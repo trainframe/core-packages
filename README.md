@@ -55,6 +55,7 @@ For development without hardware, the simulator hosts virtual devices that speak
 
 ## Documentation
 
+- [Implementation status](docs/status.md) — what's built vs. specified, ranked next priorities
 - [Protocol spec (latest)](docs/spec/protocol-v0.2.md)
 - [Simulator architecture](docs/spec/simulator-v0.1.md)
 - [Building a new device type](docs/contributing/new-device.md)
