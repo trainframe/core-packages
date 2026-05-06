@@ -95,6 +95,38 @@ describe('end-to-end: virtual train obeys clearances', () => {
   });
 });
 
+describe('physical mishaps — overshoot', () => {
+  it('emits an anomaly event when overshoot_rate forces a brake to fail', () => {
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
+    sim.spawnTrain('T1', {
+      startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+      config: { overshoot_rate: 1, stopping_noise: 0 },
+    });
+    sim.assignRoute('T1', [{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+    sim.advance(10_000);
+
+    const anomalies = sim
+      .getEventsOfType('anomaly')
+      .filter((e) => e.device_id === 'T1')
+      .map((e) => (e.payload as { description: string }).description);
+    expect(anomalies.length).toBeGreaterThan(0);
+    expect(anomalies[0]).toMatch(/T1 overshot clearance limit at M2/);
+  });
+
+  it('does not emit an overshoot anomaly with overshoot_rate at 0', () => {
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
+    sim.spawnTrain('T1', {
+      startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+      config: { overshoot_rate: 0 },
+    });
+    sim.assignRoute('T1', [{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+    sim.advance(10_000);
+
+    const overshootAnomalies = sim.getEventsOfType('anomaly').filter((e) => e.device_id === 'T1');
+    expect(overshootAnomalies).toEqual([]);
+  });
+});
+
 describe('event listener hook', () => {
   it('streams every captured event to subscribers in order', () => {
     const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 7 });

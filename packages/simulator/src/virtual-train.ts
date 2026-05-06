@@ -18,6 +18,13 @@ export interface VirtualTrainConfig {
   miss_rate: number;
   /** Detection latency in ms (mean, stddev). */
   detection_latency_ms: { mean: number; stddev: number };
+  /**
+   * Probability the brakes fail to engage when the train should be slowing for
+   * its clearance limit. Rolled once per edge (sticky for that edge) — see
+   * docs/adr/006-physical-mishap-simulation.md. When this fires the train
+   * crosses the limit at speed and an `anomaly` event is emitted.
+   */
+  overshoot_rate: number;
 }
 
 export const DEFAULT_TRAIN_CONFIG: VirtualTrainConfig = {
@@ -26,6 +33,7 @@ export const DEFAULT_TRAIN_CONFIG: VirtualTrainConfig = {
   stopping_noise: 0.05,
   miss_rate: 0.01,
   detection_latency_ms: { mean: 20, stddev: 5 },
+  overshoot_rate: 0,
 };
 
 interface TrainEvent {
@@ -51,6 +59,10 @@ export class VirtualTrain {
   // Once we've emitted the to_marker for the current edge, don't emit it again
   // on subsequent ticks while parked. Reset on every edge transition.
   private emitted_current_edge_end = false;
+  // Per-edge sticky flag for the overshoot mishap. Once the brake fails to
+  // engage on this edge, it stays failed until the train transitions to the
+  // next edge. See ADR-006.
+  private overshoot_engaged_this_edge = false;
 
   constructor(
     private readonly device_id: string,
@@ -155,9 +167,17 @@ export class VirtualTrain {
       (this.velocity_mm_s * this.velocity_mm_s) / (2 * this.config.acceleration_mm_s2);
     const stopping_distance_mm =
       ideal_stopping_mm * (1 + this.random.normal(0, this.config.stopping_noise));
-    if (distance_to_limit_mm <= stopping_distance_mm) {
-      this.target_velocity_mm_s = 0;
+    if (distance_to_limit_mm > stopping_distance_mm) return;
+
+    // Brake should engage. Roll the overshoot mishap once per edge — if the
+    // brake fails, leave target_velocity at max and let the train cross the
+    // limit at speed. The anomaly is emitted from maybeCrossEdgeEnd.
+    if (!this.overshoot_engaged_this_edge && this.config.overshoot_rate > 0) {
+      this.overshoot_engaged_this_edge = this.random.bernoulli(this.config.overshoot_rate);
     }
+    if (this.overshoot_engaged_this_edge) return;
+
+    this.target_velocity_mm_s = 0;
   }
 
   private maybeCrossEdgeEnd(edge_length_mm: number): void {
@@ -170,6 +190,9 @@ export class VirtualTrain {
     this.emitted_current_edge_end = true;
 
     if (this.clearance_limit_marker_id === marker_id) {
+      if (this.overshoot_engaged_this_edge) {
+        this.emitOvershootAnomaly(marker_id, this.distance_into_edge_mm - edge_length_mm);
+      }
       // Park at the limit. A grant_clearance will transition us to the next edge.
       this.distance_into_edge_mm = edge_length_mm;
       this.velocity_mm_s = 0;
@@ -187,12 +210,25 @@ export class VirtualTrain {
       this.current_edge = next_edge;
       this.distance_into_edge_mm = 0;
       this.emitted_current_edge_end = false;
+      this.overshoot_engaged_this_edge = false;
       return;
     }
     // End of route. Park here. No more ticks should emit anything.
     this.velocity_mm_s = 0;
     this.target_velocity_mm_s = 0;
     this.current_edge = null;
+  }
+
+  private emitOvershootAnomaly(marker_id: string, overshoot_mm: number): void {
+    this.emit({
+      event_type: 'anomaly',
+      device_id: this.device_id,
+      payload: {
+        severity: 'warning',
+        description: `Train ${this.device_id} overshot clearance limit at ${marker_id} by ${overshoot_mm.toFixed(1)}mm`,
+        context: { train_id: this.device_id, marker_id, overshoot_mm },
+      },
+    });
   }
 
   private emitMarkerObservation(marker_id: string): void {
