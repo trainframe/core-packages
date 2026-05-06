@@ -1,0 +1,359 @@
+import type { Capability } from '../capability.js';
+import type { CapabilityRegistry } from '../registry.js';
+import { type SchedulerEffect, effects, grantClearancePayload } from './effects.js';
+import type { LayoutState } from './layout-state.js';
+import { type TrainState, initialTrainState } from './train-state.js';
+import { type EdgeRef, edgesEqual } from './types.js';
+
+/**
+ * Information about a connected device, tracked by the scheduler.
+ */
+interface DeviceRecord {
+  device_id: string;
+  capabilities: ReadonlyArray<string>;
+  /** Per-capability state: capability_id -> opaque state value. */
+  capability_state: Map<string, unknown>;
+}
+
+/**
+ * The scheduler. Stateful, but the state is fully observable and all
+ * mutations happen through `handleEvent`.
+ */
+export class Scheduler {
+  private readonly devices = new Map<string, DeviceRecord>();
+  private readonly trains = new Map<string, TrainState>();
+
+  constructor(
+    private readonly registry: CapabilityRegistry,
+    private readonly layout: LayoutState,
+  ) {}
+
+  // ---------- public observers (for testing and the visualiser) ----------
+
+  getTrainState(trainId: string): TrainState | undefined {
+    return this.trains.get(trainId);
+  }
+
+  getDeviceCapabilityState(deviceId: string, capabilityId: string): unknown {
+    return this.devices.get(deviceId)?.capability_state.get(capabilityId);
+  }
+
+  getLayout(): LayoutState {
+    return this.layout;
+  }
+
+  // ---------- event entry point ----------
+
+  handleEvent(event: {
+    event_type: string;
+    device_id: string;
+    payload: unknown;
+  }): ReadonlyArray<SchedulerEffect> {
+    switch (event.event_type) {
+      case 'device_registered':
+        return this.handleDeviceRegistered(event.device_id, event.payload);
+      case 'tag_observed':
+        return this.handleTagObserved(event.device_id, event.payload);
+      case 'clearance_request':
+        return this.handleClearanceRequest(event.payload);
+      case 'switch_state_changed':
+        return this.handleSwitchStateChanged(event.payload);
+      default:
+        return this.dispatchToCapabilities(event);
+    }
+  }
+
+  // ---------- device registration ----------
+
+  private handleDeviceRegistered(
+    deviceId: string,
+    payload: unknown,
+  ): ReadonlyArray<SchedulerEffect> {
+    const { capabilities } = payload as { capabilities: string[] };
+
+    const unknownCaps = this.registry.validateDeviceCapabilities(capabilities);
+    if (unknownCaps.length > 0) {
+      return [
+        effects.publishEvent('anomaly', {
+          severity: 'warning',
+          description: `Device ${deviceId} declared unknown capabilities: ${unknownCaps.join(', ')}`,
+        }),
+      ];
+    }
+
+    const capabilityState = new Map<string, unknown>();
+    for (const capId of capabilities) {
+      const cap = this.registry.get(capId);
+      if (cap) {
+        capabilityState.set(capId, cap.initialiseStateFor(deviceId));
+      }
+    }
+
+    this.devices.set(deviceId, {
+      device_id: deviceId,
+      capabilities,
+      capability_state: capabilityState,
+    });
+
+    // If this device claims to be a train, initialise train state.
+    if (capabilities.includes('core.controls_motion')) {
+      if (!this.trains.has(deviceId)) {
+        this.trains.set(deviceId, initialTrainState(deviceId));
+      }
+    }
+
+    return [effects.updateState('devices', deviceId, { capabilities })];
+  }
+
+  // ---------- tag observed → marker traversed ----------
+
+  private handleTagObserved(deviceId: string, payload: unknown): ReadonlyArray<SchedulerEffect> {
+    const { tag_id } = payload as { tag_id: string };
+
+    // For v0.1 we assume the tag IS a marker ID; tag→marker resolution will
+    // come later via a separate tag_assignment registry. The simulator
+    // already uses marker IDs as tag IDs, so this is consistent.
+    if (!this.layout.hasMarker(tag_id)) {
+      return [
+        effects.publishEvent('anomaly', {
+          severity: 'info',
+          description: `Unknown tag observed: ${tag_id} (not a registered marker)`,
+        }),
+      ];
+    }
+
+    // The reading device — if it's a train — has just traversed this marker.
+    const device = this.devices.get(deviceId);
+    if (!device || !device.capabilities.includes('core.controls_motion')) {
+      // Trackside detector reading a vehicle tag — not in v0.1.
+      return [];
+    }
+
+    return this.handleTrainAtMarker(deviceId, tag_id);
+  }
+
+  /**
+   * Update train position and decide whether to extend clearance.
+   * The most consequential method in the scheduler.
+   */
+  private handleTrainAtMarker(trainId: string, markerId: string): ReadonlyArray<SchedulerEffect> {
+    const train = this.trains.get(trainId);
+    if (!train) return [];
+
+    // Update train position.
+    const previousMarkerId = train.last_marker_id;
+    train.last_marker_id = markerId;
+
+    // If we have a route, advance progress when reaching an expected marker.
+    if (train.route && previousMarkerId) {
+      const currentEdge = train.route.edges[train.route.progress_index];
+      if (currentEdge && currentEdge.to_marker_id === markerId) {
+        const newIndex = train.route.progress_index + 1;
+        train.route = { ...train.route, progress_index: newIndex };
+        const nextEdge = train.route.edges[newIndex];
+        if (nextEdge) {
+          train.current_edge = nextEdge;
+        } else {
+          train.current_edge = undefined;
+        }
+      }
+    }
+
+    const out: SchedulerEffect[] = [
+      effects.publishEvent('marker_traversed', {
+        train_id: trainId,
+        marker_id: markerId,
+        direction: 'forward',
+        in_discovery_mode: false,
+      }),
+    ];
+
+    // If the train is at its clearance limit and there's more route, try
+    // to extend clearance.
+    if (train.clearance_limit_marker_id === markerId && train.route) {
+      const nextEdge = train.route.edges[train.route.progress_index];
+      if (nextEdge) {
+        const grant = this.tryGrantClearance(train, nextEdge);
+        if (grant) out.push(grant);
+      }
+    }
+
+    return out;
+  }
+
+  // ---------- clearance request handling ----------
+
+  private handleClearanceRequest(payload: unknown): ReadonlyArray<SchedulerEffect> {
+    const { train_id, next_edge } = payload as { train_id: string; next_edge: EdgeRef };
+    const train = this.trains.get(train_id);
+    if (!train) return [];
+
+    const grant = this.tryGrantClearance(train, next_edge);
+    return grant ? [grant] : [];
+  }
+
+  /**
+   * Decide whether to extend a train's clearance to include the given edge.
+   * Consults all capabilities with `onClearanceConsultation` hooks. If any
+   * deny, clearance is withheld. Otherwise it's granted.
+   *
+   * Block exclusivity: an edge already cleared to another train always denies.
+   */
+  private tryGrantClearance(train: TrainState, nextEdge: EdgeRef): SchedulerEffect | null {
+    // Block exclusivity check.
+    for (const [otherId, other] of this.trains) {
+      if (otherId === train.train_id) continue;
+      if (other.cleared_edges.some((e) => edgesEqual(e, nextEdge))) {
+        return null; // another train holds clearance for this edge
+      }
+    }
+
+    // Capability consultation.
+    for (const device of this.devices.values()) {
+      for (const capId of device.capabilities) {
+        const cap = this.registry.get(capId);
+        if (!cap) continue;
+
+        const state = device.capability_state.get(capId);
+        const vote = cap.invokeOnClearanceConsultation(state, {
+          train_id: train.train_id,
+          current_limit_marker_id: train.clearance_limit_marker_id ?? '',
+          proposed_new_limit_marker_id: nextEdge.to_marker_id,
+          proposed_edges_to_clear: [nextEdge],
+        });
+        if (vote && vote.vote === 'deny') return null;
+      }
+    }
+
+    // Grant.
+    train.clearance_limit_marker_id = nextEdge.to_marker_id;
+    train.cleared_edges = [...train.cleared_edges, nextEdge];
+    return effects.sendCommand(
+      train.train_id,
+      'grant_clearance',
+      grantClearancePayload(nextEdge.to_marker_id, [nextEdge]),
+    );
+  }
+
+  // ---------- switch state ----------
+
+  private handleSwitchStateChanged(payload: unknown): ReadonlyArray<SchedulerEffect> {
+    const { junction_marker_id, position, confirmed } = payload as {
+      junction_marker_id: string;
+      position: string;
+      confirmed: boolean;
+    };
+    if (confirmed) {
+      this.layout.setSwitchPosition(junction_marker_id, position);
+    }
+    return [effects.updateState('switches', junction_marker_id, { position, confirmed })];
+  }
+
+  // ---------- generic capability dispatch ----------
+
+  /**
+   * Events not handled directly by the scheduler are dispatched to any
+   * capability that wants to handle them. This is how `gate_state_changed`
+   * reaches the gates_clearance capability without the scheduler needing
+   * to know what gates are.
+   */
+  private dispatchToCapabilities(event: {
+    event_type: string;
+    device_id: string;
+    payload: unknown;
+  }): ReadonlyArray<SchedulerEffect> {
+    const device = this.devices.get(event.device_id);
+    if (!device) return [];
+
+    const out: SchedulerEffect[] = [];
+    for (const capId of device.capabilities) {
+      const cap = this.registry.get(capId);
+      if (!cap) continue;
+
+      const oldState = device.capability_state.get(capId);
+      const result = cap.invokeOnEvent(oldState, {
+        device_id: event.device_id,
+        event_type: event.event_type,
+        payload: event.payload,
+        device_capabilities: device.capabilities,
+      });
+
+      device.capability_state.set(capId, result.newState);
+      out.push(...this.translateIntents(result.intents, event.device_id));
+    }
+
+    // After applying state changes, retry any blocked clearance requests.
+    // Cheap approach: try every train at its current limit. This is O(trains)
+    // per event but trains are few.
+    for (const train of this.trains.values()) {
+      if (!train.route || !train.clearance_limit_marker_id) continue;
+      const nextEdge = train.route.edges[train.route.progress_index];
+      if (!nextEdge) continue;
+      if (train.last_marker_id !== train.clearance_limit_marker_id) continue;
+      const grant = this.tryGrantClearance(train, nextEdge);
+      if (grant) out.push(grant);
+    }
+
+    return out;
+  }
+
+  private translateIntents(
+    intents: ReadonlyArray<import('../capability.js').SchedulerIntent>,
+    sourceDeviceId: string,
+  ): SchedulerEffect[] {
+    const out: SchedulerEffect[] = [];
+    for (const intent of intents) {
+      switch (intent.kind) {
+        case 'send_command':
+          out.push(effects.sendCommand(intent.device_id, intent.command_type, intent.payload));
+          break;
+        case 'emit_anomaly':
+          out.push(
+            effects.publishEvent('anomaly', {
+              severity: intent.severity,
+              description: intent.description,
+              context: { source_device_id: sourceDeviceId },
+            }),
+          );
+          break;
+        // withhold/release intents are state-only; the scheduler reads the
+        // capability state directly during clearance consultation.
+        case 'withhold_clearance_at_marker':
+        case 'release_clearance_at_marker':
+          break;
+      }
+    }
+    return out;
+  }
+
+  // ---------- route assignment (driven by external API, not events) ----------
+
+  /**
+   * Assign a route to a train. Called by the server's HTTP/MQTT API in
+   * response to user requests. Returns effects: the route command for the
+   * train, plus an initial clearance grant for the first edge.
+   */
+  assignRoute(
+    trainId: string,
+    routeId: string,
+    edges: ReadonlyArray<EdgeRef>,
+  ): ReadonlyArray<SchedulerEffect> {
+    const train = this.trains.get(trainId);
+    if (!train) return [];
+    if (edges.length === 0) return [];
+
+    train.route = { route_id: routeId, edges, progress_index: 0 };
+    train.cleared_edges = [];
+    const firstEdge = edges[0];
+    if (!firstEdge) return [];
+    train.clearance_limit_marker_id = firstEdge.from_marker_id;
+
+    const out: SchedulerEffect[] = [
+      effects.sendCommand(trainId, 'assign_route', { route_id: routeId, edges }),
+    ];
+
+    const grant = this.tryGrantClearance(train, firstEdge);
+    if (grant) out.push(grant);
+    return out;
+  }
+}
