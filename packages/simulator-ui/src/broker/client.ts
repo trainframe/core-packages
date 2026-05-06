@@ -18,11 +18,21 @@ export interface BrokerMessage {
 export type StatusListener = (status: BrokerStatus, error?: Error) => void;
 export type MessageListener = (message: BrokerMessage) => void;
 
+export interface PublishOptions {
+  /**
+   * If true, the broker stores the message and forwards it to any future
+   * subscriber whose topic filter matches. Used for state messages
+   * (`railway/state/...`) that should reflect the world's current shape on
+   * fresh subscriptions.
+   */
+  readonly retain?: boolean;
+}
+
 export interface BrokerClient {
   readonly status: BrokerStatus;
   connect(url: string): void;
   disconnect(): void;
   subscribe(topic: string, handler: MessageListener): () => void;
-  publish(topic: string, payload: Uint8Array): void;
+  publish(topic: string, payload: Uint8Array, options?: PublishOptions): void;
   onStatusChange(listener: StatusListener): () => void;
 }

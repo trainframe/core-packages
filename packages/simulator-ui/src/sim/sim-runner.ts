@@ -63,7 +63,19 @@ export class SimRunner {
       tick_ms: this.options.tick_ms,
     });
     this.unsubscribeFromSim = this.simulation.onEvent((event) => this.handleEvent(event));
+    this.publishLayoutState();
     this.notify();
+  }
+
+  /**
+   * Publish the active layout as a retained MQTT state message so the
+   * visualiser (or any other subscriber) can reconstruct the world's shape
+   * on first connection. Topic: `railway/state/layout/<layout_name>`.
+   */
+  private publishLayoutState(): void {
+    const topic = `railway/state/layout/${this.options.layout.name}`;
+    const payload = new TextEncoder().encode(JSON.stringify(this.options.layout));
+    this.client.publish(topic, payload, { retain: true });
   }
 
   /** Begin auto-advancing the sim on a real-time interval. */

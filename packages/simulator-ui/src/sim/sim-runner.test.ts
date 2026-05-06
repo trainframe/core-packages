@@ -120,6 +120,33 @@ describe('SimRunner — event publishing', () => {
   });
 });
 
+describe('SimRunner — layout state', () => {
+  it('publishes the active layout as a retained state message on start', () => {
+    const { runner, client } = makeRunner();
+    runner.start();
+
+    const layoutMsg = client.published.find((m) => m.topic === 'railway/state/layout/simple-loop');
+    expect(layoutMsg).toBeDefined();
+    if (!layoutMsg) throw new Error('unreachable');
+
+    const decoded = JSON.parse(new TextDecoder().decode(layoutMsg.payload));
+    expect(decoded.name).toBe('simple-loop');
+    expect(decoded.markers).toHaveLength(SIMPLE_LOOP.markers.length);
+  });
+
+  it('replays the retained layout to a subscriber that joined after start', () => {
+    const { runner, client } = makeRunner();
+    runner.start();
+
+    const seen: string[] = [];
+    client.subscribe('railway/state/layout/+', (msg) => {
+      seen.push(msg.topic);
+    });
+
+    expect(seen).toEqual(['railway/state/layout/simple-loop']);
+  });
+});
+
 describe('SimRunner — auto-advance', () => {
   it('advances the sim on the configured interval when resumed', () => {
     vi.useFakeTimers();

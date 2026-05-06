@@ -1,5 +1,11 @@
 import mqtt, { type MqttClient } from 'mqtt';
-import type { BrokerClient, BrokerStatus, MessageListener, StatusListener } from './client.js';
+import type {
+  BrokerClient,
+  BrokerStatus,
+  MessageListener,
+  PublishOptions,
+  StatusListener,
+} from './client.js';
 
 /**
  * Production `BrokerClient` backed by `mqtt` over WebSockets.
@@ -63,9 +69,9 @@ export class MqttBrokerClient implements BrokerClient {
     };
   }
 
-  publish(topic: string, payload: Uint8Array): void {
+  publish(topic: string, payload: Uint8Array, options?: PublishOptions): void {
     // mqtt accepts Uint8Array directly in browser builds (Buffer is a Node global).
-    this.client?.publish(topic, payload as unknown as Buffer);
+    this.client?.publish(topic, payload as unknown as Buffer, { retain: options?.retain ?? false });
   }
 
   onStatusChange(listener: StatusListener): () => void {

@@ -3,6 +3,7 @@ import type {
   BrokerMessage,
   BrokerStatus,
   MessageListener,
+  PublishOptions,
   StatusListener,
 } from './client.js';
 
@@ -23,6 +24,8 @@ export class InMemoryBrokerClient implements BrokerClient {
   private currentStatus: BrokerStatus = 'disconnected';
   private readonly subs = new Map<string, Set<MessageListener>>();
   private readonly statusListeners = new Set<StatusListener>();
+  /** Last retained message per topic, in insertion order. Replayed on subscribe. */
+  private readonly retained = new Map<string, BrokerMessage>();
   readonly published: BrokerMessage[] = [];
 
   get status(): BrokerStatus {
@@ -45,15 +48,20 @@ export class InMemoryBrokerClient implements BrokerClient {
       this.subs.set(topic, bucket);
     }
     bucket.add(handler);
+    // Replay retained messages whose topic matches this subscription pattern.
+    for (const [retainedTopic, message] of this.retained) {
+      if (matchesTopic(topic, retainedTopic)) handler(message);
+    }
     return () => {
       bucket?.delete(handler);
       if (bucket && bucket.size === 0) this.subs.delete(topic);
     };
   }
 
-  publish(topic: string, payload: Uint8Array): void {
+  publish(topic: string, payload: Uint8Array, options?: PublishOptions): void {
     const message = { topic, payload };
     this.published.push(message);
+    if (options?.retain) this.retained.set(topic, message);
     this.deliver(message);
   }
 

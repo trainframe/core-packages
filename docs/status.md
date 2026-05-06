@@ -111,9 +111,9 @@ Coverage thresholds: 75 lines / 65 branches / 65 functions (new package; ratchet
 | MQTT-over-WS subscriber                    | shipped | `BrokerSubscriber` interface + `mqtt`-backed prod client + in-memory test impl.|
 | Connection status UI                       | shipped |                                                                               |
 | Live event log                             | shipped | Rolling 100, newest-first, loose parsing, custom-event vendor surfaced.       |
-| Layout rendering (markers, edges)          | not started | Spec §"Spatial layout": visualiser auto-routes curves between markers.       |
-| Train-position rendering                   | not started | From `train_status` + `marker_traversed` events.                              |
-| Layout snapshot bootstrap                  | not started | Subscribe `railway/state/#` for current world.                                 |
+| Layout rendering (markers, edges)          | shipped | SVG canvas. Auto-places markers around a circle when no spatial coords; uses `position.x_mm/y_mm` when present. |
+| Train-position rendering                   | partial | Train icons placed at last `marker_traversed` marker. No `train_status` integration yet (mid-edge interpolation, speed indicator). |
+| Layout snapshot bootstrap                  | shipped | `useLayoutState` subscribes to `railway/state/layout/+`; simulator-ui publishes the active layout retained on start. |
 | Tag-assignment / discovery UI              | not started | Spec §"Incremental discovery": user assigns kind to unknown tags.             |
 
 ---
@@ -128,6 +128,7 @@ Coverage thresholds: 75 lines / 65 branches / 65 functions (new package; ratchet
 | Track configuration UI                     | shipped | Preset dropdown + custom-JSON editor, persisted in localStorage.               |
 | Spawn-train form (per-train config)        | partial | Today: a single button spawns the next `T<n>` along the layout's first three edges. No per-train physics knobs (e.g. overshoot). |
 | Realtime-mode auto-advance                 | shipped | `setInterval` + `tick_ms`. No speed multiplier yet.                            |
+| Retained layout state publish              | shipped | `SimRunner.start()` publishes the active layout to `railway/state/layout/<name>` retained. |
 | Mishap rate UI                             | not started | `overshoot_rate` is config-only; needs operator-facing knobs (ADR-006 §"Out of scope"). |
 | Inbound command subscription (broker → sim)| not started | Today the sim runs the scheduler in-process. Once a real server exists, the sim should accept commands. |
 
@@ -198,12 +199,13 @@ Mirrored from [`CLAUDE.md`](../CLAUDE.md). Need ADRs before implementation.
 
 Ranked by leverage. None are mandatory; this is the recommendation, not the plan.
 
-1. **Visualiser layout rendering**. Markers + edges as SVG, train positions from `train_status`. Closes the loop on the simulator → broker → visualiser flow that's currently log-only. Self-contained, testable, immediately demo-able.
-2. **`packages/server` first cut**. Broker client + scheduler dispatch + retained-state publishing. Unblocks every "real hardware" path. Largest single piece of unbuilt code in the repo.
-3. **`controls_switch` capability + edge filtering**. The scheduler should refuse to clear an edge whose `requires_switch_state` doesn't match the current switch position. Modest scheduler change, satisfies a major feature in the spec, enables interesting layouts (figure-8 with junction).
-4. **Tag→marker resolution registry + `assigns_tags` + ADR**. Moves the simulator and protocol off the "tag IDs ARE marker IDs" shortcut. Prerequisite for discovery mode.
-5. **Discovery mode / topology learning**. Ingest `tag_observed` for unknown tags, infer edges, ratchet `inferred → confirmed` after N traversals. Spec §"Incremental discovery". Scheduler + layout-state work.
-6. **`startTestEnvironment` harness + fault profiles**. Replace the ad-hoc `new Simulation(...)` pattern in tests with the harness the simulator spec describes. Profiles, `attachDevice`, `waitForEvent`. Pays off as more capabilities ship.
+1. **`controls_switch` capability + edge filtering**. The scheduler should refuse to clear an edge whose `requires_switch_state` doesn't match the current switch position. Modest scheduler change, satisfies a major feature in the spec, enables interesting layouts (figure-8 with junction). E2E test in `@trainframe/integration` to verify.
+2. **Simulator transport refactor + device-only mode**. Factor `Simulation` so it can run without an embedded scheduler, using a transport adapter to publish events through a real `BrokerClient`. Unblocks simulator-driven E2E tests in `@trainframe/integration`. Resolves the "two schedulers" awkwardness once a real server is in use.
+3. **Tag→marker resolution registry + `assigns_tags` + ADR**. Moves the simulator and protocol off the "tag IDs ARE marker IDs" shortcut. Prerequisite for discovery mode.
+4. **Discovery mode / topology learning**. Ingest `tag_observed` for unknown tags, infer edges, ratchet `inferred → confirmed` after N traversals. Spec §"Incremental discovery". Scheduler + layout-state work; depends on #3.
+5. **`startTestEnvironment` harness + fault profiles**. Replace the ad-hoc `new Simulation(...)` pattern in tests with the harness the simulator spec describes. Profiles, `attachDevice`, `waitForEvent`. Pays off as more capabilities ship.
+6. **Train-position interpolation in the visualiser**. Subscribe to `train_status`, animate trains mid-edge instead of snapping to last-traversed marker. Small visual polish; bigger payoff once `train_status` is being emitted by something.
+7. **HTTP/MQTT admin API for the server**. Operator endpoints for `assignRoute`, layout reload, etc. Today `Server.assignRoute` is a method only; no remote way to trigger it.
 
 Smaller follow-ups that don't need a major thread:
 
