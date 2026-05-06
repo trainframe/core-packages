@@ -24,11 +24,11 @@ jobs:
       - name: Lint (zero warnings)
         run: pnpm lint
 
-      - name: Typecheck
-        run: pnpm typecheck
-
       - name: Build
         run: pnpm build
+
+      - name: Typecheck
+        run: pnpm typecheck
 
       - name: Test with coverage
         run: pnpm test
