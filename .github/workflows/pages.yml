@@ -1,0 +1,87 @@
+name: Pages
+
+# Builds the visualiser and simulator-ui as a single GitHub Pages deployment
+# under /visualiser/ and /simulator-ui/. Production-only; PR previews are not
+# published.
+#
+# Repo setup needed (one-time, manual): Settings → Pages → Source = "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Build protocol (workspace dep)
+        run: pnpm --filter @trainframe/protocol build
+
+      - name: Build visualiser
+        env:
+          VISUALISER_BASE: /core-packages/visualiser/
+        run: pnpm --filter @trainframe/visualiser build
+
+      - name: Build simulator-ui
+        env:
+          SIMULATOR_UI_BASE: /core-packages/simulator-ui/
+        run: pnpm --filter @trainframe/simulator-ui build
+
+      - name: Assemble Pages site
+        run: |
+          mkdir -p _site/visualiser _site/simulator-ui
+          cp -r packages/visualiser/dist/. _site/visualiser/
+          cp -r packages/simulator-ui/dist/. _site/simulator-ui/
+          cat > _site/index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+            <head>
+              <meta charset="UTF-8" />
+              <title>Trainframe</title>
+            </head>
+            <body>
+              <h1>Trainframe</h1>
+              <ul>
+                <li><a href="visualiser/">Visualiser</a></li>
+                <li><a href="simulator-ui/">Simulator</a></li>
+              </ul>
+            </body>
+          </html>
+          EOF
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
