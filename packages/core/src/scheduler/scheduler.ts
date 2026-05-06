@@ -140,24 +140,8 @@ export class Scheduler {
     const train = this.trains.get(trainId);
     if (!train) return [];
 
-    // Update train position.
-    const previousMarkerId = train.last_marker_id;
     train.last_marker_id = markerId;
-
-    // If we have a route, advance progress when reaching an expected marker.
-    if (train.route && previousMarkerId) {
-      const currentEdge = train.route.edges[train.route.progress_index];
-      if (currentEdge && currentEdge.to_marker_id === markerId) {
-        const newIndex = train.route.progress_index + 1;
-        train.route = { ...train.route, progress_index: newIndex };
-        const nextEdge = train.route.edges[newIndex];
-        if (nextEdge) {
-          train.current_edge = nextEdge;
-        } else {
-          train.current_edge = undefined;
-        }
-      }
-    }
+    this.advanceRouteIfArrivedAt(train, markerId);
 
     const out: SchedulerEffect[] = [
       effects.publishEvent('marker_traversed', {
@@ -168,17 +152,37 @@ export class Scheduler {
       }),
     ];
 
-    // If the train is at its clearance limit and there's more route, try
-    // to extend clearance.
-    if (train.clearance_limit_marker_id === markerId && train.route) {
-      const nextEdge = train.route.edges[train.route.progress_index];
-      if (nextEdge) {
-        const grant = this.tryGrantClearance(train, nextEdge);
-        if (grant) out.push(grant);
-      }
-    }
+    const grant = this.maybeExtendClearance(train, markerId);
+    if (grant) out.push(grant);
 
     return out;
+  }
+
+  /**
+   * Advance the train's route progress when it reports the to_marker of the
+   * edge it's currently expected to be on. Idempotent: a marker that doesn't
+   * match the current edge is a no-op (it'll surface as an anomaly elsewhere
+   * once topology violation handling lands).
+   */
+  private advanceRouteIfArrivedAt(train: TrainState, markerId: string): void {
+    if (!train.route) return;
+    const currentEdge = train.route.edges[train.route.progress_index];
+    if (!currentEdge || currentEdge.to_marker_id !== markerId) return;
+
+    const newIndex = train.route.progress_index + 1;
+    train.route = { ...train.route, progress_index: newIndex };
+    train.current_edge = train.route.edges[newIndex];
+  }
+
+  /**
+   * If the train has just reached its clearance limit and the route has more
+   * edges ahead, attempt to grant clearance for the next edge.
+   */
+  private maybeExtendClearance(train: TrainState, markerId: string): SchedulerEffect | null {
+    if (train.clearance_limit_marker_id !== markerId || !train.route) return null;
+    const nextEdge = train.route.edges[train.route.progress_index];
+    if (!nextEdge) return null;
+    return this.tryGrantClearance(train, nextEdge);
   }
 
   // ---------- clearance request handling ----------
@@ -200,32 +204,39 @@ export class Scheduler {
    * Block exclusivity: an edge already cleared to another train always denies.
    */
   private tryGrantClearance(train: TrainState, nextEdge: EdgeRef): SchedulerEffect | null {
-    // Block exclusivity check.
-    for (const [otherId, other] of this.trains) {
-      if (otherId === train.train_id) continue;
-      if (other.cleared_edges.some((e) => edgesEqual(e, nextEdge))) {
-        return null; // another train holds clearance for this edge
-      }
-    }
+    if (this.edgeIsClearedToAnotherTrain(train.train_id, nextEdge)) return null;
+    if (this.anyCapabilityDeniesClearance(train, nextEdge)) return null;
+    return this.grantClearance(train, nextEdge);
+  }
 
-    // Capability consultation.
+  private edgeIsClearedToAnotherTrain(trainId: string, edge: EdgeRef): boolean {
+    for (const [otherId, other] of this.trains) {
+      if (otherId === trainId) continue;
+      if (other.cleared_edges.some((e) => edgesEqual(e, edge))) return true;
+    }
+    return false;
+  }
+
+  private anyCapabilityDeniesClearance(train: TrainState, nextEdge: EdgeRef): boolean {
+    const request = {
+      train_id: train.train_id,
+      current_limit_marker_id: train.clearance_limit_marker_id ?? '',
+      proposed_new_limit_marker_id: nextEdge.to_marker_id,
+      proposed_edges_to_clear: [nextEdge],
+    };
     for (const device of this.devices.values()) {
       for (const capId of device.capabilities) {
         const cap = this.registry.get(capId);
         if (!cap) continue;
-
         const state = device.capability_state.get(capId);
-        const vote = cap.invokeOnClearanceConsultation(state, {
-          train_id: train.train_id,
-          current_limit_marker_id: train.clearance_limit_marker_id ?? '',
-          proposed_new_limit_marker_id: nextEdge.to_marker_id,
-          proposed_edges_to_clear: [nextEdge],
-        });
-        if (vote && vote.vote === 'deny') return null;
+        const vote = cap.invokeOnClearanceConsultation(state, request);
+        if (vote && vote.vote === 'deny') return true;
       }
     }
+    return false;
+  }
 
-    // Grant.
+  private grantClearance(train: TrainState, nextEdge: EdgeRef): SchedulerEffect {
     train.clearance_limit_marker_id = nextEdge.to_marker_id;
     train.cleared_edges = [...train.cleared_edges, nextEdge];
     return effects.sendCommand(

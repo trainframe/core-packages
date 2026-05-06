@@ -48,6 +48,9 @@ export class VirtualTrain {
   private route: ReadonlyArray<RouteEdge> = [];
   private route_index = 0;
   private clearance_limit_marker_id: string | null = null;
+  // Once we've emitted the to_marker for the current edge, don't emit it again
+  // on subsequent ticks while parked. Reset on every edge transition.
+  private emitted_current_edge_end = false;
 
   constructor(
     private readonly device_id: string,
@@ -93,6 +96,7 @@ export class VirtualTrain {
             this.route_index += 1;
             this.current_edge = next_edge;
             this.distance_into_edge_mm = 0;
+            this.emitted_current_edge_end = false;
           }
         }
         this.target_velocity_mm_s = this.config.max_velocity_mm_s;
@@ -113,74 +117,82 @@ export class VirtualTrain {
   tick(dt_ms: number): void {
     const dt_s = dt_ms / 1000;
 
-    // Adjust velocity toward target.
-    if (this.velocity_mm_s < this.target_velocity_mm_s) {
-      this.velocity_mm_s = Math.min(
-        this.target_velocity_mm_s,
-        this.velocity_mm_s + this.config.acceleration_mm_s2 * dt_s,
-      );
-    } else if (this.velocity_mm_s > this.target_velocity_mm_s) {
-      this.velocity_mm_s = Math.max(
-        this.target_velocity_mm_s,
-        this.velocity_mm_s - this.config.acceleration_mm_s2 * dt_s,
-      );
-    }
-
-    // Advance position.
+    this.adjustVelocity(dt_s);
     if (!this.current_edge) return;
-    this.distance_into_edge_mm += this.velocity_mm_s * dt_s;
 
+    this.distance_into_edge_mm += this.velocity_mm_s * dt_s;
+    const edge_length_mm = this.currentEdgeLength();
+
+    this.maybeBrakeForClearanceLimit(edge_length_mm);
+    this.maybeCrossEdgeEnd(edge_length_mm);
+  }
+
+  private adjustVelocity(dt_s: number): void {
+    const accel_mm = this.config.acceleration_mm_s2 * dt_s;
+    if (this.velocity_mm_s < this.target_velocity_mm_s) {
+      this.velocity_mm_s = Math.min(this.target_velocity_mm_s, this.velocity_mm_s + accel_mm);
+    } else if (this.velocity_mm_s > this.target_velocity_mm_s) {
+      this.velocity_mm_s = Math.max(this.target_velocity_mm_s, this.velocity_mm_s - accel_mm);
+    }
+  }
+
+  private currentEdgeLength(): number {
+    if (!this.current_edge) return 200;
     const edge = this.layout.findEdge(
       this.current_edge.from_marker_id,
       this.current_edge.to_marker_id,
     );
-    const edge_length_mm = edge?.estimated_length_mm ?? 200;
+    return edge?.estimated_length_mm ?? 200;
+  }
 
-    // Check if we should be braking based on clearance limit.
-    if (
-      this.clearance_limit_marker_id &&
-      this.clearance_limit_marker_id === this.current_edge.to_marker_id &&
-      this.velocity_mm_s > 0
-    ) {
-      const distance_to_limit_mm = edge_length_mm - this.distance_into_edge_mm;
-      // Compute kinematic stopping distance: v² / (2a). Velocity is mm/s,
-      // accel is mm/s², so the result is in mm directly. Apply noise.
-      const ideal_stopping_mm =
-        (this.velocity_mm_s * this.velocity_mm_s) / (2 * this.config.acceleration_mm_s2);
-      const stopping_distance_mm =
-        ideal_stopping_mm * (1 + this.random.normal(0, this.config.stopping_noise));
-      if (distance_to_limit_mm <= stopping_distance_mm) {
-        this.target_velocity_mm_s = 0;
-      }
+  private maybeBrakeForClearanceLimit(edge_length_mm: number): void {
+    if (!this.current_edge || this.velocity_mm_s <= 0) return;
+    if (this.clearance_limit_marker_id !== this.current_edge.to_marker_id) return;
+
+    const distance_to_limit_mm = edge_length_mm - this.distance_into_edge_mm;
+    // Kinematic stopping distance: v² / (2a). Apply multiplicative noise.
+    const ideal_stopping_mm =
+      (this.velocity_mm_s * this.velocity_mm_s) / (2 * this.config.acceleration_mm_s2);
+    const stopping_distance_mm =
+      ideal_stopping_mm * (1 + this.random.normal(0, this.config.stopping_noise));
+    if (distance_to_limit_mm <= stopping_distance_mm) {
+      this.target_velocity_mm_s = 0;
+    }
+  }
+
+  private maybeCrossEdgeEnd(edge_length_mm: number): void {
+    if (!this.current_edge) return;
+    if (this.distance_into_edge_mm < edge_length_mm) return;
+    if (this.emitted_current_edge_end) return;
+
+    const marker_id = this.current_edge.to_marker_id;
+    this.emitMarkerObservation(marker_id);
+    this.emitted_current_edge_end = true;
+
+    if (this.clearance_limit_marker_id === marker_id) {
+      // Park at the limit. A grant_clearance will transition us to the next edge.
+      this.distance_into_edge_mm = edge_length_mm;
+      this.velocity_mm_s = 0;
+      this.target_velocity_mm_s = 0;
+      return;
     }
 
-    // Crossed the end of the edge? Emit marker, transition.
-    if (this.distance_into_edge_mm >= edge_length_mm) {
-      const marker_id = this.current_edge.to_marker_id;
-      this.emitMarkerObservation(marker_id);
+    this.transitionToNextEdge(marker_id);
+  }
 
-      // If we just hit our clearance limit, park here. Don't transition until
-      // clearance is extended (which will arrive via grant_clearance command).
-      if (this.clearance_limit_marker_id === marker_id) {
-        this.distance_into_edge_mm = edge_length_mm;
-        this.velocity_mm_s = 0;
-        this.target_velocity_mm_s = 0;
-        return;
-      }
-
-      // Move to next edge if route allows.
-      const next_edge = this.route[this.route_index + 1];
-      if (next_edge && next_edge.from_marker_id === marker_id) {
-        this.route_index += 1;
-        this.current_edge = next_edge;
-        this.distance_into_edge_mm = 0;
-      } else {
-        // End of route. Park here. No more ticks should emit anything.
-        this.velocity_mm_s = 0;
-        this.target_velocity_mm_s = 0;
-        this.current_edge = null;
-      }
+  private transitionToNextEdge(at_marker_id: string): void {
+    const next_edge = this.route[this.route_index + 1];
+    if (next_edge && next_edge.from_marker_id === at_marker_id) {
+      this.route_index += 1;
+      this.current_edge = next_edge;
+      this.distance_into_edge_mm = 0;
+      this.emitted_current_edge_end = false;
+      return;
     }
+    // End of route. Park here. No more ticks should emit anything.
+    this.velocity_mm_s = 0;
+    this.target_velocity_mm_s = 0;
+    this.current_edge = null;
   }
 
   private emitMarkerObservation(marker_id: string): void {
