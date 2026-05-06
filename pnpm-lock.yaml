@@ -71,6 +71,9 @@ importers:
 
   packages/simulator-ui:
     dependencies:
+      '@sinclair/typebox':
+        specifier: ^0.33.0
+        version: 0.33.22
       '@trainframe/protocol':
         specifier: workspace:*
         version: link:../protocol

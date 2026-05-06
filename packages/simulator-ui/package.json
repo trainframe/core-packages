@@ -13,6 +13,7 @@
     "typecheck": "tsc -b --noEmit"
   },
   "dependencies": {
+    "@sinclair/typebox": "^0.33.0",
     "@trainframe/protocol": "workspace:*",
     "@trainframe/simulator": "workspace:*",
     "mqtt": "^5.10.0",

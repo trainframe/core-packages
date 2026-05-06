@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
 import { InMemoryBrokerClient } from '../broker/in-memory-client.js';
+import { SIMPLE_LOOP } from '../sim/layouts.js';
 import { SimControls } from './SimControls.js';
 
 function renderControls() {
@@ -10,7 +11,7 @@ function renderControls() {
   client.connect('ws://test');
   const view = render(
     <BrokerProvider client={client}>
-      <SimControls />
+      <SimControls layout={SIMPLE_LOOP} />
     </BrokerProvider>,
   );
   return { client, ...view };

@@ -1,33 +1,38 @@
-import { SIMPLE_LOOP } from '../sim/layouts.js';
+import type { Layout } from '@trainframe/protocol';
 import { useSimRunner } from '../sim/use-sim-runner.js';
 
 const STEP_MS = 1000;
 
-const DEMO_ROUTE = [
-  { from_marker_id: 'M1', to_marker_id: 'M2' },
-  { from_marker_id: 'M2', to_marker_id: 'M3' },
-  { from_marker_id: 'M3', to_marker_id: 'M4' },
-];
+interface SimControlsProps {
+  /** Layout the simulation is running against. Switching layouts rebuilds the runner. */
+  readonly layout: Layout;
+}
 
 /**
- * Operator panel for driving an in-browser simulation. Spawns trains on the
- * default loop, runs them along a fixed demo route, and publishes events
- * through the configured MQTT broker. The first iteration uses a single
- * preset layout; track configuration UI comes next.
+ * Operator panel for driving an in-browser simulation. Spawns trains starting
+ * on the layout's first edge and routes them along the next three edges,
+ * publishing all captured events through the configured MQTT broker.
  */
-export function SimControls() {
+export function SimControls({ layout }: SimControlsProps) {
   const { snapshot, start, resume, pause, stop, step, spawnTrain, assignRoute } = useSimRunner(
-    SIMPLE_LOOP,
+    layout,
     100,
   );
 
   const isIdle = snapshot.status === 'idle';
   const nextTrainId = `T${snapshot.train_ids.length + 1}`;
+  const demoRoute = layout.edges
+    .slice(0, 3)
+    .map((e) => ({ from_marker_id: e.from_marker_id, to_marker_id: e.to_marker_id }));
+  const canSpawn = demoRoute.length > 0;
 
   function handleSpawnAndAssign() {
+    if (!canSpawn) return;
+    const firstEdge = demoRoute[0];
+    if (!firstEdge) return;
     if (isIdle) start();
-    spawnTrain(nextTrainId, DEMO_ROUTE[0] as { from_marker_id: string; to_marker_id: string });
-    assignRoute(nextTrainId, DEMO_ROUTE);
+    spawnTrain(nextTrainId, firstEdge);
+    assignRoute(nextTrainId, demoRoute);
   }
 
   return (
