@@ -35,8 +35,11 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - name: Build protocol (workspace dep)
-        run: pnpm --filter @trainframe/protocol build
+      - name: Build workspace deps consumed by the UIs
+        run: |
+          pnpm --filter @trainframe/protocol build
+          pnpm --filter @trainframe/core build
+          pnpm --filter @trainframe/simulator build
 
       - name: Build visualiser
         env:
