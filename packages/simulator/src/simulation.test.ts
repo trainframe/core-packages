@@ -95,6 +95,29 @@ describe('end-to-end: virtual train obeys clearances', () => {
   });
 });
 
+describe('event listener hook', () => {
+  it('streams every captured event to subscribers in order', () => {
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 7 });
+    const seen: Array<{ event_type: string; device_id: string }> = [];
+    const off = sim.onEvent((e) => seen.push({ event_type: e.event_type, device_id: e.device_id }));
+
+    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+    sim.assignRoute('T1', [{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+    sim.advance(5_000);
+
+    expect(seen[0]).toEqual({ event_type: 'device_registered', device_id: 'T1' });
+    expect(seen.some((e) => e.event_type === 'tag_observed' && e.device_id === 'T1')).toBe(true);
+    expect(seen.some((e) => e.event_type === 'marker_traversed' && e.device_id === 'server')).toBe(
+      true,
+    );
+
+    off();
+    const before = seen.length;
+    sim.advance(1_000);
+    expect(seen.length).toBe(before);
+  });
+});
+
 describe('determinism', () => {
   it('produces identical outputs with the same seed', () => {
     const run = (seed: number) => {

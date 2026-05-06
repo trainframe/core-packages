@@ -4,6 +4,7 @@ import type { BrokerClient } from './broker/client.js';
 import { MqttBrokerClient } from './broker/mqtt-client.js';
 import { ConnectionStatus } from './components/ConnectionStatus.js';
 import { Settings } from './components/Settings.js';
+import { SimControls } from './components/SimControls.js';
 import { loadBrokerUrl } from './config/broker-config.js';
 
 interface AppProps {
@@ -29,6 +30,7 @@ export function App({ client }: AppProps = {}) {
         </p>
         <ConnectionStatus />
         <Settings initialUrl={initialUrl} />
+        <SimControls />
       </main>
     </BrokerProvider>
   );

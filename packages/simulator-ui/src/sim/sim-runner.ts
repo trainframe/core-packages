@@ -1,0 +1,168 @@
+import { PROTOCOL_VERSION } from '@trainframe/protocol';
+import type { Layout } from '@trainframe/protocol';
+import { type CapturedEvent, Simulation } from '@trainframe/simulator';
+import type { BrokerClient } from '../broker/client.js';
+
+interface RouteEdge {
+  from_marker_id: string;
+  to_marker_id: string;
+}
+
+export type SimRunnerStatus = 'idle' | 'running' | 'paused';
+
+export interface SimRunnerSnapshot {
+  readonly status: SimRunnerStatus;
+  readonly sim_time_ms: number;
+  readonly events_published: number;
+  readonly train_ids: ReadonlyArray<string>;
+}
+
+export interface SimRunnerOptions {
+  /** Layout the sim is built around. */
+  readonly layout: Layout;
+  /** Virtual-ms advanced per real-time tick when running. */
+  readonly tick_ms: number;
+  /** Source of UUIDs for outbound envelopes. Defaults to crypto.randomUUID. */
+  readonly newId?: () => string;
+}
+
+type SnapshotListener = (snapshot: SimRunnerSnapshot) => void;
+
+/**
+ * Drives a `Simulation` instance and bridges its events onto an MQTT broker.
+ *
+ * The sim core stays transport-agnostic — `Simulation.onEvent` exposes a flat
+ * stream of captured events; this class wraps each one in the wire envelope
+ * (event_id, timestamp_device, protocol_version) and publishes it to the
+ * appropriate `railway/events/<type>/<device>` topic.
+ *
+ * UI state is exposed through `snapshot()` / `onSnapshotChange`, so the React
+ * layer can render counts and statuses without reaching into private fields.
+ */
+export class SimRunner {
+  private simulation: Simulation | null = null;
+  private intervalHandle: ReturnType<typeof setInterval> | null = null;
+  private unsubscribeFromSim: (() => void) | null = null;
+  private events_published = 0;
+  private train_ids: string[] = [];
+  private readonly snapshotListeners = new Set<SnapshotListener>();
+  private readonly newId: () => string;
+
+  constructor(
+    private readonly client: BrokerClient,
+    private readonly options: SimRunnerOptions,
+  ) {
+    this.newId = options.newId ?? defaultNewId;
+  }
+
+  /** Initialise a fresh `Simulation`. Idempotent — does nothing if already started. */
+  start(): void {
+    if (this.simulation) return;
+    this.simulation = new Simulation({
+      layout: this.options.layout,
+      tick_ms: this.options.tick_ms,
+    });
+    this.unsubscribeFromSim = this.simulation.onEvent((event) => this.handleEvent(event));
+    this.notify();
+  }
+
+  /** Begin auto-advancing the sim on a real-time interval. */
+  resume(): void {
+    if (!this.simulation || this.intervalHandle !== null) return;
+    this.intervalHandle = setInterval(() => {
+      this.simulation?.advance(this.options.tick_ms);
+      this.notify();
+    }, this.options.tick_ms);
+    this.notify();
+  }
+
+  /** Stop auto-advancing without tearing down the sim. */
+  pause(): void {
+    if (this.intervalHandle === null) return;
+    clearInterval(this.intervalHandle);
+    this.intervalHandle = null;
+    this.notify();
+  }
+
+  /** Tear down the simulation, dropping all state. */
+  stop(): void {
+    this.pause();
+    this.unsubscribeFromSim?.();
+    this.unsubscribeFromSim = null;
+    this.simulation = null;
+    this.events_published = 0;
+    this.train_ids = [];
+    this.notify();
+  }
+
+  /** Advance the sim by `ms` virtual milliseconds without auto-running. */
+  step(ms: number): void {
+    if (!this.simulation) return;
+    this.simulation.advance(ms);
+    this.notify();
+  }
+
+  spawnTrain(train_id: string, startEdge: RouteEdge): void {
+    if (!this.simulation || this.train_ids.includes(train_id)) return;
+    this.simulation.spawnTrain(train_id, { startEdge });
+    this.train_ids = [...this.train_ids, train_id];
+    this.notify();
+  }
+
+  assignRoute(train_id: string, edges: ReadonlyArray<RouteEdge>): void {
+    this.simulation?.assignRoute(train_id, edges);
+  }
+
+  snapshot(): SimRunnerSnapshot {
+    return {
+      status: this.computeStatus(),
+      sim_time_ms: this.simulation?.clock.now() ?? 0,
+      events_published: this.events_published,
+      train_ids: [...this.train_ids],
+    };
+  }
+
+  onSnapshotChange(listener: SnapshotListener): () => void {
+    this.snapshotListeners.add(listener);
+    listener(this.snapshot());
+    return () => {
+      this.snapshotListeners.delete(listener);
+    };
+  }
+
+  private computeStatus(): SimRunnerStatus {
+    if (this.simulation === null) return 'idle';
+    return this.intervalHandle === null ? 'paused' : 'running';
+  }
+
+  private handleEvent(event: CapturedEvent): void {
+    this.publishEvent(event);
+    this.events_published += 1;
+    this.notify();
+  }
+
+  private publishEvent(event: CapturedEvent): void {
+    const envelope = {
+      event_id: this.newId(),
+      device_id: event.device_id,
+      timestamp_device: new Date().toISOString(),
+      event_type: event.event_type,
+      protocol_version: PROTOCOL_VERSION,
+      payload: event.payload,
+    };
+    const topic = `railway/events/${event.event_type}/${event.device_id}`;
+    this.client.publish(topic, new TextEncoder().encode(JSON.stringify(envelope)));
+  }
+
+  private notify(): void {
+    const snap = this.snapshot();
+    for (const listener of this.snapshotListeners) listener(snap);
+  }
+}
+
+function defaultNewId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return Math.random().toString(36).slice(2);
+}

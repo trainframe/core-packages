@@ -11,12 +11,14 @@ import { SeededRandom } from './random.js';
 import { VirtualGate } from './virtual-gate.js';
 import { DEFAULT_TRAIN_CONFIG, VirtualTrain, type VirtualTrainConfig } from './virtual-train.js';
 
-interface CapturedEvent {
+export interface CapturedEvent {
   at_ms: number;
   event_type: string;
   device_id: string;
   payload: unknown;
 }
+
+export type SimulationEventListener = (event: CapturedEvent) => void;
 
 export interface SimulationOptions {
   layout: Layout;
@@ -45,6 +47,7 @@ export class Simulation {
   readonly events: CapturedEvent[] = [];
   readonly commands: CapturedEvent[] = [];
 
+  private readonly eventListeners = new Set<SimulationEventListener>();
   private readonly trains = new Map<string, VirtualTrain>();
   private readonly gates = new Map<string, VirtualGate>();
   private readonly tick_ms: number;
@@ -131,8 +134,26 @@ export class Simulation {
     }
   }
 
+  /**
+   * Subscribe to every captured event — both device-emitted events that the
+   * simulation routes into the scheduler and server-derived publish_event
+   * effects. Returns an unsubscribe function. This is how external transports
+   * (e.g. an MQTT bridge) observe the sim without reaching into private fields.
+   */
+  onEvent(listener: SimulationEventListener): () => void {
+    this.eventListeners.add(listener);
+    return () => {
+      this.eventListeners.delete(listener);
+    };
+  }
+
+  private captureEvent(event: CapturedEvent): void {
+    this.events.push(event);
+    for (const listener of this.eventListeners) listener(event);
+  }
+
   private captureAndDispatch(event: { event_type: string; device_id: string; payload: unknown }) {
-    this.events.push({ at_ms: this.clock.now(), ...event });
+    this.captureEvent({ at_ms: this.clock.now(), ...event });
     const effects = this.scheduler.handleEvent(event);
     this.dispatchEffects(effects);
   }
@@ -149,8 +170,9 @@ export class Simulation {
         const train = this.trains.get(effect.device_id);
         train?.acceptCommand(effect.command_type, effect.payload);
       } else if (effect.kind === 'publish_event') {
-        // Server-derived events (anomaly, marker_traversed). For tests, capture them.
-        this.events.push({
+        // Server-derived events (anomaly, marker_traversed). Captured and
+        // surfaced to listeners alongside device-emitted events.
+        this.captureEvent({
           at_ms: this.clock.now(),
           event_type: effect.event_type,
           device_id: 'server',
