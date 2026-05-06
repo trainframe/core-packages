@@ -24,9 +24,12 @@ export type BuiltinCapability = (typeof BUILTIN_CAPABILITIES)[number];
 
 /**
  * Schema for any capability identifier — built-in or third-party.
- * Pattern allows dotted lowercase names with hyphens, no whitespace.
+ * Allows dotted lowercase names with hyphens or underscores, no whitespace.
+ * The built-in IDs (`core.gates_clearance`, `core.controls_motion`, etc.) all
+ * use underscores; satellite IDs (`com.alice.controls-turntable`) typically use
+ * hyphens. Both are accepted.
  */
 export const CapabilityId = Type.String({
-  pattern: '^[a-z][a-z0-9.-]*[a-z0-9]$',
+  pattern: '^[a-z][a-z0-9._-]*[a-z0-9]$',
   minLength: 3,
 });
