@@ -1,0 +1,35 @@
+{
+  "name": "@trainframe/server",
+  "version": "0.1.0",
+  "description": "Trainframe server: broker-connected scheduler that dispatches device events into core and publishes commands and retained state back.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "tf-server": "./dist/cli.js"
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@trainframe/core": "workspace:*",
+    "@trainframe/protocol": "workspace:*",
+    "mqtt": "^5.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "vitest": "^2.1.0",
+    "typescript": "^5.6.0"
+  }
+}
