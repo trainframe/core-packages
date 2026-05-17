@@ -1,0 +1,25 @@
+{
+  "name": "@trainframe/integration",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Cross-package integration tests. Spawns an in-process aedes broker, runs the real server against it, and exercises user stories through the wire.",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@trainframe/core": "workspace:*",
+    "@trainframe/protocol": "workspace:*",
+    "@trainframe/server": "workspace:*",
+    "@trainframe/simulator": "workspace:*",
+    "aedes": "^1.0.2",
+    "mqtt": "^5.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "vitest": "^2.1.0",
+    "typescript": "^5.6.0"
+  }
+}
