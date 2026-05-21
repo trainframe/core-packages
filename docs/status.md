@@ -40,7 +40,7 @@ Source: spec §"Capability model", §"Clearance model"; [`ADR-001`](adr/001-capa
 | Scheduler: route assignment               | shipped | `assignRoute` + initial clearance grant.                                                       |
 | Scheduler: clearance extension            | shipped | At-marker → grant next edge unless any capability denies. Block exclusivity.                   |
 | Scheduler: gate-release re-grant          | shipped | After capability state changes, retries blocked clearances.                                    |
-| Scheduler: switch state events            | partial | Stores position in `LayoutState`; doesn't yet enforce `requires_switch_state` on edges.        |
+| Scheduler: switch-state edge filtering    | shipped | Refuses to clear an edge whose `requires_switch_state` doesn't match the junction's confirmed position. Retries blocked clearances when a switch confirms. |
 | `LayoutState`                             | partial | Edges, marker lookup, switch positions. No discovery learning, no `inferred` flag handling.    |
 | Anomaly emission for unknown tags         | shipped | `tag_observed` against unregistered marker → anomaly event.                                    |
 | Conflict resolution policy                | not started | Open design Q (CLAUDE.md). Block exclusivity is first-come-by-clearance-grant; no priorities. |
@@ -199,13 +199,12 @@ Mirrored from [`CLAUDE.md`](../CLAUDE.md). Need ADRs before implementation.
 
 Ranked by leverage. None are mandatory; this is the recommendation, not the plan.
 
-1. **`controls_switch` capability + edge filtering**. The scheduler should refuse to clear an edge whose `requires_switch_state` doesn't match the current switch position. Modest scheduler change, satisfies a major feature in the spec, enables interesting layouts (figure-8 with junction). E2E test in `@trainframe/integration` to verify.
-2. **Simulator transport refactor + device-only mode**. Factor `Simulation` so it can run without an embedded scheduler, using a transport adapter to publish events through a real `BrokerClient`. Unblocks simulator-driven E2E tests in `@trainframe/integration`. Resolves the "two schedulers" awkwardness once a real server is in use.
-3. **Tag→marker resolution registry + `assigns_tags` + ADR**. Moves the simulator and protocol off the "tag IDs ARE marker IDs" shortcut. Prerequisite for discovery mode.
-4. **Discovery mode / topology learning**. Ingest `tag_observed` for unknown tags, infer edges, ratchet `inferred → confirmed` after N traversals. Spec §"Incremental discovery". Scheduler + layout-state work; depends on #3.
-5. **`startTestEnvironment` harness + fault profiles**. Replace the ad-hoc `new Simulation(...)` pattern in tests with the harness the simulator spec describes. Profiles, `attachDevice`, `waitForEvent`. Pays off as more capabilities ship.
-6. **Train-position interpolation in the visualiser**. Subscribe to `train_status`, animate trains mid-edge instead of snapping to last-traversed marker. Small visual polish; bigger payoff once `train_status` is being emitted by something.
-7. **HTTP/MQTT admin API for the server**. Operator endpoints for `assignRoute`, layout reload, etc. Today `Server.assignRoute` is a method only; no remote way to trigger it.
+1. **Simulator transport refactor + device-only mode**. Factor `Simulation` so it can run without an embedded scheduler, using a transport adapter to publish events through a real `BrokerClient`. Unblocks simulator-driven E2E tests in `@trainframe/integration`. Resolves the "two schedulers" awkwardness once a real server is in use.
+2. **Tag→marker resolution registry + `assigns_tags` + ADR**. Moves the simulator and protocol off the "tag IDs ARE marker IDs" shortcut. Prerequisite for discovery mode.
+3. **Discovery mode / topology learning**. Ingest `tag_observed` for unknown tags, infer edges, ratchet `inferred → confirmed` after N traversals. Spec §"Incremental discovery". Scheduler + layout-state work; depends on #2.
+4. **`startTestEnvironment` harness + fault profiles**. Replace the ad-hoc `new Simulation(...)` pattern in tests with the harness the simulator spec describes. Profiles, `attachDevice`, `waitForEvent`. Pays off as more capabilities ship.
+5. **Train-position interpolation in the visualiser**. Subscribe to `train_status`, animate trains mid-edge instead of snapping to last-traversed marker. Small visual polish; bigger payoff once `train_status` is being emitted by something.
+6. **HTTP/MQTT admin API for the server**. Operator endpoints for `assignRoute`, layout reload, etc. Today `Server.assignRoute` is a method only; no remote way to trigger it.
 
 Smaller follow-ups that don't need a major thread:
 

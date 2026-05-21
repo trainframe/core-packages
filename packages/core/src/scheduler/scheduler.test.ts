@@ -248,3 +248,212 @@ describe('Scheduler — anomalies', () => {
     expect(anomaly).toBeDefined();
   });
 });
+
+/**
+ * Figure-8 with a single junction at M2. From M2 the train can go to M3
+ * (via the "main" switch position) or M5 (via "diverge"). Both routes
+ * eventually return to M1.
+ */
+const FIGURE_8: Layout = {
+  name: 'figure-8',
+  markers: [
+    { id: 'M1', kind: 'block_boundary' },
+    { id: 'M2', kind: 'junction' },
+    { id: 'M3', kind: 'block_boundary' },
+    { id: 'M4', kind: 'block_boundary' },
+    { id: 'M5', kind: 'block_boundary' },
+  ],
+  edges: [
+    { from_marker_id: 'M1', to_marker_id: 'M2', estimated_length_mm: 200 },
+    {
+      from_marker_id: 'M2',
+      to_marker_id: 'M3',
+      estimated_length_mm: 200,
+      requires_switch_state: 'main',
+    },
+    {
+      from_marker_id: 'M2',
+      to_marker_id: 'M5',
+      estimated_length_mm: 280,
+      requires_switch_state: 'diverge',
+    },
+    { from_marker_id: 'M3', to_marker_id: 'M4', estimated_length_mm: 200 },
+    { from_marker_id: 'M4', to_marker_id: 'M1', estimated_length_mm: 200 },
+    { from_marker_id: 'M5', to_marker_id: 'M1', estimated_length_mm: 200 },
+  ],
+  junctions: [{ marker_id: 'M2' }],
+};
+
+const setupFigure8 = () => {
+  const registry = new CapabilityRegistry();
+  registry.registerAll(BUILTIN_CAPABILITIES);
+  registry.freeze();
+  const layout = new LayoutState(FIGURE_8);
+  const scheduler = new Scheduler(registry, layout);
+  return { scheduler, registry };
+};
+
+const registerSwitch = (scheduler: Scheduler, deviceId: string) =>
+  scheduler.handleEvent({
+    event_type: 'device_registered',
+    device_id: deviceId,
+    payload: { capabilities: ['core.controls_switch'] },
+  });
+
+const findGrant = (effects: ReadonlyArray<SchedulerEffect>) =>
+  effects.find(
+    (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+      e.kind === 'send_command' && e.command_type === 'grant_clearance',
+  );
+
+describe('Scheduler — switch-state edge filtering', () => {
+  it('withholds clearance across a junction when no switch position is known', () => {
+    const { scheduler } = setupFigure8();
+    registerTrain(scheduler, 'T1');
+    registerSwitch(scheduler, 'SW-M2');
+
+    scheduler.assignRoute('T1', 'route-1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    const atM2 = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+
+    expect(findGrant(atM2)).toBeUndefined();
+    expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('M2');
+  });
+
+  it('grants clearance through the junction when the switch matches', () => {
+    const { scheduler } = setupFigure8();
+    registerTrain(scheduler, 'T1');
+    registerSwitch(scheduler, 'SW-M2');
+
+    scheduler.handleEvent({
+      event_type: 'switch_state_changed',
+      device_id: 'SW-M2',
+      payload: { junction_marker_id: 'M2', position: 'main', confirmed: true },
+    });
+
+    scheduler.assignRoute('T1', 'route-1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    const atM2 = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+
+    const grant = findGrant(atM2);
+    expect(grant).toBeDefined();
+    expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M3');
+  });
+
+  it('denies clearance across a junction when the switch is in the wrong position', () => {
+    const { scheduler } = setupFigure8();
+    registerTrain(scheduler, 'T1');
+    registerSwitch(scheduler, 'SW-M2');
+
+    scheduler.handleEvent({
+      event_type: 'switch_state_changed',
+      device_id: 'SW-M2',
+      payload: { junction_marker_id: 'M2', position: 'diverge', confirmed: true },
+    });
+
+    scheduler.assignRoute('T1', 'route-1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    const atM2 = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+
+    expect(findGrant(atM2)).toBeUndefined();
+  });
+
+  it('ignores unconfirmed switch changes for clearance decisions', () => {
+    const { scheduler } = setupFigure8();
+    registerTrain(scheduler, 'T1');
+    registerSwitch(scheduler, 'SW-M2');
+
+    scheduler.handleEvent({
+      event_type: 'switch_state_changed',
+      device_id: 'SW-M2',
+      payload: { junction_marker_id: 'M2', position: 'main', confirmed: false },
+    });
+
+    scheduler.assignRoute('T1', 'route-1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    const atM2 = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+
+    expect(findGrant(atM2)).toBeUndefined();
+  });
+
+  it('grants the previously-withheld clearance once the switch confirms', () => {
+    const { scheduler } = setupFigure8();
+    registerTrain(scheduler, 'T1');
+    registerSwitch(scheduler, 'SW-M2');
+
+    scheduler.assignRoute('T1', 'route-1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+    expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('M2');
+
+    // Switch confirms in the matching position - clearance should extend.
+    const afterSwitch = scheduler.handleEvent({
+      event_type: 'switch_state_changed',
+      device_id: 'SW-M2',
+      payload: { junction_marker_id: 'M2', position: 'main', confirmed: true },
+    });
+
+    const grant = findGrant(afterSwitch);
+    expect(grant).toBeDefined();
+    expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M3');
+  });
+});

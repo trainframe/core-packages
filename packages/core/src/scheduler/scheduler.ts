@@ -205,8 +205,21 @@ export class Scheduler {
    */
   private tryGrantClearance(train: TrainState, nextEdge: EdgeRef): SchedulerEffect | null {
     if (this.edgeIsClearedToAnotherTrain(train.train_id, nextEdge)) return null;
+    if (this.edgeRequiresMismatchedSwitch(nextEdge)) return null;
     if (this.anyCapabilityDeniesClearance(train, nextEdge)) return null;
     return this.grantClearance(train, nextEdge);
+  }
+
+  /**
+   * Edge filtering by switch state. If the edge declares a
+   * `requires_switch_state`, the junction's current position must match.
+   * Unknown position counts as a mismatch (default-safe).
+   */
+  private edgeRequiresMismatchedSwitch(edge: EdgeRef): boolean {
+    const layoutEdge = this.layout.findEdge(edge.from_marker_id, edge.to_marker_id);
+    const required = layoutEdge?.requires_switch_state;
+    if (!required) return false;
+    return this.layout.getSwitchPosition(edge.from_marker_id) !== required;
   }
 
   private edgeIsClearedToAnotherTrain(trainId: string, edge: EdgeRef): boolean {
@@ -254,10 +267,32 @@ export class Scheduler {
       position: string;
       confirmed: boolean;
     };
+    const out: SchedulerEffect[] = [
+      effects.updateState('switches', junction_marker_id, { position, confirmed }),
+    ];
     if (confirmed) {
       this.layout.setSwitchPosition(junction_marker_id, position);
+      out.push(...this.retryBlockedClearances());
     }
-    return [effects.updateState('switches', junction_marker_id, { position, confirmed })];
+    return out;
+  }
+
+  /**
+   * Retry clearance for every train waiting at its current limit. Called
+   * after any state change that might unblock a previously-denied edge
+   * (capability state change, switch position change).
+   */
+  private retryBlockedClearances(): ReadonlyArray<SchedulerEffect> {
+    const out: SchedulerEffect[] = [];
+    for (const train of this.trains.values()) {
+      if (!train.route || !train.clearance_limit_marker_id) continue;
+      const nextEdge = train.route.edges[train.route.progress_index];
+      if (!nextEdge) continue;
+      if (train.last_marker_id !== train.clearance_limit_marker_id) continue;
+      const grant = this.tryGrantClearance(train, nextEdge);
+      if (grant) out.push(grant);
+    }
+    return out;
   }
 
   // ---------- generic capability dispatch ----------
@@ -293,18 +328,7 @@ export class Scheduler {
       out.push(...this.translateIntents(result.intents, event.device_id));
     }
 
-    // After applying state changes, retry any blocked clearance requests.
-    // Cheap approach: try every train at its current limit. This is O(trains)
-    // per event but trains are few.
-    for (const train of this.trains.values()) {
-      if (!train.route || !train.clearance_limit_marker_id) continue;
-      const nextEdge = train.route.edges[train.route.progress_index];
-      if (!nextEdge) continue;
-      if (train.last_marker_id !== train.clearance_limit_marker_id) continue;
-      const grant = this.tryGrantClearance(train, nextEdge);
-      if (grant) out.push(grant);
-    }
-
+    out.push(...this.retryBlockedClearances());
     return out;
   }
 
