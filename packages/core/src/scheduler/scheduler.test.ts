@@ -585,3 +585,130 @@ describe('Scheduler — tag resolution', () => {
     expect(scheduler.getTagRegistry().resolve('TAG-PWND')).toBeUndefined();
   });
 });
+
+describe('Scheduler — discovery mode', () => {
+  it('creates a marker on the fly when a tag is assigned to an unknown target', () => {
+    const { scheduler } = setup();
+    expect(scheduler.getLayout().hasMarker('M-NEW')).toBe(false);
+
+    const effects = scheduler.handleEvent({
+      event_type: 'tag_assignment',
+      device_id: 'GARAGE',
+      payload: {
+        tag_id: 'TAG-NEW',
+        assigned_kind: 'marker',
+        target_id: 'M-NEW',
+        marker_kind: 'block_boundary',
+      },
+    });
+
+    expect(scheduler.getLayout().hasMarker('M-NEW')).toBe(true);
+    expect(scheduler.getLayout().getMarker('M-NEW')?.kind).toBe('block_boundary');
+
+    const layoutSnapshot = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'update_state_snapshot' }> =>
+        e.kind === 'update_state_snapshot' && e.entity_type === 'layout',
+    );
+    expect(layoutSnapshot).toBeDefined();
+  });
+
+  it('infers an edge when a train traverses two markers with no existing edge between them', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+
+    // Add a new marker on the side, no edge to it yet.
+    scheduler.handleEvent({
+      event_type: 'tag_assignment',
+      device_id: 'GARAGE',
+      payload: {
+        tag_id: 'M-OFF',
+        assigned_kind: 'marker',
+        target_id: 'M-OFF',
+        marker_kind: 'block_boundary',
+      },
+    });
+
+    // Train at M1 (existing), then unexpectedly at M-OFF.
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    const effects = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M-OFF' },
+    });
+
+    const edge = scheduler.getLayout().findEdge('M1', 'M-OFF');
+    expect(edge).toBeDefined();
+    expect(edge?.inferred).toBe(true);
+
+    const traversed = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
+        e.kind === 'publish_event' && e.event_type === 'marker_traversed',
+    );
+    expect((traversed?.payload as { in_discovery_mode: boolean }).in_discovery_mode).toBe(true);
+  });
+
+  it('confirms an inferred edge after the configured number of traversals', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.handleEvent({
+      event_type: 'tag_assignment',
+      device_id: 'GARAGE',
+      payload: {
+        tag_id: 'M-OFF',
+        assigned_kind: 'marker',
+        target_id: 'M-OFF',
+      },
+    });
+
+    // Drive the train back and forth M1 ↔ M-OFF three times. The default
+    // threshold is 3 traversals of the M1→M-OFF edge.
+    const cross = (markerId: string) =>
+      scheduler.handleEvent({
+        event_type: 'tag_observed',
+        device_id: 'T1',
+        payload: { tag_id: markerId },
+      });
+    cross('M1');
+    cross('M-OFF'); // traversal 1 (and infer)
+    cross('M1');
+    cross('M-OFF'); // traversal 2
+    cross('M1');
+    cross('M-OFF'); // traversal 3 — should flip inferred to false
+
+    const edge = scheduler.getLayout().findEdge('M1', 'M-OFF');
+    expect(edge?.inferred).toBe(false);
+  });
+
+  it('threshold is configurable via the scheduler`s LayoutState', () => {
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const layout = new LayoutState(SIMPLE_LOOP, { confirmTraversals: 1 });
+    const scheduler = new Scheduler(registry, layout);
+    seedIdentityTags(scheduler, SIMPLE_LOOP_MARKERS);
+    registerTrain(scheduler, 'T1');
+
+    scheduler.handleEvent({
+      event_type: 'tag_assignment',
+      device_id: 'GARAGE',
+      payload: { tag_id: 'M-X', assigned_kind: 'marker', target_id: 'M-X' },
+    });
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M-X' },
+    });
+
+    const edge = layout.findEdge('M1', 'M-X');
+    expect(edge?.inferred).toBe(false);
+  });
+});

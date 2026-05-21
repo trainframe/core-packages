@@ -42,7 +42,7 @@ Source: spec §"Capability model", §"Clearance model"; [`ADR-001`](adr/001-capa
 | Scheduler: clearance extension            | shipped | At-marker → grant next edge unless any capability denies. Block exclusivity.                   |
 | Scheduler: gate-release re-grant          | shipped | After capability state changes, retries blocked clearances.                                    |
 | Scheduler: switch-state edge filtering    | shipped | Refuses to clear an edge whose `requires_switch_state` doesn't match the junction's confirmed position. Retries blocked clearances when a switch confirms. |
-| `LayoutState`                             | partial | Edges, marker lookup, switch positions. No discovery learning, no `inferred` flag handling.    |
+| `LayoutState`                             | shipped | Edges, marker lookup, switch positions, runtime `upsertMarker`, edge inference via `recordTraversal`, inferred→confirmed flip on N traversals (ADR-009), `toLayout()` serialiser for republishing as retained state. |
 | Anomaly emission for unknown tags         | shipped | `tag_observed` against unregistered marker → anomaly event.                                    |
 | Conflict resolution policy                | not started | Open design Q (CLAUDE.md). Block exclusivity is first-come-by-clearance-grant; no priorities. |
 | Multi-gate semantics                      | not started | Open design Q. Today: any deny is a deny (logical AND).                                        |
@@ -98,7 +98,7 @@ Source: spec §"Transport: MQTT" (server is what runs the scheduler against a re
 | HTTP admin API (assignRoute, hold/release, tags)  | shipped | `AdminHttpServer` on a configurable port (default 3000). Endpoints: `/api/health`, `/api/state`, `/api/trains/:id/route`, `/api/trains/:id/revoke_clearance`, `/api/gates/:id/hold`, `/api/gates/:id/release`, `/api/tags`. CLI: `--http-port`. No auth (LAN/localhost). ADR-008. |
 | Custom-event dispatch (`railway/events/custom/...`) | not started | Server only subscribes to four-segment core events.                            |
 | Authentication / pairing                          | not started | Spec §"Authentication" defers details to garage-device pairing.                |
-| Discovery mode (learning new edges/markers)       | not started | Spec §"Incremental discovery". Major scheduler+layout work.                    |
+| Discovery mode (learning new edges/markers)       | shipped | ADR-009. Marker creation on `tag_assignment`, edge inference on traversal, confirmation after 3 traversals (configurable). Layout republished as retained state on every change. Edge-length learning and cautious-clearance follow-ups deferred. |
 | Simulator-ui device-only mode                     | not started | The browser sim still runs its own scheduler in-process. Once the real server is in operator use, the sim should publish raw device events and let the server schedule. |
 
 Coverage thresholds: 75 lines / 65 branches / 65 functions (new package; ratchet up as the surface stabilises).
@@ -117,7 +117,7 @@ Coverage thresholds: 75 lines / 65 branches / 65 functions (new package; ratchet
 | Train-position rendering                   | shipped | Mid-edge interpolation from `train_status` events; falls back to last `marker_traversed` marker when no status yet. |
 | Layout snapshot bootstrap                  | shipped | `useLayoutState` subscribes to `railway/state/layout/+`; simulator-ui publishes the active layout retained on start. |
 | Tag-assignment UI                          | shipped | `UnknownTags` component surfaces unknown-tag anomalies and POSTs `tag_assignment` requests to the server's admin HTTP API. Plays the discovery loop: anomaly → operator picks target → registry binds → row vanishes. |
-| Discovery / topology learning UI           | not started | Bigger sibling to tag assignment - lets the operator confirm inferred edges once that scheduler work lands. |
+| Discovery / topology learning UI           | partial | Discovered markers + inferred edges show up in the layout SVG live (via retained-state republish). Distinguishing inferred from confirmed visually is a follow-up. |
 
 ---
 
@@ -219,7 +219,8 @@ Mirrored from [`CLAUDE.md`](../CLAUDE.md). Need ADRs before implementation.
 
 Ranked by leverage. None are mandatory; this is the recommendation, not the plan.
 
-1. **Discovery mode / topology learning**. Ingest `tag_observed` for unknown tags, infer edges, ratchet `inferred → confirmed` after N traversals. Spec §"Incremental discovery". Builds on the now-shipped `TagRegistry` (ADR-007).
+1. **Visualiser styling for inferred edges**. Render inferred edges as dashed lines or with a "learning" badge; the data is already in retained state. Small visual win.
+2. **Edge-length learning**. Populate `learned_traversal_time_ms_at_speed` on traversal; backfill `estimated_length_mm` once a reference length is known anywhere in the layout.
 
 Smaller follow-ups that don't need a major thread:
 

@@ -165,10 +165,11 @@ export class Scheduler {
    * bindings.
    */
   private handleTagAssignment(deviceId: string, payload: unknown): ReadonlyArray<SchedulerEffect> {
-    const { tag_id, assigned_kind, target_id } = payload as {
+    const { tag_id, assigned_kind, target_id, marker_kind } = payload as {
       tag_id: string;
       assigned_kind: 'marker' | 'vehicle';
       target_id: string;
+      marker_kind?: string;
     };
 
     const device = this.devices.get(deviceId);
@@ -181,8 +182,22 @@ export class Scheduler {
       ];
     }
 
+    const out: SchedulerEffect[] = [];
+
+    // Discovery (ADR-009): a marker assignment can point at a target that
+    // doesn't yet exist in the layout. Create the marker on the fly so the
+    // scheduler can route through it as soon as the train sees it again.
+    if (assigned_kind === 'marker' && !this.layout.hasMarker(target_id)) {
+      const kind = isMarkerKind(marker_kind) ? marker_kind : 'unspecified';
+      const added = this.layout.upsertMarker(target_id, kind);
+      if (added) {
+        out.push(effects.updateState('layout', this.layout.name, this.layout.toLayout()));
+      }
+    }
+
     this.tags.assign(tag_id, { kind: assigned_kind, target_id });
-    return [effects.updateState('tags', tag_id, { assigned_kind, target_id })];
+    out.push(effects.updateState('tags', tag_id, { assigned_kind, target_id }));
+    return out;
   }
 
   /**
@@ -193,17 +208,33 @@ export class Scheduler {
     const train = this.trains.get(trainId);
     if (!train) return [];
 
+    const previousMarker = train.last_marker_id;
     train.last_marker_id = markerId;
     this.advanceRouteIfArrivedAt(train, markerId);
 
-    const out: SchedulerEffect[] = [
+    // Discovery: when a train moves from one marker to another, either
+    // confirm an existing edge (inferred or not) or learn a new one.
+    // The `in_discovery_mode` flag on marker_traversed reflects whether
+    // the edge we just crossed is still inferred after this traversal.
+    let inDiscoveryMode = false;
+    const out: SchedulerEffect[] = [];
+    if (previousMarker && previousMarker !== markerId) {
+      const result = this.layout.recordTraversal(previousMarker, markerId);
+      const edge = this.layout.findEdge(previousMarker, markerId);
+      inDiscoveryMode = edge?.inferred ?? false;
+      if (result.inferredEdgeAdded || result.edgeConfirmed) {
+        out.push(effects.updateState('layout', this.layout.name, this.layout.toLayout()));
+      }
+    }
+
+    out.push(
       effects.publishEvent('marker_traversed', {
         train_id: trainId,
         marker_id: markerId,
         direction: 'forward',
-        in_discovery_mode: false,
+        in_discovery_mode: inDiscoveryMode,
       }),
-    ];
+    );
 
     const grant = this.maybeExtendClearance(train, markerId);
     if (grant) out.push(grant);
@@ -444,4 +475,25 @@ export class Scheduler {
     if (grant) out.push(grant);
     return out;
   }
+}
+
+const VALID_MARKER_KINDS = new Set([
+  'block_boundary',
+  'station_stop',
+  'junction',
+  'terminus',
+  'yard_entry',
+  'unspecified',
+]);
+
+type MarkerKind =
+  | 'block_boundary'
+  | 'station_stop'
+  | 'junction'
+  | 'terminus'
+  | 'yard_entry'
+  | 'unspecified';
+
+function isMarkerKind(value: unknown): value is MarkerKind {
+  return typeof value === 'string' && VALID_MARKER_KINDS.has(value);
 }
