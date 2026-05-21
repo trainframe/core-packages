@@ -25,6 +25,13 @@ export interface VirtualTrainConfig {
    * crosses the limit at speed and an `anomaly` event is emitted.
    */
   overshoot_rate: number;
+  /**
+   * Interval at which the train emits `train_status` events while moving or
+   * on-edge. Setting this to 0 disables emission (useful in unit tests that
+   * don't care about position broadcasts). Default 250 ms - frequent enough
+   * for smooth visualiser interpolation, sparse enough to not flood the bus.
+   */
+  train_status_interval_ms: number;
 }
 
 export const DEFAULT_TRAIN_CONFIG: VirtualTrainConfig = {
@@ -34,6 +41,7 @@ export const DEFAULT_TRAIN_CONFIG: VirtualTrainConfig = {
   miss_rate: 0.01,
   detection_latency_ms: { mean: 20, stddev: 5 },
   overshoot_rate: 0,
+  train_status_interval_ms: 250,
 };
 
 interface TrainEvent {
@@ -63,6 +71,10 @@ export class VirtualTrain {
   // engage on this edge, it stays failed until the train transitions to the
   // next edge. See ADR-006.
   private overshoot_engaged_this_edge = false;
+  // Accumulator for the train_status emission cadence.
+  private ms_since_status = 0;
+  private route_id: string | null = null;
+  private route_progress_edge_index = 0;
 
   constructor(
     private readonly device_id: string,
@@ -90,9 +102,11 @@ export class VirtualTrain {
   acceptCommand(command_type: string, payload: unknown): void {
     switch (command_type) {
       case 'assign_route': {
-        const { edges } = payload as { edges: RouteEdge[] };
+        const { edges, route_id } = payload as { edges: RouteEdge[]; route_id?: string };
         this.route = edges;
         this.route_index = 0;
+        this.route_id = route_id ?? null;
+        this.route_progress_edge_index = 0;
         if (!this.current_edge && edges[0]) {
           this.current_edge = edges[0];
           this.distance_into_edge_mm = 0;
@@ -144,6 +158,47 @@ export class VirtualTrain {
 
     this.maybeBrakeForClearanceLimit(edge_length_mm);
     this.maybeCrossEdgeEnd(edge_length_mm);
+
+    this.maybeEmitStatus(dt_ms);
+  }
+
+  /**
+   * Emit a `train_status` event when enough wall time has elapsed since the
+   * previous one. Frequent enough for smooth visualiser interpolation; not
+   * so frequent that it floods the bus. Disabled when interval is 0.
+   */
+  private maybeEmitStatus(dt_ms: number): void {
+    if (this.config.train_status_interval_ms <= 0) return;
+    this.ms_since_status += dt_ms;
+    if (this.ms_since_status < this.config.train_status_interval_ms) return;
+    this.ms_since_status = 0;
+
+    const payload: Record<string, unknown> = {
+      train_id: this.device_id,
+      speed_normalised:
+        this.config.max_velocity_mm_s > 0
+          ? Math.min(1, Math.max(0, this.velocity_mm_s / this.config.max_velocity_mm_s))
+          : 0,
+    };
+    if (this.current_edge) {
+      payload.current_edge = {
+        from_marker_id: this.current_edge.from_marker_id,
+        to_marker_id: this.current_edge.to_marker_id,
+      };
+      payload.estimated_distance_from_edge_start_mm = this.distance_into_edge_mm;
+    }
+    if (this.clearance_limit_marker_id) {
+      payload.clearance_limit_marker_id = this.clearance_limit_marker_id;
+    }
+    if (this.route_id) {
+      payload.route_id = this.route_id;
+      payload.route_progress_edge_index = this.route_index;
+    }
+    this.emit({
+      event_type: 'train_status',
+      device_id: this.device_id,
+      payload,
+    });
   }
 
   private adjustVelocity(dt_s: number): void {

@@ -23,6 +23,7 @@ export interface VisualiserMarker {
 export interface VisualiserEdge {
   readonly from_marker_id: string;
   readonly to_marker_id: string;
+  readonly estimated_length_mm?: number;
 }
 
 /**
@@ -80,5 +81,9 @@ function isMarker(value: unknown): value is VisualiserMarker {
 function isEdge(value: unknown): value is VisualiserEdge {
   if (typeof value !== 'object' || value === null) return false;
   const e = value as Record<string, unknown>;
-  return typeof e.from_marker_id === 'string' && typeof e.to_marker_id === 'string';
+  if (typeof e.from_marker_id !== 'string' || typeof e.to_marker_id !== 'string') return false;
+  if (e.estimated_length_mm !== undefined && typeof e.estimated_length_mm !== 'number') {
+    return false;
+  }
+  return true;
 }

@@ -1,10 +1,12 @@
 import type { JSX } from 'react';
 import {
+  type VisualiserEdge,
   type VisualiserLayout,
   type VisualiserMarker,
   useLayoutState,
 } from '../state/use-layout-state.js';
 import { type TrainPositions, useTrainPositions } from '../state/use-train-positions.js';
+import { type TrainStatuses, useTrainStatuses } from '../state/use-train-statuses.js';
 
 interface Point {
   readonly x: number;
@@ -27,6 +29,7 @@ const TRAIN_RADIUS = 9;
 export function LayoutCanvas() {
   const layout = useLayoutState();
   const trains = useTrainPositions();
+  const trainStatuses = useTrainStatuses();
 
   if (!layout) {
     return (
@@ -38,6 +41,7 @@ export function LayoutCanvas() {
   }
 
   const markerPositions = computeMarkerPositions(layout);
+  const edgeIndex = indexEdges(layout.edges);
 
   return (
     <section aria-label="Layout">
@@ -89,30 +93,38 @@ export function LayoutCanvas() {
             );
           })}
         </g>
-        <g data-testid="trains">{renderTrains(trains, markerPositions)}</g>
+        <g data-testid="trains">
+          {renderTrains(trains, trainStatuses, markerPositions, edgeIndex)}
+        </g>
       </svg>
     </section>
   );
 }
 
-function renderTrains(trains: TrainPositions, markerPositions: Map<string, Point>) {
+function renderTrains(
+  trains: TrainPositions,
+  statuses: TrainStatuses,
+  markerPositions: Map<string, Point>,
+  edgeIndex: Map<string, VisualiserEdge>,
+) {
   const out: JSX.Element[] = [];
-  for (const [trainId, markerId] of trains) {
-    const p = markerPositions.get(markerId);
-    if (!p) continue;
+  const trainIds = new Set<string>([...trains.keys(), ...statuses.keys()]);
+
+  for (const trainId of trainIds) {
+    const placement = placeTrain(trainId, trains, statuses, markerPositions, edgeIndex);
+    if (!placement) continue;
+    const { x, y, atMarker, onEdge } = placement;
     out.push(
-      <g key={trainId} data-train-id={trainId} data-at-marker={markerId}>
-        <circle
-          cx={p.x}
-          cy={p.y}
-          r={TRAIN_RADIUS}
-          fill="#1f77b4"
-          stroke="#0b3d68"
-          strokeWidth={2}
-        />
+      <g
+        key={trainId}
+        data-train-id={trainId}
+        {...(atMarker ? { 'data-at-marker': atMarker } : {})}
+        {...(onEdge ? { 'data-on-edge': onEdge } : {})}
+      >
+        <circle cx={x} cy={y} r={TRAIN_RADIUS} fill="#1f77b4" stroke="#0b3d68" strokeWidth={2} />
         <text
-          x={p.x}
-          y={p.y - MARKER_RADIUS - 6}
+          x={x}
+          y={y - MARKER_RADIUS - 6}
           textAnchor="middle"
           fontSize={11}
           fontFamily="sans-serif"
@@ -123,6 +135,57 @@ function renderTrains(trains: TrainPositions, markerPositions: Map<string, Point
       </g>,
     );
   }
+  return out;
+}
+
+interface TrainPlacement extends Point {
+  readonly atMarker?: string;
+  readonly onEdge?: string;
+}
+
+/**
+ * Prefer the latest `train_status` for mid-edge interpolation. Fall back to
+ * the last `marker_traversed` snap-to-marker when status hasn't arrived yet.
+ */
+function placeTrain(
+  trainId: string,
+  trains: TrainPositions,
+  statuses: TrainStatuses,
+  markerPositions: Map<string, Point>,
+  edgeIndex: Map<string, VisualiserEdge>,
+): TrainPlacement | undefined {
+  const status = statuses.get(trainId);
+  if (status?.current_edge) {
+    const from = markerPositions.get(status.current_edge.from_marker_id);
+    const to = markerPositions.get(status.current_edge.to_marker_id);
+    if (from && to) {
+      const edge = edgeIndex.get(edgeKey(status.current_edge));
+      const length = edge?.estimated_length_mm;
+      const distance = status.distance_into_edge_mm ?? 0;
+      const t = length && length > 0 ? Math.min(1, Math.max(0, distance / length)) : 0;
+      return {
+        x: from.x + (to.x - from.x) * t,
+        y: from.y + (to.y - from.y) * t,
+        onEdge: edgeKey(status.current_edge),
+      };
+    }
+  }
+
+  const markerId = trains.get(trainId);
+  if (markerId) {
+    const p = markerPositions.get(markerId);
+    if (p) return { x: p.x, y: p.y, atMarker: markerId };
+  }
+  return undefined;
+}
+
+function edgeKey(e: { from_marker_id: string; to_marker_id: string }): string {
+  return `${e.from_marker_id}->${e.to_marker_id}`;
+}
+
+function indexEdges(edges: ReadonlyArray<VisualiserEdge>): Map<string, VisualiserEdge> {
+  const out = new Map<string, VisualiserEdge>();
+  for (const edge of edges) out.set(edgeKey(edge), edge);
   return out;
 }
 

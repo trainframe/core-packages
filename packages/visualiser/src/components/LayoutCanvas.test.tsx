@@ -117,4 +117,60 @@ describe('LayoutCanvas', () => {
       within(region).getByRole('img', { name: /track diagram for simple-loop/i }),
     ).toBeInTheDocument();
   });
+
+  it('interpolates a train along its edge when train_status arrives with edge metadata', () => {
+    const layoutWithLengths = {
+      ...SIMPLE_LOOP_LAYOUT,
+      edges: SIMPLE_LOOP_LAYOUT.edges.map((e) => ({ ...e, estimated_length_mm: 200 })),
+    };
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/simple-loop', layoutWithLengths));
+    act(() =>
+      deliverEvent(client, 'railway/events/train_status/T1', {
+        train_id: 'T1',
+        current_edge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+        estimated_distance_from_edge_start_mm: 100, // halfway along a 200mm edge
+        speed_normalised: 0.5,
+      }),
+    );
+
+    const trainNode = screen.getByTestId('trains').querySelector('[data-train-id="T1"]');
+    expect(trainNode?.getAttribute('data-on-edge')).toBe('M1->M2');
+    const circle = trainNode?.querySelector('circle');
+    const markers = screen.getByTestId('markers');
+    const m1 = markers.querySelector('[data-marker-id="M1"] circle');
+    const m2 = markers.querySelector('[data-marker-id="M2"] circle');
+    const trainX = Number(circle?.getAttribute('cx'));
+    const trainY = Number(circle?.getAttribute('cy'));
+    const expectedX = (Number(m1?.getAttribute('cx')) + Number(m2?.getAttribute('cx'))) / 2;
+    const expectedY = (Number(m1?.getAttribute('cy')) + Number(m2?.getAttribute('cy'))) / 2;
+    expect(trainX).toBeCloseTo(expectedX, 1);
+    expect(trainY).toBeCloseTo(expectedY, 1);
+  });
+
+  it('prefers the latest train_status over a stale marker_traversed', () => {
+    const layoutWithLengths = {
+      ...SIMPLE_LOOP_LAYOUT,
+      edges: SIMPLE_LOOP_LAYOUT.edges.map((e) => ({ ...e, estimated_length_mm: 200 })),
+    };
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/simple-loop', layoutWithLengths));
+    act(() =>
+      deliverEvent(client, 'railway/events/marker_traversed/T1', {
+        train_id: 'T1',
+        marker_id: 'M1',
+      }),
+    );
+    act(() =>
+      deliverEvent(client, 'railway/events/train_status/T1', {
+        train_id: 'T1',
+        current_edge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+        estimated_distance_from_edge_start_mm: 50,
+        speed_normalised: 0.25,
+      }),
+    );
+    const trainNode = screen.getByTestId('trains').querySelector('[data-train-id="T1"]');
+    expect(trainNode?.getAttribute('data-on-edge')).toBe('M1->M2');
+    expect(trainNode?.getAttribute('data-at-marker')).toBeNull();
+  });
 });

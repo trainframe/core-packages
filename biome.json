@@ -7,7 +7,13 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "ignore": ["**/dist/**", "**/node_modules/**", "**/*.generated.ts"]
+    "ignore": [
+      "**/dist/**",
+      "**/node_modules/**",
+      "**/*.generated.ts",
+      "**/test-results/**",
+      "**/playwright-report/**"
+    ]
   },
   "formatter": {
     "enabled": true,

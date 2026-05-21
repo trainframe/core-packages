@@ -169,3 +169,41 @@ describe('determinism', () => {
     expect(run(99)).toEqual(run(99));
   });
 });
+
+describe('train_status emission', () => {
+  it('emits train_status events at the configured interval with edge + distance + speed', () => {
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
+    sim.spawnTrain('T1', {
+      startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+      config: { train_status_interval_ms: 100 },
+    });
+    sim.assignRoute('T1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+    sim.advance(1_000); // 10 status windows
+
+    const statuses = sim.getEventsOfType('train_status');
+    expect(statuses.length).toBeGreaterThanOrEqual(8);
+    const first = statuses[0]?.payload as {
+      train_id: string;
+      current_edge?: { from_marker_id: string; to_marker_id: string };
+      speed_normalised: number;
+    };
+    expect(first.train_id).toBe('T1');
+    expect(first.current_edge?.from_marker_id).toBe('M1');
+    expect(first.speed_normalised).toBeGreaterThanOrEqual(0);
+    expect(first.speed_normalised).toBeLessThanOrEqual(1);
+  });
+
+  it('does not emit train_status when interval is 0', () => {
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
+    sim.spawnTrain('T1', {
+      startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+      config: { train_status_interval_ms: 0 },
+    });
+    sim.assignRoute('T1', [{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+    sim.advance(2_000);
+    expect(sim.getEventsOfType('train_status')).toHaveLength(0);
+  });
+});

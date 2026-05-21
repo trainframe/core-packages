@@ -114,7 +114,7 @@ Coverage thresholds: 75 lines / 65 branches / 65 functions (new package; ratchet
 | Connection status UI                       | shipped |                                                                               |
 | Live event log                             | shipped | Rolling 100, newest-first, loose parsing, custom-event vendor surfaced.       |
 | Layout rendering (markers, edges)          | shipped | SVG canvas. Auto-places markers around a circle when no spatial coords; uses `position.x_mm/y_mm` when present. |
-| Train-position rendering                   | partial | Train icons placed at last `marker_traversed` marker. No `train_status` integration yet (mid-edge interpolation, speed indicator). |
+| Train-position rendering                   | shipped | Mid-edge interpolation from `train_status` events; falls back to last `marker_traversed` marker when no status yet. |
 | Layout snapshot bootstrap                  | shipped | `useLayoutState` subscribes to `railway/state/layout/+`; simulator-ui publishes the active layout retained on start. |
 | Tag-assignment / discovery UI              | not started | Spec §"Incremental discovery": user assigns kind to unknown tags.             |
 
@@ -220,9 +220,8 @@ Ranked by leverage. None are mandatory; this is the recommendation, not the plan
 
 1. **Discovery mode / topology learning**. Ingest `tag_observed` for unknown tags, infer edges, ratchet `inferred → confirmed` after N traversals. Spec §"Incremental discovery". Builds on the now-shipped `TagRegistry` (ADR-007).
 2. **`startTestEnvironment` harness + fault profiles**. Replace the ad-hoc `new Simulation(...)` pattern in tests with the harness the simulator spec describes. Profiles, `attachDevice`, `waitForEvent`. Pays off as more capabilities ship.
-3. **Train-position interpolation in the visualiser**. Subscribe to `train_status`, animate trains mid-edge instead of snapping to last-traversed marker. Small visual polish; bigger payoff once `train_status` is being emitted by something.
-4. **HTTP/MQTT admin API for the server**. Operator endpoints for `assignRoute`, layout reload, etc. Today `Server.assignRoute` is a method only; no remote way to trigger it.
-5. **Visualiser "assign this tag" UI**. When an unknown-tag anomaly surfaces, let the operator bind it to a marker through a garage device. Pairs naturally with discovery mode.
+3. **HTTP/MQTT admin API for the server**. Operator endpoints for `assignRoute`, layout reload, etc. Today `Server.assignRoute` is a method only; no remote way to trigger it.
+4. **Visualiser "assign this tag" UI**. When an unknown-tag anomaly surfaces, let the operator bind it to a marker through a garage device. Pairs naturally with discovery mode.
 
 Smaller follow-ups that don't need a major thread:
 
