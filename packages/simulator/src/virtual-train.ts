@@ -71,6 +71,13 @@ export class VirtualTrain {
     private readonly random: SeededRandom,
     private readonly clock: VirtualClock,
     private readonly emit: (e: TrainEvent) => void,
+    /**
+     * marker_id → tag_id resolution for emission. Markers absent from this
+     * map produce no `tag_observed` event when crossed. Real layouts would
+     * use opaque tag IDs; tests can populate identity mappings via
+     * `Simulation`'s `register_tags: 'identity'` option.
+     */
+    private readonly markerToTag: ReadonlyMap<string, string> = new Map(),
   ) {}
 
   /** Place the train at the start of an edge with no route yet. */
@@ -233,6 +240,8 @@ export class VirtualTrain {
 
   private emitMarkerObservation(marker_id: string): void {
     if (this.random.bernoulli(this.config.miss_rate)) return;
+    const tag_id = this.markerToTag.get(marker_id);
+    if (!tag_id) return;
     const latency_ms = Math.max(
       0,
       this.random.normal(
@@ -244,7 +253,7 @@ export class VirtualTrain {
       this.emit({
         event_type: 'tag_observed',
         device_id: this.device_id,
-        payload: { tag_id: marker_id, direction: 'forward' },
+        payload: { tag_id, direction: 'forward' },
       });
     });
   }

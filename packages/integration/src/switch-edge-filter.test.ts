@@ -36,6 +36,7 @@ let harness: Harness;
 
 beforeEach(async () => {
   harness = await startHarness({ layout: FIGURE_8 });
+  await harness.testClient.seedIdentityTags(['M1', 'M2', 'M3', 'M4', 'M5']);
 });
 
 afterEach(async () => {

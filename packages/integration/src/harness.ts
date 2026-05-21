@@ -130,6 +130,31 @@ export class TestClient {
     return tc;
   }
 
+  /**
+   * Register a synthetic garage and publish identity tag_assignment events
+   * for the given markers. Waits for the garage's retained device state so
+   * subsequent tag_observed events resolve cleanly. Tests that exercise
+   * tag_observed should call this once in setup.
+   */
+  async seedIdentityTags(markerIds: ReadonlyArray<string>): Promise<void> {
+    await this.publishEvent('device_registered', 'GARAGE', {
+      capabilities: ['core.assigns_tags'],
+    });
+    await this.waitForState('railway/state/devices/GARAGE');
+    for (const id of markerIds) {
+      await this.publishEvent('tag_assignment', 'GARAGE', {
+        tag_id: id,
+        assigned_kind: 'marker',
+        target_id: id,
+      });
+    }
+    // Wait for the last assignment to land as retained state.
+    if (markerIds.length > 0) {
+      const last = markerIds[markerIds.length - 1];
+      await this.waitForState(`railway/state/tags/${last}`);
+    }
+  }
+
   /** Publish an event the way a device would. */
   async publishEvent(event_type: string, device_id: string, payload: unknown): Promise<void> {
     const envelope: ServerEnvelope = {

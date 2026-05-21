@@ -21,7 +21,7 @@ const SIMPLE_LOOP: Layout = {
 
 describe('end-to-end: virtual train obeys clearances', () => {
   it('a train assigned a route moves through markers in order', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
     sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
 
     sim.assignRoute('T1', [
@@ -39,7 +39,7 @@ describe('end-to-end: virtual train obeys clearances', () => {
   });
 
   it('a gated marker stops the train, releasing the gate lets it continue', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
     sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
     const gate = sim.spawnGate('GATE-M3');
     gate.withhold('M3', 'crane busy');
@@ -72,7 +72,7 @@ describe('end-to-end: virtual train obeys clearances', () => {
   });
 
   it('two trains on the same route do not occupy the same edge', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 2 });
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 2, register_tags: 'identity' });
     sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
     sim.spawnTrain('T2', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
 
@@ -97,7 +97,7 @@ describe('end-to-end: virtual train obeys clearances', () => {
 
 describe('physical mishaps — overshoot', () => {
   it('emits an anomaly event when overshoot_rate forces a brake to fail', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
     sim.spawnTrain('T1', {
       startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
       config: { overshoot_rate: 1, stopping_noise: 0 },
@@ -114,7 +114,7 @@ describe('physical mishaps — overshoot', () => {
   });
 
   it('does not emit an overshoot anomaly with overshoot_rate at 0', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
     sim.spawnTrain('T1', {
       startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
       config: { overshoot_rate: 0 },
@@ -129,7 +129,7 @@ describe('physical mishaps — overshoot', () => {
 
 describe('event listener hook', () => {
   it('streams every captured event to subscribers in order', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 7 });
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 7, register_tags: 'identity' });
     const seen: Array<{ event_type: string; device_id: string }> = [];
     const off = sim.onEvent((e) => seen.push({ event_type: e.event_type, device_id: e.device_id }));
 
@@ -153,7 +153,7 @@ describe('event listener hook', () => {
 describe('determinism', () => {
   it('produces identical outputs with the same seed', () => {
     const run = (seed: number) => {
-      const sim = new Simulation({ layout: SIMPLE_LOOP, seed });
+      const sim = new Simulation({ layout: SIMPLE_LOOP, seed, register_tags: 'identity' });
       sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
       sim.assignRoute('T1', [
         { from_marker_id: 'M1', to_marker_id: 'M2' },

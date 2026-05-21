@@ -98,6 +98,16 @@ describe('Server — gate clearance flow', () => {
     publishWireEvent(client, 'device_registered', 'GATE-M3', {
       capabilities: ['core.gates_clearance'],
     });
+    publishWireEvent(client, 'device_registered', 'GARAGE', {
+      capabilities: ['core.assigns_tags'],
+    });
+    for (const marker of ['M1', 'M2', 'M3', 'M4']) {
+      publishWireEvent(client, 'tag_assignment', 'GARAGE', {
+        tag_id: marker,
+        assigned_kind: 'marker',
+        target_id: marker,
+      });
+    }
     publishWireEvent(client, 'gate_state_changed', 'GATE-M3', {
       marker_id: 'M3',
       state: 'withholding',

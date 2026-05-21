@@ -2,6 +2,7 @@ import type { Capability } from '../capability.js';
 import type { CapabilityRegistry } from '../registry.js';
 import { type SchedulerEffect, effects, grantClearancePayload } from './effects.js';
 import type { LayoutState } from './layout-state.js';
+import { TagRegistry } from './tag-registry.js';
 import { type TrainState, initialTrainState } from './train-state.js';
 import { type EdgeRef, edgesEqual } from './types.js';
 
@@ -22,11 +23,17 @@ interface DeviceRecord {
 export class Scheduler {
   private readonly devices = new Map<string, DeviceRecord>();
   private readonly trains = new Map<string, TrainState>();
+  private readonly tags = new TagRegistry();
 
   constructor(
     private readonly registry: CapabilityRegistry,
     private readonly layout: LayoutState,
   ) {}
+
+  /** Read-only view of the tag registry, exposed for the visualiser/tests. */
+  getTagRegistry(): TagRegistry {
+    return this.tags;
+  }
 
   // ---------- public observers (for testing and the visualiser) ----------
 
@@ -58,6 +65,8 @@ export class Scheduler {
         return this.handleClearanceRequest(event.payload);
       case 'switch_state_changed':
         return this.handleSwitchStateChanged(event.payload);
+      case 'tag_assignment':
+        return this.handleTagAssignment(event.device_id, event.payload);
       default:
         return this.dispatchToCapabilities(event);
     }
@@ -110,26 +119,66 @@ export class Scheduler {
   private handleTagObserved(deviceId: string, payload: unknown): ReadonlyArray<SchedulerEffect> {
     const { tag_id } = payload as { tag_id: string };
 
-    // For v0.1 we assume the tag IS a marker ID; tag→marker resolution will
-    // come later via a separate tag_assignment registry. The simulator
-    // already uses marker IDs as tag IDs, so this is consistent.
-    if (!this.layout.hasMarker(tag_id)) {
+    const binding = this.tags.resolve(tag_id);
+    if (!binding) {
       return [
         effects.publishEvent('anomaly', {
           severity: 'info',
-          description: `Unknown tag observed: ${tag_id} (not a registered marker)`,
+          description: `Unknown tag observed: ${tag_id} (not in the tag registry)`,
         }),
       ];
     }
 
-    // The reading device — if it's a train — has just traversed this marker.
     const device = this.devices.get(deviceId);
-    if (!device || !device.capabilities.includes('core.controls_motion')) {
-      // Trackside detector reading a vehicle tag — not in v0.1.
-      return [];
+    if (!device) return [];
+
+    // Trains reading their own readers traverse markers. Trackside detectors
+    // reading vehicle tags identify vehicles. Each case derives a different
+    // event from the same raw tag_observed.
+    if (binding.kind === 'marker' && device.capabilities.includes('core.controls_motion')) {
+      return this.handleTrainAtMarker(deviceId, binding.target_id);
     }
 
-    return this.handleTrainAtMarker(deviceId, tag_id);
+    if (binding.kind === 'vehicle') {
+      return [
+        effects.publishEvent('vehicle_identified', {
+          vehicle_id: binding.target_id,
+          context_device_id: deviceId,
+        }),
+      ];
+    }
+
+    // Marker tag read by a non-train device. The protocol's marker_traversed
+    // event requires a train_id, so there's no derived event we can publish
+    // here without a registered vehicle context.
+    return [];
+  }
+
+  /**
+   * Bind a tag to an entity. Only devices that declared `core.assigns_tags`
+   * at registration may mutate the registry. Updates to the registry are
+   * published as retained state so fresh subscribers see the world's tag
+   * bindings.
+   */
+  private handleTagAssignment(deviceId: string, payload: unknown): ReadonlyArray<SchedulerEffect> {
+    const { tag_id, assigned_kind, target_id } = payload as {
+      tag_id: string;
+      assigned_kind: 'marker' | 'vehicle';
+      target_id: string;
+    };
+
+    const device = this.devices.get(deviceId);
+    if (!device || !device.capabilities.includes('core.assigns_tags')) {
+      return [
+        effects.publishEvent('anomaly', {
+          severity: 'warning',
+          description: `Device ${deviceId} attempted tag_assignment without core.assigns_tags`,
+        }),
+      ];
+    }
+
+    this.tags.assign(tag_id, { kind: assigned_kind, target_id });
+    return [effects.updateState('tags', tag_id, { assigned_kind, target_id })];
   }
 
   /**

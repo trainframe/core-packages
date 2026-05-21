@@ -36,7 +36,8 @@ Source: spec §"Capability model", §"Clearance model"; [`ADR-001`](adr/001-capa
 | `Capability<State>` author-facing type    | shipped | + `RegisteredCapability` existential wrapper + `wrap()` adapter.                               |
 | `CapabilityRegistry`                      | shipped | `register`, `registerAll`, `freeze`, `validateDeviceCapabilities`, lookup.                     |
 | `core.gates_clearance` built-in           | shipped | Full `onEvent` + `onClearanceConsultation` + `onDeviceDisconnect` hooks.                       |
-| Other built-in capabilities               | partial | Stubs only. `controls_motion`, `accepts_route`, `controls_switch`, `displays_aspect`, `identifies_vehicles`, `reports_marker_traversal`, `assigns_tags`: declared but no hook logic. |
+| Other built-in capabilities               | partial | Stubs for `controls_motion`, `accepts_route`, `controls_switch`, `displays_aspect`, `identifies_vehicles`, `reports_marker_traversal`. `core.assigns_tags` is now real: scheduler enforces that only devices declaring it can mutate the `TagRegistry`. |
+| Tag-to-entity registry (`TagRegistry`)    | shipped | Sibling of `LayoutState`. Populated only by `tag_assignment` events from `core.assigns_tags` devices; resolves `tag_observed` to `marker_traversed` or `vehicle_identified`. Retained on `railway/state/tags/<tag_id>`. ADR-007. |
 | Scheduler: route assignment               | shipped | `assignRoute` + initial clearance grant.                                                       |
 | Scheduler: clearance extension            | shipped | At-marker → grant next edge unless any capability denies. Block exclusivity.                   |
 | Scheduler: gate-release re-grant          | shipped | After capability state changes, retries blocked clearances.                                    |
@@ -217,11 +218,11 @@ Mirrored from [`CLAUDE.md`](../CLAUDE.md). Need ADRs before implementation.
 
 Ranked by leverage. None are mandatory; this is the recommendation, not the plan.
 
-1. **Tag→marker resolution registry + `assigns_tags` + ADR**. Moves the simulator and protocol off the "tag IDs ARE marker IDs" shortcut. Prerequisite for discovery mode.
-2. **Discovery mode / topology learning**. Ingest `tag_observed` for unknown tags, infer edges, ratchet `inferred → confirmed` after N traversals. Spec §"Incremental discovery". Scheduler + layout-state work; depends on #1.
-3. **`startTestEnvironment` harness + fault profiles**. Replace the ad-hoc `new Simulation(...)` pattern in tests with the harness the simulator spec describes. Profiles, `attachDevice`, `waitForEvent`. Pays off as more capabilities ship.
-4. **Train-position interpolation in the visualiser**. Subscribe to `train_status`, animate trains mid-edge instead of snapping to last-traversed marker. Small visual polish; bigger payoff once `train_status` is being emitted by something.
-5. **HTTP/MQTT admin API for the server**. Operator endpoints for `assignRoute`, layout reload, etc. Today `Server.assignRoute` is a method only; no remote way to trigger it.
+1. **Discovery mode / topology learning**. Ingest `tag_observed` for unknown tags, infer edges, ratchet `inferred → confirmed` after N traversals. Spec §"Incremental discovery". Builds on the now-shipped `TagRegistry` (ADR-007).
+2. **`startTestEnvironment` harness + fault profiles**. Replace the ad-hoc `new Simulation(...)` pattern in tests with the harness the simulator spec describes. Profiles, `attachDevice`, `waitForEvent`. Pays off as more capabilities ship.
+3. **Train-position interpolation in the visualiser**. Subscribe to `train_status`, animate trains mid-edge instead of snapping to last-traversed marker. Small visual polish; bigger payoff once `train_status` is being emitted by something.
+4. **HTTP/MQTT admin API for the server**. Operator endpoints for `assignRoute`, layout reload, etc. Today `Server.assignRoute` is a method only; no remote way to trigger it.
+5. **Visualiser "assign this tag" UI**. When an unknown-tag anomaly surfaces, let the operator bind it to a marker through a garage device. Pairs naturally with discovery mode.
 
 Smaller follow-ups that don't need a major thread:
 

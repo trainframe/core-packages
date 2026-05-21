@@ -147,6 +147,12 @@ export type AspectChanged = Static<typeof AspectChanged>;
 const TagAssignmentPayload = Type.Object({
   tag_id: Type.String(),
   assigned_kind: Type.Union([Type.Literal('vehicle'), Type.Literal('marker')]),
+  /**
+   * ID of the entity this tag refers to. Must match an existing marker
+   * ID when `assigned_kind === 'marker'`, or a train ID when
+   * `assigned_kind === 'vehicle'`.
+   */
+  target_id: Type.String(),
   marker_kind: Type.Optional(
     Type.Union([
       Type.Literal('block_boundary'),

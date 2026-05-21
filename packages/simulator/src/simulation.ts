@@ -34,6 +34,19 @@ export interface SimulationOptions {
    * Default: false (embedded scheduler runs as before).
    */
   disableScheduler?: boolean;
+  /**
+   * Test convenience: when set to `'identity'`, on construction the
+   * simulation publishes a `device_registered` event for a synthetic
+   * `SIM-GARAGE` declaring `core.assigns_tags`, then publishes one
+   * `tag_assignment` event per marker binding `tag_id === marker_id` and
+   * `target_id === marker_id`. Trains spawned afterwards inherit that
+   * identity tag map so their `tag_observed` emissions resolve cleanly.
+   *
+   * Real layouts populate the registry via real garages; this option is a
+   * conveniences wrapper around real events, not a back door into the
+   * registry's private state. See ADR-007.
+   */
+  register_tags?: 'identity';
 }
 
 /**
@@ -60,6 +73,7 @@ export class Simulation {
   private readonly gates = new Map<string, VirtualGate>();
   private readonly tick_ms: number;
   private last_tick_ms = 0;
+  private readonly markerToTag: Map<string, string> = new Map();
 
   constructor(opts: SimulationOptions) {
     this.random = new SeededRandom(opts.seed ?? 42);
@@ -74,6 +88,35 @@ export class Simulation {
 
     this.layout = new LayoutState(opts.layout);
     this.scheduler = opts.disableScheduler ? undefined : new Scheduler(this.registry, this.layout);
+
+    if (opts.register_tags === 'identity') {
+      this.seedIdentityTags(opts.layout);
+    }
+  }
+
+  /**
+   * Register a synthetic garage and publish one `tag_assignment` event per
+   * marker, binding `tag_id === marker_id`. Uses the same event path as a
+   * real garage device.
+   */
+  private seedIdentityTags(layout: Layout): void {
+    this.captureAndDispatch({
+      event_type: 'device_registered',
+      device_id: 'SIM-GARAGE',
+      payload: { capabilities: ['core.assigns_tags'] },
+    });
+    for (const marker of layout.markers) {
+      this.markerToTag.set(marker.id, marker.id);
+      this.captureAndDispatch({
+        event_type: 'tag_assignment',
+        device_id: 'SIM-GARAGE',
+        payload: {
+          tag_id: marker.id,
+          assigned_kind: 'marker',
+          target_id: marker.id,
+        },
+      });
+    }
   }
 
   /** Register a virtual train. Returns the train so tests can inspect it. */
@@ -85,8 +128,14 @@ export class Simulation {
     },
   ): VirtualTrain {
     const config = { ...DEFAULT_TRAIN_CONFIG, ...options?.config };
-    const train = new VirtualTrain(train_id, config, this.layout, this.random, this.clock, (e) =>
-      this.captureAndDispatch(e),
+    const train = new VirtualTrain(
+      train_id,
+      config,
+      this.layout,
+      this.random,
+      this.clock,
+      (e) => this.captureAndDispatch(e),
+      this.markerToTag,
     );
     this.trains.set(train_id, train);
     if (options?.startEdge) {

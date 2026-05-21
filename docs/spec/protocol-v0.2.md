@@ -156,7 +156,7 @@ The broker does not set `timestamp_server`; the scheduler does, on consumption. 
 
 `aspect_changed`: emitted by `displays_aspect` device when display updates.
 
-`tag_assignment`: emitted by `assigns_tags` device. Payload: `tag_id`, `assigned_kind`, metadata. Updates the tag→entity map.
+`tag_assignment`: emitted by `assigns_tags` device. Payload: `tag_id`, `assigned_kind` (`marker` | `vehicle`), `target_id` (the marker_id or train_id this tag refers to), optional `marker_kind`, metadata. Updates the tag→entity map. Honoured only if the emitting device declared `core.assigns_tags`.
 
 `anomaly`: emitted by anything; describes unexpected conditions: unknown tags, missed-marker timeouts, two trains in one block, switch position contradicting command. Free-form description, severity.
 
@@ -180,7 +180,7 @@ Commands flow from server to devices via `railway/commands/{device_id}`. Same en
 
 `hold_gate` / `release_gate`: to a `gates_clearance` device. Used for server overrides of local gate logic. Rare.
 
-`assign_tag`: to an `assigns_tags` device. Payload: tag_id, kind, metadata. The server commits the assignment after the device confirms.
+`assign_tag`: to an `assigns_tags` device. Payload: `tag_id`, `assigned_kind`, `target_id`, optional `marker_kind`, metadata. The server commits the assignment after the device confirms with a `tag_assignment` event.
 
 ---
 

@@ -27,8 +27,12 @@ export interface SimRunnerControls {
  */
 export function useSimRunner(layout: Layout, tick_ms: number): SimRunnerControls {
   const { client } = useBroker();
+  // Identity tag scheme is fine for the in-browser demo: every marker maps
+  // to a tag of the same ID, so spawned trains' tag_observed events resolve
+  // cleanly without an operator interaction. Real installs that pair real
+  // hardware will override this once the UI exposes a garage interaction.
   const runner = useMemo(
-    () => new SimRunner(client, { layout, tick_ms }),
+    () => new SimRunner(client, { layout, tick_ms, register_tags: 'identity' }),
     [client, layout, tick_ms],
   );
   const [snapshot, setSnapshot] = useState<SimRunnerSnapshot>(() => runner.snapshot());

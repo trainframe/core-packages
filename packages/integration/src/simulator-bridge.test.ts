@@ -29,11 +29,19 @@ let simulation: Simulation;
 
 beforeEach(async () => {
   harness = await startHarness({ layout: SIMPLE_LOOP });
+  // Seed tag bindings on the *server* side. The simulator (device-only mode)
+  // emits tag_observed events; the server resolves them through its own
+  // TagRegistry, so the assignment events must reach the server.
+  await harness.testClient.seedIdentityTags(['M1', 'M2', 'M3', 'M4']);
 
+  // Pass the same identity mapping to the simulation so its VirtualTrains
+  // know which tag_id to emit per marker. No tag_assignment events fire on
+  // construction here - the harness already populated the server.
   simulation = new Simulation({
     layout: SIMPLE_LOOP,
     seed: 1,
     disableScheduler: true,
+    register_tags: 'identity',
   });
 
   simBrokerClient = new MqttBrokerClient();

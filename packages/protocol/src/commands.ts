@@ -78,6 +78,8 @@ export type SetAspect = Static<typeof SetAspect>;
 const AssignTagPayload = Type.Object({
   tag_id: Type.String(),
   assigned_kind: Type.Union([Type.Literal('vehicle'), Type.Literal('marker')]),
+  /** ID of the entity this tag will refer to (marker_id or train_id). */
+  target_id: Type.String(),
   marker_kind: Type.Optional(Type.String()),
   metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 });

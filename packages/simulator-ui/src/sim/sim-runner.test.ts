@@ -12,6 +12,7 @@ function makeRunner(): { runner: SimRunner; client: InMemoryBrokerClient } {
     layout: SIMPLE_LOOP,
     tick_ms: 100,
     newId: () => FIXED_ID,
+    register_tags: 'identity',
   });
   return { runner, client };
 }
@@ -177,6 +178,7 @@ function makeDeviceOnlyRunner(): { runner: SimRunner; client: InMemoryBrokerClie
     tick_ms: 100,
     newId: () => FIXED_ID,
     mode: 'device-only',
+    register_tags: 'identity',
   });
   return { runner, client };
 }

@@ -37,6 +37,13 @@ export interface SimRunnerOptions {
    * `@trainframe/server` is also on the bus.
    */
   readonly mode?: SimRunnerMode;
+  /**
+   * If set, the simulation publishes identity tag_assignment events for
+   * every marker on startup (see `SimulationOptions.register_tags`). Trains
+   * spawned afterwards emit `tag_observed` with the resolved tag IDs.
+   * Default off; embedded-mode demos and tests typically want `'identity'`.
+   */
+  readonly register_tags?: 'identity';
 }
 
 type SnapshotListener = (snapshot: SimRunnerSnapshot) => void;
@@ -78,6 +85,7 @@ export class SimRunner {
       layout: this.options.layout,
       tick_ms: this.options.tick_ms,
       disableScheduler: this.mode === 'device-only',
+      ...(this.options.register_tags ? { register_tags: this.options.register_tags } : {}),
     });
     this.unsubscribeFromSim = this.simulation.onEvent((event) => this.handleEvent(event));
     if (this.mode === 'device-only') {

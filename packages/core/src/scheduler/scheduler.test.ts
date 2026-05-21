@@ -37,6 +37,7 @@ const setup = () => {
   registry.freeze();
   const layout = new LayoutState(SIMPLE_LOOP);
   const scheduler = new Scheduler(registry, layout);
+  seedIdentityTags(scheduler, SIMPLE_LOOP_MARKERS);
   return { scheduler, registry };
 };
 
@@ -53,6 +54,30 @@ const registerGate = (scheduler: Scheduler, deviceId: string) =>
     device_id: deviceId,
     payload: { capabilities: ['core.gates_clearance'] },
   });
+
+/**
+ * Tests need tag→marker bindings before `tag_observed` resolves to anything.
+ * Pre-register a synthetic garage that declares `core.assigns_tags`, then bind
+ * each marker to a tag whose ID equals the marker ID. This is the "identity"
+ * tag scheme - real layouts would use opaque tag IDs but the tests only care
+ * that the resolution path runs.
+ */
+const seedIdentityTags = (scheduler: Scheduler, markerIds: ReadonlyArray<string>): void => {
+  scheduler.handleEvent({
+    event_type: 'device_registered',
+    device_id: 'GARAGE',
+    payload: { capabilities: ['core.assigns_tags'] },
+  });
+  for (const id of markerIds) {
+    scheduler.handleEvent({
+      event_type: 'tag_assignment',
+      device_id: 'GARAGE',
+      payload: { tag_id: id, assigned_kind: 'marker', target_id: id },
+    });
+  }
+};
+
+const SIMPLE_LOOP_MARKERS = ['M1', 'M2', 'M3', 'M4'];
 
 // ---------- tests ----------
 
@@ -290,6 +315,7 @@ const setupFigure8 = () => {
   registry.freeze();
   const layout = new LayoutState(FIGURE_8);
   const scheduler = new Scheduler(registry, layout);
+  seedIdentityTags(scheduler, ['M1', 'M2', 'M3', 'M4', 'M5']);
   return { scheduler, registry };
 };
 
@@ -455,5 +481,107 @@ describe('Scheduler — switch-state edge filtering', () => {
     const grant = findGrant(afterSwitch);
     expect(grant).toBeDefined();
     expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M3');
+  });
+});
+
+describe('Scheduler — tag resolution', () => {
+  it('resolves a marker tag and treats the reading train as having traversed it', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignRoute('T1', 'route-1', [{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+
+    const effects = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+
+    const traversed = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
+        e.kind === 'publish_event' && e.event_type === 'marker_traversed',
+    );
+    expect(traversed).toBeDefined();
+    expect((traversed?.payload as { marker_id: string }).marker_id).toBe('M1');
+  });
+
+  it('derives a vehicle_identified event when a trackside reader sees a vehicle tag', () => {
+    const { scheduler } = setup();
+    // Register a yard reader (identifies_vehicles) and a vehicle tag bound
+    // to a train ID. The reader publishes tag_observed; we expect the
+    // scheduler to derive a vehicle_identified.
+    scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'YARD-1',
+      payload: { capabilities: ['core.identifies_vehicles'] },
+    });
+    scheduler.handleEvent({
+      event_type: 'tag_assignment',
+      device_id: 'GARAGE',
+      payload: { tag_id: 'TAG-T1', assigned_kind: 'vehicle', target_id: 'T1' },
+    });
+
+    const effects = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'YARD-1',
+      payload: { tag_id: 'TAG-T1' },
+    });
+
+    const identified = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
+        e.kind === 'publish_event' && e.event_type === 'vehicle_identified',
+    );
+    expect(identified).toBeDefined();
+    expect((identified?.payload as { vehicle_id: string }).vehicle_id).toBe('T1');
+  });
+
+  it('emits an anomaly when a tag has no registry binding', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+
+    const effects = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'UNBOUND-TAG-XYZ' },
+    });
+
+    const anomaly = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
+        e.kind === 'publish_event' && e.event_type === 'anomaly',
+    );
+    expect(anomaly).toBeDefined();
+  });
+
+  it('publishes the assignment as retained state when tag_assignment lands', () => {
+    const { scheduler } = setup();
+    const effects = scheduler.handleEvent({
+      event_type: 'tag_assignment',
+      device_id: 'GARAGE',
+      payload: { tag_id: 'TAG-NEW', assigned_kind: 'marker', target_id: 'M2' },
+    });
+
+    const snapshot = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'update_state_snapshot' }> =>
+        e.kind === 'update_state_snapshot' && e.entity_type === 'tags',
+    );
+    expect(snapshot).toBeDefined();
+    expect(snapshot?.entity_id).toBe('TAG-NEW');
+  });
+
+  it('rejects tag_assignment from a device that did not declare core.assigns_tags', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'IMPOSTOR');
+
+    const effects = scheduler.handleEvent({
+      event_type: 'tag_assignment',
+      device_id: 'IMPOSTOR',
+      payload: { tag_id: 'TAG-PWND', assigned_kind: 'marker', target_id: 'M2' },
+    });
+
+    const anomaly = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
+        e.kind === 'publish_event' && e.event_type === 'anomaly',
+    );
+    expect(anomaly).toBeDefined();
+    expect(scheduler.getTagRegistry().resolve('TAG-PWND')).toBeUndefined();
   });
 });
