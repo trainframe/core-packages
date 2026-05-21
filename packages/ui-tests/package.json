@@ -1,0 +1,26 @@
+{
+  "name": "@trainframe/ui-tests",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Browser-driven Playwright E2E tests for the simulator UI. Spawns an aedes WebSocket broker + real @trainframe/server alongside the UI's Vite preview and asserts on the rendered DOM.",
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "install-browsers": "playwright install --with-deps chromium",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@trainframe/protocol": "workspace:*",
+    "@trainframe/server": "workspace:*",
+    "aedes": "^1.0.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.6.0"
+  }
+}

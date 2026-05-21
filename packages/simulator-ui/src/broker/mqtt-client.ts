@@ -26,7 +26,10 @@ export class MqttBrokerClient implements BrokerClient {
     this.disconnect();
     this.setStatus('connecting');
 
-    const client = mqtt.connect(url, { protocolVersion: 5, reconnectPeriod: 2000 });
+    // MQTT 3.1.1 (protocolVersion: 4) to keep compatibility with brokers that
+    // don't yet speak v5 (notably aedes, which we use in tests). Switch to 5
+    // once we adopt a broker that requires it.
+    const client = mqtt.connect(url, { protocolVersion: 4, reconnectPeriod: 2000 });
     this.client = client;
 
     client.on('connect', () => {

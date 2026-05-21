@@ -159,10 +159,27 @@ Private workspace package. Spawns an in-process [aedes](https://www.npmjs.com/pa
 | aedes-based test harness                          | shipped | `startHarness({ layout })` → `{ server, testClient, shutdown }`. Random port, MQTT 3.1.1. |
 | `TestClient` device/operator surrogate            | shipped | `publishEvent`, `waitForCommand`, `waitForState`, `commandsFor`, `retained`, `events`. |
 | Clearance flow E2E test                           | shipped | Initial grant, gate withholds, gate releases, retained layout bootstrap.       |
-| Simulator-driven E2E (sim publishes device events)| not started | Needs `@trainframe/simulator` to support a "device-only" transport mode (no embedded scheduler). Out-of-scope for the harness as-is. |
-| Browser-driven UI E2E (clicks + SVG assertions)   | not started | Out of this package. Will live in a separate Playwright-based package when added. |
+| Simulator-driven E2E (sim publishes device events)| shipped | `simulator-bridge.test.ts` drives a `Simulation` (device-only mode) through `BrokerBridge` against the real server. |
+| Browser-driven UI E2E (clicks + SVG assertions)   | shipped | Lives in `@trainframe/ui-tests` (separate package, Playwright + Chromium). |
 
 Coverage thresholds: disabled. The package IS the cross-cutting coverage; gating itself on its own coverage is circular.
+
+---
+
+## Browser UI tests: `packages/ui-tests/`
+
+Private workspace package. Spawns the simulator-ui Vite preview, an aedes broker over WebSockets, and a real `@trainframe/server` against it; drives Chromium through Playwright and asserts on rendered DOM.
+
+| Area                                              | Status | Notes                                                                          |
+| ------------------------------------------------- | :----: | ------------------------------------------------------------------------------ |
+| Playwright + Chromium setup                       | shipped | `playwright.config.ts` with `webServer` for `vite preview`; chromium-only project. |
+| `startUiHarness` (aedes WS + server)              | shipped | WebSocket listener with MQTT-subprotocol selection. Reused by per-spec `beforeAll`. |
+| Lifecycle smoke test                              | shipped | Start, Spawn, Step against the embedded sim (no broker required). |
+| Connected-to-broker test                          | shipped | UI connects to aedes via WS, `device_registered` round-trips through the server. |
+| Per-train spawn / route-assign UI coverage        | not started | Future tests once the UI exposes a spawn form and route designer.               |
+| Visualiser SVG assertions                         | not started | Cross-app: ui-tests today only drives simulator-ui. Visualiser coverage when worth it. |
+
+Coverage thresholds: not applicable (Playwright; covered by E2E pass/fail).
 
 ---
 
@@ -205,7 +222,6 @@ Ranked by leverage. None are mandatory; this is the recommendation, not the plan
 3. **`startTestEnvironment` harness + fault profiles**. Replace the ad-hoc `new Simulation(...)` pattern in tests with the harness the simulator spec describes. Profiles, `attachDevice`, `waitForEvent`. Pays off as more capabilities ship.
 4. **Train-position interpolation in the visualiser**. Subscribe to `train_status`, animate trains mid-edge instead of snapping to last-traversed marker. Small visual polish; bigger payoff once `train_status` is being emitted by something.
 5. **HTTP/MQTT admin API for the server**. Operator endpoints for `assignRoute`, layout reload, etc. Today `Server.assignRoute` is a method only; no remote way to trigger it.
-6. **Playwright browser-driven E2E for simulator-ui**. New `@trainframe/ui-tests` package: spawns broker + server + simulator-ui in headed/headless Chromium, drives UI interactions (configure layout, spawn train, assign route, press gate), asserts on rendered SVG and event log. Closes the loop on operator-facing UX before any hardware exists.
 
 Smaller follow-ups that don't need a major thread:
 
