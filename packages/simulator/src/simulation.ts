@@ -27,6 +27,13 @@ export interface SimulationOptions {
   tick_ms?: number;
   /** Optional extra capabilities for satellite testing. */
   extraCapabilities?: ReadonlyArray<import('@trainframe/core').Capability<unknown>>;
+  /**
+   * Run without an embedded scheduler. Virtual devices still emit events
+   * and accept commands, but routing/clearance decisions are expected to
+   * come from an external server over a broker (see `BrokerBridge`).
+   * Default: false (embedded scheduler runs as before).
+   */
+  disableScheduler?: boolean;
 }
 
 /**
@@ -43,7 +50,8 @@ export class Simulation {
   readonly random: SeededRandom;
   readonly registry: CapabilityRegistry;
   readonly layout: LayoutState;
-  readonly scheduler: Scheduler;
+  /** Embedded scheduler. Undefined when `disableScheduler` was set. */
+  readonly scheduler: Scheduler | undefined;
   readonly events: CapturedEvent[] = [];
   readonly commands: CapturedEvent[] = [];
 
@@ -65,7 +73,7 @@ export class Simulation {
     this.registry.freeze();
 
     this.layout = new LayoutState(opts.layout);
-    this.scheduler = new Scheduler(this.registry, this.layout);
+    this.scheduler = opts.disableScheduler ? undefined : new Scheduler(this.registry, this.layout);
   }
 
   /** Register a virtual train. Returns the train so tests can inspect it. */
@@ -100,14 +108,31 @@ export class Simulation {
     return gate;
   }
 
-  /** Assign a route to a train. */
+  /** Assign a route to a train. Requires the embedded scheduler. */
   assignRoute(
     train_id: string,
     edges: ReadonlyArray<{ from_marker_id: string; to_marker_id: string }>,
     route_id = `route-${train_id}-${this.clock.now()}`,
   ): void {
+    if (!this.scheduler) {
+      throw new Error(
+        'Simulation.assignRoute called with the embedded scheduler disabled. ' +
+          'Issue commands via the broker (railway/commands/{device_id}) instead.',
+      );
+    }
     const effects = this.scheduler.assignRoute(train_id, route_id, edges);
     this.dispatchEffects(effects);
+  }
+
+  /**
+   * Apply an external command to a virtual device. Used by the broker bridge
+   * (device-only mode) so a real server can drive the simulation through the
+   * wire instead of via the embedded scheduler.
+   */
+  handleCommand(device_id: string, command_type: string, payload: unknown): void {
+    this.commands.push({ at_ms: this.clock.now(), event_type: command_type, device_id, payload });
+    const train = this.trains.get(device_id);
+    train?.acceptCommand(command_type, payload);
   }
 
   /**
@@ -154,6 +179,7 @@ export class Simulation {
 
   private captureAndDispatch(event: { event_type: string; device_id: string; payload: unknown }) {
     this.captureEvent({ at_ms: this.clock.now(), ...event });
+    if (!this.scheduler) return;
     const effects = this.scheduler.handleEvent(event);
     this.dispatchEffects(effects);
   }

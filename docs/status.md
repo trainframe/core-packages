@@ -63,6 +63,7 @@ Source: [`docs/spec/simulator-v0.1.md`](spec/simulator-v0.1.md); [`ADR-006`](adr
 | `VirtualTrain`                                    | shipped | Position/velocity, braking, route execution, marker emission with latency.    |
 | `VirtualGate`                                     | shipped | Withhold/release per marker.                                                   |
 | `Simulation.onEvent` listener API                 | shipped | Used by simulator-ui to bridge events onto MQTT.                              |
+| Device-only mode (`disableScheduler` + `BrokerBridge`) | shipped | Run virtual devices against a real broker + server with no embedded scheduler. Bridges `simulation.onEvent` → `railway/events/...` and routes `railway/commands/...` to `simulation.handleCommand()`. E2E covered by `@trainframe/integration`. |
 | Realistic-time mode                               | partial | simulator-ui drives `setInterval` advance; no first-class realtime mode in the package. |
 | Detection: miss rate                              | shipped | `miss_rate` knob on train config.                                              |
 | Detection: latency (mean+stddev)                  | shipped | `detection_latency_ms`.                                                        |
@@ -199,12 +200,13 @@ Mirrored from [`CLAUDE.md`](../CLAUDE.md). Need ADRs before implementation.
 
 Ranked by leverage. None are mandatory; this is the recommendation, not the plan.
 
-1. **Simulator transport refactor + device-only mode**. Factor `Simulation` so it can run without an embedded scheduler, using a transport adapter to publish events through a real `BrokerClient`. Unblocks simulator-driven E2E tests in `@trainframe/integration`. Resolves the "two schedulers" awkwardness once a real server is in use.
-2. **Tag→marker resolution registry + `assigns_tags` + ADR**. Moves the simulator and protocol off the "tag IDs ARE marker IDs" shortcut. Prerequisite for discovery mode.
-3. **Discovery mode / topology learning**. Ingest `tag_observed` for unknown tags, infer edges, ratchet `inferred → confirmed` after N traversals. Spec §"Incremental discovery". Scheduler + layout-state work; depends on #2.
-4. **`startTestEnvironment` harness + fault profiles**. Replace the ad-hoc `new Simulation(...)` pattern in tests with the harness the simulator spec describes. Profiles, `attachDevice`, `waitForEvent`. Pays off as more capabilities ship.
-5. **Train-position interpolation in the visualiser**. Subscribe to `train_status`, animate trains mid-edge instead of snapping to last-traversed marker. Small visual polish; bigger payoff once `train_status` is being emitted by something.
-6. **HTTP/MQTT admin API for the server**. Operator endpoints for `assignRoute`, layout reload, etc. Today `Server.assignRoute` is a method only; no remote way to trigger it.
+1. **Tag→marker resolution registry + `assigns_tags` + ADR**. Moves the simulator and protocol off the "tag IDs ARE marker IDs" shortcut. Prerequisite for discovery mode.
+2. **Discovery mode / topology learning**. Ingest `tag_observed` for unknown tags, infer edges, ratchet `inferred → confirmed` after N traversals. Spec §"Incremental discovery". Scheduler + layout-state work; depends on #1.
+3. **`startTestEnvironment` harness + fault profiles**. Replace the ad-hoc `new Simulation(...)` pattern in tests with the harness the simulator spec describes. Profiles, `attachDevice`, `waitForEvent`. Pays off as more capabilities ship.
+4. **Train-position interpolation in the visualiser**. Subscribe to `train_status`, animate trains mid-edge instead of snapping to last-traversed marker. Small visual polish; bigger payoff once `train_status` is being emitted by something.
+5. **HTTP/MQTT admin API for the server**. Operator endpoints for `assignRoute`, layout reload, etc. Today `Server.assignRoute` is a method only; no remote way to trigger it.
+6. **Playwright browser-driven E2E for simulator-ui**. New `@trainframe/ui-tests` package: spawns broker + server + simulator-ui in headed/headless Chromium, drives UI interactions (configure layout, spawn train, assign route, press gate), asserts on rendered SVG and event log. Closes the loop on operator-facing UX before any hardware exists.
+7. **Simulator-ui device-only mode adoption**. Wire `SimRunner` to use `BrokerBridge` (now shipped) when a real server is present, so the UI publishes raw device events instead of running its own embedded scheduler.
 
 Smaller follow-ups that don't need a major thread:
 
