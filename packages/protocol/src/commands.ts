@@ -73,6 +73,30 @@ const SetAspectPayload = Type.Object({
 export const SetAspect = commandEnvelope('set_aspect', SetAspectPayload);
 export type SetAspect = Static<typeof SetAspect>;
 
+// ---------- hold_gate / release_gate ----------
+
+/**
+ * Server-side override of a `gates_clearance` device's local logic. The
+ * gate honours the override and publishes a matching `gate_state_changed`
+ * event. Rare in normal operation: stations decide their own dwell. Used
+ * by the operator/visualiser to force a hold (e.g. during a fault) or to
+ * release a train that's been left stranded.
+ */
+const HoldGatePayload = Type.Object({
+  marker_id: Uuid,
+  reason: Type.Optional(Type.String()),
+});
+
+export const HoldGate = commandEnvelope('hold_gate', HoldGatePayload);
+export type HoldGate = Static<typeof HoldGate>;
+
+const ReleaseGatePayload = Type.Object({
+  marker_id: Uuid,
+});
+
+export const ReleaseGate = commandEnvelope('release_gate', ReleaseGatePayload);
+export type ReleaseGate = Static<typeof ReleaseGate>;
+
 // ---------- assign_tag ----------
 
 const AssignTagPayload = Type.Object({
@@ -97,6 +121,8 @@ export const CoreCommand = Type.Union([
   EmergencyStop,
   SetSwitchPosition,
   SetAspect,
+  HoldGate,
+  ReleaseGate,
   AssignTag,
 ]);
 export type CoreCommand = Static<typeof CoreCommand>;
@@ -109,5 +135,7 @@ export const CORE_COMMAND_SCHEMAS = {
   emergency_stop: EmergencyStop,
   set_switch_position: SetSwitchPosition,
   set_aspect: SetAspect,
+  hold_gate: HoldGate,
+  release_gate: ReleaseGate,
   assign_tag: AssignTag,
 } as const;

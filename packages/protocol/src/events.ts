@@ -52,6 +52,21 @@ const MarkerTraversedPayload = Type.Object({
 export const MarkerTraversed = eventEnvelope('marker_traversed', MarkerTraversedPayload);
 export type MarkerTraversed = Static<typeof MarkerTraversed>;
 
+// ---------- vehicle_identified (server-derived) ----------
+
+/**
+ * Server-derived from a `tag_observed` whose tag resolves to a vehicle in
+ * the `TagRegistry`. Names which vehicle was identified and which device
+ * saw it (yard sensor, garage slot, on-train reader).
+ */
+const VehicleIdentifiedPayload = Type.Object({
+  vehicle_id: Type.String(),
+  context_device_id: Type.String(),
+});
+
+export const VehicleIdentified = eventEnvelope('vehicle_identified', VehicleIdentifiedPayload);
+export type VehicleIdentified = Static<typeof VehicleIdentified>;
+
 // ---------- train_status ----------
 
 const TrainStatusPayload = Type.Object({
@@ -186,6 +201,7 @@ export const CoreEvent = Type.Union([
   DeviceRegistered,
   TagObserved,
   MarkerTraversed,
+  VehicleIdentified,
   TrainStatus,
   ClearanceRequest,
   ClearanceGranted,
@@ -206,6 +222,7 @@ export const CORE_EVENT_SCHEMAS = {
   device_registered: DeviceRegistered,
   tag_observed: TagObserved,
   marker_traversed: MarkerTraversed,
+  vehicle_identified: VehicleIdentified,
   train_status: TrainStatus,
   clearance_request: ClearanceRequest,
   clearance_granted: ClearanceGranted,

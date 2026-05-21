@@ -219,6 +219,7 @@ describe('event envelope and core event schemas', () => {
         'device_registered',
         'tag_observed',
         'marker_traversed',
+        'vehicle_identified',
         'train_status',
         'clearance_request',
         'clearance_granted',
@@ -276,6 +277,8 @@ describe('command envelope and core command schemas', () => {
         'emergency_stop',
         'set_switch_position',
         'set_aspect',
+        'hold_gate',
+        'release_gate',
         'assign_tag',
       ]),
     );

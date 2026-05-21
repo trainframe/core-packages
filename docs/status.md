@@ -20,8 +20,8 @@ Source: [`docs/spec/protocol-v0.2.md`](spec/protocol-v0.2.md)
 | `DeviceManifest` schema                    | shipped | Used by examples; not yet enforced by anything that loads manifests.                           |
 | Layout schema                              | shipped | Markers, edges, junctions. Optional spatial fields.                                            |
 | `protocol_version` literal                 | shipped | `0.2.0` exported as `PROTOCOL_VERSION`.                                                        |
-| `hold_gate` / `release_gate` commands      | not started | Mentioned in spec; not in `commands.ts`. Server-side override of local gate logic.             |
-| `vehicle_identified` event schema          | not started | Spec defines; not yet a TypeBox schema in `events.ts`.                                         |
+| `hold_gate` / `release_gate` commands      | shipped | Server-side override of local gate logic. `VirtualGate.acceptCommand` honours them and publishes the matching `gate_state_changed`. |
+| `vehicle_identified` event schema          | shipped | `{ vehicle_id, context_device_id }`. The scheduler already derives these from vehicle-tag observations.                                |
 
 Coverage: 100% lines, 100% branches.
 
@@ -226,7 +226,5 @@ Ranked by leverage. None are mandatory; this is the recommendation, not the plan
 Smaller follow-ups that don't need a major thread:
 
 - ADR + implementation for missing detection knobs (double-read, spurious read).
-- `hold_gate` / `release_gate` commands (server-side override of local gate logic).
-- `vehicle_identified` event schema in `packages/protocol/`.
 - Per-train spawn config form in simulator-ui (mishap rate knobs from ADR-006).
 - Bundle-size / code-splitting on the two Vite apps (currently 569 kB each).

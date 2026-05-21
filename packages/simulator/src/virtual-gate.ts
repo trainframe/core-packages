@@ -45,4 +45,25 @@ export class VirtualGate {
       payload: { marker_id, state: 'granting' },
     });
   }
+
+  /**
+   * Honour server-side overrides of local gate logic. `hold_gate` forces a
+   * withhold; `release_gate` clears it. The gate then publishes a normal
+   * `gate_state_changed` event so the rest of the system observes the same
+   * shape it would for any other transition.
+   */
+  acceptCommand(command_type: string, payload: unknown): void {
+    switch (command_type) {
+      case 'hold_gate': {
+        const { marker_id, reason } = payload as { marker_id: string; reason?: string };
+        this.withhold(marker_id, reason ?? 'server override');
+        break;
+      }
+      case 'release_gate': {
+        const { marker_id } = payload as { marker_id: string };
+        this.release(marker_id);
+        break;
+      }
+    }
+  }
 }

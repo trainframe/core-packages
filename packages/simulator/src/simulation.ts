@@ -182,6 +182,8 @@ export class Simulation {
     this.commands.push({ at_ms: this.clock.now(), event_type: command_type, device_id, payload });
     const train = this.trains.get(device_id);
     train?.acceptCommand(command_type, payload);
+    const gate = this.gates.get(device_id);
+    gate?.acceptCommand(command_type, payload);
   }
 
   /**
