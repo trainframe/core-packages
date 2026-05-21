@@ -74,8 +74,8 @@ Source: [`docs/spec/simulator-v0.1.md`](spec/simulator-v0.1.md); [`ADR-006`](adr
 | Mishap: derailment                                | not started | Framing in ADR-006; deferred to per-train UI controls.                         |
 | `WiFiTransport` / `EspNowTransport`               | not started | Spec defines; the package today has no transport abstraction (in-process only).|
 | Virtual bridge with frame loss/reorder/latency    | not started | Bridge fault injection.                                                        |
-| Fault profiles (`pristine`/`realistic`/`hostile`) | not started | Spec'd named bundles. Today every config is per-test.                          |
-| `startTestEnvironment` harness API                | not started | Spec'd in §"Testing harness API". Today tests construct a `Simulation` directly. |
+| Fault profiles (`pristine`/`realistic`/`hostile`) | shipped | `FAULT_PROFILES` map in `@trainframe/simulator/testing`. Tests pick by name; per-train overrides win. |
+| `startTestEnvironment` harness API                | shipped | `@trainframe/simulator/testing` exports `startTestEnvironment({layout, seed, faults, tags})`. Bundles a seeded `Simulation` with identity-tag seeding and `waitForEvent`, `advance`, `spawnTrain`, `assignRoute` helpers. In-process today; broker-backed variant deferred. |
 | `registerVirtualCapability` extensibility         | not started | Satellite virtual devices have nowhere to register. `extraCapabilities` only handles core-side hooks. |
 | `attachDevice` (load real device into harness)    | not started | For satellite-author testing; depends on the harness API.                      |
 
@@ -219,7 +219,6 @@ Mirrored from [`CLAUDE.md`](../CLAUDE.md). Need ADRs before implementation.
 Ranked by leverage. None are mandatory; this is the recommendation, not the plan.
 
 1. **Discovery mode / topology learning**. Ingest `tag_observed` for unknown tags, infer edges, ratchet `inferred → confirmed` after N traversals. Spec §"Incremental discovery". Builds on the now-shipped `TagRegistry` (ADR-007).
-2. **`startTestEnvironment` harness + fault profiles**. Replace the ad-hoc `new Simulation(...)` pattern in tests with the harness the simulator spec describes. Profiles, `attachDevice`, `waitForEvent`. Pays off as more capabilities ship.
 3. **Visualiser "assign this tag" UI**. When an unknown-tag anomaly surfaces, let the operator bind it to a marker through a garage device. Pairs naturally with discovery mode; can now use `POST /api/tags` directly.
 
 Smaller follow-ups that don't need a major thread:
