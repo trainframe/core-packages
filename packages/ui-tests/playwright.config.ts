@@ -1,7 +1,9 @@
 import { defineConfig } from '@playwright/test';
 
-const UI_PORT = 4173;
-const UI_URL = `http://127.0.0.1:${UI_PORT}`;
+const SIM_PORT = 4173;
+const VISUALISER_PORT = 4174;
+export const SIM_URL = `http://127.0.0.1:${SIM_PORT}`;
+export const VISUALISER_URL = `http://127.0.0.1:${VISUALISER_PORT}`;
 
 export default defineConfig({
   testDir: './tests',
@@ -12,7 +14,7 @@ export default defineConfig({
   workers: 1,
   reporter: 'list',
   use: {
-    baseURL: UI_URL,
+    baseURL: SIM_URL,
     trace: 'on-first-retry',
   },
   projects: [
@@ -21,12 +23,22 @@ export default defineConfig({
       use: { browserName: 'chromium' },
     },
   ],
-  webServer: {
-    command: `pnpm --filter @trainframe/simulator-ui exec vite preview --host 127.0.0.1 --port ${UI_PORT} --strictPort`,
-    url: UI_URL,
-    reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  },
+  webServer: [
+    {
+      command: `pnpm --filter @trainframe/simulator-ui exec vite preview --host 127.0.0.1 --port ${SIM_PORT} --strictPort`,
+      url: SIM_URL,
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+    {
+      command: `pnpm --filter @trainframe/visualiser exec vite preview --host 127.0.0.1 --port ${VISUALISER_PORT} --strictPort`,
+      url: VISUALISER_URL,
+      reuseExistingServer: !process.env.CI,
+      timeout: 120_000,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    },
+  ],
 });

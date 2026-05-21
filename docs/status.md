@@ -116,7 +116,8 @@ Coverage thresholds: 75 lines / 65 branches / 65 functions (new package; ratchet
 | Layout rendering (markers, edges)          | shipped | SVG canvas. Auto-places markers around a circle when no spatial coords; uses `position.x_mm/y_mm` when present. |
 | Train-position rendering                   | shipped | Mid-edge interpolation from `train_status` events; falls back to last `marker_traversed` marker when no status yet. |
 | Layout snapshot bootstrap                  | shipped | `useLayoutState` subscribes to `railway/state/layout/+`; simulator-ui publishes the active layout retained on start. |
-| Tag-assignment / discovery UI              | not started | Spec §"Incremental discovery": user assigns kind to unknown tags.             |
+| Tag-assignment UI                          | shipped | `UnknownTags` component surfaces unknown-tag anomalies and POSTs `tag_assignment` requests to the server's admin HTTP API. Plays the discovery loop: anomaly → operator picks target → registry binds → row vanishes. |
+| Discovery / topology learning UI           | not started | Bigger sibling to tag assignment - lets the operator confirm inferred edges once that scheduler work lands. |
 
 ---
 
@@ -178,7 +179,7 @@ Private workspace package. Spawns the simulator-ui Vite preview, an aedes broker
 | Lifecycle smoke test                              | shipped | Start, Spawn, Step against the embedded sim (no broker required). |
 | Connected-to-broker test                          | shipped | UI connects to aedes via WS, `device_registered` round-trips through the server. |
 | Per-train spawn / route-assign UI coverage        | not started | Future tests once the UI exposes a spawn form and route designer.               |
-| Visualiser SVG assertions                         | not started | Cross-app: ui-tests today only drives simulator-ui. Visualiser coverage when worth it. |
+| Visualiser SVG assertions                         | partial | Two-server harness now boots simulator-ui (4173) + visualiser (4174). Tag-assignment journey lands in the visualiser; SVG-position assertions still TODO. |
 
 Coverage thresholds: not applicable (Playwright; covered by E2E pass/fail).
 
@@ -219,7 +220,6 @@ Mirrored from [`CLAUDE.md`](../CLAUDE.md). Need ADRs before implementation.
 Ranked by leverage. None are mandatory; this is the recommendation, not the plan.
 
 1. **Discovery mode / topology learning**. Ingest `tag_observed` for unknown tags, infer edges, ratchet `inferred → confirmed` after N traversals. Spec §"Incremental discovery". Builds on the now-shipped `TagRegistry` (ADR-007).
-3. **Visualiser "assign this tag" UI**. When an unknown-tag anomaly surfaces, let the operator bind it to a marker through a garage device. Pairs naturally with discovery mode; can now use `POST /api/tags` directly.
 
 Smaller follow-ups that don't need a major thread:
 

@@ -1,5 +1,6 @@
 import mqtt, { type MqttClient } from 'mqtt';
 import type { BrokerStatus, BrokerSubscriber, MessageListener, StatusListener } from './client.js';
+import { matchesTopic } from './in-memory-client.js';
 
 /**
  * Production `BrokerSubscriber` backed by `mqtt` over WebSockets.
@@ -20,7 +21,9 @@ export class MqttBrokerSubscriber implements BrokerSubscriber {
     this.disconnect();
     this.setStatus('connecting');
 
-    const client = mqtt.connect(url, { protocolVersion: 5, reconnectPeriod: 2000 });
+    // MQTT 3.1.1 for parity with the simulator-ui client; aedes (our test
+    // broker) doesn't speak v5 yet. Bump to 5 when the broker side catches up.
+    const client = mqtt.connect(url, { protocolVersion: 4, reconnectPeriod: 2000 });
     this.client = client;
 
     client.on('connect', () => {
@@ -31,10 +34,17 @@ export class MqttBrokerSubscriber implements BrokerSubscriber {
     client.on('close', () => this.setStatus('disconnected'));
     client.on('error', (error) => this.setStatus('error', error));
     client.on('message', (topic, payload) => {
-      const bucket = this.subs.get(topic);
-      if (!bucket) return;
+      // Match the concrete inbound topic against every subscription pattern.
+      // The `mqtt` library only fires `message` for topics that matched some
+      // subscription, so we can't skip this step - the subscription key in
+      // `subs` is the pattern (e.g. `railway/events/anomaly/+`), and the
+      // inbound topic is the concrete value (e.g. `.../server`).
       const message = { topic, payload: new Uint8Array(payload) };
-      for (const handler of bucket) handler(message);
+      for (const [pattern, bucket] of this.subs) {
+        if (matchesTopic(pattern, topic)) {
+          for (const handler of bucket) handler(message);
+        }
+      }
     });
   }
 

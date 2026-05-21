@@ -74,7 +74,7 @@ export class InMemoryBrokerSubscriber implements BrokerSubscriber {
   }
 }
 
-function matchesTopic(pattern: string, topic: string): boolean {
+export function matchesTopic(pattern: string, topic: string): boolean {
   if (pattern === topic) return true;
   if (!pattern.includes('+') && !pattern.includes('#')) return false;
   const patternParts = pattern.split('/');
