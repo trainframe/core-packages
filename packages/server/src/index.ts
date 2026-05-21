@@ -1,5 +1,7 @@
 export { Server } from './server.js';
 export type { ServerOptions } from './server.js';
+export { AdminHttpServer } from './admin-http.js';
+export type { AdminHttpServerOptions } from './admin-http.js';
 export type {
   BrokerClient,
   BrokerMessage,

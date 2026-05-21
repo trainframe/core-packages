@@ -95,7 +95,7 @@ Source: spec §"Transport: MQTT" (server is what runs the scheduler against a re
 | Publish `SchedulerEffect`s as commands/events     | shipped | `send_command` → `railway/commands/{device_id}`; `publish_event` → `railway/events/{type}/server`; `update_state_snapshot` → `railway/state/{type}/{id}` retained. |
 | Retained `railway/state/layout/<name>` snapshot   | shipped | Published on `Server.start()`.                                                 |
 | Minimal CLI (`tf-server`)                         | shipped | `--layout <path> [--broker mqtt://…]`. SIGINT/SIGTERM clean shutdown.          |
-| HTTP / MQTT admin API (assignRoute, etc.)         | partial | `Server.assignRoute` exists as a method; no remote endpoint yet.               |
+| HTTP admin API (assignRoute, hold/release, tags)  | shipped | `AdminHttpServer` on a configurable port (default 3000). Endpoints: `/api/health`, `/api/state`, `/api/trains/:id/route`, `/api/trains/:id/revoke_clearance`, `/api/gates/:id/hold`, `/api/gates/:id/release`, `/api/tags`. CLI: `--http-port`. No auth (LAN/localhost). ADR-008. |
 | Custom-event dispatch (`railway/events/custom/...`) | not started | Server only subscribes to four-segment core events.                            |
 | Authentication / pairing                          | not started | Spec §"Authentication" defers details to garage-device pairing.                |
 | Discovery mode (learning new edges/markers)       | not started | Spec §"Incremental discovery". Major scheduler+layout work.                    |
@@ -220,8 +220,7 @@ Ranked by leverage. None are mandatory; this is the recommendation, not the plan
 
 1. **Discovery mode / topology learning**. Ingest `tag_observed` for unknown tags, infer edges, ratchet `inferred → confirmed` after N traversals. Spec §"Incremental discovery". Builds on the now-shipped `TagRegistry` (ADR-007).
 2. **`startTestEnvironment` harness + fault profiles**. Replace the ad-hoc `new Simulation(...)` pattern in tests with the harness the simulator spec describes. Profiles, `attachDevice`, `waitForEvent`. Pays off as more capabilities ship.
-3. **HTTP/MQTT admin API for the server**. Operator endpoints for `assignRoute`, layout reload, etc. Today `Server.assignRoute` is a method only; no remote way to trigger it.
-4. **Visualiser "assign this tag" UI**. When an unknown-tag anomaly surfaces, let the operator bind it to a marker through a garage device. Pairs naturally with discovery mode.
+3. **Visualiser "assign this tag" UI**. When an unknown-tag anomaly surfaces, let the operator bind it to a marker through a garage device. Pairs naturally with discovery mode; can now use `POST /api/tags` directly.
 
 Smaller follow-ups that don't need a major thread:
 

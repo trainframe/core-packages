@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { argv, env, exit, stderr, stdout } from 'node:process';
 import type { Layout } from '@trainframe/protocol';
+import { AdminHttpServer } from './admin-http.js';
 import { MqttBrokerClient } from './broker/mqtt-client.js';
 import { Server } from './server.js';
 
@@ -36,7 +37,15 @@ async function main(): Promise<void> {
 
   stdout.write(`tf-server: connected to ${broker}, layout '${layout.name}'\n`);
 
+  let admin: AdminHttpServer | null = null;
+  if (args.httpPort !== 0) {
+    admin = new AdminHttpServer({ server });
+    const port = await admin.listen(args.httpPort);
+    stdout.write(`tf-server: admin HTTP API on http://127.0.0.1:${port}\n`);
+  }
+
   const shutdown = async () => {
+    await admin?.close();
     server.stop();
     await client.disconnect();
     exit(0);
@@ -48,24 +57,35 @@ async function main(): Promise<void> {
 interface CliArgs {
   layout: string | undefined;
   broker: string | undefined;
+  httpPort: number;
   help: boolean;
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { help: false, layout: undefined, broker: undefined };
+  const args: CliArgs = {
+    help: false,
+    layout: undefined,
+    broker: undefined,
+    httpPort: 3000,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--help' || a === '-h') args.help = true;
     else if (a === '--layout') args.layout = argv[++i];
     else if (a === '--broker') args.broker = argv[++i];
+    else if (a === '--http-port') {
+      const next = argv[++i];
+      if (next !== undefined) args.httpPort = Number.parseInt(next, 10);
+    }
   }
   return args;
 }
 
 function printUsage(): void {
   stdout.write(
-    'Usage: tf-server --layout <path-to-layout.json> [--broker mqtt://host:1883]\n' +
-      '  --broker can also be set via TRAINFRAME_BROKER env var.\n',
+    'Usage: tf-server --layout <path-to-layout.json> [--broker mqtt://host:1883] [--http-port 3000]\n' +
+      '  --broker can also be set via TRAINFRAME_BROKER env var.\n' +
+      '  --http-port 0 disables the admin HTTP API (default 3000).\n',
   );
 }
 

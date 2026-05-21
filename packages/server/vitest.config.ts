@@ -17,6 +17,11 @@ export default defineConfig({
         // a real broker (see packages/integration); the contract is covered
         // via InMemoryBrokerClient.
         'src/broker/mqtt-client.ts',
+        // Operator HTTP surface. Every endpoint is exercised end-to-end by
+        // @trainframe/integration's admin-http.test.ts hitting the real
+        // server through real HTTP; a parallel unit suite here would just
+        // restate the integration tests with mocks.
+        'src/admin-http.ts',
       ],
       thresholds: {
         lines: 75,

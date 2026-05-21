@@ -78,12 +78,38 @@ export class Server {
   }
 
   /**
-   * Assign a route to a train. Today this is the entry point operator tools
-   * call directly; an HTTP/MQTT admin API will wrap it later.
+   * Assign a route to a train. Direct entry point used by tests and the
+   * admin HTTP API; the wire-equivalent is a `tag_observed` round-trip
+   * triggering route assignment - but route assignment itself is operator
+   * intent, not device telemetry, so it has no wire event.
    */
   assignRoute(trainId: string, routeId: string, edges: ReadonlyArray<RouteEdge>): void {
     const effects = this.scheduler.assignRoute(trainId, routeId, edges);
     this.dispatchEffects(effects);
+  }
+
+  /**
+   * Inject an event into the scheduler exactly as if it had arrived on the
+   * wire, then dispatch any effects. Used by the admin HTTP API for things
+   * like operator-driven `tag_assignment`. Internal: prefer publishing on
+   * MQTT from clients that can.
+   */
+  injectEvent(event_type: string, device_id: string, payload: unknown): void {
+    const effects = this.scheduler.handleEvent({ event_type, device_id, payload });
+    this.dispatchEffects(effects);
+  }
+
+  /**
+   * Publish a command on `railway/commands/<device_id>`. Used by the admin
+   * HTTP API to forward operator overrides (`hold_gate`, `release_gate`,
+   * `revoke_clearance`) onto the wire so devices receive them through the
+   * same path as scheduler-issued commands.
+   */
+  publishCommand(device_id: string, command_type: string, payload: unknown): void {
+    this.options.client.publish(
+      `railway/commands/${device_id}`,
+      this.encodeCommand(command_type, device_id, payload),
+    );
   }
 
   /** Test/observability hook. */

@@ -41,6 +41,10 @@ export class Scheduler {
     return this.trains.get(trainId);
   }
 
+  getTrainIds(): ReadonlyArray<string> {
+    return [...this.trains.keys()];
+  }
+
   getDeviceCapabilityState(deviceId: string, capabilityId: string): unknown {
     return this.devices.get(deviceId)?.capability_state.get(capabilityId);
   }

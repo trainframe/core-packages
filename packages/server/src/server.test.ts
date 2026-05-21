@@ -162,6 +162,28 @@ describe('Server — defensive parsing', () => {
   });
 });
 
+describe('Server — admin injection points', () => {
+  it('injectEvent routes through the scheduler and publishes derived state', () => {
+    const { server, client } = makeServer();
+    server.injectEvent('device_registered', 'ADMIN', {
+      capabilities: ['core.assigns_tags'],
+    });
+    const retained = client.published.find((m) => m.topic === 'railway/state/devices/ADMIN');
+    expect(retained).toBeDefined();
+  });
+
+  it('publishCommand emits a properly-enveloped command on the right topic', () => {
+    const { server, client } = makeServer();
+    server.publishCommand('GATE-1', 'release_gate', { marker_id: 'M3' });
+    const sent = client.published.find((m) => m.topic === 'railway/commands/GATE-1');
+    expect(sent).toBeDefined();
+    if (!sent) throw new Error('unreachable');
+    const env = JSON.parse(new TextDecoder().decode(sent.payload));
+    expect(env.command_type).toBe('release_gate');
+    expect(env.payload).toEqual({ marker_id: 'M3' });
+  });
+});
+
 function countCommands(
   client: InMemoryBrokerClient,
   train_id: string,
