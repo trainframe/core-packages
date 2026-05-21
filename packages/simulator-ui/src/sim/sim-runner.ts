@@ -1,6 +1,6 @@
 import { PROTOCOL_VERSION } from '@trainframe/protocol';
 import type { Layout } from '@trainframe/protocol';
-import { type CapturedEvent, Simulation } from '@trainframe/simulator';
+import { BrokerBridge, type CapturedEvent, Simulation } from '@trainframe/simulator';
 import type { BrokerClient } from '../broker/client.js';
 
 interface RouteEdge {
@@ -17,6 +17,8 @@ export interface SimRunnerSnapshot {
   readonly train_ids: ReadonlyArray<string>;
 }
 
+export type SimRunnerMode = 'embedded' | 'device-only';
+
 export interface SimRunnerOptions {
   /** Layout the sim is built around. */
   readonly layout: Layout;
@@ -24,6 +26,17 @@ export interface SimRunnerOptions {
   readonly tick_ms: number;
   /** Source of UUIDs for outbound envelopes. Defaults to crypto.randomUUID. */
   readonly newId?: () => string;
+  /**
+   * `embedded` (default): the simulation runs its own scheduler in-browser
+   * and publishes both device events and server-derived events to the broker.
+   * Use when there's no other server on the bus.
+   *
+   * `device-only`: the simulation has no embedded scheduler; the bridge
+   * forwards device events to the broker and routes inbound commands from
+   * `railway/commands/<device_id>` back into the simulation. Use when a real
+   * `@trainframe/server` is also on the bus.
+   */
+  readonly mode?: SimRunnerMode;
 }
 
 type SnapshotListener = (snapshot: SimRunnerSnapshot) => void;
@@ -41,18 +54,21 @@ type SnapshotListener = (snapshot: SimRunnerSnapshot) => void;
  */
 export class SimRunner {
   private simulation: Simulation | null = null;
+  private bridge: BrokerBridge | null = null;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private unsubscribeFromSim: (() => void) | null = null;
   private events_published = 0;
   private train_ids: string[] = [];
   private readonly snapshotListeners = new Set<SnapshotListener>();
   private readonly newId: () => string;
+  private readonly mode: SimRunnerMode;
 
   constructor(
     private readonly client: BrokerClient,
     private readonly options: SimRunnerOptions,
   ) {
     this.newId = options.newId ?? defaultNewId;
+    this.mode = options.mode ?? 'embedded';
   }
 
   /** Initialise a fresh `Simulation`. Idempotent — does nothing if already started. */
@@ -61,8 +77,13 @@ export class SimRunner {
     this.simulation = new Simulation({
       layout: this.options.layout,
       tick_ms: this.options.tick_ms,
+      disableScheduler: this.mode === 'device-only',
     });
     this.unsubscribeFromSim = this.simulation.onEvent((event) => this.handleEvent(event));
+    if (this.mode === 'device-only') {
+      this.bridge = new BrokerBridge(this.simulation, this.client, { newId: this.newId });
+      this.bridge.start();
+    }
     this.publishLayoutState();
     this.notify();
   }
@@ -99,6 +120,8 @@ export class SimRunner {
   /** Tear down the simulation, dropping all state. */
   stop(): void {
     this.pause();
+    this.bridge?.stop();
+    this.bridge = null;
     this.unsubscribeFromSim?.();
     this.unsubscribeFromSim = null;
     this.simulation = null;
@@ -122,6 +145,12 @@ export class SimRunner {
   }
 
   assignRoute(train_id: string, edges: ReadonlyArray<RouteEdge>): void {
+    if (this.mode === 'device-only') {
+      throw new Error(
+        'SimRunner.assignRoute is unavailable in device-only mode. Issue the ' +
+          'assign_route command from a server on the broker instead.',
+      );
+    }
     this.simulation?.assignRoute(train_id, edges);
   }
 
@@ -148,7 +177,9 @@ export class SimRunner {
   }
 
   private handleEvent(event: CapturedEvent): void {
-    this.publishEvent(event);
+    if (this.mode !== 'device-only') {
+      this.publishEvent(event);
+    }
     this.events_published += 1;
     this.notify();
   }

@@ -168,3 +168,96 @@ describe('SimRunner — auto-advance', () => {
     }
   });
 });
+
+function makeDeviceOnlyRunner(): { runner: SimRunner; client: InMemoryBrokerClient } {
+  const client = new InMemoryBrokerClient();
+  client.connect('ws://test');
+  const runner = new SimRunner(client, {
+    layout: SIMPLE_LOOP,
+    tick_ms: 100,
+    newId: () => FIXED_ID,
+    mode: 'device-only',
+  });
+  return { runner, client };
+}
+
+describe('SimRunner — device-only mode', () => {
+  it('still publishes device events from spawned trains', () => {
+    const { runner, client } = makeDeviceOnlyRunner();
+    runner.start();
+    runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
+
+    const registered = client.published.find(
+      (m) => m.topic === 'railway/events/device_registered/T1',
+    );
+    expect(registered).toBeDefined();
+  });
+
+  it('does not publish server-derived events (no embedded scheduler runs)', () => {
+    const { runner, client } = makeDeviceOnlyRunner();
+    runner.start();
+    runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
+    runner.step(5_000);
+
+    const fromServer = client.published.filter((m) => m.topic.endsWith('/server'));
+    expect(fromServer).toHaveLength(0);
+  });
+
+  it('routes inbound commands from the broker into the simulation', () => {
+    const { runner, client } = makeDeviceOnlyRunner();
+    runner.start();
+    runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
+
+    client.publish(
+      'railway/commands/T1',
+      new TextEncoder().encode(
+        JSON.stringify({
+          command_id: 'c1',
+          device_id: 'T1',
+          command_type: 'assign_route',
+          payload: {
+            route_id: 'r-1',
+            edges: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
+          },
+        }),
+      ),
+    );
+    client.publish(
+      'railway/commands/T1',
+      new TextEncoder().encode(
+        JSON.stringify({
+          command_id: 'c2',
+          device_id: 'T1',
+          command_type: 'grant_clearance',
+          payload: {
+            limit_marker_id: 'M2',
+            edges_newly_cleared: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
+          },
+        }),
+      ),
+    );
+
+    // Train should now move and emit a tag_observed at M2 within a few ticks.
+    runner.step(5_000);
+    const tagEvents = client.published.filter((m) =>
+      m.topic.startsWith('railway/events/tag_observed/'),
+    );
+    expect(tagEvents.length).toBeGreaterThan(0);
+  });
+
+  it('throws if assignRoute is called locally - server must drive routing', () => {
+    const { runner } = makeDeviceOnlyRunner();
+    runner.start();
+    runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
+    expect(() => runner.assignRoute('T1', [{ from_marker_id: 'M1', to_marker_id: 'M2' }])).toThrow(
+      /device-only mode/,
+    );
+  });
+
+  it('publishes the layout state as retained on start, same as embedded mode', () => {
+    const { runner, client } = makeDeviceOnlyRunner();
+    runner.start();
+    const layoutMsg = client.published.find((m) => m.topic === 'railway/state/layout/simple-loop');
+    expect(layoutMsg).toBeDefined();
+  });
+});

@@ -131,7 +131,7 @@ Coverage thresholds: 75 lines / 65 branches / 65 functions (new package; ratchet
 | Realtime-mode auto-advance                 | shipped | `setInterval` + `tick_ms`. No speed multiplier yet.                            |
 | Retained layout state publish              | shipped | `SimRunner.start()` publishes the active layout to `railway/state/layout/<name>` retained. |
 | Mishap rate UI                             | not started | `overshoot_rate` is config-only; needs operator-facing knobs (ADR-006 §"Out of scope"). |
-| Inbound command subscription (broker → sim)| not started | Today the sim runs the scheduler in-process. Once a real server exists, the sim should accept commands. |
+| Inbound command subscription (broker → sim)| shipped | `SimRunner` accepts `mode: 'device-only'`, which constructs the `Simulation` without an embedded scheduler and wires `BrokerBridge` to forward `railway/commands/<device>` into the sim. Operator-facing UI still defaults to `embedded`. |
 
 ---
 
@@ -206,7 +206,6 @@ Ranked by leverage. None are mandatory; this is the recommendation, not the plan
 4. **Train-position interpolation in the visualiser**. Subscribe to `train_status`, animate trains mid-edge instead of snapping to last-traversed marker. Small visual polish; bigger payoff once `train_status` is being emitted by something.
 5. **HTTP/MQTT admin API for the server**. Operator endpoints for `assignRoute`, layout reload, etc. Today `Server.assignRoute` is a method only; no remote way to trigger it.
 6. **Playwright browser-driven E2E for simulator-ui**. New `@trainframe/ui-tests` package: spawns broker + server + simulator-ui in headed/headless Chromium, drives UI interactions (configure layout, spawn train, assign route, press gate), asserts on rendered SVG and event log. Closes the loop on operator-facing UX before any hardware exists.
-7. **Simulator-ui device-only mode adoption**. Wire `SimRunner` to use `BrokerBridge` (now shipped) when a real server is present, so the UI publishes raw device events instead of running its own embedded scheduler.
 
 Smaller follow-ups that don't need a major thread:
 
