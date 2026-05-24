@@ -30,18 +30,24 @@ export type FaultProfileName = 'pristine' | 'realistic' | 'hostile';
 export const FAULT_PROFILES: Record<FaultProfileName, Partial<VirtualTrainConfig>> = {
   pristine: {
     miss_rate: 0,
+    double_read_rate: 0,
+    spurious_read_rate: 0,
     stopping_noise: 0,
     overshoot_rate: 0,
     detection_latency_ms: { mean: 0, stddev: 0 },
   },
   realistic: {
     miss_rate: 0.01,
+    double_read_rate: 0.005,
+    spurious_read_rate: 0,
     stopping_noise: 0.05,
     overshoot_rate: 0,
     detection_latency_ms: { mean: 20, stddev: 5 },
   },
   hostile: {
     miss_rate: 0.1,
+    double_read_rate: 0.05,
+    spurious_read_rate: 0.001,
     stopping_noise: 0.2,
     overshoot_rate: 0.05,
     detection_latency_ms: { mean: 30, stddev: 10 },

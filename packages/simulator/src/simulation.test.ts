@@ -150,6 +150,49 @@ describe('event listener hook', () => {
   });
 });
 
+describe('detection mishaps — double reads', () => {
+  it('emits two tag_observed events for a single marker crossing when double_read_rate is 1', () => {
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
+    sim.spawnTrain('T1', {
+      startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+      // miss_rate: 0 so the primary read is guaranteed to arrive
+      config: { double_read_rate: 1, miss_rate: 0 },
+    });
+    sim.assignRoute('T1', [{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+    sim.advance(10_000);
+
+    const tagEvents = sim
+      .getEventsOfType('tag_observed')
+      .filter((e) => e.device_id === 'T1' && (e.payload as { tag_id: string }).tag_id === 'M2');
+    expect(tagEvents.length).toBe(2);
+    // The second read must arrive strictly after the first.
+    const first = tagEvents[0];
+    const second = tagEvents[1];
+    if (!first || !second) throw new Error('unreachable');
+    expect(second.at_ms).toBeGreaterThan(first.at_ms);
+  });
+});
+
+describe('detection mishaps — spurious reads', () => {
+  it('emits tag_observed events with a spurious- prefix after a few ticks when spurious_read_rate is 1', () => {
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
+    sim.spawnTrain('T1', {
+      startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+      config: { spurious_read_rate: 1 },
+    });
+    // No route needed — spurious reads fire every tick regardless.
+    sim.advance(200); // 4 ticks at 50 ms default
+
+    const spurious = sim
+      .getEventsOfType('tag_observed')
+      .filter(
+        (e) =>
+          e.device_id === 'T1' && (e.payload as { tag_id: string }).tag_id.startsWith('spurious-'),
+      );
+    expect(spurious.length).toBeGreaterThanOrEqual(4);
+  });
+});
+
 describe('determinism', () => {
   it('produces identical outputs with the same seed', () => {
     const run = (seed: number) => {

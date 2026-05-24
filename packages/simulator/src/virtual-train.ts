@@ -26,6 +26,19 @@ export interface VirtualTrainConfig {
    */
   overshoot_rate: number;
   /**
+   * Probability of a double-read on each marker crossing. When this fires, a
+   * second `tag_observed` event for the same tag is emitted after an additional
+   * latency of `N(10ms, 5ms)` on top of the primary read latency.
+   */
+  double_read_rate: number;
+  /**
+   * Per-tick probability of a spurious `tag_observed` event with a fabricated
+   * tag ID (`spurious-<random 0-999999>`). Simulates a reader picking up an
+   * unrelated or unknown tag, which triggers an `Unknown tag observed` anomaly
+   * downstream. Default 0.
+   */
+  spurious_read_rate: number;
+  /**
    * Interval at which the train emits `train_status` events while moving or
    * on-edge. Setting this to 0 disables emission (useful in unit tests that
    * don't care about position broadcasts). Default 250 ms - frequent enough
@@ -41,6 +54,8 @@ export const DEFAULT_TRAIN_CONFIG: VirtualTrainConfig = {
   miss_rate: 0.01,
   detection_latency_ms: { mean: 20, stddev: 5 },
   overshoot_rate: 0,
+  double_read_rate: 0,
+  spurious_read_rate: 0,
   train_status_interval_ms: 250,
 };
 
@@ -149,6 +164,19 @@ export class VirtualTrain {
 
   tick(dt_ms: number): void {
     const dt_s = dt_ms / 1000;
+
+    // Spurious reads happen regardless of whether the train is on an edge.
+    if (
+      this.config.spurious_read_rate > 0 &&
+      this.random.bernoulli(this.config.spurious_read_rate)
+    ) {
+      const tag_id = `spurious-${Math.floor(this.random.range(0, 1_000_000))}`;
+      this.emit({
+        event_type: 'tag_observed',
+        device_id: this.device_id,
+        payload: { tag_id, direction: 'forward' },
+      });
+    }
 
     this.adjustVelocity(dt_s);
     if (!this.current_edge) return;
@@ -311,6 +339,18 @@ export class VirtualTrain {
         payload: { tag_id, direction: 'forward' },
       });
     });
+
+    // Double-read: schedule a second emission after an additional short delay.
+    if (this.config.double_read_rate > 0 && this.random.bernoulli(this.config.double_read_rate)) {
+      const extra_ms = Math.max(0, this.random.normal(10, 5));
+      this.clock.schedule(latency_ms + extra_ms, () => {
+        this.emit({
+          event_type: 'tag_observed',
+          device_id: this.device_id,
+          payload: { tag_id, direction: 'forward' },
+        });
+      });
+    }
   }
 
   // Observers for tests

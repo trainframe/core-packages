@@ -70,6 +70,38 @@ describe('LayoutCanvas', () => {
     expect(edges.querySelectorAll('line').length).toBe(4);
   });
 
+  it('renders inferred edges as dashed and confirmed edges as solid', () => {
+    const layoutWithInferredEdge = {
+      name: 'discovery-loop',
+      markers: [
+        { id: 'M1', kind: 'block_boundary' },
+        { id: 'M2', kind: 'block_boundary' },
+        { id: 'M3', kind: 'block_boundary' },
+      ],
+      edges: [
+        { from_marker_id: 'M1', to_marker_id: 'M2' },
+        { from_marker_id: 'M2', to_marker_id: 'M3', inferred: true },
+      ],
+      junctions: [],
+    };
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/discovery-loop', layoutWithInferredEdge));
+
+    const edges = screen.getByTestId('edges');
+    const lines = edges.querySelectorAll('line');
+    expect(lines.length).toBe(2);
+
+    const inferredLine = edges.querySelector('line[data-inferred="true"]');
+    expect(inferredLine).not.toBeNull();
+    expect(inferredLine?.getAttribute('stroke-dasharray')).toBe('8 6');
+
+    // The confirmed edge should have no data-inferred attribute at all.
+    const allLines = Array.from(lines);
+    const confirmedLine = allLines.find((l) => !l.hasAttribute('data-inferred'));
+    expect(confirmedLine).not.toBeUndefined();
+    expect(confirmedLine?.hasAttribute('stroke-dasharray')).toBe(false);
+  });
+
   it('places a train marker at its last reported marker', () => {
     const { client } = renderCanvas();
     act(() => deliverState(client, 'railway/state/layout/simple-loop', SIMPLE_LOOP_LAYOUT));

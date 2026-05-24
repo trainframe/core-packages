@@ -1,4 +1,5 @@
 import type { Layout } from '@trainframe/protocol';
+import type { VirtualTrainConfig } from '@trainframe/simulator';
 import { useEffect, useMemo, useState } from 'react';
 import { useBroker } from '../broker/broker-context.js';
 import { SimRunner, type SimRunnerSnapshot } from './sim-runner.js';
@@ -13,6 +14,7 @@ export interface SimRunnerControls {
   readonly spawnTrain: (
     train_id: string,
     edge: { from_marker_id: string; to_marker_id: string },
+    config?: Partial<VirtualTrainConfig>,
   ) => void;
   readonly assignRoute: (
     train_id: string,
@@ -47,7 +49,7 @@ export function useSimRunner(layout: Layout, tick_ms: number): SimRunnerControls
     pause: () => runner.pause(),
     stop: () => runner.stop(),
     step: (ms) => runner.step(ms),
-    spawnTrain: (id, edge) => runner.spawnTrain(id, edge),
+    spawnTrain: (id, edge, config) => runner.spawnTrain(id, edge, config),
     assignRoute: (id, edges) => runner.assignRoute(id, edges),
   };
 }

@@ -6,6 +6,16 @@ export default defineConfig({
   plugins: [react()],
   base: process.env.SIMULATOR_UI_BASE ?? '/',
   server: { port: 5174 },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/react')) return 'react-vendor';
+          if (id.includes('node_modules/mqtt')) return 'mqtt-vendor';
+        },
+      },
+    },
+  },
   test: {
     environment: 'jsdom',
     globals: true,

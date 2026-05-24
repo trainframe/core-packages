@@ -1,6 +1,11 @@
 import { PROTOCOL_VERSION } from '@trainframe/protocol';
 import type { Layout } from '@trainframe/protocol';
-import { BrokerBridge, type CapturedEvent, Simulation } from '@trainframe/simulator';
+import {
+  BrokerBridge,
+  type CapturedEvent,
+  Simulation,
+  type VirtualTrainConfig,
+} from '@trainframe/simulator';
 import type { BrokerClient } from '../broker/client.js';
 
 interface RouteEdge {
@@ -145,9 +150,9 @@ export class SimRunner {
     this.notify();
   }
 
-  spawnTrain(train_id: string, startEdge: RouteEdge): void {
+  spawnTrain(train_id: string, startEdge: RouteEdge, config?: Partial<VirtualTrainConfig>): void {
     if (!this.simulation || this.train_ids.includes(train_id)) return;
-    this.simulation.spawnTrain(train_id, { startEdge });
+    this.simulation.spawnTrain(train_id, { startEdge, ...(config ? { config } : {}) });
     this.train_ids = [...this.train_ids, train_id];
     this.notify();
   }

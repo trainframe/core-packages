@@ -1,4 +1,5 @@
 import type { Layout } from '@trainframe/protocol';
+import { useState } from 'react';
 import { useSimRunner } from '../sim/use-sim-runner.js';
 
 const STEP_MS = 1000;
@@ -20,19 +21,35 @@ export function SimControls({ layout }: SimControlsProps) {
   );
 
   const isIdle = snapshot.status === 'idle';
-  const nextTrainId = `T${snapshot.train_ids.length + 1}`;
   const demoRoute = layout.edges
     .slice(0, 3)
     .map((e) => ({ from_marker_id: e.from_marker_id, to_marker_id: e.to_marker_id }));
   const canSpawn = demoRoute.length > 0;
 
-  function handleSpawnAndAssign() {
+  const computedNextId = `T${snapshot.train_ids.length + 1}`;
+  const [trainId, setTrainId] = useState(computedNextId);
+  const [overshootRate, setOvershootRate] = useState('0');
+  const [missRate, setMissRate] = useState('0.01');
+
+  function handleSpawn(e: React.FormEvent) {
+    e.preventDefault();
     if (!canSpawn) return;
     const firstEdge = demoRoute[0];
     if (!firstEdge) return;
+
+    const parsedOvershoot = Number.parseFloat(overshootRate);
+    const parsedMiss = Number.parseFloat(missRate);
+    const config: { overshoot_rate?: number; miss_rate?: number } = {};
+    if (!Number.isNaN(parsedOvershoot))
+      config.overshoot_rate = Math.min(1, Math.max(0, parsedOvershoot));
+    if (!Number.isNaN(parsedMiss)) config.miss_rate = Math.min(1, Math.max(0, parsedMiss));
+
     if (isIdle) start();
-    spawnTrain(nextTrainId, firstEdge);
-    assignRoute(nextTrainId, demoRoute);
+    spawnTrain(trainId, firstEdge, config);
+    assignRoute(trainId, demoRoute);
+
+    // Advance train_id to the next default after spawn
+    setTrainId(`T${snapshot.train_ids.length + 2}`);
   }
 
   return (
@@ -68,9 +85,42 @@ export function SimControls({ layout }: SimControlsProps) {
       </fieldset>
       <fieldset>
         <legend>Trains</legend>
-        <button type="button" onClick={handleSpawnAndAssign}>
-          Spawn train + assign demo route
-        </button>
+        <form onSubmit={handleSpawn}>
+          <label>
+            Train ID{' '}
+            <input
+              type="text"
+              value={trainId}
+              onChange={(e) => setTrainId(e.target.value)}
+              required
+            />
+          </label>{' '}
+          <label>
+            Overshoot rate{' '}
+            <input
+              type="number"
+              value={overshootRate}
+              onChange={(e) => setOvershootRate(e.target.value)}
+              min="0"
+              max="1"
+              step="0.01"
+            />
+          </label>{' '}
+          <label>
+            Miss rate{' '}
+            <input
+              type="number"
+              value={missRate}
+              onChange={(e) => setMissRate(e.target.value)}
+              min="0"
+              max="1"
+              step="0.01"
+            />
+          </label>{' '}
+          <button type="submit" disabled={!canSpawn}>
+            Spawn train
+          </button>
+        </form>
       </fieldset>
     </section>
   );

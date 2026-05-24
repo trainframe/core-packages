@@ -68,8 +68,8 @@ Source: [`docs/spec/simulator-v0.1.md`](spec/simulator-v0.1.md); [`ADR-006`](adr
 | Realistic-time mode                               | partial | simulator-ui drives `setInterval` advance; no first-class realtime mode in the package. |
 | Detection: miss rate                              | shipped | `miss_rate` knob on train config.                                              |
 | Detection: latency (mean+stddev)                  | shipped | `detection_latency_ms`.                                                        |
-| Detection: double-read rate                       | not started | Spec'd, not implemented.                                                       |
-| Detection: spurious-read rate                     | not started | Spec'd, not implemented.                                                       |
+| Detection: double-read rate                       | shipped | `double_read_rate` knob on `VirtualTrainConfig`. On hit, a second `tag_observed` fires after an additional N(10, 5) ms latency. |
+| Detection: spurious-read rate                     | shipped | `spurious_read_rate` knob. Each tick rolls a Bernoulli; on hit emits `tag_observed` with `tag_id = spurious-<random>` to trigger an Unknown-tag anomaly downstream. |
 | Mishap: overshoot                                 | shipped | Sticky per-edge brake-fail, anomaly emission. ADR-006.                         |
 | Mishap: derailment                                | not started | Framing in ADR-006; deferred to per-train UI controls.                         |
 | `WiFiTransport` / `EspNowTransport`               | not started | Spec defines; the package today has no transport abstraction (in-process only).|
@@ -117,7 +117,7 @@ Coverage thresholds: 75 lines / 65 branches / 65 functions (new package; ratchet
 | Train-position rendering                   | shipped | Mid-edge interpolation from `train_status` events; falls back to last `marker_traversed` marker when no status yet. |
 | Layout snapshot bootstrap                  | shipped | `useLayoutState` subscribes to `railway/state/layout/+`; simulator-ui publishes the active layout retained on start. |
 | Tag-assignment UI                          | shipped | `UnknownTags` component surfaces unknown-tag anomalies and POSTs `tag_assignment` requests to the server's admin HTTP API. Plays the discovery loop: anomaly → operator picks target → registry binds → row vanishes. |
-| Discovery / topology learning UI           | partial | Discovered markers + inferred edges show up in the layout SVG live (via retained-state republish). Distinguishing inferred from confirmed visually is a follow-up. |
+| Discovery / topology learning UI           | shipped | Discovered markers and inferred edges show up in the layout SVG live. Inferred edges render dashed (`stroke-dasharray="8 6"`) with `data-inferred="true"`; confirmed edges stay solid. |
 
 ---
 
@@ -129,10 +129,10 @@ Coverage thresholds: 75 lines / 65 branches / 65 functions (new package; ratchet
 | `SimRunner` bridge → MQTT publish          | shipped | Event envelope construction, snapshot listeners.                               |
 | Lifecycle controls                         | shipped | Start / Resume / Pause / Stop / Step.                                          |
 | Track configuration UI                     | shipped | Preset dropdown + custom-JSON editor, persisted in localStorage.               |
-| Spawn-train form (per-train config)        | partial | Today: a single button spawns the next `T<n>` along the layout's first three edges. No per-train physics knobs (e.g. overshoot). |
+| Spawn-train form (per-train config)        | shipped | Inline form on `SimControls` lets the operator pick `train_id`, `overshoot_rate`, `miss_rate` before spawning. Threaded through `useSimRunner` → `SimRunner.spawnTrain` → `Simulation.spawnTrain(config)`. |
 | Realtime-mode auto-advance                 | shipped | `setInterval` + `tick_ms`. No speed multiplier yet.                            |
 | Retained layout state publish              | shipped | `SimRunner.start()` publishes the active layout to `railway/state/layout/<name>` retained. |
-| Mishap rate UI                             | not started | `overshoot_rate` is config-only; needs operator-facing knobs (ADR-006 §"Out of scope"). |
+| Mishap rate UI                             | shipped | Overshoot + miss rate exposed on the spawn form; double-read and spurious-read knobs available on the simulator but not yet on the form. |
 | Inbound command subscription (broker → sim)| shipped | `SimRunner` accepts `mode: 'device-only'`, which constructs the `Simulation` without an embedded scheduler and wires `BrokerBridge` to forward `railway/commands/<device>` into the sim. Operator-facing UI still defaults to `embedded`. |
 
 ---
@@ -219,11 +219,10 @@ Mirrored from [`CLAUDE.md`](../CLAUDE.md). Need ADRs before implementation.
 
 Ranked by leverage. None are mandatory; this is the recommendation, not the plan.
 
-1. **Visualiser styling for inferred edges**. Render inferred edges as dashed lines or with a "learning" badge; the data is already in retained state. Small visual win.
-2. **Edge-length learning**. Populate `learned_traversal_time_ms_at_speed` on traversal; backfill `estimated_length_mm` once a reference length is known anywhere in the layout.
+1. **Use learned traversal times for clearance decisions**. `LayoutState.getLearnedTraversalMs` now accumulates EWMA times per edge; nothing reads it yet. Wire it into braking-distance / clearance-extension logic so trains learn to slow earlier on long edges.
+2. **Surface `train_status` battery + error_state in the visualiser**. Schema fields exist but the visualiser ignores them.
 
 Smaller follow-ups that don't need a major thread:
 
 - ADR + implementation for missing detection knobs (double-read, spurious read).
 - Per-train spawn config form in simulator-ui (mishap rate knobs from ADR-006).
-- Bundle-size / code-splitting on the two Vite apps (currently 569 kB each).

@@ -1,9 +1,10 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
 import { InMemoryBrokerClient } from '../broker/in-memory-client.js';
 import { SIMPLE_LOOP } from '../sim/layouts.js';
+import { SimRunner } from '../sim/sim-runner.js';
 import { SimControls } from './SimControls.js';
 
 function renderControls() {
@@ -70,5 +71,37 @@ describe('SimControls', () => {
     await user.click(screen.getByRole('button', { name: /^stop$/i }));
     expect(screen.getByTestId('sim-status')).toHaveTextContent('idle');
     expect(screen.getByText('none')).toBeInTheDocument();
+  });
+
+  it('form default values: train_id is T1, overshoot_rate is 0, miss_rate is 0.01', () => {
+    renderControls();
+
+    const trainIdInput = screen.getByRole('textbox', { name: /train id/i });
+    expect(trainIdInput).toHaveValue('T1');
+
+    const overshootInput = screen.getByRole('spinbutton', { name: /overshoot rate/i });
+    expect(overshootInput).toHaveValue(0);
+
+    const missRateInput = screen.getByRole('spinbutton', { name: /miss rate/i });
+    expect(missRateInput).toHaveValue(0.01);
+  });
+
+  it('submitting with overshoot_rate=0.5 calls SimRunner.spawnTrain with that config', async () => {
+    const user = userEvent.setup();
+    const spy = vi.spyOn(SimRunner.prototype, 'spawnTrain');
+
+    renderControls();
+
+    const overshootInput = screen.getByRole('spinbutton', { name: /overshoot rate/i });
+    await user.clear(overshootInput);
+    await user.type(overshootInput, '0.5');
+
+    await user.click(screen.getByRole('button', { name: /spawn train/i }));
+
+    expect(spy).toHaveBeenCalledOnce();
+    const [, , config] = spy.mock.calls[0] ?? [];
+    expect(config).toMatchObject({ overshoot_rate: 0.5 });
+
+    spy.mockRestore();
   });
 });

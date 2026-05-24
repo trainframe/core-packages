@@ -66,8 +66,9 @@ export function LayoutCanvas() {
                 y1={from.y}
                 x2={to.x}
                 y2={to.y}
-                stroke="#888"
+                stroke={edge.inferred ? '#aaa' : '#888'}
                 strokeWidth={3}
+                {...(edge.inferred ? { strokeDasharray: '8 6', 'data-inferred': 'true' } : {})}
               />
             );
           })}

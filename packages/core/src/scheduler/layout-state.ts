@@ -7,6 +7,12 @@ export interface LayoutStateOptions {
    * simulator spec §"Incremental discovery".
    */
   readonly confirmTraversals?: number;
+  /**
+   * Clock callback used to timestamp traversals for learned traversal time
+   * computation. Defaults to `Date.now`. Inject a virtual clock in tests and
+   * the simulator for determinism.
+   */
+  readonly now?: () => number;
 }
 
 export interface RecordTraversalResult {
@@ -39,10 +45,22 @@ export class LayoutState {
   /** Traversal counter per edge for discovery-mode confirmation (ADR-009). */
   private readonly traversalCounts = new Map<string, number>();
   private readonly confirmTraversals: number;
+  /**
+   * Timestamp of the previous `recordTraversal` call, used to compute the
+   * time taken to traverse the most-recently-recorded edge.
+   */
+  private lastRecordedAt: number | null = null;
+  /**
+   * EWMA of traversal time in ms per edge key, populated as trains run.
+   * Alpha = 0.3: new value contributes 30%, prior average 70%.
+   */
+  private readonly learnedMs = new Map<string, number>();
+  private readonly now: () => number;
 
   constructor(layout: Layout, options: LayoutStateOptions = {}) {
     this.name = layout.name;
     this.confirmTraversals = options.confirmTraversals ?? 3;
+    this.now = options.now ?? Date.now;
 
     for (const marker of layout.markers) {
       this.markers.set(marker.id, marker);
@@ -176,7 +194,31 @@ export class LayoutState {
     if (shouldConfirm) {
       this.confirmEdge(fromMarkerId, toMarkerId);
     }
+
+    // Update learned traversal time. `lastRecordedAt` holds the timestamp of
+    // the previous call, so the delta is the time spent on the edge that just
+    // completed (from→to). Skip the very first call (no prior timestamp to
+    // diff); record the timestamp for every valid traversal so the next call
+    // can compute a delta.
+    const ts = this.now();
+    if (this.lastRecordedAt !== null) {
+      const delta = ts - this.lastRecordedAt;
+      const prior = this.learnedMs.get(key);
+      this.learnedMs.set(key, prior === undefined ? delta : prior * 0.7 + delta * 0.3);
+    }
+    this.lastRecordedAt = ts;
+
     return { inferredEdgeAdded: added, edgeConfirmed: shouldConfirm };
+  }
+
+  /**
+   * Returns the EWMA traversal time in ms for the given edge, or `undefined`
+   * if the edge has been traversed fewer than twice (not enough data to
+   * compute a delta). Per the protocol spec §"Incremental discovery",
+   * `learned_traversal_time_ms_at_speed`.
+   */
+  getLearnedTraversalMs(fromMarkerId: string, toMarkerId: string): number | undefined {
+    return this.learnedMs.get(edgeKey(fromMarkerId, toMarkerId));
   }
 
   /** Flip the inferred flag off on every copy of the edge stored in the indexes. */
