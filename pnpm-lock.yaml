@@ -185,6 +185,9 @@ importers:
       aedes:
         specifier: ^1.0.2
         version: 1.0.2
+      mqtt:
+        specifier: ^5.10.0
+        version: 5.15.1
       ws:
         specifier: ^8.18.0
         version: 8.20.0
