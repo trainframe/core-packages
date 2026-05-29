@@ -94,4 +94,52 @@ describe('parseLayoutJson', () => {
       expect(result.error.length).toBeGreaterThan(0);
     }
   });
+
+  it('rejects an edge whose from_marker is not declared', () => {
+    const result = parseLayoutJson(
+      JSON.stringify({
+        name: 'dangling-from',
+        markers: [{ id: 'A', kind: 'block_boundary' }],
+        edges: [{ from_marker_id: 'NOPE', to_marker_id: 'A' }],
+        junctions: [],
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/unknown marker/i);
+      expect(result.error).toContain('NOPE');
+    }
+  });
+
+  it('rejects an edge whose to_marker is not declared', () => {
+    const result = parseLayoutJson(
+      JSON.stringify({
+        name: 'dangling-to',
+        markers: [{ id: 'A', kind: 'block_boundary' }],
+        edges: [{ from_marker_id: 'A', to_marker_id: 'NOPE' }],
+        junctions: [],
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/unknown marker/i);
+      expect(result.error).toContain('NOPE');
+    }
+  });
+
+  it('rejects a junction whose marker_id is not declared', () => {
+    const result = parseLayoutJson(
+      JSON.stringify({
+        name: 'dangling-junction',
+        markers: [{ id: 'A', kind: 'block_boundary' }],
+        edges: [],
+        junctions: [{ marker_id: 'NOPE' }],
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/junction/i);
+      expect(result.error).toContain('NOPE');
+    }
+  });
 });

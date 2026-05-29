@@ -96,7 +96,25 @@ export function parseLayoutJson(text: string): LayoutValidationResult {
     const summary = errors.map((err) => `${err.path || '/'}: ${err.message}`).join('; ');
     return { ok: false, error: summary || 'Layout did not match schema' };
   }
+  const integrityError = checkReferentialIntegrity(parsed);
+  if (integrityError !== null) return { ok: false, error: integrityError };
   return { ok: true, layout: parsed };
+}
+
+// Schema validates shape only; without this check the sim crashes inside LayoutState on start, not in the form.
+function checkReferentialIntegrity(layout: Layout): string | null {
+  const markerIds = new Set(layout.markers.map((m) => m.id));
+  for (const edge of layout.edges) {
+    if (!markerIds.has(edge.from_marker_id) || !markerIds.has(edge.to_marker_id)) {
+      return `Edge references unknown marker: ${edge.from_marker_id} -> ${edge.to_marker_id}`;
+    }
+  }
+  for (const junction of layout.junctions) {
+    if (!markerIds.has(junction.marker_id)) {
+      return `Junction references unknown marker: ${junction.marker_id}`;
+    }
+  }
+  return null;
 }
 
 /** Convenience: the default layout the app starts with. */

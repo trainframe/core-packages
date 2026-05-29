@@ -22,6 +22,18 @@ const SIMPLE_LOOP: Layout = {
   junctions: [],
 };
 
+describe('LayoutState constructor', () => {
+  it('throws when an edge references a marker that is not in the markers list', () => {
+    const broken: Layout = {
+      name: 'broken',
+      markers: [{ id: 'M1', kind: 'block_boundary' }],
+      edges: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
+      junctions: [],
+    };
+    expect(() => new LayoutState(broken)).toThrow(/unknown marker: M1 -> M2/);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Learned traversal time (EWMA)
 // ---------------------------------------------------------------------------
