@@ -250,3 +250,74 @@ describe('train_status emission', () => {
     expect(sim.getEventsOfType('train_status')).toHaveLength(0);
   });
 });
+
+describe('despawn → device_disconnected', () => {
+  it('despawnGate emits a device_disconnected event and the scheduler releases the gate`s withholds', () => {
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
+    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+    const gate = sim.spawnGate('GATE-M3');
+    gate.withhold('M3', 'crane busy');
+
+    sim.assignRoute('T1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+      { from_marker_id: 'M3', to_marker_id: 'M4' },
+    ]);
+    sim.advance(10_000);
+
+    // Train is stopped at M2.
+    expect(
+      sim
+        .getEventsOfType('marker_traversed')
+        .map((e) => (e.payload as { marker_id: string }).marker_id),
+    ).toEqual(['M2']);
+    expect(sim.getTrain('T1')?.getVelocity()).toBe(0);
+
+    // Gate vanishes.
+    sim.despawnGate('GATE-M3');
+
+    expect(sim.getEventsOfType('device_disconnected')).toHaveLength(1);
+    expect(sim.getEventsOfType('device_disconnected')[0]?.device_id).toBe('GATE-M3');
+
+    // Train resumes after the disconnect-triggered re-grant.
+    sim.advance(10_000);
+    const traversals = sim
+      .getEventsOfType('marker_traversed')
+      .map((e) => (e.payload as { marker_id: string }).marker_id);
+    expect(traversals).toContain('M3');
+  });
+
+  it('despawnTrain emits a device_disconnected event and frees its held block for a waiting peer', () => {
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
+    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+    sim.spawnTrain('T2', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+
+    sim.assignRoute('T1', [{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+    sim.assignRoute('T2', [{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+
+    // T2 was blocked by T1.
+    const t2GrantsBefore = sim
+      .getCommandsForDevice('T2')
+      .filter((c) => c.event_type === 'grant_clearance');
+    expect(t2GrantsBefore).toHaveLength(0);
+
+    // T1 vanishes (e.g. derailed and unplugged).
+    sim.despawnTrain('T1');
+
+    expect(sim.getEventsOfType('device_disconnected')).toHaveLength(1);
+    expect(sim.getEventsOfType('device_disconnected')[0]?.device_id).toBe('T1');
+
+    const t2Grants = sim
+      .getCommandsForDevice('T2')
+      .filter((c) => c.event_type === 'grant_clearance');
+    expect(t2Grants).toHaveLength(1);
+    expect((t2Grants[0]?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M2');
+  });
+
+  it('despawning an unknown train or gate is a no-op', () => {
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
+    sim.despawnTrain('NEVER-SPAWNED');
+    sim.despawnGate('NEVER-SPAWNED');
+    expect(sim.getEventsOfType('device_disconnected')).toHaveLength(0);
+  });
+});

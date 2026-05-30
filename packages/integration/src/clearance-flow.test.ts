@@ -125,4 +125,43 @@ describe('Clearance flow through a real broker', () => {
     expect(layoutMsg).toBeDefined();
     expect((layoutMsg as { name: string }).name).toBe('simple-loop');
   });
+
+  it('When a withholding gate disconnects, the train sees the previously-blocked clearance arrive', async () => {
+    await harness.testClient.publishEvent('device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    await harness.testClient.publishEvent('device_registered', 'GATE-M3', {
+      capabilities: ['core.gates_clearance'],
+    });
+    await harness.testClient.waitForState('railway/state/devices/T1');
+    await harness.testClient.waitForState('railway/state/devices/GATE-M3');
+    await harness.testClient.publishEvent('gate_state_changed', 'GATE-M3', {
+      marker_id: 'M3',
+      state: 'withholding',
+    });
+    harness.server.assignRoute('T1', 'route-1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+    await harness.testClient.waitForCommand('T1', 'grant_clearance');
+    await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M1' });
+    await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M2' });
+
+    // Gate vanishes (LWT in production, explicit event here). The hook should
+    // release the withhold and the scheduler should re-grant.
+    await harness.testClient.publishEvent('device_disconnected', 'GATE-M3', {});
+
+    const start = Date.now();
+    let grants = harness.testClient
+      .commandsFor('T1')
+      .filter((c) => c.command_type === 'grant_clearance');
+    while (grants.length < 2 && Date.now() - start < 2000) {
+      await new Promise((r) => setTimeout(r, 20));
+      grants = harness.testClient
+        .commandsFor('T1')
+        .filter((c) => c.command_type === 'grant_clearance');
+    }
+    expect(grants).toHaveLength(2);
+    expect((grants[1]?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M3');
+  });
 });

@@ -63,6 +63,8 @@ export class Scheduler {
     switch (event.event_type) {
       case 'device_registered':
         return this.handleDeviceRegistered(event.device_id, event.payload);
+      case 'device_disconnected':
+        return this.handleDeviceDisconnect(event.device_id);
       case 'tag_observed':
         return this.handleTagObserved(event.device_id, event.payload);
       case 'clearance_request':
@@ -116,6 +118,42 @@ export class Scheduler {
     }
 
     return [effects.updateState('devices', deviceId, { capabilities })];
+  }
+
+  // ---------- device disconnect ----------
+
+  /**
+   * A device vanished. Run every capability's `onDeviceDisconnect` hook so
+   * capability-owned state (e.g. gates_clearance withholds) is released,
+   * translate any intents the hooks produced, then drop the device record.
+   * If the device declared `core.controls_motion`, drop its train state too
+   * so the block it owned in `cleared_edges` no longer denies peers.
+   *
+   * Finally retry blocked clearances: peers waiting on a withhold the
+   * vanished device held, or on an edge the vanished train was hogging,
+   * should be granted now in the same handler call.
+   */
+  private handleDeviceDisconnect(deviceId: string): ReadonlyArray<SchedulerEffect> {
+    const device = this.devices.get(deviceId);
+    if (!device) return [];
+
+    const out: SchedulerEffect[] = [];
+    for (const capId of device.capabilities) {
+      const cap = this.registry.get(capId);
+      if (!cap) continue;
+      const oldState = device.capability_state.get(capId);
+      const result = cap.invokeOnDeviceDisconnect(oldState);
+      device.capability_state.set(capId, result.newState);
+      out.push(...this.translateIntents(result.intents, deviceId));
+    }
+
+    this.devices.delete(deviceId);
+    if (device.capabilities.includes('core.controls_motion')) {
+      this.trains.delete(deviceId);
+    }
+
+    out.push(...this.retryBlockedClearances());
+    return out;
   }
 
   // ---------- tag observed → marker traversed ----------
