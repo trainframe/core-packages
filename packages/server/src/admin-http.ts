@@ -178,12 +178,12 @@ export class AdminHttpServer {
     noContent(res);
   }
 
-  private revokeClearance(trainId: string, body: unknown, res: ServerResponse): void {
-    const obj = (body ?? {}) as Record<string, unknown>;
-    this.server.publishCommand(trainId, 'revoke_clearance', {
-      reason: typeof obj.reason === 'string' ? obj.reason : 'admin',
-      immediate: obj.immediate === true,
-    });
+  private revokeClearance(trainId: string, _body: unknown, res: ServerResponse): void {
+    // Goes through the scheduler so cleared edges are released and waiting
+    // peers get reconsidered. The wire-level command is one of the resulting
+    // effects, not a side-channel publish, so scheduler state and the train's
+    // observable behavior stay aligned.
+    this.server.revokeClearance(trainId);
     noContent(res);
   }
 

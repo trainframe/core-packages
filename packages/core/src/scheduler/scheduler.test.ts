@@ -272,6 +272,89 @@ describe('Scheduler — block exclusivity', () => {
   });
 });
 
+describe('Scheduler — clearance revocation', () => {
+  it('drops the holding train`s cleared edges and grants a waiting peer', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    registerTrain(scheduler, 'T2');
+
+    // T1 takes M1→M2 (gets initial clearance).
+    scheduler.assignRoute('T1', 'route-1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+    expect(scheduler.getTrainState('T1')?.cleared_edges).toHaveLength(1);
+
+    // T2 also wants M1→M2 — denied because T1 holds the block.
+    const t2Initial = scheduler.assignRoute('T2', 'route-2', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+    ]);
+    expect(
+      t2Initial.find((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance'),
+    ).toBeUndefined();
+
+    // Operator revokes T1's clearance.
+    const effects = scheduler.revokeClearance('T1');
+
+    // T1 receives a revoke_clearance command.
+    const revoke = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'revoke_clearance' && e.device_id === 'T1',
+    );
+    expect(revoke).toBeDefined();
+
+    // T2 receives a grant_clearance for M1→M2 since the block is freed.
+    const t2Grant = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+    );
+    expect(t2Grant).toBeDefined();
+    expect((t2Grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M2');
+
+    // T1's cleared edges are empty.
+    const t1State = scheduler.getTrainState('T1');
+    expect(t1State?.cleared_edges).toEqual([]);
+
+    // T2 now owns M1→M2.
+    const t2State = scheduler.getTrainState('T2');
+    expect(t2State?.cleared_edges).toEqual([{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+  });
+
+  it('is a no-op for an unknown train', () => {
+    const { scheduler } = setup();
+    const effects = scheduler.revokeClearance('NOPE');
+    expect(effects).toEqual([]);
+  });
+
+  it('resets the clearance limit to the train`s last known marker', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignRoute('T1', 'route-1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+
+    // T1 moves to M1, then M2 (and is granted M2→M3).
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+    expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('M3');
+
+    scheduler.revokeClearance('T1');
+
+    const t1State = scheduler.getTrainState('T1');
+    expect(t1State?.cleared_edges).toEqual([]);
+    expect(t1State?.clearance_limit_marker_id).toBe('M2');
+  });
+});
+
 describe('Scheduler — anomalies', () => {
   it('emits an anomaly when an unknown tag is observed', () => {
     const { scheduler } = setup();

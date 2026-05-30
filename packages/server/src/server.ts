@@ -89,6 +89,17 @@ export class Server {
   }
 
   /**
+   * Revoke a train's clearance. Mirrors `assignRoute`: the scheduler decides,
+   * the server enacts. Returned effects include the `revoke_clearance` command
+   * to the train and any `grant_clearance` commands to peers that were waiting
+   * on the freed block. No-op if the train doesn't exist.
+   */
+  revokeClearance(trainId: string): void {
+    const effects = this.scheduler.revokeClearance(trainId);
+    this.dispatchEffects(effects);
+  }
+
+  /**
    * Inject an event into the scheduler exactly as if it had arrived on the
    * wire, then dispatch any effects. Used by the admin HTTP API for things
    * like operator-driven `tag_assignment`. Internal: prefer publishing on
