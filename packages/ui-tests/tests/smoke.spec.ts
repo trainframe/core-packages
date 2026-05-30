@@ -1,10 +1,15 @@
 import { expect, test } from '@playwright/test';
 
-test.describe('Simulator UI: lifecycle smoke', () => {
+/**
+ * Operator-facing smoke. Each test is framed as "what does the operator do
+ * and see?" rather than "what internal state transitions?". The journey
+ * regression for multi-train block release lives in multi-train-journey.spec.
+ */
+
+test.describe('Simulator UI: operator panel', () => {
   test.beforeEach(async ({ page }) => {
-    // Pre-seed localStorage so the page renders even before the broker harness
-    // is up. The broker URL doesn't need to be reachable for the basic
-    // SimRunner lifecycle controls to function.
+    // Seed the broker URL so the page mounts even before a broker exists —
+    // the panel is meant to be usable without a live broker for setup work.
     await page.addInitScript(() => {
       try {
         localStorage.setItem('trainframe.simulator-ui.brokerUrl', 'ws://127.0.0.1:9001');
@@ -13,33 +18,33 @@ test.describe('Simulator UI: lifecycle smoke', () => {
       }
     });
     await page.goto('/');
+  });
+
+  test('the operator lands on a ready panel with no trains and Spawn available', async ({
+    page,
+  }) => {
     await expect(page.getByRole('heading', { name: /Trainframe Simulator/i })).toBeVisible();
+    await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/none/i);
+    await expect(page.getByRole('button', { name: /spawn train/i })).toBeEnabled();
+    // Pause and Stop are not yet meaningful — the operator hasn't started anything.
+    await expect(page.getByRole('button', { name: /^pause$/i })).toBeDisabled();
+    await expect(page.getByRole('button', { name: /^stop$/i })).toBeDisabled();
   });
 
-  test('clicking Start moves the simulation from idle to paused', async ({ page }) => {
-    const status = page.getByTestId('sim-status');
-    await expect(status).toHaveText('idle');
-
-    await page.getByRole('button', { name: 'Start', exact: true }).click();
-    await expect(status).toHaveText('paused');
+  test('after spawning a train, the operator sees it listed in the snapshot', async ({ page }) => {
+    await page.getByRole('button', { name: /spawn train/i }).click();
+    await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1/);
   });
 
-  test('clicking Spawn registers a train and surfaces it in the snapshot', async ({ page }) => {
-    await page.getByRole('button', { name: 'Start', exact: true }).click();
-    await page.getByRole('button', { name: /Spawn train/i }).click();
+  test('stepping the simulation after spawning advances the clock the operator sees', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: /spawn train/i }).click();
 
-    const trainsRow = page.locator('dt:has-text("Trains") + dd');
-    await expect(trainsRow).toHaveText(/T1/);
-  });
+    const clock = page.locator('dt:has-text("Sim time") + dd');
+    await expect(clock).toHaveText('0.0s');
 
-  test('Resume + Step advances the sim clock', async ({ page }) => {
-    await page.getByRole('button', { name: 'Start', exact: true }).click();
-    await page.getByRole('button', { name: /Spawn train/i }).click();
-
-    const stepButton = page.getByRole('button', { name: /Step 1s/ });
-    await stepButton.click();
-
-    const simTime = page.locator('dt:has-text("Sim time") + dd');
-    await expect(simTime).not.toHaveText('0.0s');
+    await page.getByRole('button', { name: /step 1s/i }).click();
+    await expect(clock).not.toHaveText('0.0s');
   });
 });
