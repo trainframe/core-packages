@@ -182,6 +182,9 @@ importers:
       '@trainframe/server':
         specifier: workspace:*
         version: link:../server
+      '@trainframe/simulator':
+        specifier: workspace:*
+        version: link:../simulator
       aedes:
         specifier: ^1.0.2
         version: 1.0.2
