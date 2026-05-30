@@ -179,11 +179,11 @@ Private workspace package. Spawns the simulator-ui Vite preview, an aedes broker
 | Area                                              | Status | Notes                                                                          |
 | ------------------------------------------------- | :----: | ------------------------------------------------------------------------------ |
 | Playwright + Chromium setup                       | shipped | `playwright.config.ts` with `webServer` for `vite preview`; chromium-only project. |
-| `startUiHarness` (aedes WS + server)              | shipped | WebSocket listener with MQTT-subprotocol selection. Reused by per-spec `beforeAll`. |
+| `startUiHarness` (aedes WS + server + bridged sim)| shipped | WebSocket listener with MQTT-subprotocol selection. Also wires a device-only `Simulation` to the broker via `BrokerBridge`, so admin HTTP commands actually reach virtual trains/gates. Reused by per-spec `beforeAll`. |
 | Lifecycle smoke test                              | shipped | Start, Spawn, Step against the embedded sim (no broker required). |
 | Connected-to-broker test                          | shipped | UI connects to aedes via WS, `device_registered` round-trips through the server. |
-| Per-train spawn / route-assign UI coverage        | not started | Future tests once the UI exposes a spawn form and route designer.               |
-| Visualiser SVG assertions                         | partial | Two-server harness now boots simulator-ui (4173) + visualiser (4174). Tag-assignment journey lands in the visualiser; SVG-position assertions still TODO. |
+| Operator journeys                                 | shipped | `multi-train-journey`, `tag-assignment`, `discovery`, `feature-showcase`, plus five new specs: `route-reassignment` (expects `cleared_edges`-wipe fix), `unknown-tag-closure` (bound-tag → train lands on marker), `spawn-form-mishaps` (overshoot knob → anomaly in EventLog), `layout-swap` (preset swap + invalid-JSON error), `gate-hold-release` (admin HTTP hold/release → train stops/advances). |
+| Visualiser SVG assertions                         | shipped | `data-train-id` / `data-at-marker` / `data-on-edge` / `data-marker-id` / `data-inferred` assertions are routine across the new specs. |
 
 Coverage thresholds: not applicable (Playwright; covered by E2E pass/fail).
 
