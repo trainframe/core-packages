@@ -44,6 +44,7 @@ Source: spec §"Capability model", §"Clearance model"; [`ADR-001`](adr/001-capa
 | Scheduler: switch-state edge filtering    | shipped | Refuses to clear an edge whose `requires_switch_state` doesn't match the junction's confirmed position. Retries blocked clearances when a switch confirms. |
 | `LayoutState`                             | shipped | Edges, marker lookup, switch positions, runtime `upsertMarker`, edge inference via `recordTraversal`, inferred→confirmed flip on N traversals (ADR-009), `toLayout()` serialiser for republishing as retained state. |
 | Anomaly emission for unknown tags         | shipped | `tag_observed` against unregistered marker → anomaly event.                                    |
+| Referential validation on broker boundary | shipped | `assignRoute`, `clearance_request`, and `switch_state_changed` reject payloads referencing markers absent from `LayoutState`, emit a warning anomaly, and skip the would-be state mutation. Defence-in-depth against malformed inbound MQTT. |
 | Conflict resolution policy                | not started | Open design Q (CLAUDE.md). Block exclusivity is first-come-by-clearance-grant; no priorities. |
 | Multi-gate semantics                      | not started | Open design Q. Today: any deny is a deny (logical AND).                                        |
 | Topology violation handling               | not started | Open design Q. Today: silently ignored.                                                        |

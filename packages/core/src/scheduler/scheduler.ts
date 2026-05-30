@@ -280,11 +280,41 @@ export class Scheduler {
 
   private handleClearanceRequest(payload: unknown): ReadonlyArray<SchedulerEffect> {
     const { train_id, next_edge } = payload as { train_id: string; next_edge: EdgeRef };
+
+    const missing = this.unknownMarkersInEdges([next_edge]);
+    if (missing.length > 0) {
+      return [
+        effects.publishEvent('anomaly', {
+          severity: 'warning',
+          description: `clearance_request from ${train_id} references unknown marker(s): ${missing.join(', ')}`,
+        }),
+      ];
+    }
+
     const train = this.trains.get(train_id);
     if (!train) return [];
 
     const grant = this.tryGrantClearance(train, next_edge);
     return grant ? [grant] : [];
+  }
+
+  /**
+   * Return the (deduplicated, ordered) marker IDs referenced by `edges` that
+   * are not present in the current layout. Used as a referential-integrity
+   * check on event/command payloads at the broker boundary, where we cannot
+   * trust inbound MQTT to reference known entities.
+   */
+  private unknownMarkersInEdges(edges: ReadonlyArray<EdgeRef>): ReadonlyArray<string> {
+    const missing: string[] = [];
+    const seen = new Set<string>();
+    for (const edge of edges) {
+      for (const markerId of [edge.from_marker_id, edge.to_marker_id]) {
+        if (seen.has(markerId)) continue;
+        seen.add(markerId);
+        if (!this.layout.hasMarker(markerId)) missing.push(markerId);
+      }
+    }
+    return missing;
   }
 
   /**
@@ -358,6 +388,16 @@ export class Scheduler {
       position: string;
       confirmed: boolean;
     };
+
+    if (!this.layout.hasMarker(junction_marker_id)) {
+      return [
+        effects.publishEvent('anomaly', {
+          severity: 'warning',
+          description: `switch_state_changed references unknown junction marker: ${junction_marker_id}`,
+        }),
+      ];
+    }
+
     const out: SchedulerEffect[] = [
       effects.updateState('switches', junction_marker_id, { position, confirmed }),
     ];
@@ -468,6 +508,16 @@ export class Scheduler {
     const train = this.trains.get(trainId);
     if (!train) return [];
     if (edges.length === 0) return [];
+
+    const missing = this.unknownMarkersInEdges(edges);
+    if (missing.length > 0) {
+      return [
+        effects.publishEvent('anomaly', {
+          severity: 'warning',
+          description: `Route ${routeId} for ${trainId} references unknown marker(s): ${missing.join(', ')}`,
+        }),
+      ];
+    }
 
     train.route = { route_id: routeId, edges, progress_index: 0 };
     train.cleared_edges = [];
