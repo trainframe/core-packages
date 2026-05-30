@@ -50,6 +50,22 @@ describe('layout-config persistence', () => {
     expect(loadLayoutSelection()).toEqual({ kind: 'preset', preset_id: 'simple-loop' });
   });
 
+  it('falls back to the default when stored custom layout fails referential integrity', () => {
+    localStorage.setItem(
+      'trainframe.simulator-ui.layout',
+      JSON.stringify({
+        kind: 'custom',
+        layout: {
+          name: 'dangling',
+          markers: [{ id: 'A', kind: 'block_boundary' }],
+          edges: [{ from_marker_id: 'A', to_marker_id: 'NOPE' }],
+          junctions: [],
+        },
+      }),
+    );
+    expect(loadLayoutSelection()).toEqual({ kind: 'preset', preset_id: 'simple-loop' });
+  });
+
   it('clears storage', () => {
     saveLayoutSelection({ kind: 'preset', preset_id: 'long-loop' });
     clearLayoutSelection();
