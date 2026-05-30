@@ -413,10 +413,17 @@ export class Scheduler {
    * cleared to it. Called after any state change that might unblock a
    * previously-denied edge (capability state change, switch position change,
    * a peer train freeing the block).
+   *
+   * `skipTrainIds` exists for `revokeClearance`: the revoked train must not
+   * be eligible to immediately re-grab the block it was just told to release,
+   * which would defeat the entire operator action.
    */
-  private retryBlockedClearances(): ReadonlyArray<SchedulerEffect> {
+  private retryBlockedClearances(
+    skipTrainIds?: ReadonlySet<string>,
+  ): ReadonlyArray<SchedulerEffect> {
     const out: SchedulerEffect[] = [];
     for (const train of this.trains.values()) {
+      if (skipTrainIds?.has(train.train_id)) continue;
       if (!train.route) continue;
       const nextEdge = train.route.edges[train.route.progress_index];
       if (!nextEdge) continue;
@@ -537,6 +544,37 @@ export class Scheduler {
     // event happens to trigger retry elsewhere.
     out.push(...this.retryBlockedClearances());
     return out;
+  }
+
+  /**
+   * Revoke a train's clearance. The train is told to stop (the wire-level
+   * `revoke_clearance` command), its cleared edges are released back to the
+   * pool, and any peers waiting on those blocks are reconsidered in the same
+   * call so the operator's intent — free this section, give it to someone
+   * else — lands atomically.
+   *
+   * The clearance limit collapses to wherever the train actually is: the next
+   * extension attempt has to start from there. If the train has never moved,
+   * the existing limit (set by `assignRoute`) is left in place.
+   *
+   * No-op if the train isn't registered.
+   */
+  revokeClearance(trainId: string): ReadonlyArray<SchedulerEffect> {
+    const train = this.trains.get(trainId);
+    if (!train) return [];
+
+    train.cleared_edges = [];
+    if (train.last_marker_id !== undefined) {
+      train.clearance_limit_marker_id = train.last_marker_id;
+    }
+
+    return [
+      effects.sendCommand(trainId, 'revoke_clearance', {
+        reason: 'admin',
+        immediate: true,
+      }),
+      ...this.retryBlockedClearances(new Set([trainId])),
+    ];
   }
 }
 

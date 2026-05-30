@@ -109,6 +109,51 @@ describe('Admin HTTP API', () => {
     expect(res.status).toBe(404);
   });
 
+  it('POST /api/trains/:id/revoke_clearance frees the block for waiting peers', async () => {
+    // Two trains contending for M1→M2. T1 wins the initial grant; T2 is
+    // blocked. Operator revokes T1's clearance; T2 must then receive a grant
+    // for the same edge, and T1's scheduler-side cleared_edges must be empty.
+    await harness.testClient.publishEvent('device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    await harness.testClient.publishEvent('device_registered', 'T2', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    await harness.testClient.waitForState('railway/state/devices/T1');
+    await harness.testClient.waitForState('railway/state/devices/T2');
+
+    harness.server.assignRoute('T1', 'route-1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+    await harness.testClient.waitForCommand('T1', 'grant_clearance');
+
+    harness.server.assignRoute('T2', 'route-2', [{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+    // T2 should not have a grant yet — T1 holds the block.
+    const t2GrantsBefore = harness.testClient
+      .commandsFor('T2')
+      .filter((c) => c.command_type === 'grant_clearance');
+    expect(t2GrantsBefore).toHaveLength(0);
+
+    const res = await post('/api/trains/T1/revoke_clearance', {});
+    expect(res.status).toBe(204);
+
+    // Scheduler state should update immediately: T1 holds no edges,
+    // T2 holds M1→M2 via the retried grant.
+    const t1State = harness.server.getScheduler().getTrainState('T1');
+    expect(t1State?.cleared_edges).toEqual([]);
+    const t2State = harness.server.getScheduler().getTrainState('T2');
+    expect(t2State?.cleared_edges).toEqual([{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+
+    // T1 receives the revoke_clearance command on the wire.
+    const revoke = await harness.testClient.waitForCommand('T1', 'revoke_clearance');
+    expect(revoke.command_type).toBe('revoke_clearance');
+
+    // T2 receives the previously-blocked grant_clearance.
+    const t2Grant = await harness.testClient.waitForCommand('T2', 'grant_clearance');
+    expect((t2Grant.payload as { limit_marker_id: string }).limit_marker_id).toBe('M2');
+  });
+
   it('GET /api/state returns scheduler state', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
