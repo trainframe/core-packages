@@ -481,6 +481,11 @@ export class Scheduler {
 
     const grant = this.tryGrantClearance(train, firstEdge);
     if (grant) out.push(grant);
+
+    // Wiping cleared_edges above may have released blocks that peer trains
+    // were waiting on. Retry so they don't sit blocked until an unrelated
+    // event happens to trigger retry elsewhere.
+    out.push(...this.retryBlockedClearances());
     return out;
   }
 }
