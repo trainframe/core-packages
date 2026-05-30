@@ -54,7 +54,12 @@ export function loadLayoutSelection(): StoredLayoutSelection {
       }
     }
     if (parsed.kind === 'custom' && Value.Check(LayoutSchema, parsed.layout)) {
-      return { kind: 'custom', layout: parsed.layout };
+      // Rehydration is a silent recovery path — there's no UI surface to
+      // report an error to — so a referentially-invalid stored layout falls
+      // through to DEFAULT_SELECTION rather than crashing later in LayoutState.
+      if (checkReferentialIntegrity(parsed.layout) === null) {
+        return { kind: 'custom', layout: parsed.layout };
+      }
     }
   } catch {
     // fall through to default
