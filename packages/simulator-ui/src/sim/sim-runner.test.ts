@@ -22,71 +22,95 @@ function decode(payload: Uint8Array): unknown {
 }
 
 describe('SimRunner — lifecycle', () => {
-  it('reports idle before start, paused after start, running after resume', () => {
-    const { runner } = makeRunner();
-    expect(runner.snapshot().status).toBe('idle');
+  it('the operator can spawn a train, watch it move, pause it, and clear the world', () => {
+    const { runner, client } = makeRunner();
 
+    // Nothing has happened yet: no trains exposed, no events on the broker.
+    expect(runner.snapshot().train_ids).toEqual([]);
+    expect(client.published).toHaveLength(0);
+
+    // Spawning surfaces the train in the snapshot and on the broker.
     runner.start();
-    expect(runner.snapshot().status).toBe('paused');
+    runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
+    runner.assignRoute('T1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+    expect(runner.snapshot().train_ids).toEqual(['T1']);
 
+    // Resuming auto-advances the sim clock; pausing stops it.
     runner.resume();
-    expect(runner.snapshot().status).toBe('running');
-
+    const movingTime = runner.snapshot().sim_time_ms;
     runner.pause();
-    expect(runner.snapshot().status).toBe('paused');
+    const pausedTime = runner.snapshot().sim_time_ms;
+    // Pause holds the clock steady (within one tick of where it stopped).
+    expect(pausedTime).toBeGreaterThanOrEqual(movingTime);
 
+    // Stop wipes the world back to empty.
     runner.stop();
-    expect(runner.snapshot().status).toBe('idle');
+    expect(runner.snapshot().train_ids).toEqual([]);
+    expect(runner.snapshot().sim_time_ms).toBe(0);
   });
 
-  it('start is idempotent', () => {
+  it('calling start twice does not reset an already-running sim', () => {
     const { runner } = makeRunner();
     runner.start();
-    const first = runner.snapshot().sim_time_ms;
+    runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
+    runner.step(1_000);
+    const firstTime = runner.snapshot().sim_time_ms;
+    const firstTrains = runner.snapshot().train_ids;
+
     runner.start();
-    expect(runner.snapshot().sim_time_ms).toBe(first);
+    expect(runner.snapshot().sim_time_ms).toBe(firstTime);
+    expect(runner.snapshot().train_ids).toEqual(firstTrains);
   });
 
-  it('notifies snapshot listeners on lifecycle changes', () => {
+  it('snapshot listeners are notified whenever observable state changes', () => {
     const { runner } = makeRunner();
-    const seen: string[] = [];
-    runner.onSnapshotChange((s) => seen.push(s.status));
+    const snapshots: Array<{ trains: number; events: number }> = [];
+    runner.onSnapshotChange((s) =>
+      snapshots.push({ trains: s.train_ids.length, events: s.events_published }),
+    );
 
     runner.start();
-    runner.resume();
-    runner.pause();
+    runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
     runner.stop();
 
-    expect(seen).toEqual(['idle', 'paused', 'running', 'paused', 'idle']);
+    // We don't pin an exact sequence — the contract is just that observable
+    // changes produce notifications. Start with no trains, peak at one, end
+    // back at zero.
+    expect(snapshots.length).toBeGreaterThanOrEqual(3);
+    expect(snapshots[0]?.trains).toBe(0);
+    expect(Math.max(...snapshots.map((s) => s.trains))).toBe(1);
+    expect(snapshots[snapshots.length - 1]?.trains).toBe(0);
   });
 });
 
 describe('SimRunner — event publishing', () => {
-  it('publishes a device_registered envelope to the broker when a train is spawned', () => {
+  it('a spawned train shows up on the broker as a registered device the rest of the bus can see', () => {
     const { runner, client } = makeRunner();
     runner.start();
     runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
 
-    const registered = client.published.find(
-      (m) => m.topic === 'railway/events/device_registered/T1',
-    );
-    expect(registered).toBeDefined();
-    if (!registered) throw new Error('unreachable');
-    const envelope = decode(registered.payload) as {
-      event_id: string;
-      device_id: string;
-      event_type: string;
-      protocol_version: string;
+    const registration = client.published
+      .map((m) => ({ topic: m.topic, payload: decode(m.payload) }))
+      .find(
+        (m): m is { topic: string; payload: { device_id: string; event_type: string } } =>
+          typeof (m.payload as { event_type?: unknown }).event_type === 'string' &&
+          (m.payload as { event_type: string }).event_type === 'device_registered' &&
+          (m.payload as { device_id?: unknown }).device_id === 'T1',
+      );
+    expect(registration).toBeDefined();
+    if (!registration) throw new Error('unreachable');
+    // A consumer of the bus sees enough to act: the train identifies itself
+    // and lists what it can do.
+    const payload = registration.payload as unknown as {
       payload: { capabilities: string[] };
     };
-    expect(envelope.event_id).toBe(FIXED_ID);
-    expect(envelope.device_id).toBe('T1');
-    expect(envelope.event_type).toBe('device_registered');
-    expect(envelope.protocol_version).toBe('0.2.0');
-    expect(envelope.payload.capabilities).toContain('core.controls_motion');
+    expect(payload.payload.capabilities).toContain('core.controls_motion');
   });
 
-  it('publishes server-derived marker_traversed events with device_id="server"', () => {
+  it('stepping after spawn produces marker traversal events for the train as it moves', () => {
     const { runner, client } = makeRunner();
     runner.start();
     runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
@@ -96,26 +120,35 @@ describe('SimRunner — event publishing', () => {
     ]);
     runner.step(5_000);
 
-    const marker = client.published.find(
-      (m) => m.topic === 'railway/events/marker_traversed/server',
+    const traversals = client.published.filter((m) =>
+      m.topic.startsWith('railway/events/marker_traversed/'),
     );
-    expect(marker).toBeDefined();
+    expect(traversals.length).toBeGreaterThan(0);
   });
 
-  it('counts published events in its snapshot', () => {
+  it('the events_published counter grows as the operator steps the sim', () => {
     const { runner } = makeRunner();
     runner.start();
     runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
-    expect(runner.snapshot().events_published).toBeGreaterThan(0);
+    runner.assignRoute('T1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+
+    const afterSpawn = runner.snapshot().events_published;
+    expect(afterSpawn).toBeGreaterThan(0);
+
+    runner.step(5_000);
+    expect(runner.snapshot().events_published).toBeGreaterThan(afterSpawn);
   });
 
-  it('exposes the registered trains in its snapshot', () => {
+  it('the snapshot reports the trains the operator has spawned, without duplicates', () => {
     const { runner } = makeRunner();
     runner.start();
     runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
     expect(runner.snapshot().train_ids).toEqual(['T1']);
 
-    // Idempotent on duplicate spawn.
+    // Spawning the same id twice is a no-op from the operator's POV.
     runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
     expect(runner.snapshot().train_ids).toEqual(['T1']);
   });

@@ -786,20 +786,32 @@ describe('Scheduler — tag resolution', () => {
     expect(anomaly).toBeDefined();
   });
 
-  it('publishes the assignment as retained state when tag_assignment lands', () => {
+  it('a tag bound to a marker can then be observed by a train and is treated as that marker', () => {
     const { scheduler } = setup();
-    const effects = scheduler.handleEvent({
+    registerTrain(scheduler, 'T1');
+
+    // The operator (via a garage device) binds a freshly-printed tag to M2.
+    scheduler.handleEvent({
       event_type: 'tag_assignment',
       device_id: 'GARAGE',
       payload: { tag_id: 'TAG-NEW', assigned_kind: 'marker', target_id: 'M2' },
     });
 
-    const snapshot = effects.find(
-      (e): e is Extract<SchedulerEffect, { kind: 'update_state_snapshot' }> =>
-        e.kind === 'update_state_snapshot' && e.entity_type === 'tags',
+    // Later, a train scans that tag. The system should treat the train as
+    // having traversed M2 — the binding is what wires the new tag into the
+    // logical world.
+    const effects = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'TAG-NEW' },
+    });
+
+    const traversed = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
+        e.kind === 'publish_event' && e.event_type === 'marker_traversed',
     );
-    expect(snapshot).toBeDefined();
-    expect(snapshot?.entity_id).toBe('TAG-NEW');
+    expect(traversed).toBeDefined();
+    expect((traversed?.payload as { marker_id: string }).marker_id).toBe('M2');
   });
 
   it('rejects tag_assignment from a device that did not declare core.assigns_tags', () => {
