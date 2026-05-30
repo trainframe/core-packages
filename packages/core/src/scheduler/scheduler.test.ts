@@ -744,3 +744,79 @@ describe('Scheduler — discovery mode', () => {
     expect(edge?.inferred).toBe(false);
   });
 });
+
+describe('Scheduler — referential validation', () => {
+  it('rejects assignRoute when an edge references a marker not in the layout', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+
+    const effects = scheduler.assignRoute('T1', 'route-bad', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M999' },
+    ]);
+
+    const grant = effects.find(
+      (e) => e.kind === 'send_command' && e.command_type === 'grant_clearance',
+    );
+    expect(grant).toBeUndefined();
+
+    const anomaly = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
+        e.kind === 'publish_event' && e.event_type === 'anomaly',
+    );
+    expect(anomaly).toBeDefined();
+    expect((anomaly?.payload as { description: string }).description).toContain('M999');
+
+    const train = scheduler.getTrainState('T1');
+    expect(train?.route).toBeUndefined();
+    expect(train?.clearance_limit_marker_id).toBeUndefined();
+    expect(train?.cleared_edges).toEqual([]);
+  });
+
+  it('rejects switch_state_changed when the junction marker is not in the layout', () => {
+    const { scheduler } = setupFigure8();
+    registerSwitch(scheduler, 'SW-BOGUS');
+
+    const effects = scheduler.handleEvent({
+      event_type: 'switch_state_changed',
+      device_id: 'SW-BOGUS',
+      payload: { junction_marker_id: 'BOGUS', position: 'main', confirmed: true },
+    });
+
+    const anomaly = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
+        e.kind === 'publish_event' && e.event_type === 'anomaly',
+    );
+    expect(anomaly).toBeDefined();
+    expect((anomaly?.payload as { description: string }).description).toContain('BOGUS');
+
+    const updateState = effects.find(
+      (e) => e.kind === 'update_state_snapshot' && e.entity_type === 'switches',
+    );
+    expect(updateState).toBeUndefined();
+    expect(scheduler.getLayout().getSwitchPosition('BOGUS')).toBeUndefined();
+  });
+
+  it('rejects clearance_request when the next_edge references a marker not in the layout', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+
+    const effects = scheduler.handleEvent({
+      event_type: 'clearance_request',
+      device_id: 'T1',
+      payload: { train_id: 'T1', next_edge: { from_marker_id: 'M1', to_marker_id: 'NOPE' } },
+    });
+
+    const grant = effects.find(
+      (e) => e.kind === 'send_command' && e.command_type === 'grant_clearance',
+    );
+    expect(grant).toBeUndefined();
+
+    const anomaly = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
+        e.kind === 'publish_event' && e.event_type === 'anomaly',
+    );
+    expect(anomaly).toBeDefined();
+    expect((anomaly?.payload as { description: string }).description).toContain('NOPE');
+  });
+});
