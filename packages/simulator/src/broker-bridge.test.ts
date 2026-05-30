@@ -70,36 +70,47 @@ function matches(pattern: string, topic: string): boolean {
 const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 
 describe('BrokerBridge', () => {
-  it('publishes simulation events as envelopes on the right topic', () => {
+  it('a subscriber on the bus sees a newly-spawned virtual train identify itself and advertise what it can do', () => {
     const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, disableScheduler: true });
     const broker = new FakeBroker();
     const bridge = new BrokerBridge(sim, broker, { newId: () => 'id-x' });
     bridge.start();
 
+    // A consumer subscribes to events for T1 before the train exists.
+    const seen: Array<{ event_type: string; capabilities?: string[] }> = [];
+    broker.subscribe('railway/events/#', (m) => {
+      const env = JSON.parse(decode(m.payload)) as {
+        device_id: string;
+        event_type: string;
+        payload: { capabilities?: string[] };
+      };
+      if (env.device_id !== 'T1') return;
+      seen.push({
+        event_type: env.event_type,
+        ...(env.payload.capabilities ? { capabilities: env.payload.capabilities } : {}),
+      });
+    });
+
     sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
 
-    const registered = broker.published.find(
-      (m) => m.topic === 'railway/events/device_registered/T1',
-    );
-    expect(registered).toBeDefined();
-    if (!registered) return;
-    const env = JSON.parse(decode(registered.payload));
-    expect(env.event_type).toBe('device_registered');
-    expect(env.device_id).toBe('T1');
-    expect(env.event_id).toBe('id-x');
-    expect((env.payload as { capabilities: string[] }).capabilities).toContain(
-      'core.controls_motion',
-    );
+    const registration = seen.find((e) => e.event_type === 'device_registered');
+    expect(registration).toBeDefined();
+    expect(registration?.capabilities).toContain('core.controls_motion');
   });
 
-  it('routes inbound commands to the simulation via handleCommand', () => {
+  it('a command published on the bus reaches the virtual train and makes it move', () => {
     const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, disableScheduler: true });
     const broker = new FakeBroker();
     const bridge = new BrokerBridge(sim, broker, { newId: () => 'id-x' });
     bridge.start();
 
-    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+    const train = sim.spawnTrain('T1', {
+      startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+    });
+    expect(train.getVelocity()).toBe(0); // starts stopped
 
+    // A server on the bus assigns a route and grants clearance — exactly as
+    // a real server would.
     broker.inject('railway/commands/T1', {
       command_id: 'c1',
       device_id: 'T1',
@@ -112,10 +123,19 @@ describe('BrokerBridge', () => {
         ],
       },
     });
+    broker.inject('railway/commands/T1', {
+      command_id: 'c2',
+      device_id: 'T1',
+      command_type: 'grant_clearance',
+      payload: {
+        limit_marker_id: 'M2',
+        edges_newly_cleared: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
+      },
+    });
 
-    const assigned = sim.commands.find((c) => c.event_type === 'assign_route');
-    expect(assigned).toBeDefined();
-    expect(assigned?.device_id).toBe('T1');
+    sim.advance(2_000);
+    expect(train.getVelocity()).toBeGreaterThan(0);
+    expect(train.getDistanceIntoEdge()).toBeGreaterThan(0);
   });
 
   it('ignores malformed command messages without throwing', () => {

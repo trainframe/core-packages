@@ -163,24 +163,47 @@ describe('Server — defensive parsing', () => {
 });
 
 describe('Server — admin injection points', () => {
-  it('injectEvent routes through the scheduler and publishes derived state', () => {
+  it('a device registered via injectEvent gains real capabilities — its tag assignment is honoured, an unprivileged device is rejected', () => {
     const { server, client } = makeServer();
+
+    // An unprivileged device tries to bind a tag and is ignored: nothing
+    // retained on the tag's state topic.
+    publishWireEvent(client, 'device_registered', 'IMPOSTOR', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    publishWireEvent(client, 'tag_assignment', 'IMPOSTOR', {
+      tag_id: 'TAG-X',
+      assigned_kind: 'marker',
+      target_id: 'M2',
+    });
+    expect(client.published.find((m) => m.topic === 'railway/state/tags/TAG-X')).toBeUndefined();
+
+    // The admin injects a device registration that grants core.assigns_tags.
+    // That same device can now bind TAG-Y, and the binding becomes visible
+    // to the rest of the bus as retained state.
     server.injectEvent('device_registered', 'ADMIN', {
       capabilities: ['core.assigns_tags'],
     });
-    const retained = client.published.find((m) => m.topic === 'railway/state/devices/ADMIN');
-    expect(retained).toBeDefined();
+    publishWireEvent(client, 'tag_assignment', 'ADMIN', {
+      tag_id: 'TAG-Y',
+      assigned_kind: 'marker',
+      target_id: 'M2',
+    });
+    expect(client.published.find((m) => m.topic === 'railway/state/tags/TAG-Y')).toBeDefined();
   });
 
-  it('publishCommand emits a properly-enveloped command on the right topic', () => {
+  it('a command sent via publishCommand reaches a device subscribed to its command topic', () => {
     const { server, client } = makeServer();
+    const received: Array<{ command_type: string; payload: unknown }> = [];
+    client.subscribe('railway/commands/GATE-1', (msg) => {
+      received.push(decode<{ command_type: string; payload: unknown }>(msg.payload));
+    });
+
     server.publishCommand('GATE-1', 'release_gate', { marker_id: 'M3' });
-    const sent = client.published.find((m) => m.topic === 'railway/commands/GATE-1');
-    expect(sent).toBeDefined();
-    if (!sent) throw new Error('unreachable');
-    const env = JSON.parse(new TextDecoder().decode(sent.payload));
-    expect(env.command_type).toBe('release_gate');
-    expect(env.payload).toEqual({ marker_id: 'M3' });
+
+    expect(received).toHaveLength(1);
+    expect(received[0]?.command_type).toBe('release_gate');
+    expect(received[0]?.payload).toEqual({ marker_id: 'M3' });
   });
 });
 

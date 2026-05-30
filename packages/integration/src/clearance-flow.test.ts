@@ -31,7 +31,7 @@ afterEach(async () => {
 });
 
 describe('Clearance flow through a real broker', () => {
-  it('Given a registered train, when an operator assigns a route, the train sees a grant_clearance command on the wire', async () => {
+  it('Given a registered train, when the operator assigns a route, the train is permitted to advance as far as M2', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
@@ -42,8 +42,9 @@ describe('Clearance flow through a real broker', () => {
       { from_marker_id: 'M2', to_marker_id: 'M3' },
     ]);
 
-    const grant = await harness.testClient.waitForCommand('T1', 'grant_clearance');
-    expect((grant.payload as { limit_marker_id: string }).limit_marker_id).toBe('M2');
+    // The train hears that it may run up to M2 (but not yet beyond).
+    const permission = await harness.testClient.waitForCommand('T1', 'grant_clearance');
+    expect((permission.payload as { limit_marker_id: string }).limit_marker_id).toBe('M2');
   });
 
   it('Given a gate withholds M3, when the train reports passing M2 it receives no further clearance', async () => {
