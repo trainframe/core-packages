@@ -270,6 +270,40 @@ describe('Scheduler — block exclusivity', () => {
     );
     expect(t2Grant).toBeDefined();
   });
+
+  it('releases blocks held by a train when it is reassigned to a route not covering them, granting waiting peers', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    registerTrain(scheduler, 'T2');
+
+    // T1 takes M1→M2 (with M2→M3 queued).
+    scheduler.assignRoute('T1', 'route-1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+
+    // T2 is denied the same M1→M2 edge.
+    const t2Initial = scheduler.assignRoute('T2', 'route-2', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+    ]);
+    expect(
+      t2Initial.find((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance'),
+    ).toBeUndefined();
+
+    // Operator reassigns T1 to a yard-style route that no longer touches
+    // M1→M2. The wipe should release T1's hold on M1→M2 and the scheduler
+    // must retry T2's previously-denied clearance in the same call — no
+    // unrelated event should be required.
+    const reassign = scheduler.assignRoute('T1', 'route-1b', [
+      { from_marker_id: 'M3', to_marker_id: 'M4' },
+    ]);
+
+    const t2Grant = reassign.find(
+      (e) =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+    );
+    expect(t2Grant).toBeDefined();
+  });
 });
 
 describe('Scheduler — anomalies', () => {
