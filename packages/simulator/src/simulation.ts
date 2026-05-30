@@ -157,6 +157,39 @@ export class Simulation {
     return gate;
   }
 
+  /**
+   * Despawn a virtual train. Drops the train from the simulation and emits a
+   * `device_disconnected` event so the scheduler (or any broker-side server)
+   * runs capability disconnect hooks and releases any block the train was
+   * still holding. Models a train being unplugged, derailed, or otherwise
+   * vanishing from the network without a graceful handoff.
+   */
+  despawnTrain(train_id: string): void {
+    if (!this.trains.has(train_id)) return;
+    this.trains.delete(train_id);
+    this.captureAndDispatch({
+      event_type: 'device_disconnected',
+      device_id: train_id,
+      payload: {},
+    });
+  }
+
+  /**
+   * Despawn a virtual gate. Drops the gate from the simulation and emits a
+   * `device_disconnected` event so the scheduler runs the gates_clearance
+   * disconnect hook and releases all the gate's withholds. Models a gating
+   * device losing power while it had a train held.
+   */
+  despawnGate(device_id: string): void {
+    if (!this.gates.has(device_id)) return;
+    this.gates.delete(device_id);
+    this.captureAndDispatch({
+      event_type: 'device_disconnected',
+      device_id,
+      payload: {},
+    });
+  }
+
   /** Assign a route to a train. Requires the embedded scheduler. */
   assignRoute(
     train_id: string,

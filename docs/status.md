@@ -42,6 +42,7 @@ Source: spec §"Capability model", §"Clearance model"; [`ADR-001`](adr/001-capa
 | Scheduler: clearance extension            | shipped | At-marker → grant next edge unless any capability denies. Block exclusivity.                   |
 | Scheduler: gate-release re-grant          | shipped | After capability state changes, retries blocked clearances.                                    |
 | Scheduler: switch-state edge filtering    | shipped | Refuses to clear an edge whose `requires_switch_state` doesn't match the junction's confirmed position. Retries blocked clearances when a switch confirms. |
+| Scheduler: device disconnect               | shipped | `device_disconnected` event runs each capability's `onDeviceDisconnect` hook, deletes the device (and its train state if it owned `core.controls_motion`), then retries blocked clearances so peers waiting on a vanished gate's withhold or a vanished train's block get re-granted. |
 | `LayoutState`                             | shipped | Edges, marker lookup, switch positions, runtime `upsertMarker`, edge inference via `recordTraversal`, inferred→confirmed flip on N traversals (ADR-009), `toLayout()` serialiser for republishing as retained state. |
 | Anomaly emission for unknown tags         | shipped | `tag_observed` against unregistered marker → anomaly event.                                    |
 | Conflict resolution policy                | not started | Open design Q (CLAUDE.md). Block exclusivity is first-come-by-clearance-grant; no priorities. |
@@ -63,6 +64,7 @@ Source: [`docs/spec/simulator-v0.1.md`](spec/simulator-v0.1.md); [`ADR-006`](adr
 | `SeededRandom`                                    | shipped | Bernoulli + normal sources.                                                    |
 | `VirtualTrain`                                    | shipped | Position/velocity, braking, route execution, marker emission with latency.    |
 | `VirtualGate`                                     | shipped | Withhold/release per marker.                                                   |
+| Despawn → `device_disconnected`                   | shipped | `Simulation.despawnTrain` and `despawnGate` drop the device and emit a `device_disconnected` event so the scheduler can run disconnect hooks and free held blocks/withholds. Stand-in for MQTT LWT in pre-broker tests. |
 | `Simulation.onEvent` listener API                 | shipped | Used by simulator-ui to bridge events onto MQTT.                              |
 | Device-only mode (`disableScheduler` + `BrokerBridge`) | shipped | Run virtual devices against a real broker + server with no embedded scheduler. Bridges `simulation.onEvent` → `railway/events/...` and routes `railway/commands/...` to `simulation.handleCommand()`. E2E covered by `@trainframe/integration`. |
 | Realistic-time mode                               | partial | simulator-ui drives `setInterval` advance; no first-class realtime mode in the package. |

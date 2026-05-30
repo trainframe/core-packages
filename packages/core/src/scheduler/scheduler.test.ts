@@ -272,6 +272,92 @@ describe('Scheduler — block exclusivity', () => {
   });
 });
 
+describe('Scheduler — device disconnect', () => {
+  it('releases a gate`s withholds when the gating device disconnects and grants the previously-blocked clearance', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    registerGate(scheduler, 'GATE-M3');
+
+    scheduler.handleEvent({
+      event_type: 'gate_state_changed',
+      device_id: 'GATE-M3',
+      payload: { marker_id: 'M3', state: 'withholding', reason: 'crane busy' },
+    });
+    scheduler.assignRoute('T1', 'route-1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    const atM2 = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+    // Sanity: the gate withholds, so no clearance past M2.
+    expect(findGrant(atM2)).toBeUndefined();
+    expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('M2');
+
+    // Gate vanishes. Its withhold must be released and T1 must be re-granted.
+    const afterDisconnect = scheduler.handleEvent({
+      event_type: 'device_disconnected',
+      device_id: 'GATE-M3',
+      payload: {},
+    });
+
+    const grant = findGrant(afterDisconnect);
+    expect(grant).toBeDefined();
+    expect(grant?.device_id).toBe('T1');
+    expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M3');
+  });
+
+  it('releases a disconnected train`s held block so waiting peers can be granted', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    registerTrain(scheduler, 'T2');
+
+    // T1 takes M1→M2.
+    scheduler.assignRoute('T1', 'route-1', [{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+    // T2 wants the same edge — assigned but no grant.
+    const t2Initial = scheduler.assignRoute('T2', 'route-2', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+    ]);
+    expect(findGrant(t2Initial)).toBeUndefined();
+
+    // T1 vanishes (e.g. derailed and unplugged). The block must release and
+    // T2 must be granted in the same handler call.
+    const afterDisconnect = scheduler.handleEvent({
+      event_type: 'device_disconnected',
+      device_id: 'T1',
+      payload: {},
+    });
+
+    const t2Grant = afterDisconnect.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+    );
+    expect(t2Grant).toBeDefined();
+    expect((t2Grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M2');
+
+    // T1 should no longer be tracked as a train.
+    expect(scheduler.getTrainState('T1')).toBeUndefined();
+    expect(scheduler.getTrainIds()).not.toContain('T1');
+  });
+
+  it('is a no-op for unknown device IDs', () => {
+    const { scheduler } = setup();
+    const effects = scheduler.handleEvent({
+      event_type: 'device_disconnected',
+      device_id: 'NEVER-REGISTERED',
+      payload: {},
+    });
+    expect(effects).toEqual([]);
+  });
+});
+
 describe('Scheduler — anomalies', () => {
   it('emits an anomaly when an unknown tag is observed', () => {
     const { scheduler } = setup();
