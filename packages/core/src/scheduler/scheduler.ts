@@ -212,6 +212,11 @@ export class Scheduler {
     train.last_marker_id = markerId;
     this.advanceRouteIfArrivedAt(train, markerId);
 
+    // Release the block this train has now finished. ADR-002 block exclusivity
+    // gates concurrent occupation, not lifetime ownership — without pruning,
+    // cleared_edges grows monotonically and every following train is denied.
+    train.cleared_edges = train.cleared_edges.filter((e) => e.to_marker_id !== markerId);
+
     // Discovery: when a train moves from one marker to another, either
     // confirm an existing edge (inferred or not) or learn a new one.
     // The `in_discovery_mode` flag on marker_traversed reflects whether
@@ -238,6 +243,8 @@ export class Scheduler {
 
     const grant = this.maybeExtendClearance(train, markerId);
     if (grant) out.push(grant);
+
+    out.push(...this.retryBlockedClearances());
 
     return out;
   }
@@ -362,17 +369,18 @@ export class Scheduler {
   }
 
   /**
-   * Retry clearance for every train waiting at its current limit. Called
-   * after any state change that might unblock a previously-denied edge
-   * (capability state change, switch position change).
+   * Retry clearance for every train whose current route edge isn't yet
+   * cleared to it. Called after any state change that might unblock a
+   * previously-denied edge (capability state change, switch position change,
+   * a peer train freeing the block).
    */
   private retryBlockedClearances(): ReadonlyArray<SchedulerEffect> {
     const out: SchedulerEffect[] = [];
     for (const train of this.trains.values()) {
-      if (!train.route || !train.clearance_limit_marker_id) continue;
+      if (!train.route) continue;
       const nextEdge = train.route.edges[train.route.progress_index];
       if (!nextEdge) continue;
-      if (train.last_marker_id !== train.clearance_limit_marker_id) continue;
+      if (train.cleared_edges.some((e) => edgesEqual(e, nextEdge))) continue;
       const grant = this.tryGrantClearance(train, nextEdge);
       if (grant) out.push(grant);
     }

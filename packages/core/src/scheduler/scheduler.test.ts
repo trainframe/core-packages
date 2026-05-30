@@ -238,6 +238,38 @@ describe('Scheduler — block exclusivity', () => {
     );
     expect(grant).toBeUndefined();
   });
+
+  it('releases a block when the holding train traverses past it, granting waiting trains', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    registerTrain(scheduler, 'T2');
+
+    scheduler.assignRoute('T1', 'route-1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+    const t2Initial = scheduler.assignRoute('T2', 'route-2', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+    ]);
+    // T2 starts blocked: route assigned but no grant.
+    expect(
+      t2Initial.find((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance'),
+    ).toBeUndefined();
+
+    // T1 reaches M2 → finishes M1→M2 and the block should release. T2 was
+    // waiting on M1→M2 with no other change, so the scheduler must retry its
+    // grant in the same handler call.
+    const effects = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+    const t2Grant = effects.find(
+      (e) =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+    );
+    expect(t2Grant).toBeDefined();
+  });
 });
 
 describe('Scheduler — anomalies', () => {
