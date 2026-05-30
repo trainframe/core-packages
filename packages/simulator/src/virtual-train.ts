@@ -122,9 +122,13 @@ export class VirtualTrain {
         this.route_index = 0;
         this.route_id = route_id ?? null;
         this.route_progress_edge_index = 0;
-        if (!this.current_edge && edges[0]) {
+        // Always snap to the new route's first edge. Without this, a moving
+        // train ignores reassignment and keeps walking its old plan with the
+        // new route_id mismatched against its current edge.
+        if (edges[0]) {
           this.current_edge = edges[0];
           this.distance_into_edge_mm = 0;
+          this.emitted_current_edge_end = false;
         }
         // Speed will be set when clearance arrives.
         break;
