@@ -54,4 +54,19 @@ test.describe('Simulator UI: operator panel', () => {
     await page.getByRole('button', { name: /step 1s/i }).click();
     await expect(clock).not.toHaveText('0.0s');
   });
+
+  test('stopping the sim resets the Train ID field so the next spawn starts at T1 again', async ({
+    page,
+  }) => {
+    const trainIdInput = page.getByRole('textbox', { name: /Train ID/i });
+    await expect(trainIdInput).toHaveValue('T1');
+
+    await page.getByRole('button', { name: /spawn train/i }).click();
+    await expect(trainIdInput).toHaveValue('T2');
+
+    await page.getByRole('button', { name: /^stop$/i }).click();
+    await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/none/i);
+    // No trains exist anymore — the form should reflect that.
+    await expect(trainIdInput).toHaveValue('T1');
+  });
 });

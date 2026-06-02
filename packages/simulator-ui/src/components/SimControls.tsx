@@ -1,5 +1,5 @@
 import type { Layout } from '@trainframe/protocol';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useSimRunner } from '../sim/use-sim-runner.js';
 
 const STEP_MS = 1000;
@@ -30,6 +30,13 @@ export function SimControls({ layout }: SimControlsProps) {
   const [trainId, setTrainId] = useState(computedNextId);
   const [overshootRate, setOvershootRate] = useState('0');
   const [missRate, setMissRate] = useState('0.01');
+
+  // When the train list empties (Stop), reset the form's Train ID so the
+  // operator's next spawn doesn't start at the last auto-incremented value
+  // and skip over T1.
+  useEffect(() => {
+    if (snapshot.train_ids.length === 0) setTrainId('T1');
+  }, [snapshot.train_ids.length]);
 
   function handleSpawn(e: React.FormEvent) {
     e.preventDefault();
