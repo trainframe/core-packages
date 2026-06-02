@@ -71,6 +71,39 @@ describe('end-to-end: virtual train obeys clearances', () => {
     expect(traversalsAfter).toEqual(['M2', 'M3', 'M4']);
   });
 
+  it('a train on a short edge still advances when the next-edge grant arrives', () => {
+    // Layout where the first edge is shorter than the previously-hardcoded
+    // 200mm transition threshold. Discovered live: SHORT_LOOP edges of 100mm
+    // left the train parked at M2 because the grant_clearance handler
+    // checked `distance_into_edge_mm >= 200` instead of the real edge length.
+    const SHORT_LOOP: Layout = {
+      name: 'short-loop',
+      markers: [
+        { id: 'M1', kind: 'block_boundary' },
+        { id: 'M2', kind: 'block_boundary' },
+        { id: 'M3', kind: 'block_boundary' },
+      ],
+      edges: [
+        { from_marker_id: 'M1', to_marker_id: 'M2', estimated_length_mm: 100 },
+        { from_marker_id: 'M2', to_marker_id: 'M3', estimated_length_mm: 100 },
+      ],
+      junctions: [],
+    };
+    const sim = new Simulation({ layout: SHORT_LOOP, seed: 1, register_tags: 'identity' });
+    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+    sim.assignRoute('T1', [
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+    ]);
+
+    sim.advance(10_000);
+
+    const traversals = sim
+      .getEventsOfType('marker_traversed')
+      .map((t) => (t.payload as { marker_id: string }).marker_id);
+    expect(traversals).toEqual(['M2', 'M3']);
+  });
+
   it('two trains on the same route do not occupy the same edge', () => {
     const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 2, register_tags: 'identity' });
     sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });

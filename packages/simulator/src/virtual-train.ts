@@ -137,9 +137,12 @@ export class VirtualTrain {
         const { limit_marker_id } = payload as { limit_marker_id: string };
         this.clearance_limit_marker_id = limit_marker_id;
         // If parked at end of current edge (= old limit), transition to next.
+        // Use the real edge length, not a hardcoded 200 — short edges would
+        // otherwise leave a parked train unable to advance when its
+        // extension grant arrives.
         if (
           this.current_edge &&
-          this.distance_into_edge_mm >= 200 && // edge length, hardcoded for now
+          this.distance_into_edge_mm >= this.currentEdgeLength() &&
           this.velocity_mm_s === 0
         ) {
           const at_marker = this.current_edge.to_marker_id;
