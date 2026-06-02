@@ -4,13 +4,21 @@ import { openSimulatorUi, openVisualiser } from '../src/playwright-helpers.js';
 import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
 /**
- * When the operator closes the simulator-ui tab (or the page navigates away),
- * the `pagehide` event fires and the `useSimRunner` hook calls `runner.stop()`.
- * That despawns each train through the Simulation (emitting `device_disconnected`),
- * so the visualiser stops drawing orphaned train icons.
+ * When the operator closes the simulator-ui tab, Chromium fires the
+ * `pagehide` event before tearing down the page. The `useSimRunner` hook
+ * listens for that event and calls `runner.stop()`, which despawns each train
+ * through the Simulation (emitting `device_disconnected`). The visualiser's
+ * train-position and train-status hooks remove a train when they see that
+ * event, so the icon disappears.
  *
  * Without the pagehide handler, closing the tab leaves trains visible in the
  * visualiser forever because no disconnect events are published.
+ *
+ * The test drives the journey as a real operator would: it opens both UIs,
+ * spawns a train, and closes the simulator-ui page via Playwright's
+ * `page.close()`. This is safe because Chromium dispatches `pagehide`
+ * synchronously as part of the page-close sequence and the MQTT frame is
+ * small enough to flush within that window before the WebSocket tears down.
  */
 
 const CLOSE_LOOP: Layout = {
@@ -53,14 +61,11 @@ test.describe
       await sim.getByRole('button', { name: /Spawn train/i }).click();
       await expect(visualiser.locator('[data-train-id="T1"]')).toBeVisible({ timeout: 8_000 });
 
-      // Simulate the user closing the tab by dispatching `pagehide` while the
-      // WebSocket is still open, then closing the context. Direct
-      // `context.close()` tears down the WebSocket before the MQTT frame can
-      // flush; dispatching the event manually keeps the connection alive for
-      // the synchronous publish path.
-      await sim.evaluate(() =>
-        window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: false })),
-      );
+      // Close the tab the way a real operator would. Playwright's page.close()
+      // triggers the browser's normal unload sequence (including pagehide),
+      // which causes useSimRunner to call runner.stop() and publish
+      // device_disconnected for each train before the WebSocket closes.
+      await sim.close();
       await expect(visualiser.locator('[data-train-id="T1"]')).toHaveCount(0, { timeout: 5_000 });
     });
   });
