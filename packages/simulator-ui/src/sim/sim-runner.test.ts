@@ -153,7 +153,7 @@ describe('SimRunner — event publishing', () => {
     expect(runner.snapshot().train_ids).toEqual(['T1']);
   });
 
-  it('spawnTrain returns true on a fresh id and false when the id is already taken', () => {
+  it("the operator can't accidentally spawn the same train_id twice", () => {
     const { runner } = makeRunner();
     runner.start();
     expect(runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' })).toBe(true);
