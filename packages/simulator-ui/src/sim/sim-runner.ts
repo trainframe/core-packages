@@ -104,9 +104,11 @@ export class SimRunner {
   /**
    * Publish the active layout as a retained MQTT state message so the
    * visualiser (or any other subscriber) can reconstruct the world's shape
-   * on first connection. Topic: `railway/state/layout/<layout_name>`.
+   * on first connection. Topic: `railway/state/layout/<layout_name>`. Public
+   * so the host UI can call it as soon as the runner mounts — applying a
+   * layout is an operator-visible action and should propagate before Start.
    */
-  private publishLayoutState(): void {
+  publishLayoutState(): void {
     const topic = `railway/state/layout/${this.options.layout.name}`;
     const payload = new TextEncoder().encode(JSON.stringify(this.options.layout));
     this.client.publish(topic, payload, { retain: true });

@@ -108,3 +108,38 @@ test.describe
       await expect(visualiser.locator('[data-marker-id="A"]')).toHaveCount(0);
     });
   });
+
+test.describe
+  .serial('Operator applies a new layout without starting the sim', () => {
+    // Fresh harness so the broker doesn't carry retained state from the prior
+    // describe block. We need to start from "visualiser sees simple-loop only".
+    let harness: UiHarness;
+
+    test.beforeAll(async () => {
+      harness = await startUiHarness({ layout: SIMPLE_LOOP_HARNESS, wsPort: 9001 });
+    });
+
+    test.afterAll(async () => {
+      await harness.shutdown();
+    });
+
+    test('Apply layout alone (without Start) propagates the new layout to the visualiser', async ({
+      browser,
+    }) => {
+      const visualiser = await openVisualiser(browser);
+      const sim = await openSimulatorUi(browser, { preset: 'simple-loop' });
+
+      // Initial: visualiser sees simple-loop (M1..M4).
+      await expect(visualiser.locator('[data-marker-id="M4"]')).toBeVisible();
+      await expect(visualiser.locator('[data-marker-id="M5"]')).toHaveCount(0);
+
+      // Operator picks long-loop, applies. They DO NOT press Start —
+      // applying a layout is itself a meaningful operator action ("this
+      // is my layout now") and the visualiser should reflect it.
+      await sim.getByLabel(/Source/i).selectOption('long-loop');
+      await sim.getByRole('button', { name: /Apply layout/i }).click();
+
+      await expect(visualiser.locator('[data-marker-id="M5"]')).toBeVisible({ timeout: 5_000 });
+      await expect(visualiser.locator('[data-marker-id="M6"]')).toBeVisible({ timeout: 5_000 });
+    });
+  });

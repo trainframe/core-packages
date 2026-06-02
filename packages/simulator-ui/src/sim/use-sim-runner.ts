@@ -41,6 +41,12 @@ export function useSimRunner(layout: Layout, tick_ms: number): SimRunnerControls
 
   useEffect(() => runner.onSnapshotChange(setSnapshot), [runner]);
   useEffect(() => () => runner.stop(), [runner]);
+  // Republish the retained layout state whenever the active layout changes,
+  // even before Start. Applying a layout is itself an operator action and
+  // the visualiser should reflect it without requiring the sim to be run.
+  useEffect(() => {
+    runner.publishLayoutState();
+  }, [runner]);
 
   return {
     snapshot,
