@@ -7,7 +7,7 @@ interface SettingsProps {
 }
 
 export function Settings({ initialUrl }: SettingsProps) {
-  const { client } = useBroker();
+  const { client, status, error } = useBroker();
   const [url, setUrl] = useState(initialUrl);
   const [savedUrl, setSavedUrl] = useState(initialUrl);
 
@@ -35,6 +35,11 @@ export function Settings({ initialUrl }: SettingsProps) {
       <p>
         Currently configured: <code>{savedUrl}</code>
       </p>
+      {status === 'error' && (
+        <p role="alert" data-testid="broker-error">
+          {error?.message ?? "Couldn't reach the broker — check the URL."}
+        </p>
+      )}
     </form>
   );
 }

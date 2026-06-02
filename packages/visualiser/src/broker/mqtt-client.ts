@@ -27,12 +27,34 @@ export class MqttBrokerSubscriber implements BrokerSubscriber {
     this.client = client;
 
     client.on('connect', () => {
+      if (this.client !== client) return;
       this.setStatus('connected');
       for (const topic of this.subs.keys()) client.subscribe(topic);
     });
-    client.on('reconnect', () => this.setStatus('connecting'));
-    client.on('close', () => this.setStatus('disconnected'));
-    client.on('error', (error) => this.setStatus('error', error));
+    client.on('reconnect', () => {
+      if (this.client !== client) return;
+      this.setStatus('connecting');
+    });
+    // In the browser the mqtt library does not emit 'error' for WebSocket
+    // connection failures (the error object has no `.code`, so mqtt silently
+    // swallows it). Surface the failure via 'close' instead: if the socket
+    // closes while we are still in the 'connecting' state we never reached the
+    // broker — treat that as an error. A close from a previously 'connected'
+    // socket is a normal disconnection. Guard against stale events from a
+    // superseded client (the old client fires 'close' after end(true) even
+    // though connect() has already created a new one).
+    client.on('close', () => {
+      if (this.client !== client) return;
+      if (this.currentStatus === 'connecting') {
+        this.setStatus('error', new Error("Couldn't reach the broker — check the URL."));
+      } else if (this.currentStatus !== 'error') {
+        this.setStatus('disconnected');
+      }
+    });
+    client.on('error', (error) => {
+      if (this.client !== client) return;
+      this.setStatus('error', error);
+    });
     client.on('message', (topic, payload) => {
       // Match the concrete inbound topic against every subscription pattern.
       // The `mqtt` library only fires `message` for topics that matched some
