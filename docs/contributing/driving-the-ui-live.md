@@ -7,6 +7,19 @@ browser (Playwright UI mode, headed runs, manual). The point is to set up
 a journey end-to-end (custom track, multiple trains, gates, the lot) without
 re-discovering the hard-won lessons every time.
 
+**Build setups the way a human operator would, not by pasting JSON.**
+Trainframe is the protocol for a smart wooden train set; the simulator-ui
+exists to let an operator construct and run that set the way they would in
+real life — place a marker, connect two markers with an edge, declare a
+station, drop a train onto the track, sketch its route. Pasting a layout
+JSON blob skips the whole authoring journey and gives a misleading
+impression that the platform is "ready" when in reality it has none of the
+affordances a real operator would need. When testing or demoing, go
+through the same per-entity flow a user would: add markers one at a time,
+draw edges between them, mark stations, spawn trains with routes you
+assemble click-by-click. If a flow can't be completed by clicking through
+the UI alone — that's the bug to fix.
+
 If you're writing a Playwright **spec** instead, the model is
 `packages/ui-tests/tests/multi-train-journey.spec.ts` and the shared helpers
 at `packages/ui-tests/src/playwright-helpers.ts`. The principles below
