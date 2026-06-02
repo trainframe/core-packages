@@ -104,7 +104,7 @@ test.describe('Simulator UI: operator panel', () => {
     await page.getByRole('button', { name: /spawn train/i }).click();
 
     // An inline alert explaining the conflict must be visible.
-    const errorEl = page.getByTestId('spawn-error');
+    const errorEl = page.getByRole('alert');
     await expect(errorEl).toBeVisible();
     await expect(errorEl).toHaveText(/T1 already exists/i);
 
@@ -116,7 +116,7 @@ test.describe('Simulator UI: operator panel', () => {
     // Fixing the ID clears the error.
     await trainIdInput.fill('T2');
     await page.getByRole('button', { name: /spawn train/i }).click();
-    await expect(page.getByTestId('spawn-error')).toHaveCount(0);
+    await expect(page.getByRole('alert')).toHaveCount(0);
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1, T2/);
   });
 
@@ -142,7 +142,7 @@ test.describe('Simulator UI: operator panel', () => {
     // Spawn must be disabled with no ambiguity.
     await expect(page.getByRole('button', { name: /spawn train/i })).toBeDisabled();
     // The operator gets a clear explanation, not just a greyed-out button.
-    await expect(page.getByTestId('spawn-disabled-hint')).toBeVisible();
-    await expect(page.getByTestId('spawn-disabled-hint')).toHaveText(/add at least one edge/i);
+    await expect(page.getByText(/add at least one edge/i)).toBeVisible();
+    await expect(page.getByText(/add at least one edge/i)).toBeVisible();
   });
 });

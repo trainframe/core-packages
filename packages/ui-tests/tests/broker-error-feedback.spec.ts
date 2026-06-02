@@ -45,8 +45,7 @@ test.describe
       const page = await openVisualiser(browser);
 
       // Sanity-check: visualiser starts connected to the harness.
-      const statusBadge = page.locator('output[data-status]');
-      await expect(statusBadge).toHaveAttribute('data-status', 'connected', { timeout: 10_000 });
+      await expect(page.getByRole('status')).toHaveText(/connected/i, { timeout: 10_000 });
 
       // Operator opens Settings (already visible) and types a URL that has no
       // broker behind it (port 9999 is unoccupied during the test run).
@@ -55,7 +54,7 @@ test.describe
       await page.getByRole('button', { name: /connect/i }).click();
 
       // The error alert must appear and mention the broker.
-      const errorAlert = page.getByTestId('broker-error');
+      const errorAlert = page.getByRole('alert');
       await expect(errorAlert).toBeVisible({ timeout: 10_000 });
       await expect(errorAlert).toContainText(/broker/i);
 
@@ -65,7 +64,7 @@ test.describe
 
       // The alert disappears and the status badge returns to connected.
       await expect(errorAlert).toHaveCount(0, { timeout: 10_000 });
-      await expect(statusBadge).toHaveAttribute('data-status', 'connected', { timeout: 10_000 });
+      await expect(page.getByRole('status')).toHaveText(/connected/i, { timeout: 10_000 });
     });
   });
 
@@ -93,8 +92,7 @@ test.describe
       });
 
       // Sanity-check: sim-ui starts connected to the harness.
-      const statusBadge = page.locator('output[data-status]');
-      await expect(statusBadge).toHaveAttribute('data-status', 'connected', { timeout: 10_000 });
+      await expect(page.getByRole('status')).toHaveText(/connected/i, { timeout: 10_000 });
 
       // Operator opens Settings (already visible) and types a URL that has no
       // broker behind it.
@@ -103,7 +101,7 @@ test.describe
       await page.getByRole('button', { name: /connect/i }).click();
 
       // The error alert must appear and mention the broker.
-      const errorAlert = page.getByTestId('broker-error');
+      const errorAlert = page.getByRole('alert');
       await expect(errorAlert).toBeVisible({ timeout: 10_000 });
       await expect(errorAlert).toContainText(/broker/i);
 
@@ -113,6 +111,6 @@ test.describe
 
       // The alert disappears and the status badge returns to connected.
       await expect(errorAlert).toHaveCount(0, { timeout: 10_000 });
-      await expect(statusBadge).toHaveAttribute('data-status', 'connected', { timeout: 10_000 });
+      await expect(page.getByRole('status')).toHaveText(/connected/i, { timeout: 10_000 });
     });
   });
