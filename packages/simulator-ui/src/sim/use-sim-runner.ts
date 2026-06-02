@@ -15,7 +15,7 @@ export interface SimRunnerControls {
     train_id: string,
     edge: { from_marker_id: string; to_marker_id: string },
     config?: Partial<VirtualTrainConfig>,
-  ) => void;
+  ) => boolean;
   readonly assignRoute: (
     train_id: string,
     edges: ReadonlyArray<{ from_marker_id: string; to_marker_id: string }>,
