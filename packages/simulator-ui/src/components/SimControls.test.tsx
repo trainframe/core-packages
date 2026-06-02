@@ -1,11 +1,10 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { Layout } from '@trainframe/protocol';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
 import { InMemoryBrokerClient } from '../broker/in-memory-client.js';
 import { SIMPLE_LOOP } from '../sim/layouts.js';
-import { SimRunner } from '../sim/sim-runner.js';
 import { SimControls } from './SimControls.js';
 
 function renderControls(layout: Layout = SIMPLE_LOOP) {
@@ -93,37 +92,49 @@ describe('SimControls — operator panel', () => {
     expect(screen.getByRole('spinbutton', { name: /miss rate/i })).toHaveValue(0.01);
   });
 
-  it('the overshoot rate the operator types is applied to the spawned train', async () => {
+  it('the overshoot rate the operator types causes an anomaly event on the broker when the train overshoots', async () => {
     const user = userEvent.setup();
-    const spy = vi.spyOn(SimRunner.prototype, 'spawnTrain');
+    const { client } = renderControls();
 
-    renderControls();
-
+    // Set overshoot to 1 — brakes fail every time, guaranteeing an overshoot
+    // on the first clearance limit the train reaches (M2 on the SIMPLE_LOOP).
     const overshootInput = screen.getByRole('spinbutton', { name: /overshoot rate/i });
     await user.clear(overshootInput);
-    await user.type(overshootInput, '0.5');
+    await user.type(overshootInput, '1');
 
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
 
-    expect(spy).toHaveBeenCalledOnce();
-    const [, , config] = spy.mock.calls[0] ?? [];
-    expect(config).toMatchObject({ overshoot_rate: 0.5 });
+    // Pause auto-run so steps are the only source of virtual time advancement.
+    await user.click(screen.getByRole('button', { name: /^pause$/i }));
 
-    spy.mockRestore();
+    // Step enough virtual time for the train to cross M2 at speed. The
+    // SIMPLE_LOOP edge is 200 mm at max 100 mm/s — roughly 2 s to traverse.
+    // Six 1 s steps give comfortable headroom.
+    for (let i = 0; i < 6; i++) {
+      await user.click(screen.getByRole('button', { name: /^step 1s$/i }));
+    }
+
+    const anomalyMsg = client.published.find((m) =>
+      m.topic.startsWith('railway/events/anomaly/T1'),
+    );
+    expect(anomalyMsg).toBeDefined();
+    const envelope = JSON.parse(new TextDecoder().decode(anomalyMsg?.payload)) as {
+      payload: { description: string };
+    };
+    expect(envelope.payload.description).toMatch(/overshot/i);
   });
 
   it('shows an empty-layout hint when the layout has no edges and Spawn is disabled', () => {
     renderControls(EDGELESS_LAYOUT);
 
     expect(screen.getByRole('button', { name: /spawn train/i })).toBeDisabled();
-    expect(screen.getByTestId('spawn-disabled-hint')).toBeInTheDocument();
-    expect(screen.getByTestId('spawn-disabled-hint')).toHaveTextContent(/add at least one edge/i);
+    expect(screen.getByText(/add at least one edge/i)).toBeInTheDocument();
   });
 
   it('does not show the empty-layout hint when the layout has edges', () => {
     renderControls();
 
-    expect(screen.queryByTestId('spawn-disabled-hint')).not.toBeInTheDocument();
+    expect(screen.queryByText(/add at least one edge/i)).not.toBeInTheDocument();
   });
 
   it('shows a duplicate-id error and does not advance the counter when the operator re-uses a train ID', async () => {
@@ -141,8 +152,7 @@ describe('SimControls — operator panel', () => {
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
 
     // Error appears; the counter has NOT advanced past T2.
-    const errorEl = screen.getByTestId('spawn-error');
-    expect(errorEl).toHaveAttribute('role', 'alert');
+    const errorEl = screen.getByRole('alert');
     expect(errorEl).toHaveTextContent(/T1 already exists/i);
     expect(trainIdInput).toHaveValue('T1');
   });
@@ -157,13 +167,13 @@ describe('SimControls — operator panel', () => {
     await user.clear(trainIdInput);
     await user.type(trainIdInput, 'T1');
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
-    expect(screen.getByTestId('spawn-error')).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toBeInTheDocument();
 
     // Fix the ID to a fresh one and spawn again.
     await user.clear(trainIdInput);
     await user.type(trainIdInput, 'T2');
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
 
-    expect(screen.queryByTestId('spawn-error')).not.toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });
