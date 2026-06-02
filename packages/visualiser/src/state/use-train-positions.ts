@@ -33,7 +33,32 @@ export function useTrainPositions(): TrainPositions {
     return client.subscribe('railway/events/marker_traversed/+', handler);
   }, [client]);
 
+  // Remove a train from the position map when it disconnects, so a Stop in
+  // the simulator-ui stops the visualiser from drawing the departed train.
+  useEffect(() => {
+    const handler = (message: BrokerMessage) => {
+      const trainId = trainIdFromDisconnect(message.topic);
+      if (!trainId) return;
+      setPositions((prev) => {
+        if (!prev.has(trainId)) return prev;
+        const next = new Map(prev);
+        next.delete(trainId);
+        return next;
+      });
+    };
+    return client.subscribe('railway/events/device_disconnected/+', handler);
+  }, [client]);
+
   return positions;
+}
+
+function trainIdFromDisconnect(topic: string): string | null {
+  const parts = topic.split('/');
+  if (parts.length !== 4) return null;
+  if (parts[0] !== 'railway' || parts[1] !== 'events' || parts[2] !== 'device_disconnected') {
+    return null;
+  }
+  return parts[3] ?? null;
 }
 
 function parseTraversal(payload: Uint8Array): MarkerTraversedPayload | null {

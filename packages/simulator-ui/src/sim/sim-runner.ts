@@ -135,6 +135,15 @@ export class SimRunner {
   /** Tear down the simulation, dropping all state. */
   stop(): void {
     this.pause();
+    // Despawn each train through the Simulation BEFORE we drop our reference
+    // to it. Despawn emits `device_disconnected` through the captured-event
+    // sink, which we route to the broker — so subscribers like the visualiser
+    // stop drawing trains that are no longer present.
+    if (this.simulation) {
+      for (const trainId of this.train_ids) {
+        this.simulation.despawnTrain(trainId);
+      }
+    }
     this.bridge?.stop();
     this.bridge = null;
     this.unsubscribeFromSim?.();

@@ -55,7 +55,7 @@ test.describe('Simulator UI: operator panel', () => {
     await expect(clock).not.toHaveText('0.0s');
   });
 
-  test('spawning while paused respects the operator\'s pause — sim stays paused', async ({
+  test("spawning while paused respects the operator's pause — sim stays paused", async ({
     page,
   }) => {
     // Spawn from idle: auto-resumes, sim runs.

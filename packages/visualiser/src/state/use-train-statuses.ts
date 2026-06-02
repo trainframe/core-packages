@@ -33,7 +33,32 @@ export function useTrainStatuses(): TrainStatuses {
     return client.subscribe('railway/events/train_status/+', handler);
   }, [client]);
 
+  // Drop a train when the broker tells us its device disconnected — without
+  // this the last train_status is sticky forever, including across Stop.
+  useEffect(() => {
+    const handler = (message: BrokerMessage) => {
+      const trainId = trainIdFromDisconnect(message.topic);
+      if (!trainId) return;
+      setStatuses((prev) => {
+        if (!prev.has(trainId)) return prev;
+        const next = new Map(prev);
+        next.delete(trainId);
+        return next;
+      });
+    };
+    return client.subscribe('railway/events/device_disconnected/+', handler);
+  }, [client]);
+
   return statuses;
+}
+
+function trainIdFromDisconnect(topic: string): string | null {
+  const parts = topic.split('/');
+  if (parts.length !== 4) return null;
+  if (parts[0] !== 'railway' || parts[1] !== 'events' || parts[2] !== 'device_disconnected') {
+    return null;
+  }
+  return parts[3] ?? null;
 }
 
 function parseStatus(payload: Uint8Array): TrainStatus | null {
