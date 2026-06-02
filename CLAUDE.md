@@ -158,6 +158,12 @@ These are unresolved; ask before assuming an answer.
 - `docs/spec/protocol-v0.2.md` — current protocol spec
 - `docs/spec/simulator-v0.1.md` — simulator architecture
 - `docs/contributing/new-device.md` — how to build a new device type
+- `docs/contributing/driving-the-ui-live.md` — playbook for live-driving the
+  simulator-ui and visualiser through a controllable browser (Chrome DevTools
+  MCP, headed Playwright, manual). Read this *before* opening browser tabs
+  for a multi-step journey — it captures the gotchas (isolated contexts,
+  `localhost` vs `127.0.0.1`, broker port conflicts, controlled-input
+  setters) that otherwise cost real time.
 - `docs/adr/` — decisions and reasoning
 
 ## When in doubt
