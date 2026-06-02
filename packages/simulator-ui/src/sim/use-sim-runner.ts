@@ -41,6 +41,16 @@ export function useSimRunner(layout: Layout, tick_ms: number): SimRunnerControls
 
   useEffect(() => runner.onSnapshotChange(setSnapshot), [runner]);
   useEffect(() => () => runner.stop(), [runner]);
+  // Stop the runner (and despawn trains) when the tab is closed or navigated
+  // away. `pagehide` is more reliably fired on tab close than `beforeunload`
+  // and also fires on mobile background transitions. Synchronous publish is
+  // best-effort — the browser allows in-flight XHR/MQTT frames during the
+  // pagehide window — but covers the common desktop case.
+  useEffect(() => {
+    const handlePageHide = () => runner.stop();
+    window.addEventListener('pagehide', handlePageHide);
+    return () => window.removeEventListener('pagehide', handlePageHide);
+  }, [runner]);
   // Republish the retained layout state whenever the active layout changes,
   // even before Start. Applying a layout is itself an operator action and
   // the visualiser should reflect it without requiring the sim to be run.
