@@ -8,6 +8,14 @@ import {
 } from '@trainframe/simulator';
 import type { BrokerClient } from '../broker/client.js';
 
+/**
+ * Dwell time at a station: the virtual gate withholds clearance at the
+ * station marker for this long, then releases for the same duration, looping
+ * while the runner is active. Exported so tests can pace timers around it
+ * and so a future settings UI can override it.
+ */
+export const STATION_DWELL_MS = 5_000;
+
 interface RouteEdge {
   from_marker_id: string;
   to_marker_id: string;
@@ -74,6 +82,17 @@ export class SimRunner {
   private readonly snapshotListeners = new Set<SnapshotListener>();
   private readonly newId: () => string;
   private readonly mode: SimRunnerMode;
+  /**
+   * Interval handles for station-dwell gates, keyed by the gate's device ID.
+   * Populated on `start()` for every `station_stop` marker in the layout and
+   * cleared on `stop()` so the timers don't leak past teardown.
+   */
+  private readonly stationDwellHandles = new Map<string, ReturnType<typeof setInterval>>();
+  /**
+   * Track which station gates we auto-spawned so `stop()` can despawn them
+   * even if the simulation has been touched directly.
+   */
+  private readonly stationGateIds: string[] = [];
 
   constructor(
     private readonly client: BrokerClient,
@@ -98,7 +117,39 @@ export class SimRunner {
       this.bridge.start();
     }
     this.publishLayoutState();
+    this.spawnStationDwellGates();
     this.notify();
+  }
+
+  /**
+   * Spawn a `VirtualGate` for every `station_stop` marker in the layout and
+   * begin a continuous withhold/release cycle so trains approaching a station
+   * visibly pause there. The gates use the device ID pattern
+   * `STATION-${markerId}` so subscribers can tell auto-spawned dwell gates
+   * from operator-placed gates at a glance. Called after `publishLayoutState`
+   * so subscribers see the layout before any station gate registrations.
+   */
+  private spawnStationDwellGates(): void {
+    if (!this.simulation) return;
+    const stationMarkers = this.options.layout.markers.filter((m) => m.kind === 'station_stop');
+    for (const marker of stationMarkers) {
+      const deviceId = `STATION-${marker.id}`;
+      const gate = this.simulation.spawnGate(deviceId);
+      this.stationGateIds.push(deviceId);
+      // Initial state: withhold immediately so the first approaching train
+      // stalls if it arrives during this window.
+      gate.withhold(marker.id);
+      let withholding = true;
+      const handle = setInterval(() => {
+        if (withholding) {
+          gate.release(marker.id);
+        } else {
+          gate.withhold(marker.id);
+        }
+        withholding = !withholding;
+      }, STATION_DWELL_MS);
+      this.stationDwellHandles.set(deviceId, handle);
+    }
   }
 
   /**
@@ -135,15 +186,26 @@ export class SimRunner {
   /** Tear down the simulation, dropping all state. */
   stop(): void {
     this.pause();
-    // Despawn each train through the Simulation BEFORE we drop our reference
-    // to it. Despawn emits `device_disconnected` through the captured-event
-    // sink, which we route to the broker — so subscribers like the visualiser
-    // stop drawing trains that are no longer present.
+    // Stop the station-dwell timers BEFORE despawning gates so a pending
+    // interval tick can't try to withhold/release a freshly-deleted gate.
+    for (const handle of this.stationDwellHandles.values()) {
+      clearInterval(handle);
+    }
+    this.stationDwellHandles.clear();
+    // Despawn each train and each auto-spawned station gate through the
+    // Simulation BEFORE we drop our reference to it. Despawn emits
+    // `device_disconnected` through the captured-event sink, which we route
+    // to the broker — so subscribers like the visualiser stop drawing
+    // entities that are no longer present.
     if (this.simulation) {
       for (const trainId of this.train_ids) {
         this.simulation.despawnTrain(trainId);
       }
+      for (const gateId of this.stationGateIds) {
+        this.simulation.despawnGate(gateId);
+      }
     }
+    this.stationGateIds.length = 0;
     this.bridge?.stop();
     this.bridge = null;
     this.unsubscribeFromSim?.();

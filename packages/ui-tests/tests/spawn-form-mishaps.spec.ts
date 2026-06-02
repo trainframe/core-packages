@@ -55,6 +55,11 @@ test.describe
       // edge crossing the train approaches will mishap.
       await sim.getByLabel(/^Train ID/i).fill('T1');
       await sim.getByLabel(/Overshoot rate/i).fill('1');
+      // Build a route through the loop so the train has a plan to follow.
+      for (const marker of ['M1', 'M2', 'M3', 'M4']) {
+        await sim.getByLabel(/marker/i).selectOption(marker);
+        await sim.getByRole('button', { name: /add to route/i }).click();
+      }
       // Spawn auto-starts and auto-resumes the sim — no extra Resume click.
       await sim.getByRole('button', { name: /Spawn train/i }).click();
 

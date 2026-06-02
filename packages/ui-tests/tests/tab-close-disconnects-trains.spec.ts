@@ -58,6 +58,10 @@ test.describe
 
       await expect(visualiser.locator('[data-marker-id="M1"]')).toBeVisible();
 
+      for (const marker of ['M1', 'M2']) {
+        await sim.getByLabel(/marker/i).selectOption(marker);
+        await sim.getByRole('button', { name: /add to route/i }).click();
+      }
       await sim.getByRole('button', { name: /Spawn train/i }).click();
       await expect(visualiser.locator('[data-train-id="T1"]')).toBeVisible({ timeout: 8_000 });
 

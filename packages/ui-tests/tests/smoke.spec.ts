@@ -1,10 +1,22 @@
-import { expect, test } from '@playwright/test';
+import { type Page, expect, test } from '@playwright/test';
 
 /**
  * Operator-facing smoke. Each test is framed as "what does the operator do
  * and see?" rather than "what internal state transitions?". The journey
  * regression for multi-train block release lives in multi-train-journey.spec.
  */
+
+/**
+ * The default sim-ui starts with the SIMPLE_LOOP preset. The route builder
+ * starts empty, so every spawn-driving test first builds a viable route
+ * (M1 → M2) to enable the Spawn button.
+ */
+async function buildDefaultRoute(page: Page): Promise<void> {
+  for (const marker of ['M1', 'M2']) {
+    await page.getByLabel(/marker/i).selectOption(marker);
+    await page.getByRole('button', { name: /add to route/i }).click();
+  }
+}
 
 test.describe('Simulator UI: operator panel', () => {
   test.beforeEach(async ({ page }) => {
@@ -25,6 +37,9 @@ test.describe('Simulator UI: operator panel', () => {
   }) => {
     await expect(page.getByRole('heading', { name: /Trainframe Simulator/i })).toBeVisible();
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/none/i);
+    // Spawn is gated on building a route — after the operator picks
+    // markers, Spawn becomes available.
+    await buildDefaultRoute(page);
     await expect(page.getByRole('button', { name: /spawn train/i })).toBeEnabled();
     // Pause and Stop are not yet meaningful — the operator hasn't started anything.
     await expect(page.getByRole('button', { name: /^pause$/i })).toBeDisabled();
@@ -32,6 +47,7 @@ test.describe('Simulator UI: operator panel', () => {
   });
 
   test('after spawning a train, the operator sees it listed in the snapshot', async ({ page }) => {
+    await buildDefaultRoute(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1/);
   });
@@ -39,6 +55,7 @@ test.describe('Simulator UI: operator panel', () => {
   test('spawning from idle leaves the simulation running so the operator sees motion without further input', async ({
     page,
   }) => {
+    await buildDefaultRoute(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(page.getByTestId('sim-status')).toHaveText('running');
   });
@@ -46,6 +63,7 @@ test.describe('Simulator UI: operator panel', () => {
   test('stepping the simulation after spawning advances the clock the operator sees', async ({
     page,
   }) => {
+    await buildDefaultRoute(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
 
     const clock = page.locator('dt:has-text("Sim time") + dd');
@@ -59,6 +77,7 @@ test.describe('Simulator UI: operator panel', () => {
     page,
   }) => {
     // Spawn from idle: auto-resumes, sim runs.
+    await buildDefaultRoute(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(page.getByTestId('sim-status')).toHaveText('running');
 
@@ -68,7 +87,8 @@ test.describe('Simulator UI: operator panel', () => {
 
     // A second Spawn while paused should add the train but leave the
     // sim paused — the operator paused for a reason and a side-effect
-    // resume would override their intent.
+    // resume would override their intent. The route is still on the form
+    // from the first spawn, so the second Spawn is enabled.
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1, T2/);
     await expect(page.getByTestId('sim-status')).toHaveText('paused');
@@ -80,6 +100,7 @@ test.describe('Simulator UI: operator panel', () => {
     const trainIdInput = page.getByRole('textbox', { name: /Train ID/i });
     await expect(trainIdInput).toHaveValue('T1');
 
+    await buildDefaultRoute(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(trainIdInput).toHaveValue('T2');
 
@@ -95,6 +116,7 @@ test.describe('Simulator UI: operator panel', () => {
     const trainIdInput = page.getByRole('textbox', { name: /Train ID/i });
 
     // Spawn T1 — succeeds, counter advances to T2.
+    await buildDefaultRoute(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1/);
     await expect(trainIdInput).toHaveValue('T2');
