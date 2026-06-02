@@ -16,11 +16,6 @@ import type { BrokerClient } from '../broker/client.js';
  */
 export const STATION_DWELL_MS = 5_000;
 
-interface RouteEdge {
-  from_marker_id: string;
-  to_marker_id: string;
-}
-
 export type SimRunnerStatus = 'idle' | 'running' | 'paused';
 
 export interface SimRunnerSnapshot {
@@ -230,7 +225,7 @@ export class SimRunner {
    */
   spawnTrain(
     train_id: string,
-    startEdge: RouteEdge,
+    startEdge: { from_marker_id: string; to_marker_id: string },
     config?: Partial<VirtualTrainConfig>,
   ): boolean {
     if (!this.simulation || this.train_ids.includes(train_id)) return false;
@@ -240,14 +235,14 @@ export class SimRunner {
     return true;
   }
 
-  assignRoute(train_id: string, edges: ReadonlyArray<RouteEdge>): void {
+  assignSchedule(train_id: string, stops: ReadonlyArray<string>): void {
     if (this.mode === 'device-only') {
       throw new Error(
-        'SimRunner.assignRoute is unavailable in device-only mode. Issue the ' +
+        'SimRunner.assignSchedule is unavailable in device-only mode. Issue the ' +
           'assign_route command from a server on the broker instead.',
       );
     }
-    this.simulation?.assignRoute(train_id, edges);
+    this.simulation?.assignSchedule(train_id, stops);
   }
 
   snapshot(): SimRunnerSnapshot {

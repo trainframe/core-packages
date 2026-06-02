@@ -240,9 +240,9 @@ test.describe
       await page.goto(SIM_URL);
       await expect(page.getByRole('heading', { name: /Trainframe Simulator/i })).toBeVisible();
       await page.getByRole('button', { name: 'Start', exact: true }).click();
-      for (const marker of ['M1', 'M2', 'M3']) {
-        await page.getByLabel(/marker/i).selectOption(marker);
-        await page.getByRole('button', { name: /add to route/i }).click();
+      for (const stop of ['M1', 'M3']) {
+        await page.getByRole('combobox', { name: /stop/i }).selectOption(stop);
+        await page.getByRole('button', { name: /add stop/i }).click();
       }
       await page.getByRole('button', { name: /Spawn train/i }).click();
       await settle(page);

@@ -9,11 +9,6 @@ import {
 import { type Layout, PROTOCOL_VERSION } from '@trainframe/protocol';
 import type { BrokerClient } from './broker/client.js';
 
-interface RouteEdge {
-  from_marker_id: string;
-  to_marker_id: string;
-}
-
 export interface ServerOptions {
   /** Layout the server reasons against. Published as retained state on start. */
   readonly layout: Layout;
@@ -78,18 +73,22 @@ export class Server {
   }
 
   /**
-   * Assign a route to a train. Direct entry point used by tests and the
-   * admin HTTP API; the wire-equivalent is a `tag_observed` round-trip
-   * triggering route assignment - but route assignment itself is operator
-   * intent, not device telemetry, so it has no wire event.
+   * Assign a *schedule* to a train — an ordered list of stops the train
+   * will cycle through indefinitely. The scheduler invokes the planner to
+   * compute the per-leg transit on demand. See ADR-010.
+   *
+   * Direct entry point used by tests and the admin HTTP API; the
+   * wire-equivalent of operator intent is not a single event but the
+   * resulting `assign_route` commands and clearance grants that flow out
+   * to the train.
    */
-  assignRoute(trainId: string, routeId: string, edges: ReadonlyArray<RouteEdge>): void {
-    const effects = this.scheduler.assignRoute(trainId, routeId, edges);
+  assignSchedule(trainId: string, routeId: string, stops: ReadonlyArray<string>): void {
+    const effects = this.scheduler.assignSchedule(trainId, routeId, stops);
     this.dispatchEffects(effects);
   }
 
   /**
-   * Revoke a train's clearance. Mirrors `assignRoute`: the scheduler decides,
+   * Revoke a train's clearance. Mirrors `assignSchedule`: the scheduler decides,
    * the server enacts. Returned effects include the `revoke_clearance` command
    * to the train and any `grant_clearance` commands to peers that were waiting
    * on the freed block. No-op if the train doesn't exist.

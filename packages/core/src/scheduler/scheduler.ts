@@ -2,6 +2,7 @@ import type { Capability } from '../capability.js';
 import type { CapabilityRegistry } from '../registry.js';
 import { type SchedulerEffect, effects, grantClearancePayload } from './effects.js';
 import type { LayoutState } from './layout-state.js';
+import { planTransit } from './planner.js';
 import { TagRegistry } from './tag-registry.js';
 import { type TrainState, initialTrainState } from './train-state.js';
 import { type EdgeRef, edgesEqual } from './types.js';
@@ -248,7 +249,7 @@ export class Scheduler {
 
     const previousMarker = train.last_marker_id;
     train.last_marker_id = markerId;
-    this.advanceRouteIfArrivedAt(train, markerId);
+    const scheduleReplanEffects = this.advanceTransitAndReplanIfReached(train, markerId);
 
     // Release the block this train has now finished. ADR-002 block exclusivity
     // gates concurrent occupation, not lifetime ownership — without pruning,
@@ -279,8 +280,15 @@ export class Scheduler {
       }),
     );
 
-    const grant = this.maybeExtendClearance(train, markerId);
-    if (grant) out.push(grant);
+    // If we've just completed the current transit and replanned to the next
+    // stop, the replan emits its own initial grant — skip the
+    // extend-clearance pass on the *old* transit.
+    if (scheduleReplanEffects.length > 0) {
+      out.push(...scheduleReplanEffects);
+    } else {
+      const grant = this.maybeExtendClearance(train, markerId);
+      if (grant) out.push(grant);
+    }
 
     out.push(...this.retryBlockedClearances());
 
@@ -288,28 +296,48 @@ export class Scheduler {
   }
 
   /**
-   * Advance the train's route progress when it reports the to_marker of the
-   * edge it's currently expected to be on. Idempotent: a marker that doesn't
-   * match the current edge is a no-op (it'll surface as an anomaly elsewhere
-   * once topology violation handling lands).
+   * Advance the train's transit progress when it reports the to_marker of
+   * the edge it's currently on. Idempotent: a marker that doesn't match the
+   * current edge is a no-op.
+   *
+   * If the advance completes the transit AND the train has arrived at its
+   * scheduled target stop, advance the schedule's stop pointer and replan
+   * the next transit — emitting an `assign_route` command for the new
+   * transit and an initial clearance grant. The returned effects flow
+   * straight back to the caller in `handleTrainAtMarker`.
    */
-  private advanceRouteIfArrivedAt(train: TrainState, markerId: string): void {
-    if (!train.route) return;
-    const currentEdge = train.route.edges[train.route.progress_index];
-    if (!currentEdge || currentEdge.to_marker_id !== markerId) return;
+  private advanceTransitAndReplanIfReached(
+    train: TrainState,
+    markerId: string,
+  ): ReadonlyArray<SchedulerEffect> {
+    if (!train.transit) return [];
+    const currentEdge = train.transit.edges[train.transit.progress_index];
+    if (!currentEdge || currentEdge.to_marker_id !== markerId) return [];
 
-    const newIndex = train.route.progress_index + 1;
-    train.route = { ...train.route, progress_index: newIndex };
-    train.current_edge = train.route.edges[newIndex];
+    const newIndex = train.transit.progress_index + 1;
+    train.transit = { ...train.transit, progress_index: newIndex };
+    train.current_edge = train.transit.edges[newIndex];
+
+    // Transit still in progress — caller continues with maybeExtendClearance
+    // against the same transit.
+    if (newIndex < train.transit.edges.length) return [];
+
+    // Transit complete. If we've landed on the scheduled stop, advance the
+    // schedule's stop pointer and plan the next leg.
+    if (train.schedule && train.schedule.stops[train.schedule.current_stop_index] === markerId) {
+      return this.advanceScheduleAndReplan(train);
+    }
+
+    return [];
   }
 
   /**
-   * If the train has just reached its clearance limit and the route has more
-   * edges ahead, attempt to grant clearance for the next edge.
+   * If the train has just reached its clearance limit and the transit has
+   * more edges ahead, attempt to grant clearance for the next edge.
    */
   private maybeExtendClearance(train: TrainState, markerId: string): SchedulerEffect | null {
-    if (train.clearance_limit_marker_id !== markerId || !train.route) return null;
-    const nextEdge = train.route.edges[train.route.progress_index];
+    if (train.clearance_limit_marker_id !== markerId || !train.transit) return null;
+    const nextEdge = train.transit.edges[train.transit.progress_index];
     if (!nextEdge) return null;
     return this.tryGrantClearance(train, nextEdge);
   }
@@ -462,8 +490,8 @@ export class Scheduler {
     const out: SchedulerEffect[] = [];
     for (const train of this.trains.values()) {
       if (skipTrainIds?.has(train.train_id)) continue;
-      if (!train.route) continue;
-      const nextEdge = train.route.edges[train.route.progress_index];
+      if (!train.transit) continue;
+      const nextEdge = train.transit.edges[train.transit.progress_index];
       if (!nextEdge) continue;
       if (train.cleared_edges.some((e) => edgesEqual(e, nextEdge))) continue;
       const grant = this.tryGrantClearance(train, nextEdge);
@@ -538,50 +566,139 @@ export class Scheduler {
     return out;
   }
 
-  // ---------- route assignment (driven by external API, not events) ----------
+  // ---------- schedule assignment (driven by external API, not events) ----------
 
   /**
-   * Assign a route to a train. Called by the server's HTTP/MQTT API in
-   * response to user requests. Returns effects: the route command for the
-   * train, plus an initial clearance grant for the first edge.
+   * Assign a *schedule* — the operator-facing intent for a train. The
+   * schedule is an ordered list of stops (marker IDs); the planner computes
+   * the transit between consecutive stops on demand, and the scheduler emits
+   * the per-leg `assign_route` command (carrying the computed transit) and
+   * the initial clearance grant. See ADR-010.
+   *
+   * Cycle behaviour is implicit: after the last stop, the train heads back
+   * to the first. There is no `cyclic` flag.
+   *
+   * Starting position: the train's `last_marker_id`, or — if the train has
+   * never moved — `stops[0]` (the schedule's first stop is treated as the
+   * spawn marker).
+   *
+   * Returns effects. Empty list on a no-op (unknown train, empty stops list,
+   * train at the only stop of a single-stop schedule). Anomaly + no
+   * execution effects on referential errors (unknown stops) or when the
+   * planner can't reach the next stop from the current marker.
    */
-  assignRoute(
+  assignSchedule(
     trainId: string,
     routeId: string,
-    edges: ReadonlyArray<EdgeRef>,
+    stops: ReadonlyArray<string>,
   ): ReadonlyArray<SchedulerEffect> {
     const train = this.trains.get(trainId);
     if (!train) return [];
-    if (edges.length === 0) return [];
+    if (stops.length === 0) return [];
 
-    const missing = this.unknownMarkersInEdges(edges);
-    if (missing.length > 0) {
+    const unknownStops = stops.filter((s) => !this.layout.hasMarker(s));
+    if (unknownStops.length > 0) {
       return [
         effects.publishEvent('anomaly', {
           severity: 'warning',
-          description: `Route ${routeId} for ${trainId} references unknown marker(s): ${missing.join(', ')}`,
+          description: `Schedule ${routeId} for ${trainId} references unknown marker(s): ${unknownStops.join(', ')}`,
         }),
       ];
     }
 
-    train.route = { route_id: routeId, edges, progress_index: 0 };
+    // Determine starting marker. The schedule's first stop is the
+    // conventional spawn point for a fresh train.
+    const startMarker = train.last_marker_id ?? stops[0];
+    if (startMarker === undefined) return [];
+    train.last_marker_id = startMarker;
     train.cleared_edges = [];
-    const firstEdge = edges[0];
+    train.transit = undefined;
+
+    // The schedule's pointer is "the stop we are heading to next."
+    // Convention: if the train starts AT stops[0], the next target is
+    // stops[1] (or wraps around for a single-stop schedule, handled below).
+    const startsAtFirstStop = startMarker === stops[0];
+    const initialStopIndex = startsAtFirstStop ? Math.min(1, stops.length - 1) : 0;
+    train.schedule = {
+      route_id: routeId,
+      stops,
+      current_stop_index: initialStopIndex,
+    };
+
+    return this.planAndExecuteCurrentTransit(train);
+  }
+
+  /**
+   * Plan a transit from the train's current marker to
+   * `schedule.stops[current_stop_index]`, install it on the train, and emit
+   * the `assign_route` command + the initial clearance grant. Internal —
+   * callers are `assignSchedule` (first leg) and `advanceScheduleAndReplan`
+   * (every subsequent leg).
+   */
+  private planAndExecuteCurrentTransit(train: TrainState): ReadonlyArray<SchedulerEffect> {
+    if (!train.schedule || train.last_marker_id === undefined) return [];
+    const targetStop = train.schedule.stops[train.schedule.current_stop_index];
+    if (targetStop === undefined) return [];
+
+    if (train.last_marker_id === targetStop) {
+      // Already at the target stop. If the schedule is multi-stop, advance
+      // and replan to the next stop. If it's a single-stop schedule, park.
+      if (train.schedule.stops.length === 1) {
+        train.transit = undefined;
+        train.clearance_limit_marker_id = train.last_marker_id;
+        return [];
+      }
+      return this.advanceScheduleAndReplan(train);
+    }
+
+    const transitEdges = planTransit(this.layout, train.last_marker_id, targetStop);
+    if (transitEdges === null) {
+      // Structural unreachability. Surface and leave the train parked —
+      // the operator must fix the layout or the schedule.
+      return [
+        effects.publishEvent('anomaly', {
+          severity: 'warning',
+          description: `Schedule ${train.schedule.route_id} for ${train.train_id}: no path from ${train.last_marker_id} to stop ${targetStop}`,
+        }),
+      ];
+    }
+    if (transitEdges.length === 0) {
+      // planTransit only returns [] when from === to, which is the
+      // already-at-target case handled above. Defensive.
+      return [];
+    }
+
+    train.transit = { edges: transitEdges, progress_index: 0 };
+    const firstEdge = transitEdges[0];
     if (!firstEdge) return [];
     train.clearance_limit_marker_id = firstEdge.from_marker_id;
 
     const out: SchedulerEffect[] = [
-      effects.sendCommand(trainId, 'assign_route', { route_id: routeId, edges }),
+      effects.sendCommand(train.train_id, 'assign_route', {
+        route_id: train.schedule.route_id,
+        edges: transitEdges,
+      }),
     ];
-
     const grant = this.tryGrantClearance(train, firstEdge);
     if (grant) out.push(grant);
 
-    // Wiping cleared_edges above may have released blocks that peer trains
-    // were waiting on. Retry so they don't sit blocked until an unrelated
-    // event happens to trigger retry elsewhere.
+    // Wiping cleared_edges in assignSchedule may have released blocks that
+    // peer trains were waiting on. Retry so they don't sit blocked until an
+    // unrelated event triggers retry elsewhere.
     out.push(...this.retryBlockedClearances());
     return out;
+  }
+
+  /**
+   * Move the schedule's stop pointer to the next stop (mod stops.length)
+   * and replan a transit toward it. Called when the train arrives at the
+   * current target stop.
+   */
+  private advanceScheduleAndReplan(train: TrainState): ReadonlyArray<SchedulerEffect> {
+    if (!train.schedule) return [];
+    const nextIndex = (train.schedule.current_stop_index + 1) % train.schedule.stops.length;
+    train.schedule = { ...train.schedule, current_stop_index: nextIndex };
+    return this.planAndExecuteCurrentTransit(train);
   }
 
   /**
@@ -593,7 +710,7 @@ export class Scheduler {
    *
    * The clearance limit collapses to wherever the train actually is: the next
    * extension attempt has to start from there. If the train has never moved,
-   * the existing limit (set by `assignRoute`) is left in place.
+   * the existing limit (set by `assignSchedule`) is left in place.
    *
    * No-op if the train isn't registered.
    */

@@ -64,17 +64,17 @@ describe('Server — startup', () => {
 });
 
 describe('Server — registers a train and grants its initial clearance', () => {
-  it('publishes a grant_clearance command after assignRoute', () => {
+  it('publishes a grant_clearance command after assignSchedule', () => {
     const { server, client } = makeServer();
 
     publishWireEvent(client, 'device_registered', 'T1', {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
 
-    server.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    // Schedule [M1, M3]: brand-new train, no last_marker_id → scheduler
+    // treats M1 as the spawn and the planner plans M1 → M2 → M3. Initial
+    // grant should be for M2 (the first edge's to_marker).
+    server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     const commands = client.published.filter((m) => m.topic === 'railway/commands/T1');
     const grant = commands
@@ -114,10 +114,7 @@ describe('Server — gate clearance flow', () => {
       reason: 'crane busy',
     });
 
-    server.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     const beforeRelease = countCommands(client, 'T1', 'grant_clearance');
     expect(beforeRelease).toBe(1); // initial M2 grant
@@ -143,7 +140,7 @@ describe('Server — defensive parsing', () => {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
     client.publish('railway/events/tag_observed/T1', new TextEncoder().encode('not-json-at-all'));
-    expect(() => server.assignRoute('T1', 'r', [])).not.toThrow();
+    expect(() => server.assignSchedule('T1', 'r', [])).not.toThrow();
   });
 
   it('ignores its own server-emitted events to avoid feedback loops', () => {

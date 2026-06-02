@@ -47,10 +47,8 @@ test.describe('Simulator UI: connected to a real broker + server', () => {
     page,
   }) => {
     await page.getByRole('button', { name: 'Start', exact: true }).click();
-    for (const marker of ['M1', 'M2']) {
-      await page.getByLabel(/marker/i).selectOption(marker);
-      await page.getByRole('button', { name: /add to route/i }).click();
-    }
+    await page.getByLabel(/stop/i).selectOption('M1');
+    await page.getByRole('button', { name: /add stop/i }).click();
     await page.getByRole('button', { name: /Spawn train/i }).click();
 
     // The server subscribes to railway/events/+/+ and, on a device_registered

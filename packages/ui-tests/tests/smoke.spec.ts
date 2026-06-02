@@ -7,15 +7,13 @@ import { type Page, expect, test } from '@playwright/test';
  */
 
 /**
- * The default sim-ui starts with the SIMPLE_LOOP preset. The route builder
- * starts empty, so every spawn-driving test first builds a viable route
- * (M1 → M2) to enable the Spawn button.
+ * The default sim-ui starts with the SIMPLE_LOOP preset. The schedule builder
+ * starts empty, so every spawn-driving test first picks a stop (M1) to enable
+ * the Spawn button — a single stop is sufficient.
  */
-async function buildDefaultRoute(page: Page): Promise<void> {
-  for (const marker of ['M1', 'M2']) {
-    await page.getByLabel(/marker/i).selectOption(marker);
-    await page.getByRole('button', { name: /add to route/i }).click();
-  }
+async function buildDefaultSchedule(page: Page): Promise<void> {
+  await page.getByLabel(/stop/i).selectOption('M1');
+  await page.getByRole('button', { name: /add stop/i }).click();
 }
 
 test.describe('Simulator UI: operator panel', () => {
@@ -39,7 +37,7 @@ test.describe('Simulator UI: operator panel', () => {
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/none/i);
     // Spawn is gated on building a route — after the operator picks
     // markers, Spawn becomes available.
-    await buildDefaultRoute(page);
+    await buildDefaultSchedule(page);
     await expect(page.getByRole('button', { name: /spawn train/i })).toBeEnabled();
     // Pause and Stop are not yet meaningful — the operator hasn't started anything.
     await expect(page.getByRole('button', { name: /^pause$/i })).toBeDisabled();
@@ -47,7 +45,7 @@ test.describe('Simulator UI: operator panel', () => {
   });
 
   test('after spawning a train, the operator sees it listed in the snapshot', async ({ page }) => {
-    await buildDefaultRoute(page);
+    await buildDefaultSchedule(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1/);
   });
@@ -55,7 +53,7 @@ test.describe('Simulator UI: operator panel', () => {
   test('spawning from idle leaves the simulation running so the operator sees motion without further input', async ({
     page,
   }) => {
-    await buildDefaultRoute(page);
+    await buildDefaultSchedule(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(page.getByTestId('sim-status')).toHaveText('running');
   });
@@ -63,7 +61,7 @@ test.describe('Simulator UI: operator panel', () => {
   test('stepping the simulation after spawning advances the clock the operator sees', async ({
     page,
   }) => {
-    await buildDefaultRoute(page);
+    await buildDefaultSchedule(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
 
     const clock = page.locator('dt:has-text("Sim time") + dd');
@@ -77,7 +75,7 @@ test.describe('Simulator UI: operator panel', () => {
     page,
   }) => {
     // Spawn from idle: auto-resumes, sim runs.
-    await buildDefaultRoute(page);
+    await buildDefaultSchedule(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(page.getByTestId('sim-status')).toHaveText('running');
 
@@ -100,7 +98,7 @@ test.describe('Simulator UI: operator panel', () => {
     const trainIdInput = page.getByRole('textbox', { name: /Train ID/i });
     await expect(trainIdInput).toHaveValue('T1');
 
-    await buildDefaultRoute(page);
+    await buildDefaultSchedule(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(trainIdInput).toHaveValue('T2');
 
@@ -116,7 +114,7 @@ test.describe('Simulator UI: operator panel', () => {
     const trainIdInput = page.getByRole('textbox', { name: /Train ID/i });
 
     // Spawn T1 — succeeds, counter advances to T2.
-    await buildDefaultRoute(page);
+    await buildDefaultSchedule(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1/);
     await expect(trainIdInput).toHaveValue('T2');
@@ -143,10 +141,11 @@ test.describe('Simulator UI: operator panel', () => {
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1, T2/);
   });
 
-  test('applying an edgeless custom layout disables Spawn and shows an explanatory hint', async ({
+  test('applying a no-stop schedule disables Spawn and shows an explanatory hint', async ({
     page,
   }) => {
-    // Paste a layout with markers but no edges.
+    // Paste a layout with markers but no edges. The operator has markers to
+    // pick as stops, but has not picked any yet, so Spawn remains disabled.
     const edgelessJson = JSON.stringify(
       {
         name: 'edgeless-test',
@@ -165,7 +164,7 @@ test.describe('Simulator UI: operator panel', () => {
     // Spawn must be disabled with no ambiguity.
     await expect(page.getByRole('button', { name: /spawn train/i })).toBeDisabled();
     // The operator gets a clear explanation, not just a greyed-out button.
-    await expect(page.getByText(/add at least one edge/i)).toBeVisible();
-    await expect(page.getByText(/add at least one edge/i)).toBeVisible();
+    await expect(page.getByTestId('spawn-stops-hint')).toBeVisible();
+    await expect(page.getByTestId('spawn-stops-hint')).toContainText(/stop/i);
   });
 });

@@ -84,13 +84,9 @@ test.describe
       );
       expect(holdStatus).toBe(204);
 
-      // Assign T1 a route that wants to pass M2 and reach M3 — which is
-      // exactly the marker we just gated.
-      await postRoute(visualiser, adminPort, 'T1', 'gate-test-route', [
-        { from_marker_id: 'M1', to_marker_id: 'M2' },
-        { from_marker_id: 'M2', to_marker_id: 'M3' },
-        { from_marker_id: 'M3', to_marker_id: 'M4' },
-      ]);
+      // Assign T1 a schedule with stops M1 and M3. The planner computes
+      // the transit M1→M2→M3, passing through the gated marker.
+      await postSchedule(visualiser, adminPort, 'T1', 'gate-test-route', ['M1', 'M3']);
 
       // Drive the sim forward and wait for T1 to surface on the canvas.
       await expect
@@ -171,17 +167,12 @@ test.describe
     });
   });
 
-interface RouteEdge {
-  from_marker_id: string;
-  to_marker_id: string;
-}
-
-async function postRoute(
+async function postSchedule(
   page: import('@playwright/test').Page,
   adminPort: number,
   trainId: string,
   routeId: string,
-  edges: ReadonlyArray<RouteEdge>,
+  stops: ReadonlyArray<string>,
 ): Promise<void> {
   const status = await page.evaluate(
     async ({ port, train, body }) => {
@@ -192,7 +183,7 @@ async function postRoute(
       });
       return r.status;
     },
-    { port: adminPort, train: trainId, body: { route_id: routeId, edges } },
+    { port: adminPort, train: trainId, body: { route_id: routeId, stops } },
   );
   expect(status).toBe(204);
 }

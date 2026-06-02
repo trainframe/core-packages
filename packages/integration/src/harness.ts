@@ -178,7 +178,7 @@ export class TestClient {
   /**
    * Wait until a retained state message has landed on the given topic. Useful
    * after publishing a `device_registered` event to confirm the server has
-   * processed it before issuing follow-up actions like `assignRoute`.
+   * processed it before issuing follow-up actions like `assignSchedule`.
    */
   async waitForState(topic: string, timeout_ms = 2000): Promise<unknown> {
     const start = Date.now();

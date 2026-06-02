@@ -5,9 +5,9 @@ import { openVisualiser, waitForVisualiserConnected } from '../src/playwright-he
 import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
 /**
- * Operator journey: assign a route, let the train run a marker or two,
- * then POST a brand-new route via the admin HTTP API. The operator sees
- * the train continue onto edges that only the new route covers.
+ * Operator journey: assign a schedule, let the train run a marker or two,
+ * then POST a brand-new schedule via the admin HTTP API. The operator sees
+ * the train continue onto edges that only the new schedule covers.
  *
  * Architecture note: the simulator-UI's embedded `SimRunner` doesn't
  * subscribe to broker commands, so the admin endpoint's `assign_route`
@@ -16,10 +16,10 @@ import { type UiHarness, startUiHarness } from '../src/test-harness.js';
  * (device-only mode), which routes commands back to virtual devices. The
  * harness server is then the only scheduler in play.
  *
- * Today this spec is expected to fail until the `cleared_edges`-wipe fix
- * on `assignRoute` lands — the train keeps walking the old plan because
- * the prior cleared edges still gate its motion. The new edges arrive
- * but the scheduler never re-emits clearance for them.
+ * The wire-level `assign_route` command the scheduler sends to the train
+ * carries a planner-computed transit (edges), not the raw stop list — so
+ * the train's clearance machinery is unchanged. What changed is the
+ * operator-facing HTTP body shape: `stops` instead of `edges` (ADR-010).
  */
 
 const FIGURE_EIGHT: Layout = {
@@ -48,7 +48,7 @@ const FIGURE_EIGHT: Layout = {
 };
 
 test.describe
-  .serial('Operator reassigns a route mid-journey', () => {
+  .serial('Operator reassigns a schedule mid-journey', () => {
     let harness: UiHarness;
     let admin: AdminHttpServer;
     let adminPort: number;
@@ -64,7 +64,7 @@ test.describe
       await harness.shutdown();
     });
 
-    test('a new route POSTed mid-journey replaces the old one', async ({ browser }) => {
+    test('a new schedule POSTed mid-journey replaces the old one', async ({ browser }) => {
       const visualiser = await openVisualiser(browser);
       await expect(
         visualiser.getByRole('heading', { name: /Trainframe Visualiser/i }),
@@ -78,11 +78,9 @@ test.describe
         startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
       });
 
-      // Original route: walk the M1→M2→M3 branch.
-      await postRoute(visualiser, adminPort, 'T1', 'route-original', [
-        { from_marker_id: 'M1', to_marker_id: 'M2' },
-        { from_marker_id: 'M2', to_marker_id: 'M3' },
-      ]);
+      // Original schedule: stops M1 and M3. Planner finds M1→M2→M3 (the
+      // M2 branch), leaving M4/M5/M6 untouched.
+      await postSchedule(visualiser, adminPort, 'T1', 'route-original', ['M1', 'M3']);
 
       // Drive the sim forward and wait for T1 to surface on the canvas.
       // The visualiser places trains only once a `marker_traversed` or
@@ -112,14 +110,10 @@ test.describe
         )
         .toBe(true);
 
-      // Operator POSTs a replacement route via the admin HTTP endpoint.
-      // The route covers M1→M4→M5→M6 — edges the train would never reach
-      // on the original plan.
-      await postRoute(visualiser, adminPort, 'T1', 'route-swap', [
-        { from_marker_id: 'M1', to_marker_id: 'M4' },
-        { from_marker_id: 'M4', to_marker_id: 'M5' },
-        { from_marker_id: 'M5', to_marker_id: 'M6' },
-      ]);
+      // Operator POSTs a replacement schedule via the admin HTTP endpoint.
+      // Stops M1 and M6 cause the planner to find M1→M4→M5→M6 — edges
+      // the train would never reach on the original plan.
+      await postSchedule(visualiser, adminPort, 'T1', 'route-swap', ['M1', 'M6']);
 
       // Advance further so the new clearance has time to land and the
       // train can walk the swapped branch.
@@ -145,17 +139,12 @@ test.describe
     });
   });
 
-interface RouteEdge {
-  from_marker_id: string;
-  to_marker_id: string;
-}
-
-async function postRoute(
+async function postSchedule(
   page: import('@playwright/test').Page,
   adminPort: number,
   trainId: string,
   routeId: string,
-  edges: ReadonlyArray<RouteEdge>,
+  stops: ReadonlyArray<string>,
 ): Promise<void> {
   const status = await page.evaluate(
     async ({ port, train, body }) => {
@@ -166,7 +155,7 @@ async function postRoute(
       });
       return r.status;
     },
-    { port: adminPort, train: trainId, body: { route_id: routeId, edges } },
+    { port: adminPort, train: trainId, body: { route_id: routeId, stops } },
   );
   expect(status).toBe(204);
 }

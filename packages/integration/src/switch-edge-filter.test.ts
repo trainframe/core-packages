@@ -63,10 +63,7 @@ describe('Switch-state edge filtering through a real broker', () => {
       confirmed: true,
     });
 
-    harness.server.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance'); // initial M2 grant
 
     await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M1' });
@@ -87,10 +84,7 @@ describe('Switch-state edge filtering through a real broker', () => {
     await harness.testClient.waitForState('railway/state/devices/T1');
     await harness.testClient.waitForState('railway/state/devices/SW-M2');
 
-    harness.server.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
 
     await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M1' });
@@ -122,10 +116,7 @@ describe('Switch-state edge filtering through a real broker', () => {
     await harness.testClient.waitForState('railway/state/devices/T1');
     await harness.testClient.waitForState('railway/state/devices/SW-M2');
 
-    harness.server.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
     await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M1' });
     await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M2' });

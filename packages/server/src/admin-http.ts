@@ -110,7 +110,7 @@ export class AdminHttpServer {
     const route = url.match(/^\/api\/trains\/([^/]+)\/route$/);
     if (route?.[1]) {
       const id = decodeURIComponent(route[1]);
-      return { needsBody: true, handler: (body, res) => this.assignRoute(id, body, res) };
+      return { needsBody: true, handler: (body, res) => this.assignSchedule(id, body, res) };
     }
     const revoke = url.match(/^\/api\/trains\/([^/]+)\/revoke_clearance$/);
     if (revoke?.[1]) {
@@ -148,33 +148,23 @@ export class AdminHttpServer {
         train_id: t.train_id,
         last_marker_id: t.last_marker_id,
         clearance_limit_marker_id: t.clearance_limit_marker_id,
-        route: t.route,
+        schedule: t.schedule,
+        transit: t.transit,
         cleared_edges: t.cleared_edges,
       })),
       tags: scheduler.getTagRegistry().entries(),
     });
   }
 
-  private assignRoute(trainId: string, body: unknown, res: ServerResponse): void {
-    const { route_id, edges } = requireFields(body, ['route_id', 'edges']);
+  private assignSchedule(trainId: string, body: unknown, res: ServerResponse): void {
+    const { route_id, stops } = requireFields(body, ['route_id', 'stops']);
     if (typeof route_id !== 'string') throw new Error('route_id must be a string');
-    if (!Array.isArray(edges) || edges.length === 0)
-      throw new Error('edges must be a non-empty array');
-    for (const e of edges) {
-      if (
-        typeof e !== 'object' ||
-        e === null ||
-        typeof (e as Record<string, unknown>).from_marker_id !== 'string' ||
-        typeof (e as Record<string, unknown>).to_marker_id !== 'string'
-      ) {
-        throw new Error('edge must have from_marker_id and to_marker_id strings');
-      }
+    if (!Array.isArray(stops) || stops.length === 0)
+      throw new Error('stops must be a non-empty array');
+    for (const s of stops) {
+      if (typeof s !== 'string') throw new Error('each stop must be a marker_id string');
     }
-    this.server.assignRoute(
-      trainId,
-      route_id,
-      edges as Array<{ from_marker_id: string; to_marker_id: string }>,
-    );
+    this.server.assignSchedule(trainId, route_id, stops as ReadonlyArray<string>);
     noContent(res);
   }
 

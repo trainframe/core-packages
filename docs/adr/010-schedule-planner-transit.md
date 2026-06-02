@@ -65,7 +65,10 @@ shape, smaller scale.
 
 ### Wire change
 
-`assign_route` payload becomes:
+Two surfaces involved, with different ownership:
+
+**Operator → scheduler** (HTTP admin API, `/api/trains/:id/route`). Body
+becomes:
 
 ```jsonc
 {
@@ -74,12 +77,18 @@ shape, smaller scale.
 }
 ```
 
-The old `edges: EdgeRef[]` shape is removed. Pre-1.0; no migration shim;
-spec bump.
+The old `edges: EdgeRef[]` shape on this endpoint is removed.
 
-A train still receives `grant_clearance` commands one edge at a time as
-it crosses markers — the planner's output is consumed internally by the
-scheduler and never sent to the train.
+**Scheduler → train** (MQTT command `assign_route`, defined in
+`@trainframe/protocol/commands`). The payload shape stays
+`{ route_id, edges: EdgeRef[] }` — but the semantics shift: the edges
+are now a *transit* computed by the planner, not an operator-supplied
+list. The train doesn't need to know about schedules; it just receives a
+transit (and per-edge clearance grants on top of that, as today) and
+walks it.
+
+Both changes are pre-1.0; no migration shim. The spec bumps because the
+HTTP body shape is observable to operators.
 
 ### Planner
 

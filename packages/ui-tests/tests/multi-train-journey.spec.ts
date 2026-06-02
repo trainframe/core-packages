@@ -74,11 +74,12 @@ test.describe
 
       await expect(visualiser.locator('[data-marker-id="M1"]')).toBeVisible();
 
-      // Operator builds a route (M1 → M2 → M3 → M4) once. The route stays
-      // in the form across spawns so each new train gets the same plan.
-      for (const marker of ['M1', 'M2', 'M3', 'M4']) {
-        await sim.getByLabel(/marker/i).selectOption(marker);
-        await sim.getByRole('button', { name: /add to route/i }).click();
+      // Operator picks stops (M1, M3) once. The schedule stays in the form
+      // across spawns so each new train gets the same plan; the planner
+      // computes the per-leg transit through M2 on demand.
+      for (const stop of ['M1', 'M3']) {
+        await sim.getByRole('combobox', { name: /stop/i }).selectOption(stop);
+        await sim.getByRole('button', { name: /add stop/i }).click();
       }
 
       // Operator drives the lifecycle with three Spawn clicks. Spawn auto-

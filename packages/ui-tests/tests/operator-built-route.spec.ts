@@ -4,11 +4,10 @@ import { openSimulatorUi, openVisualiser } from '../src/playwright-helpers.js';
 import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
 /**
- * Operator journey for the route-builder. The form no longer hardcodes a
- * demo route — the operator picks each marker in order, with the dropdown
- * narrowing to the reachable onward markers after each pick. We assert the
- * train then visits exactly the markers the operator picked, by watching
- * the visualiser as edges advance.
+ * Operator journey for the schedule builder. The operator picks stops the
+ * train will cycle through; the planner computes the per-leg transit through
+ * the layout graph on demand (ADR-010). We assert the train visits the branch
+ * the operator selected by watching the visualiser as edges advance.
  */
 
 const BRANCHED: Layout = {
@@ -20,27 +19,31 @@ const BRANCHED: Layout = {
     { id: 'M4', kind: 'block_boundary' },
     { id: 'M5', kind: 'block_boundary' },
   ],
-  // Two branches sharing M2: the natural slice-the-first-three-edges route
-  // would have walked M1→M2, M2→M3, M3→M4. The operator picks the M2→M5
-  // branch instead so the assertion can tell which path the train took.
+  // Two branches sharing M2: M1→M2→M3→M4→M1 and M1→M2→M5→M1. The operator
+  // picks M5 as a stop so the planner routes M1→M2→M5, exercising the branch
+  // that a trivial first-edge walk would never take. Both branches loop back
+  // to M1 so cyclic schedules can resolve their return leg.
   edges: [
     { from_marker_id: 'M1', to_marker_id: 'M2', estimated_length_mm: 200 },
     { from_marker_id: 'M2', to_marker_id: 'M3', estimated_length_mm: 200 },
     { from_marker_id: 'M3', to_marker_id: 'M4', estimated_length_mm: 200 },
+    { from_marker_id: 'M4', to_marker_id: 'M1', estimated_length_mm: 200 },
     { from_marker_id: 'M2', to_marker_id: 'M5', estimated_length_mm: 200 },
+    { from_marker_id: 'M5', to_marker_id: 'M1', estimated_length_mm: 200 },
   ],
   junctions: [],
 };
 
-async function buildRoute(sim: Page, path: ReadonlyArray<string>): Promise<void> {
-  for (const marker of path) {
-    await sim.getByLabel(/marker/i).selectOption(marker);
-    await sim.getByRole('button', { name: /add to route/i }).click();
+/** Pick each stop ID in order and click Add stop. */
+async function buildSchedule(sim: Page, stops: ReadonlyArray<string>): Promise<void> {
+  for (const stop of stops) {
+    await sim.getByRole('combobox', { name: /stop/i }).selectOption(stop);
+    await sim.getByRole('button', { name: /add stop/i }).click();
   }
 }
 
 test.describe
-  .serial('Operator builds a route marker by marker', () => {
+  .serial('Operator builds a schedule by picking stops', () => {
     let harness: UiHarness;
 
     test.beforeAll(async () => {
@@ -59,17 +62,18 @@ test.describe
 
       await expect(visualiser.locator('[data-marker-id="M1"]')).toBeVisible();
 
-      // Operator builds M1 → M2 → M5 step by step. Spawn must be disabled
-      // until the route has at least one edge (two markers).
+      // Operator picks M1 as the first stop (spawn marker) and M5 as the
+      // second stop. Spawn is enabled as soon as there is at least one stop.
       await expect(sim.getByRole('button', { name: /spawn train/i })).toBeDisabled();
-      await buildRoute(sim, ['M1']);
-      await expect(sim.getByRole('button', { name: /spawn train/i })).toBeDisabled();
-      await buildRoute(sim, ['M2', 'M5']);
+      await buildSchedule(sim, ['M1']);
+      await expect(sim.getByRole('button', { name: /spawn train/i })).toBeEnabled();
+      await buildSchedule(sim, ['M5']);
       await expect(sim.getByRole('button', { name: /spawn train/i })).toBeEnabled();
 
-      // The visible planned-route list reflects the operator's clicks.
-      await expect(sim.getByRole('list', { name: /planned route/i })).toHaveText(/M1.*M2.*M5/);
+      // The visible planned-stops list reflects the operator's clicks.
+      await expect(sim.getByRole('list', { name: /planned stops/i })).toHaveText(/M1.*M5/);
 
+      // Spawn the train. The planner computes M1→M2→M5 from the two stops.
       await sim.getByRole('button', { name: /spawn train/i }).click();
       await expect(visualiser.locator('[data-train-id="T1"]')).toBeVisible({ timeout: 8_000 });
 

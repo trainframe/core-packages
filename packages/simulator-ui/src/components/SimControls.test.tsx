@@ -18,28 +18,32 @@ function renderControls(layout: Layout = SIMPLE_LOOP) {
   return { client, ...view };
 }
 
-/** A layout with no edges — represents the "empty layout" edge case. */
-const EDGELESS_LAYOUT: Layout = {
-  name: 'edgeless',
-  markers: [{ id: 'M1', kind: 'block_boundary' }],
+/** A layout with no markers — represents the "empty layout" edge case. */
+const EMPTY_LAYOUT: Layout = {
+  name: 'empty',
+  markers: [],
   edges: [],
   junctions: [],
 };
 
 /**
- * Build a route by selecting each marker in `path` from the dropdown and
- * clicking "Add to route". Mirrors how a real operator drives the panel.
+ * Build a schedule by selecting each marker in `stops` from the dropdown and
+ * clicking "Add stop". Mirrors how a real operator drives the panel: pick
+ * which stations the train should visit, in order.
  */
-async function buildRoute(user: ReturnType<typeof userEvent.setup>, path: ReadonlyArray<string>) {
-  for (const marker of path) {
-    const dropdown = screen.getByRole('combobox', { name: /marker/i });
+async function buildSchedule(
+  user: ReturnType<typeof userEvent.setup>,
+  stops: ReadonlyArray<string>,
+) {
+  for (const marker of stops) {
+    const dropdown = screen.getByRole('combobox', { name: /stop/i });
     await user.selectOptions(dropdown, marker);
-    await user.click(screen.getByRole('button', { name: /add to route/i }));
+    await user.click(screen.getByRole('button', { name: /add stop/i }));
   }
 }
 
 describe('SimControls — operator panel', () => {
-  it('opens with no trains and Spawn disabled until a route is built', () => {
+  it('opens with no trains and Spawn disabled until a stop is picked', () => {
     renderControls();
 
     expect(screen.getByText('none')).toBeInTheDocument();
@@ -52,7 +56,9 @@ describe('SimControls — operator panel', () => {
     const user = userEvent.setup();
     const { client } = renderControls();
 
-    await buildRoute(user, ['M1', 'M2', 'M3']);
+    // Schedule: spawn at M1 (the first stop is the spawn marker), then cycle
+    // through M3 and back.
+    await buildSchedule(user, ['M1', 'M3']);
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
 
     expect(screen.getByText('T1')).toBeInTheDocument();
@@ -62,12 +68,10 @@ describe('SimControls — operator panel', () => {
     expect(registered).toBeDefined();
   });
 
-  it('passes the operator-built route to the runner as edges, not a hardcoded slice', async () => {
+  it('passes the operator-picked stops to the runner, the planner finds the path', async () => {
     const user = userEvent.setup();
-    // Use a layout where two routes of equal first-edge differ in their
-    // onward markers. The old "demo route" (edges.slice(0,3)) would always
-    // be M1→M2, M2→M3, M3→M4. We build M1→M2, M2→M5 instead — a route only
-    // possible because of a branch from M2.
+    // A branched layout. From M2 the operator's stop list directs the train
+    // toward M5 rather than the structural shortest path that wraps around.
     const BRANCHED: Layout = {
       name: 'branched',
       markers: [
@@ -87,8 +91,8 @@ describe('SimControls — operator panel', () => {
     };
     const { client } = renderControls(BRANCHED);
 
-    // Operator picks the branch route: M1 → M2 → M5.
-    await buildRoute(user, ['M1', 'M2', 'M5']);
+    // Operator picks stops M1 → M5. The planner finds M1→M2→M5.
+    await buildSchedule(user, ['M1', 'M5']);
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
 
     // Pause auto-run, then step enough to traverse both edges.
@@ -97,9 +101,6 @@ describe('SimControls — operator panel', () => {
       await user.click(screen.getByRole('button', { name: /^step 1s$/i }));
     }
 
-    // Collect every marker the train traversed. The scheduler emits
-    // `marker_traversed` server-derived events with the marker_id and the
-    // train_id in the payload — the topic suffix is `/server`.
     const traversals = client.published
       .filter((m) => m.topic.startsWith('railway/events/marker_traversed/'))
       .map((m) => {
@@ -111,32 +112,30 @@ describe('SimControls — operator panel', () => {
       .filter((p) => p.train_id === 'T1')
       .map((p) => p.marker_id);
 
-    // The train must have visited M5 (the operator's chosen branch). A
-    // hardcoded `edges.slice(0,3)` route would have sent it to M3/M4 instead.
+    // The train must visit M5 (the operator's chosen stop) and not stray
+    // onto the M3/M4 branch the planner could otherwise have picked from M2.
     expect(traversals).toContain('M5');
     expect(traversals).not.toContain('M3');
   });
 
-  it('keeps Spawn disabled until the route has at least two markers (one edge)', async () => {
+  it('enables Spawn as soon as the first stop is picked — a single-stop schedule parks at it', async () => {
     const user = userEvent.setup();
     renderControls();
 
     const spawn = screen.getByRole('button', { name: /spawn train/i });
     expect(spawn).toBeDisabled();
 
-    await buildRoute(user, ['M1']);
-    expect(spawn).toBeDisabled();
-
-    await buildRoute(user, ['M2']);
+    await buildSchedule(user, ['M1']);
     expect(spawn).toBeEnabled();
   });
 
-  it('only offers markers reachable from the route tail after the first pick', async () => {
+  it('offers every layout marker as a stop, regardless of reachability', async () => {
     const user = userEvent.setup();
     renderControls();
 
-    // First pick is wide open — every marker is offered.
-    const beforeOptions = (screen.getByRole('combobox', { name: /marker/i }) as HTMLSelectElement)
+    // Stops are operator intent, not a per-edge plan — the picker offers every
+    // marker. Reachability is the planner's concern, not the operator's.
+    const beforeOptions = (screen.getByRole('combobox', { name: /stop/i }) as HTMLSelectElement)
       .options;
     expect(
       Array.from(beforeOptions)
@@ -144,34 +143,39 @@ describe('SimControls — operator panel', () => {
         .sort(),
     ).toEqual(['M1', 'M2', 'M3', 'M4']);
 
-    await buildRoute(user, ['M1']);
+    await buildSchedule(user, ['M1']);
 
-    // From M1 in SIMPLE_LOOP only M2 is reachable.
-    const afterOptions = (screen.getByRole('combobox', { name: /marker/i }) as HTMLSelectElement)
+    // Still every marker — picking M1 as the first stop doesn't constrain
+    // the next pick to "reachable in one edge."
+    const afterOptions = (screen.getByRole('combobox', { name: /stop/i }) as HTMLSelectElement)
       .options;
-    expect(Array.from(afterOptions).map((o) => o.value)).toEqual(['M2']);
+    expect(
+      Array.from(afterOptions)
+        .map((o) => o.value)
+        .sort(),
+    ).toEqual(['M1', 'M2', 'M3', 'M4']);
   });
 
-  it('Remove last truncates the route by one and Clear route resets it', async () => {
+  it('Remove last truncates the stop list by one and Clear stops resets it', async () => {
     const user = userEvent.setup();
     renderControls();
 
-    await buildRoute(user, ['M1', 'M2', 'M3']);
-    expect(screen.getByRole('list', { name: /planned route/i })).toHaveTextContent(/M1.*M2.*M3/);
+    await buildSchedule(user, ['M1', 'M2', 'M3']);
+    expect(screen.getByRole('list', { name: /planned stops/i })).toHaveTextContent(/M1.*M2.*M3/);
 
     await user.click(screen.getByRole('button', { name: /remove last/i }));
-    expect(screen.getByRole('list', { name: /planned route/i })).toHaveTextContent(/M1.*M2/);
-    expect(screen.queryByRole('list', { name: /planned route/i })).not.toHaveTextContent(/M3/);
+    expect(screen.getByRole('list', { name: /planned stops/i })).toHaveTextContent(/M1.*M2/);
+    expect(screen.queryByRole('list', { name: /planned stops/i })).not.toHaveTextContent(/M3/);
 
-    await user.click(screen.getByRole('button', { name: /clear route/i }));
-    expect(screen.queryByRole('list', { name: /planned route/i })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /clear stops/i }));
+    expect(screen.queryByRole('list', { name: /planned stops/i })).not.toBeInTheDocument();
   });
 
   it('spawning from idle leaves the sim running so the train moves without extra clicks', async () => {
     const user = userEvent.setup();
     renderControls();
 
-    await buildRoute(user, ['M1', 'M2']);
+    await buildSchedule(user, ['M1', 'M2']);
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
 
     expect(screen.getByTestId('sim-status')).toHaveTextContent('running');
@@ -181,7 +185,7 @@ describe('SimControls — operator panel', () => {
     const user = userEvent.setup();
     const { client } = renderControls();
 
-    await buildRoute(user, ['M1', 'M2', 'M3']);
+    await buildSchedule(user, ['M1', 'M3']);
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
     for (let i = 0; i < 3; i++) {
       await user.click(screen.getByRole('button', { name: /^step 1s$/i }));
@@ -197,7 +201,7 @@ describe('SimControls — operator panel', () => {
     const user = userEvent.setup();
     renderControls();
 
-    await buildRoute(user, ['M1', 'M2']);
+    await buildSchedule(user, ['M1', 'M2']);
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
     expect(screen.getByText('T1')).toBeInTheDocument();
 
@@ -223,7 +227,10 @@ describe('SimControls — operator panel', () => {
     await user.clear(overshootInput);
     await user.type(overshootInput, '1');
 
-    await buildRoute(user, ['M1', 'M2', 'M3']);
+    // Schedule that plans M1→M2→M3. The clearance limit on the first leg
+    // is M2 (the first intermediate marker the planner picks); overshoot
+    // there.
+    await buildSchedule(user, ['M1', 'M3']);
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
 
     // Pause auto-run so steps are the only source of virtual time advancement.
@@ -246,17 +253,17 @@ describe('SimControls — operator panel', () => {
     expect(envelope.payload.description).toMatch(/overshot/i);
   });
 
-  it('shows an empty-layout hint when the layout has no edges and Spawn is disabled', () => {
-    renderControls(EDGELESS_LAYOUT);
+  it('shows an empty-layout hint when the layout has no markers and Spawn is disabled', () => {
+    renderControls(EMPTY_LAYOUT);
 
     expect(screen.getByRole('button', { name: /spawn train/i })).toBeDisabled();
-    expect(screen.getByText(/add at least one edge/i)).toBeInTheDocument();
+    expect(screen.getByText(/add at least one marker/i)).toBeInTheDocument();
   });
 
-  it('does not show the empty-layout hint when the layout has edges', () => {
+  it('does not show the empty-layout hint when the layout has markers', () => {
     renderControls();
 
-    expect(screen.queryByText(/add at least one edge/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/add at least one marker/i)).not.toBeInTheDocument();
   });
 
   it('shows a duplicate-id error and does not advance the counter when the operator re-uses a train ID', async () => {
@@ -264,12 +271,12 @@ describe('SimControls — operator panel', () => {
     renderControls();
 
     // Spawn T1 — succeeds, counter advances to T2.
-    await buildRoute(user, ['M1', 'M2']);
+    await buildSchedule(user, ['M1', 'M2']);
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
     const trainIdInput = screen.getByRole('textbox', { name: /train id/i });
     expect(trainIdInput).toHaveValue('T2');
 
-    // Change back to T1 and try again (route stays the same — the operator
+    // Change back to T1 and try again (stops list stays the same — the operator
     // didn't touch it after spawning).
     await user.clear(trainIdInput);
     await user.type(trainIdInput, 'T1');
@@ -286,7 +293,7 @@ describe('SimControls — operator panel', () => {
     renderControls();
 
     // Cause the error.
-    await buildRoute(user, ['M1', 'M2']);
+    await buildSchedule(user, ['M1', 'M2']);
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
     const trainIdInput = screen.getByRole('textbox', { name: /train id/i });
     await user.clear(trainIdInput);

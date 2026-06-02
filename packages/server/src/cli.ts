@@ -12,7 +12,7 @@ import { Server } from './server.js';
  *   tf-server --layout path/to/layout.json --broker mqtt://localhost:1883
  *
  * This is the production entry point. Operators wrap it in their own process
- * supervision (systemd, Docker, pm2, …). HTTP / admin API for assignRoute and
+ * supervision (systemd, Docker, pm2, …). HTTP / admin API for assignSchedule and
  * other operator actions is a follow-up.
  */
 async function main(): Promise<void> {

@@ -37,10 +37,7 @@ describe('Clearance flow through a real broker', () => {
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
 
-    harness.server.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     // The train hears that it may run up to M2 (but not yet beyond).
     const permission = await harness.testClient.waitForCommand('T1', 'grant_clearance');
@@ -62,10 +59,7 @@ describe('Clearance flow through a real broker', () => {
       reason: 'crane busy',
     });
 
-    harness.server.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance'); // initial M2 grant
 
     await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M1' });
@@ -93,10 +87,7 @@ describe('Clearance flow through a real broker', () => {
       marker_id: 'M3',
       state: 'withholding',
     });
-    harness.server.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
     await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M1' });
     await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M2' });
@@ -140,10 +131,7 @@ describe('Clearance flow through a real broker', () => {
       marker_id: 'M3',
       state: 'withholding',
     });
-    harness.server.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
     await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M1' });
     await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M2' });

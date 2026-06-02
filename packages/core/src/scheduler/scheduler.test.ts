@@ -86,10 +86,9 @@ describe('Scheduler — route assignment and clearance extension', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
 
-    const effects = scheduler.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    // assignSchedule('T1', 'route-1', ['M1', 'M3']): train conceptually at M1,
+    // planner computes M1→M2→M3.
+    const effects = scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     const grant = effects.find(
       (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
@@ -103,10 +102,8 @@ describe('Scheduler — route assignment and clearance extension', () => {
   it('extends clearance when a train arrives at its limit and more route remains', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
-    scheduler.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    // Train starts at M1, heading to M3 via M1→M2→M3.
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     // Train passes M1 (the start) - then arrives at M2.
     scheduler.handleEvent({
@@ -142,11 +139,8 @@ describe('Scheduler — gating', () => {
       payload: { marker_id: 'M3', state: 'withholding', reason: 'crane busy' },
     });
 
-    // Assign a route through M3.
-    scheduler.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    // Assign a schedule through M3.
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     // Train reaches M2 — should NOT be cleared past M2 because M3 is gated.
     scheduler.handleEvent({
@@ -179,10 +173,7 @@ describe('Scheduler — gating', () => {
       device_id: 'GATE-M3',
       payload: { marker_id: 'M3', state: 'withholding', reason: 'crane busy' },
     });
-    scheduler.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     scheduler.handleEvent({
       event_type: 'tag_observed',
       device_id: 'T1',
@@ -216,16 +207,11 @@ describe('Scheduler — block exclusivity', () => {
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
 
-    // T1 takes the M1→M2 edge.
-    scheduler.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    // T1 takes the M1→M2 edge (as first leg of M1→M3 schedule).
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
-    // T2 tries to take the same M1→M2 edge.
-    const effects = scheduler.assignRoute('T2', 'route-2', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-    ]);
+    // T2 tries to take the same M1→M2 edge (first leg of M1→M2 schedule).
+    const effects = scheduler.assignSchedule('T2', 'route-2', ['M1', 'M2']);
 
     // T2 should get the route command (we don't refuse the route assignment
     // itself), but should NOT get a clearance grant.
@@ -244,14 +230,9 @@ describe('Scheduler — block exclusivity', () => {
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
 
-    scheduler.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
-    const t2Initial = scheduler.assignRoute('T2', 'route-2', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-    ]);
-    // T2 starts blocked: route assigned but no grant.
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    const t2Initial = scheduler.assignSchedule('T2', 'route-2', ['M1', 'M2']);
+    // T2 starts blocked: transit assigned but no grant.
     expect(
       t2Initial.find((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance'),
     ).toBeUndefined();
@@ -276,27 +257,28 @@ describe('Scheduler — block exclusivity', () => {
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
 
-    // T1 takes M1→M2 (with M2→M3 queued).
-    scheduler.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    // T1 takes M1→M2 (with M2→M3 queued in the transit to M3).
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     // T2 is denied the same M1→M2 edge.
-    const t2Initial = scheduler.assignRoute('T2', 'route-2', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-    ]);
+    const t2Initial = scheduler.assignSchedule('T2', 'route-2', ['M1', 'M2']);
     expect(
       t2Initial.find((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance'),
     ).toBeUndefined();
 
-    // Operator reassigns T1 to a yard-style route that no longer touches
-    // M1→M2. The wipe should release T1's hold on M1→M2 and the scheduler
-    // must retry T2's previously-denied clearance in the same call — no
-    // unrelated event should be required.
-    const reassign = scheduler.assignRoute('T1', 'route-1b', [
-      { from_marker_id: 'M3', to_marker_id: 'M4' },
-    ]);
+    // Simulate T1 having reached M3 so its last_marker_id is set there.
+    // This lets the reassignment plan M3→M4, which does not cover M1→M2.
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M3' },
+    });
+
+    // Operator reassigns T1 to a yard-style schedule that no longer touches
+    // M1→M2. Because last_marker_id='M3'=stops[0], the planner builds a transit
+    // M3→M4. The wipe of cleared_edges releases T1's hold on M1→M2 and the
+    // scheduler must retry T2's previously-denied clearance in the same call.
+    const reassign = scheduler.assignSchedule('T1', 'route-1b', ['M3', 'M4']);
 
     const t2Grant = reassign.find(
       (e) =>
@@ -313,16 +295,11 @@ describe('Scheduler — clearance revocation', () => {
     registerTrain(scheduler, 'T2');
 
     // T1 takes M1→M2 (gets initial clearance).
-    scheduler.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     expect(scheduler.getTrainState('T1')?.cleared_edges).toHaveLength(1);
 
     // T2 also wants M1→M2 — denied because T1 holds the block.
-    const t2Initial = scheduler.assignRoute('T2', 'route-2', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-    ]);
+    const t2Initial = scheduler.assignSchedule('T2', 'route-2', ['M1', 'M2']);
     expect(
       t2Initial.find((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance'),
     ).toBeUndefined();
@@ -363,10 +340,7 @@ describe('Scheduler — clearance revocation', () => {
   it('resets the clearance limit to the train`s last known marker', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
-    scheduler.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     // T1 moves to M1, then M2 (and is granted M2→M3).
     scheduler.handleEvent({
@@ -400,10 +374,7 @@ describe('Scheduler — device disconnect', () => {
       device_id: 'GATE-M3',
       payload: { marker_id: 'M3', state: 'withholding', reason: 'crane busy' },
     });
-    scheduler.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     scheduler.handleEvent({
       event_type: 'tag_observed',
       device_id: 'T1',
@@ -437,11 +408,9 @@ describe('Scheduler — device disconnect', () => {
     registerTrain(scheduler, 'T2');
 
     // T1 takes M1→M2.
-    scheduler.assignRoute('T1', 'route-1', [{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M2']);
     // T2 wants the same edge — assigned but no grant.
-    const t2Initial = scheduler.assignRoute('T2', 'route-2', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-    ]);
+    const t2Initial = scheduler.assignSchedule('T2', 'route-2', ['M1', 'M2']);
     expect(findGrant(t2Initial)).toBeUndefined();
 
     // T1 vanishes (e.g. derailed and unplugged). The block must release and
@@ -513,6 +482,11 @@ describe('Scheduler — anomalies', () => {
  * Figure-8 with a single junction at M2. From M2 the train can go to M3
  * (via the "main" switch position) or M5 (via "diverge"). Both routes
  * eventually return to M1.
+ *
+ * The planner is purely structural (ignores switch state) and uses Dijkstra
+ * with edge cost = estimated_length_mm. M2→M3 costs 200 and M2→M5 costs 280,
+ * so when the target is M3, the planner always picks M1→M2→M3 (the cheaper
+ * path). Switch-state filtering still gates clearance grant at runtime.
  */
 const FIGURE_8: Layout = {
   name: 'figure-8',
@@ -573,10 +547,9 @@ describe('Scheduler — switch-state edge filtering', () => {
     registerTrain(scheduler, 'T1');
     registerSwitch(scheduler, 'SW-M2');
 
-    scheduler.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    // Planner picks M1→M2→M3 (cheaper than M1→M2→M5). Switch state unknown
+    // so clearance is withheld at the M2→M3 junction edge.
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     scheduler.handleEvent({
       event_type: 'tag_observed',
@@ -604,10 +577,8 @@ describe('Scheduler — switch-state edge filtering', () => {
       payload: { junction_marker_id: 'M2', position: 'main', confirmed: true },
     });
 
-    scheduler.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    // Planner picks M1→M2→M3 (cheaper). Switch is 'main', matching M2→M3.
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     scheduler.handleEvent({
       event_type: 'tag_observed',
@@ -636,10 +607,8 @@ describe('Scheduler — switch-state edge filtering', () => {
       payload: { junction_marker_id: 'M2', position: 'diverge', confirmed: true },
     });
 
-    scheduler.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    // Planner picks M1→M2→M3 (cheaper). Switch is 'diverge', mismatching M2→M3.
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     scheduler.handleEvent({
       event_type: 'tag_observed',
@@ -666,10 +635,9 @@ describe('Scheduler — switch-state edge filtering', () => {
       payload: { junction_marker_id: 'M2', position: 'main', confirmed: false },
     });
 
-    scheduler.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    // Planner picks M1→M2→M3. Switch reports 'main' but unconfirmed — treated
+    // as unknown, so clearance is withheld.
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     scheduler.handleEvent({
       event_type: 'tag_observed',
@@ -690,10 +658,9 @@ describe('Scheduler — switch-state edge filtering', () => {
     registerTrain(scheduler, 'T1');
     registerSwitch(scheduler, 'SW-M2');
 
-    scheduler.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    // Planner picks M1→M2→M3. Switch unknown at assignment time so initial
+    // grant is withheld at M2.
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     scheduler.handleEvent({
       event_type: 'tag_observed',
       device_id: 'T1',
@@ -723,7 +690,8 @@ describe('Scheduler — tag resolution', () => {
   it('resolves a marker tag and treats the reading train as having traversed it', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
-    scheduler.assignRoute('T1', 'route-1', [{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+    // Single-stop-to-stop transit: M1→M2.
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M2']);
 
     const effects = scheduler.handleEvent({
       event_type: 'tag_observed',
@@ -961,14 +929,12 @@ describe('Scheduler — discovery mode', () => {
 });
 
 describe('Scheduler — referential validation', () => {
-  it('rejects assignRoute when an edge references a marker not in the layout', () => {
+  it('rejects assignSchedule when a stop references a marker not in the layout', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
 
-    const effects = scheduler.assignRoute('T1', 'route-bad', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M999' },
-    ]);
+    // M999 is not in the layout — the schedule should be rejected.
+    const effects = scheduler.assignSchedule('T1', 'route-bad', ['M1', 'M999']);
 
     const grant = effects.find(
       (e) => e.kind === 'send_command' && e.command_type === 'grant_clearance',
@@ -982,8 +948,10 @@ describe('Scheduler — referential validation', () => {
     expect(anomaly).toBeDefined();
     expect((anomaly?.payload as { description: string }).description).toContain('M999');
 
+    // Transit and schedule are not set; clearance state is clean.
     const train = scheduler.getTrainState('T1');
-    expect(train?.route).toBeUndefined();
+    expect(train?.transit).toBeUndefined();
+    expect(train?.schedule).toBeUndefined();
     expect(train?.clearance_limit_marker_id).toBeUndefined();
     expect(train?.cleared_edges).toEqual([]);
   });

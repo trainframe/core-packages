@@ -34,7 +34,11 @@ Trains are autonomous within their assigned route. The server hands a train an o
 
 **Device**: anything that connects to the broker and declares capabilities. Trains, signals, switches, stations, cranes, garages, displays, the simulator: all are devices.
 
-**Route**: an ordered sequence of *edges* a train is to traverse. The use of edges (not markers) ensures unambiguous progress tracking on layouts where the same marker is visited more than once (figure-8s, loops, shunting moves). Optional dwell instructions may be attached to specific edge transitions.
+**Schedule**: the operator-facing intent. An ordered list of *stops* (marker IDs) the train cycles through indefinitely. Carried on the admin API; not on the device-facing bus. After the last stop the train heads back to the first. There is no "non-cyclic schedule" — single-stop schedules park the train at the stop. See [ADR-010](../adr/010-schedule-planner-transit.md).
+
+**Transit**: the planner-computed per-leg sequence of edges from the train's current marker to its next stop. Re-computed on arrival at each stop. Lives in the server; reaches the train as the `assign_route` command's payload. Use of edges (not markers) ensures unambiguous progress tracking on layouts where the same marker is visited more than once (figure-8s, loops, shunting moves). Optional dwell instructions may be attached to specific edge transitions.
+
+**Route** (historical term): a synonym for transit in the wire-level `assign_route` command and field names like `route_id`. Pre-ADR-010 callers used this for the operator-facing concept too; that role is now filled by Schedule.
 
 **Clearance**: a server-issued permission for a specific train to occupy a specific sequence of edges up to a named limit. A train without clearance is stopped. Clearances are revocable.
 
@@ -166,7 +170,7 @@ The broker does not set `timestamp_server`; the scheduler does, on consumption. 
 
 Commands flow from server to devices via `railway/commands/{device_id}`. Same envelope as events, with a `command_id` the device echoes in its acknowledgement event.
 
-`assign_route`: to an `accepts_route` device. Payload: ordered list of *edges* (each identified by `from_marker_id` and `to_marker_id`), optional dwell instructions per edge transition, route ID.
+`assign_route`: to an `accepts_route` device. Payload: ordered list of *edges* (each identified by `from_marker_id` and `to_marker_id`), optional dwell instructions per edge transition, route ID. The edges here are the *transit* — the per-leg plan computed by the server's planner, not an operator-supplied route. Operators provide a sparse list of *stops* via the admin API; the server's planner translates that into the edge sequence the train receives here. See [ADR-010](../adr/010-schedule-planner-transit.md).
 
 `grant_clearance` / `revoke_clearance`: to a `controls_motion` device. Payload: limit marker, reason.
 

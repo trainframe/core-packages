@@ -173,12 +173,10 @@ describe('BrokerBridge', () => {
 });
 
 describe('Simulation device-only mode', () => {
-  it('throws if assignRoute is called without the embedded scheduler', () => {
+  it('throws if assignSchedule is called without the embedded scheduler', () => {
     const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, disableScheduler: true });
     sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
-    expect(() => sim.assignRoute('T1', [{ from_marker_id: 'M1', to_marker_id: 'M2' }])).toThrow(
-      /embedded scheduler disabled/,
-    );
+    expect(() => sim.assignSchedule('T1', ['M1', 'M2'])).toThrow(/embedded scheduler disabled/);
   });
 
   it('handleCommand applies assign_route + grant_clearance to a virtual train', () => {

@@ -190,19 +190,24 @@ export class Simulation {
     });
   }
 
-  /** Assign a route to a train. Requires the embedded scheduler. */
-  assignRoute(
+  /**
+   * Assign a *schedule* — an ordered list of stops the train cycles
+   * through indefinitely — to an in-sim train. The scheduler invokes the
+   * planner to compute the transit between stops on demand. See ADR-010.
+   * Requires the embedded scheduler.
+   */
+  assignSchedule(
     train_id: string,
-    edges: ReadonlyArray<{ from_marker_id: string; to_marker_id: string }>,
+    stops: ReadonlyArray<string>,
     route_id = `route-${train_id}-${this.clock.now()}`,
   ): void {
     if (!this.scheduler) {
       throw new Error(
-        'Simulation.assignRoute called with the embedded scheduler disabled. ' +
+        'Simulation.assignSchedule called with the embedded scheduler disabled. ' +
           'Issue commands via the broker (railway/commands/{device_id}) instead.',
       );
     }
-    const effects = this.scheduler.assignRoute(train_id, route_id, edges);
+    const effects = this.scheduler.assignSchedule(train_id, route_id, stops);
     this.dispatchEffects(effects);
   }
 

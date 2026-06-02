@@ -96,11 +96,7 @@ export interface TestEnvironment {
   readonly simulation: Simulation;
   spawnTrain(train_id: string, options?: SpawnTrainOptions): void;
   spawnGate(device_id: string): ReturnType<Simulation['spawnGate']>;
-  assignRoute(
-    train_id: string,
-    edges: ReadonlyArray<{ from_marker_id: string; to_marker_id: string }>,
-    route_id?: string,
-  ): void;
+  assignSchedule(train_id: string, stops: ReadonlyArray<string>, route_id?: string): void;
   advance(ms: number): void;
   waitForEvent(opts: WaitForEventOptions): CapturedEvent;
   onEvent(listener: SimulationEventListener): () => void;
@@ -135,8 +131,8 @@ export function startTestEnvironment(opts: TestEnvironmentOptions): TestEnvironm
     spawnGate(device_id) {
       return sim.spawnGate(device_id);
     },
-    assignRoute(train_id, edges, route_id) {
-      sim.assignRoute(train_id, edges, route_id);
+    assignSchedule(train_id, stops, route_id) {
+      sim.assignSchedule(train_id, stops, route_id);
     },
     advance(ms) {
       sim.advance(ms);

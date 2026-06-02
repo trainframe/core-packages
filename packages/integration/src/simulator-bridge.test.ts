@@ -64,10 +64,7 @@ describe('BrokerBridge: simulator runs in device-only mode against a real server
 
     await harness.testClient.waitForState('railway/state/devices/T1');
 
-    harness.server.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     const grant = await harness.testClient.waitForCommand('T1', 'grant_clearance');
     expect((grant.payload as { limit_marker_id: string }).limit_marker_id).toBe('M2');
@@ -88,10 +85,7 @@ describe('BrokerBridge: simulator runs in device-only mode against a real server
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
 
-    harness.server.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
 

@@ -59,10 +59,7 @@ describe('Admin HTTP API', () => {
 
     const res = await post('/api/trains/T1/route', {
       route_id: 'route-1',
-      edges: [
-        { from_marker_id: 'M1', to_marker_id: 'M2' },
-        { from_marker_id: 'M2', to_marker_id: 'M3' },
-      ],
+      stops: ['M1', 'M3'],
     });
     expect(res.status).toBe(204);
 
@@ -101,7 +98,7 @@ describe('Admin HTTP API', () => {
     const res = await post('/api/trains/T1/route', { route_id: 'r1' });
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
-    expect(body.error).toMatch(/edges/);
+    expect(body.error).toMatch(/stops/);
   });
 
   it('returns 404 for unknown routes', async () => {
@@ -122,13 +119,10 @@ describe('Admin HTTP API', () => {
     await harness.testClient.waitForState('railway/state/devices/T1');
     await harness.testClient.waitForState('railway/state/devices/T2');
 
-    harness.server.assignRoute('T1', 'route-1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
 
-    harness.server.assignRoute('T2', 'route-2', [{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+    harness.server.assignSchedule('T2', 'route-2', ['M1', 'M2']);
     // T2 should not have a grant yet — T1 holds the block.
     const t2GrantsBefore = harness.testClient
       .commandsFor('T2')

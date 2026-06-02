@@ -32,10 +32,7 @@ describe('SimRunner — lifecycle', () => {
     // Spawning surfaces the train in the snapshot and on the broker.
     runner.start();
     runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
-    runner.assignRoute('T1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    runner.assignSchedule('T1', ['M1', 'M3']);
     expect(runner.snapshot().train_ids).toEqual(['T1']);
 
     // Resuming auto-advances the sim clock; pausing stops it.
@@ -114,10 +111,7 @@ describe('SimRunner — event publishing', () => {
     const { runner, client } = makeRunner();
     runner.start();
     runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
-    runner.assignRoute('T1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    runner.assignSchedule('T1', ['M1', 'M3']);
     runner.step(5_000);
 
     const traversals = client.published.filter((m) =>
@@ -130,10 +124,7 @@ describe('SimRunner — event publishing', () => {
     const { runner } = makeRunner();
     runner.start();
     runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
-    runner.assignRoute('T1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    runner.assignSchedule('T1', ['M1', 'M3']);
 
     const afterSpawn = runner.snapshot().events_published;
     expect(afterSpawn).toBeGreaterThan(0);
@@ -198,7 +189,7 @@ describe('SimRunner — auto-advance', () => {
       const { runner } = makeRunner();
       runner.start();
       runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
-      runner.assignRoute('T1', [{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+      runner.assignSchedule('T1', ['M1', 'M2']);
 
       const before = runner.snapshot().sim_time_ms;
       runner.resume();
@@ -407,13 +398,11 @@ describe('SimRunner — device-only mode', () => {
     expect(tagEvents.length).toBeGreaterThan(0);
   });
 
-  it('throws if assignRoute is called locally - server must drive routing', () => {
+  it('throws if assignSchedule is called locally - server must drive routing', () => {
     const { runner } = makeDeviceOnlyRunner();
     runner.start();
     runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
-    expect(() => runner.assignRoute('T1', [{ from_marker_id: 'M1', to_marker_id: 'M2' }])).toThrow(
-      /device-only mode/,
-    );
+    expect(() => runner.assignSchedule('T1', ['M1', 'M2'])).toThrow(/device-only mode/);
   });
 
   it('publishes the layout state as retained on start, same as embedded mode', () => {

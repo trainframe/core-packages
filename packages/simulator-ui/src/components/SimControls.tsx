@@ -10,71 +10,56 @@ interface SimControlsProps {
 }
 
 /**
- * Operator panel for driving an in-browser simulation. The operator builds
- * a route marker by marker — starting with any layout marker, then only
- * markers reachable along an outgoing edge from the route's tail — and
- * spawns trains onto that route. All captured events are published through
- * the configured MQTT broker.
+ * Operator panel for driving an in-browser simulation. The operator picks an
+ * ordered list of *stops* — markers the train will cycle through indefinitely
+ * — and spawns the train. The scheduler plans the per-leg transit through
+ * the layout graph on the fly. See ADR-010.
  */
 export function SimControls({ layout }: SimControlsProps) {
-  const { snapshot, start, resume, pause, stop, step, spawnTrain, assignRoute } = useSimRunner(
+  const { snapshot, start, resume, pause, stop, step, spawnTrain, assignSchedule } = useSimRunner(
     layout,
     100,
   );
 
   const isIdle = snapshot.status === 'idle';
-  const hasAnyEdges = layout.edges.length > 0;
+  const hasAnyMarkers = layout.markers.length > 0;
 
   const computedNextId = `T${snapshot.train_ids.length + 1}`;
   const [trainId, setTrainId] = useState(computedNextId);
   const [overshootRate, setOvershootRate] = useState('0');
   const [missRate, setMissRate] = useState('0.01');
   const [spawnError, setSpawnError] = useState<string | null>(null);
-  /** Markers in order the operator has chosen them. Length >= 2 = valid route. */
-  const [routeMarkers, setRouteMarkers] = useState<string[]>([]);
-  /** The marker the operator has currently selected in the dropdown. */
-  const [nextMarker, setNextMarker] = useState<string>('');
+  /** Stops the train will cycle through. */
+  const [stops, setStops] = useState<string[]>([]);
+  /** Marker the operator has currently selected in the stop dropdown. */
+  const [nextStop, setNextStop] = useState<string>('');
 
-  // Reset the route builder when the layout changes; old marker IDs may not
-  // exist on the new layout.
+  // Reset stops when the layout changes; old marker IDs may no longer exist.
   // biome-ignore lint/correctness/useExhaustiveDependencies: layout identity is the trigger
   useEffect(() => {
-    setRouteMarkers([]);
-    setNextMarker('');
+    setStops([]);
+    setNextStop('');
   }, [layout]);
 
-  // Compute the options the dropdown should show. If the route is empty,
-  // any marker is a valid starting point. Otherwise only markers reachable
-  // along an outgoing edge from the last marker in the route are valid.
-  const dropdownOptions = useMemo<ReadonlyArray<string>>(() => {
-    if (routeMarkers.length === 0) {
-      return layout.markers.map((m) => m.id);
-    }
-    const tail = routeMarkers[routeMarkers.length - 1];
-    if (tail === undefined) return [];
-    return layout.edges.filter((e) => e.from_marker_id === tail).map((e) => e.to_marker_id);
-  }, [layout, routeMarkers]);
+  // The stop picker offers every marker in the layout — stops are an
+  // operator intent, not a per-edge plan, so reachability is the planner's
+  // problem to surface (as an anomaly) not the operator's to pre-compute.
+  const markerOptions = useMemo<ReadonlyArray<string>>(
+    () => layout.markers.map((m) => m.id),
+    [layout],
+  );
 
-  // Keep `nextMarker` consistent with the options list — when options change
-  // (route grew/shrunk or layout swapped), default to the first option so
-  // the operator can keep clicking Add without re-selecting.
+  // Default the dropdown to the first available marker so the operator can
+  // keep tapping Add without re-selecting.
   useEffect(() => {
-    if (dropdownOptions.length === 0) {
-      setNextMarker('');
+    if (markerOptions.length === 0) {
+      setNextStop('');
       return;
     }
-    if (!dropdownOptions.includes(nextMarker)) {
-      setNextMarker(dropdownOptions[0] ?? '');
+    if (!markerOptions.includes(nextStop)) {
+      setNextStop(markerOptions[0] ?? '');
     }
-  }, [dropdownOptions, nextMarker]);
-
-  const routeEdges = useMemo<ReadonlyArray<{ from_marker_id: string; to_marker_id: string }>>(
-    () =>
-      routeMarkers
-        .slice(0, -1)
-        .map((from, i) => ({ from_marker_id: from, to_marker_id: routeMarkers[i + 1] ?? '' })),
-    [routeMarkers],
-  );
+  }, [markerOptions, nextStop]);
 
   // When the train list empties (Stop), reset the form's Train ID so the
   // operator's next spawn doesn't start at the last auto-incremented value
@@ -83,45 +68,49 @@ export function SimControls({ layout }: SimControlsProps) {
     if (snapshot.train_ids.length === 0) setTrainId('T1');
   }, [snapshot.train_ids.length]);
 
-  const canSpawn = routeEdges.length >= 1;
+  const canSpawn = stops.length >= 1;
 
-  function handleAddMarker() {
-    if (nextMarker === '') return;
-    if (!dropdownOptions.includes(nextMarker)) return;
-    setRouteMarkers([...routeMarkers, nextMarker]);
+  function handleAddStop() {
+    if (nextStop === '') return;
+    if (!markerOptions.includes(nextStop)) return;
+    setStops([...stops, nextStop]);
   }
 
   function handleRemoveLast() {
-    setRouteMarkers(routeMarkers.slice(0, -1));
+    setStops(stops.slice(0, -1));
   }
 
-  function handleClearRoute() {
-    setRouteMarkers([]);
+  function handleClearStops() {
+    setStops([]);
   }
 
   function handleSpawn(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!canSpawn) return;
-    const firstEdge = routeEdges[0];
-    if (!firstEdge) return;
+    const startMarker = stops[0];
+    if (startMarker === undefined) return;
 
-    const parsedOvershoot = Number.parseFloat(overshootRate);
-    const parsedMiss = Number.parseFloat(missRate);
-    const config: { overshoot_rate?: number; miss_rate?: number } = {};
-    if (!Number.isNaN(parsedOvershoot))
-      config.overshoot_rate = Math.min(1, Math.max(0, parsedOvershoot));
-    if (!Number.isNaN(parsedMiss)) config.miss_rate = Math.min(1, Math.max(0, parsedMiss));
+    // Pick any outgoing edge from stops[0] as the physical spawn edge. The
+    // scheduler's assign_route command overrides the train's current_edge
+    // when the planner-computed transit lands, so this is just a placeholder
+    // physical position.
+    const startEdge = layout.edges.find((e) => e.from_marker_id === startMarker);
+    if (!startEdge) {
+      setSpawnError(
+        `Marker ${startMarker} has no outgoing edge — the train would have nowhere to go from here.`,
+      );
+      return;
+    }
 
     if (isIdle) start();
-    const spawned = spawnTrain(trainId, firstEdge, config);
-
+    const spawned = spawnTrain(trainId, startEdge, buildTrainConfig(overshootRate, missRate));
     if (!spawned) {
       setSpawnError(`Train ${trainId} already exists. Choose a different ID.`);
       return;
     }
 
     setSpawnError(null);
-    assignRoute(trainId, routeEdges);
+    assignSchedule(trainId, stops);
     // Pressing Spawn from idle implies "begin" — auto-resume so the train
     // moves without a second click. If the operator manually paused, respect
     // that: add the train but leave the sim paused for them to inspect.
@@ -131,7 +120,7 @@ export function SimControls({ layout }: SimControlsProps) {
     setTrainId(`T${snapshot.train_ids.length + 2}`);
   }
 
-  const firstMarkerLabel = routeMarkers.length === 0 ? 'First marker' : 'Next marker';
+  const nextStopLabel = stops.length === 0 ? 'First stop' : 'Next stop';
 
   return (
     <section aria-label="Simulator controls">
@@ -200,13 +189,13 @@ export function SimControls({ layout }: SimControlsProps) {
           </label>
           <div>
             <label>
-              {firstMarkerLabel}{' '}
+              {nextStopLabel}{' '}
               <select
-                value={nextMarker}
-                onChange={(e) => setNextMarker(e.target.value)}
-                disabled={dropdownOptions.length === 0}
+                value={nextStop}
+                onChange={(e) => setNextStop(e.target.value)}
+                disabled={markerOptions.length === 0}
               >
-                {dropdownOptions.map((id) => (
+                {markerOptions.map((id) => (
                   <option key={id} value={id}>
                     {id}
                   </option>
@@ -215,22 +204,22 @@ export function SimControls({ layout }: SimControlsProps) {
             </label>{' '}
             <button
               type="button"
-              onClick={handleAddMarker}
-              disabled={nextMarker === '' || dropdownOptions.length === 0}
+              onClick={handleAddStop}
+              disabled={nextStop === '' || markerOptions.length === 0}
             >
-              Add to route
+              Add stop
             </button>{' '}
-            <button type="button" onClick={handleRemoveLast} disabled={routeMarkers.length === 0}>
+            <button type="button" onClick={handleRemoveLast} disabled={stops.length === 0}>
               Remove last
             </button>{' '}
-            <button type="button" onClick={handleClearRoute} disabled={routeMarkers.length === 0}>
-              Clear route
+            <button type="button" onClick={handleClearStops} disabled={stops.length === 0}>
+              Clear stops
             </button>
           </div>
-          {routeMarkers.length > 0 && (
-            <ol aria-label="Planned route">
-              {routeMarkers.map((markerId, i) => (
-                // biome-ignore lint/suspicious/noArrayIndexKey: position is the identity of a route step
+          {stops.length > 0 && (
+            <ol aria-label="Planned stops">
+              {stops.map((markerId, i) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: position is the identity of a stop in the schedule
                 <li key={`${markerId}-${i}`}>{markerId}</li>
               ))}
             </ol>
@@ -239,15 +228,13 @@ export function SimControls({ layout }: SimControlsProps) {
             Spawn train
           </button>
         </form>
-        {!hasAnyEdges && (
+        {!hasAnyMarkers && (
           <p data-testid="spawn-disabled-hint">
-            Add at least one edge to the layout to spawn a train.
+            Add at least one marker to the layout to spawn a train.
           </p>
         )}
-        {hasAnyEdges && !canSpawn && (
-          <p data-testid="spawn-route-hint">
-            Pick a first marker and at least one onward marker to build a route.
-          </p>
+        {hasAnyMarkers && !canSpawn && (
+          <p data-testid="spawn-stops-hint">Pick at least one stop for the train to visit.</p>
         )}
         {spawnError !== null && (
           <p role="alert" data-testid="spawn-error">
@@ -257,4 +244,20 @@ export function SimControls({ layout }: SimControlsProps) {
       </fieldset>
     </section>
   );
+}
+
+function buildTrainConfig(
+  overshootRate: string,
+  missRate: string,
+): { overshoot_rate?: number; miss_rate?: number } {
+  const parsedOvershoot = Number.parseFloat(overshootRate);
+  const parsedMiss = Number.parseFloat(missRate);
+  const config: { overshoot_rate?: number; miss_rate?: number } = {};
+  if (!Number.isNaN(parsedOvershoot)) {
+    config.overshoot_rate = Math.min(1, Math.max(0, parsedOvershoot));
+  }
+  if (!Number.isNaN(parsedMiss)) {
+    config.miss_rate = Math.min(1, Math.max(0, parsedMiss));
+  }
+  return config;
 }

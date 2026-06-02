@@ -23,10 +23,7 @@ describe('startTestEnvironment', () => {
   it('runs a route to completion under the pristine fault profile', () => {
     const env = startTestEnvironment({ layout: SIMPLE_LOOP, seed: 1, faults: 'pristine' });
     env.simulation.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
-    env.assignRoute('T1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    env.assignSchedule('T1', ['M1', 'M3']);
 
     const reachedM3 = env.waitForEvent({
       event_type: 'marker_traversed',
@@ -43,12 +40,7 @@ describe('startTestEnvironment', () => {
       env.simulation.spawnTrain('T1', {
         startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
       });
-      env.assignRoute('T1', [
-        { from_marker_id: 'M1', to_marker_id: 'M2' },
-        { from_marker_id: 'M2', to_marker_id: 'M3' },
-        { from_marker_id: 'M3', to_marker_id: 'M4' },
-        { from_marker_id: 'M4', to_marker_id: 'M1' },
-      ]);
+      env.assignSchedule('T1', ['M1', 'M2', 'M3', 'M4']);
       env.advance(20_000);
       const traversals = env.getEventsOfType('marker_traversed').length;
       env.shutdown();
@@ -70,10 +62,7 @@ describe('startTestEnvironment', () => {
       // Force this train onto pristine physics inside a hostile environment.
       config: FAULT_PROFILES.pristine,
     });
-    env.assignRoute('T1', [
-      { from_marker_id: 'M1', to_marker_id: 'M2' },
-      { from_marker_id: 'M2', to_marker_id: 'M3' },
-    ]);
+    env.assignSchedule('T1', ['M1', 'M3']);
     const reached = env.waitForEvent({
       event_type: 'marker_traversed',
       matching: { train_id: 'T1', marker_id: 'M3' },
