@@ -5,9 +5,9 @@ import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
 /**
  * Type-in-form to event-out-of-broker closure. The operator dials the
- * spawn form's overshoot rate to its max, spawns a train, presses Resume,
- * and watches the visualiser's live event log for an `anomaly` describing
- * the overshoot. Exercises:
+ * spawn form's overshoot rate to its max, spawns a train (Spawn auto-
+ * starts AND auto-resumes the sim), and watches the visualiser's live
+ * event log for an `anomaly` describing the overshoot. Exercises:
  *
  *   simulator-ui form → SimRunner.spawnTrain → VirtualTrain config →
  *     overshoot detection in the sim core → anomaly event onto the broker
@@ -55,8 +55,8 @@ test.describe
       // edge crossing the train approaches will mishap.
       await sim.getByLabel(/^Train ID/i).fill('T1');
       await sim.getByLabel(/Overshoot rate/i).fill('1');
+      // Spawn auto-starts and auto-resumes the sim — no extra Resume click.
       await sim.getByRole('button', { name: /Spawn train/i }).click();
-      await sim.getByRole('button', { name: 'Resume', exact: true }).click();
 
       await expect(visualiser.locator('[data-train-id="T1"]')).toBeVisible({ timeout: 8_000 });
 

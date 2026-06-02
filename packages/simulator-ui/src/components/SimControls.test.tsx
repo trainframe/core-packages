@@ -41,6 +41,15 @@ describe('SimControls — operator panel', () => {
     expect(registered).toBeDefined();
   });
 
+  it('spawning from idle leaves the sim running so the train moves without extra clicks', async () => {
+    const user = userEvent.setup();
+    renderControls();
+
+    await user.click(screen.getByRole('button', { name: /spawn train/i }));
+
+    expect(screen.getByTestId('sim-status')).toHaveTextContent('running');
+  });
+
   it('stepping the sim after spawn produces marker_traversed events for the train', async () => {
     const user = userEvent.setup();
     const { client } = renderControls();

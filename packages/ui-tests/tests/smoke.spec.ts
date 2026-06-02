@@ -36,6 +36,13 @@ test.describe('Simulator UI: operator panel', () => {
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1/);
   });
 
+  test('spawning from idle leaves the simulation running so the operator sees motion without further input', async ({
+    page,
+  }) => {
+    await page.getByRole('button', { name: /spawn train/i }).click();
+    await expect(page.getByTestId('sim-status')).toHaveText('running');
+  });
+
   test('stepping the simulation after spawning advances the clock the operator sees', async ({
     page,
   }) => {

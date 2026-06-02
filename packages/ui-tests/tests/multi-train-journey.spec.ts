@@ -74,14 +74,13 @@ test.describe
 
       await expect(visualiser.locator('[data-marker-id="M1"]')).toBeVisible();
 
-      // Operator drives the lifecycle: three Spawn clicks then Resume. Spawn
-      // auto-starts the sim from idle and the form's Train ID auto-increments,
+      // Operator drives the lifecycle with three Spawn clicks. Spawn auto-
+      // starts AND auto-resumes the sim; the form's Train ID auto-increments,
       // so we fill it explicitly to keep the test deterministic across renders.
       for (const id of ['T1', 'T2', 'T3']) {
         await sim.getByLabel(/^Train ID/i).fill(id);
         await sim.getByRole('button', { name: /Spawn train/i }).click();
       }
-      await sim.getByRole('button', { name: 'Resume', exact: true }).click();
 
       // All three trains must appear on the visualiser canvas.
       for (const id of ['T1', 'T2', 'T3']) {

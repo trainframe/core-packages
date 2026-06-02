@@ -47,6 +47,9 @@ export function SimControls({ layout }: SimControlsProps) {
     if (isIdle) start();
     spawnTrain(trainId, firstEdge, config);
     assignRoute(trainId, demoRoute);
+    // Pressing Spawn implies "begin" from the operator's POV — auto-resume so
+    // a spawned train actually moves. resume() is a no-op when already running.
+    resume();
 
     // Advance train_id to the next default after spawn
     setTrainId(`T${snapshot.train_ids.length + 2}`);
