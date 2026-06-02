@@ -106,7 +106,15 @@ export function parseLayoutJson(text: string): LayoutValidationResult {
   return { ok: true, layout: parsed };
 }
 
-// Schema validates shape only; without this check the sim crashes inside LayoutState on start, not in the form.
+/**
+ * Schema validates shape only; without this check the sim crashes inside
+ * LayoutState on start, not in the form. Exported so the step-by-step
+ * track builder can apply the same integrity rules before saving.
+ */
+export function checkLayoutReferentialIntegrity(layout: Layout): string | null {
+  return checkReferentialIntegrity(layout);
+}
+
 function checkReferentialIntegrity(layout: Layout): string | null {
   const markerIds = new Set(layout.markers.map((m) => m.id));
   for (const edge of layout.edges) {
