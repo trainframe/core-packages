@@ -55,6 +55,25 @@ test.describe('Simulator UI: operator panel', () => {
     await expect(clock).not.toHaveText('0.0s');
   });
 
+  test('spawning while paused respects the operator\'s pause — sim stays paused', async ({
+    page,
+  }) => {
+    // Spawn from idle: auto-resumes, sim runs.
+    await page.getByRole('button', { name: /spawn train/i }).click();
+    await expect(page.getByTestId('sim-status')).toHaveText('running');
+
+    // Operator pauses to inspect / adjust.
+    await page.getByRole('button', { name: /^pause$/i }).click();
+    await expect(page.getByTestId('sim-status')).toHaveText('paused');
+
+    // A second Spawn while paused should add the train but leave the
+    // sim paused — the operator paused for a reason and a side-effect
+    // resume would override their intent.
+    await page.getByRole('button', { name: /spawn train/i }).click();
+    await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1, T2/);
+    await expect(page.getByTestId('sim-status')).toHaveText('paused');
+  });
+
   test('stopping the sim resets the Train ID field so the next spawn starts at T1 again', async ({
     page,
   }) => {
