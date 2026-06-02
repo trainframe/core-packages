@@ -103,20 +103,21 @@ test.describe('Simulator UI: operator panel', () => {
     await trainIdInput.fill('T1');
     await page.getByRole('button', { name: /spawn train/i }).click();
 
-    // An inline alert explaining the conflict must be visible.
-    const errorEl = page.getByRole('alert');
-    await expect(errorEl).toBeVisible();
-    await expect(errorEl).toHaveText(/T1 already exists/i);
+    // The smoke setup has no live broker, so the broker-error alert is
+    // already on the page — match by the conflict text directly, which is
+    // both semantic and specific.
+    const dupAlert = page.getByText(/T1 already exists/i);
+    await expect(dupAlert).toBeVisible();
 
     // The counter must NOT have advanced — the input stays at T1 (the
     // operator typed), and there's still only one train in the snapshot.
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/^T1$/);
     await expect(trainIdInput).toHaveValue('T1');
 
-    // Fixing the ID clears the error.
+    // Fixing the ID clears the duplicate error.
     await trainIdInput.fill('T2');
     await page.getByRole('button', { name: /spawn train/i }).click();
-    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expect(dupAlert).toHaveCount(0);
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1, T2/);
   });
 
