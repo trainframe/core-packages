@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { InMemoryBrokerClient } from '../broker/in-memory-client.js';
 import { SIMPLE_LOOP } from './layouts.js';
-import { SimRunner } from './sim-runner.js';
+import { STATION_DWELL_MS, SimRunner } from './sim-runner.js';
 
 const FIXED_ID = '00000000-0000-4000-8000-000000000000';
 
@@ -225,6 +225,123 @@ function makeDeviceOnlyRunner(): { runner: SimRunner; client: InMemoryBrokerClie
   });
   return { runner, client };
 }
+
+describe('SimRunner — station dwell gates', () => {
+  it('auto-spawns a STATION-<markerId> gate for every station_stop marker on start', () => {
+    vi.useFakeTimers();
+    try {
+      const { runner, client } = makeRunner();
+      runner.start();
+
+      // SIMPLE_LOOP has M3 as the only station_stop marker.
+      const registered = client.published.find(
+        (m) => m.topic === 'railway/events/device_registered/STATION-M3',
+      );
+      expect(registered).toBeDefined();
+      runner.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('initially withholds clearance at the station marker so approaching trains stall', () => {
+    vi.useFakeTimers();
+    try {
+      const { runner, client } = makeRunner();
+      runner.start();
+
+      const initialWithhold = client.published
+        .map((m) => ({ topic: m.topic, payload: decode(m.payload) }))
+        .find(
+          (m): m is { topic: string; payload: { payload: { marker_id: string; state: string } } } =>
+            m.topic === 'railway/events/gate_state_changed/STATION-M3',
+        );
+      expect(initialWithhold).toBeDefined();
+      expect(initialWithhold?.payload.payload.marker_id).toBe('M3');
+      expect(initialWithhold?.payload.payload.state).toBe('withholding');
+      runner.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('cycles withhold and release on the configured dwell interval', () => {
+    vi.useFakeTimers();
+    try {
+      const { runner, client } = makeRunner();
+      runner.start();
+
+      const gateMessages = () =>
+        client.published
+          .filter((m) => m.topic === 'railway/events/gate_state_changed/STATION-M3')
+          .map((m) => {
+            const env = decode(m.payload) as { payload: { state: string } };
+            return env.payload.state;
+          });
+
+      // Initial state: withhold.
+      expect(gateMessages()).toEqual(['withholding']);
+
+      // After one dwell period: release.
+      vi.advanceTimersByTime(STATION_DWELL_MS);
+      expect(gateMessages()).toEqual(['withholding', 'granting']);
+
+      // After another dwell period: withhold again.
+      vi.advanceTimersByTime(STATION_DWELL_MS);
+      expect(gateMessages()).toEqual(['withholding', 'granting', 'withholding']);
+      runner.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('despawns the station gate on stop so subscribers know it is gone', () => {
+    vi.useFakeTimers();
+    try {
+      const { runner, client } = makeRunner();
+      runner.start();
+      runner.stop();
+
+      const disconnected = client.published.find(
+        (m) => m.topic === 'railway/events/device_disconnected/STATION-M3',
+      );
+      expect(disconnected).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not auto-spawn station gates for layouts with no station_stop markers', () => {
+    vi.useFakeTimers();
+    try {
+      const client = new InMemoryBrokerClient();
+      client.connect('ws://test');
+      const runner = new SimRunner(client, {
+        layout: {
+          name: 'no-station',
+          markers: [
+            { id: 'M1', kind: 'block_boundary' },
+            { id: 'M2', kind: 'block_boundary' },
+          ],
+          edges: [{ from_marker_id: 'M1', to_marker_id: 'M2', estimated_length_mm: 200 }],
+          junctions: [],
+        },
+        tick_ms: 100,
+        newId: () => FIXED_ID,
+        register_tags: 'identity',
+      });
+      runner.start();
+
+      const stationRegs = client.published.filter((m) =>
+        m.topic.startsWith('railway/events/device_registered/STATION-'),
+      );
+      expect(stationRegs).toHaveLength(0);
+      runner.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe('SimRunner — device-only mode', () => {
   it('still publishes device events from spawned trains', () => {

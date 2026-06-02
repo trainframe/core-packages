@@ -26,12 +26,24 @@ const EDGELESS_LAYOUT: Layout = {
   junctions: [],
 };
 
+/**
+ * Build a route by selecting each marker in `path` from the dropdown and
+ * clicking "Add to route". Mirrors how a real operator drives the panel.
+ */
+async function buildRoute(user: ReturnType<typeof userEvent.setup>, path: ReadonlyArray<string>) {
+  for (const marker of path) {
+    const dropdown = screen.getByRole('combobox', { name: /marker/i });
+    await user.selectOptions(dropdown, marker);
+    await user.click(screen.getByRole('button', { name: /add to route/i }));
+  }
+}
+
 describe('SimControls — operator panel', () => {
-  it('opens with no trains, Spawn available, and Pause/Stop not yet meaningful', () => {
+  it('opens with no trains and Spawn disabled until a route is built', () => {
     renderControls();
 
     expect(screen.getByText('none')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /spawn train/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /spawn train/i })).toBeDisabled();
     expect(screen.getByRole('button', { name: /^pause$/i })).toBeDisabled();
     expect(screen.getByRole('button', { name: /^stop$/i })).toBeDisabled();
   });
@@ -40,6 +52,7 @@ describe('SimControls — operator panel', () => {
     const user = userEvent.setup();
     const { client } = renderControls();
 
+    await buildRoute(user, ['M1', 'M2', 'M3']);
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
 
     expect(screen.getByText('T1')).toBeInTheDocument();
@@ -49,10 +62,116 @@ describe('SimControls — operator panel', () => {
     expect(registered).toBeDefined();
   });
 
+  it('passes the operator-built route to the runner as edges, not a hardcoded slice', async () => {
+    const user = userEvent.setup();
+    // Use a layout where two routes of equal first-edge differ in their
+    // onward markers. The old "demo route" (edges.slice(0,3)) would always
+    // be M1→M2, M2→M3, M3→M4. We build M1→M2, M2→M5 instead — a route only
+    // possible because of a branch from M2.
+    const BRANCHED: Layout = {
+      name: 'branched',
+      markers: [
+        { id: 'M1', kind: 'block_boundary' },
+        { id: 'M2', kind: 'block_boundary' },
+        { id: 'M3', kind: 'block_boundary' },
+        { id: 'M4', kind: 'block_boundary' },
+        { id: 'M5', kind: 'block_boundary' },
+      ],
+      edges: [
+        { from_marker_id: 'M1', to_marker_id: 'M2', estimated_length_mm: 200 },
+        { from_marker_id: 'M2', to_marker_id: 'M3', estimated_length_mm: 200 },
+        { from_marker_id: 'M3', to_marker_id: 'M4', estimated_length_mm: 200 },
+        { from_marker_id: 'M2', to_marker_id: 'M5', estimated_length_mm: 200 },
+      ],
+      junctions: [],
+    };
+    const { client } = renderControls(BRANCHED);
+
+    // Operator picks the branch route: M1 → M2 → M5.
+    await buildRoute(user, ['M1', 'M2', 'M5']);
+    await user.click(screen.getByRole('button', { name: /spawn train/i }));
+
+    // Pause auto-run, then step enough to traverse both edges.
+    await user.click(screen.getByRole('button', { name: /^pause$/i }));
+    for (let i = 0; i < 6; i++) {
+      await user.click(screen.getByRole('button', { name: /^step 1s$/i }));
+    }
+
+    // Collect every marker the train traversed. The scheduler emits
+    // `marker_traversed` server-derived events with the marker_id and the
+    // train_id in the payload — the topic suffix is `/server`.
+    const traversals = client.published
+      .filter((m) => m.topic.startsWith('railway/events/marker_traversed/'))
+      .map((m) => {
+        const env = JSON.parse(new TextDecoder().decode(m.payload)) as {
+          payload: { marker_id: string; train_id?: string };
+        };
+        return env.payload;
+      })
+      .filter((p) => p.train_id === 'T1')
+      .map((p) => p.marker_id);
+
+    // The train must have visited M5 (the operator's chosen branch). A
+    // hardcoded `edges.slice(0,3)` route would have sent it to M3/M4 instead.
+    expect(traversals).toContain('M5');
+    expect(traversals).not.toContain('M3');
+  });
+
+  it('keeps Spawn disabled until the route has at least two markers (one edge)', async () => {
+    const user = userEvent.setup();
+    renderControls();
+
+    const spawn = screen.getByRole('button', { name: /spawn train/i });
+    expect(spawn).toBeDisabled();
+
+    await buildRoute(user, ['M1']);
+    expect(spawn).toBeDisabled();
+
+    await buildRoute(user, ['M2']);
+    expect(spawn).toBeEnabled();
+  });
+
+  it('only offers markers reachable from the route tail after the first pick', async () => {
+    const user = userEvent.setup();
+    renderControls();
+
+    // First pick is wide open — every marker is offered.
+    const beforeOptions = (screen.getByRole('combobox', { name: /marker/i }) as HTMLSelectElement)
+      .options;
+    expect(
+      Array.from(beforeOptions)
+        .map((o) => o.value)
+        .sort(),
+    ).toEqual(['M1', 'M2', 'M3', 'M4']);
+
+    await buildRoute(user, ['M1']);
+
+    // From M1 in SIMPLE_LOOP only M2 is reachable.
+    const afterOptions = (screen.getByRole('combobox', { name: /marker/i }) as HTMLSelectElement)
+      .options;
+    expect(Array.from(afterOptions).map((o) => o.value)).toEqual(['M2']);
+  });
+
+  it('Remove last truncates the route by one and Clear route resets it', async () => {
+    const user = userEvent.setup();
+    renderControls();
+
+    await buildRoute(user, ['M1', 'M2', 'M3']);
+    expect(screen.getByRole('list', { name: /planned route/i })).toHaveTextContent(/M1.*M2.*M3/);
+
+    await user.click(screen.getByRole('button', { name: /remove last/i }));
+    expect(screen.getByRole('list', { name: /planned route/i })).toHaveTextContent(/M1.*M2/);
+    expect(screen.queryByRole('list', { name: /planned route/i })).not.toHaveTextContent(/M3/);
+
+    await user.click(screen.getByRole('button', { name: /clear route/i }));
+    expect(screen.queryByRole('list', { name: /planned route/i })).not.toBeInTheDocument();
+  });
+
   it('spawning from idle leaves the sim running so the train moves without extra clicks', async () => {
     const user = userEvent.setup();
     renderControls();
 
+    await buildRoute(user, ['M1', 'M2']);
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
 
     expect(screen.getByTestId('sim-status')).toHaveTextContent('running');
@@ -62,6 +181,7 @@ describe('SimControls — operator panel', () => {
     const user = userEvent.setup();
     const { client } = renderControls();
 
+    await buildRoute(user, ['M1', 'M2', 'M3']);
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
     for (let i = 0; i < 3; i++) {
       await user.click(screen.getByRole('button', { name: /^step 1s$/i }));
@@ -77,6 +197,7 @@ describe('SimControls — operator panel', () => {
     const user = userEvent.setup();
     renderControls();
 
+    await buildRoute(user, ['M1', 'M2']);
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
     expect(screen.getByText('T1')).toBeInTheDocument();
 
@@ -102,6 +223,7 @@ describe('SimControls — operator panel', () => {
     await user.clear(overshootInput);
     await user.type(overshootInput, '1');
 
+    await buildRoute(user, ['M1', 'M2', 'M3']);
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
 
     // Pause auto-run so steps are the only source of virtual time advancement.
@@ -142,11 +264,13 @@ describe('SimControls — operator panel', () => {
     renderControls();
 
     // Spawn T1 — succeeds, counter advances to T2.
+    await buildRoute(user, ['M1', 'M2']);
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
     const trainIdInput = screen.getByRole('textbox', { name: /train id/i });
     expect(trainIdInput).toHaveValue('T2');
 
-    // Change back to T1 and try again.
+    // Change back to T1 and try again (route stays the same — the operator
+    // didn't touch it after spawning).
     await user.clear(trainIdInput);
     await user.type(trainIdInput, 'T1');
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
@@ -162,6 +286,7 @@ describe('SimControls — operator panel', () => {
     renderControls();
 
     // Cause the error.
+    await buildRoute(user, ['M1', 'M2']);
     await user.click(screen.getByRole('button', { name: /spawn train/i }));
     const trainIdInput = screen.getByRole('textbox', { name: /train id/i });
     await user.clear(trainIdInput);
