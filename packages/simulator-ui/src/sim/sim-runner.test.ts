@@ -152,6 +152,16 @@ describe('SimRunner — event publishing', () => {
     runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
     expect(runner.snapshot().train_ids).toEqual(['T1']);
   });
+
+  it('spawnTrain returns true on a fresh id and false when the id is already taken', () => {
+    const { runner } = makeRunner();
+    runner.start();
+    expect(runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' })).toBe(true);
+    // Second call with the same id is rejected.
+    expect(runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' })).toBe(false);
+    // A different id still succeeds.
+    expect(runner.spawnTrain('T2', { from_marker_id: 'M1', to_marker_id: 'M2' })).toBe(true);
+  });
 });
 
 describe('SimRunner — layout state', () => {

@@ -133,7 +133,7 @@ Coverage thresholds: 75 lines / 65 branches / 65 functions (new package; ratchet
 | `SimRunner` bridge → MQTT publish          | shipped | Event envelope construction, snapshot listeners.                               |
 | Lifecycle controls                         | shipped | Start / Resume / Pause / Stop / Step.                                          |
 | Track configuration UI                     | shipped | Preset dropdown + custom-JSON editor, persisted in localStorage.               |
-| Spawn-train form (per-train config)        | shipped | Inline form on `SimControls` lets the operator pick `train_id`, `overshoot_rate`, `miss_rate` before spawning. Threaded through `useSimRunner` → `SimRunner.spawnTrain` → `Simulation.spawnTrain(config)`. |
+| Spawn-train form (per-train config)        | shipped | Inline form on `SimControls` lets the operator pick `train_id`, `overshoot_rate`, `miss_rate` before spawning. Threaded through `useSimRunner` → `SimRunner.spawnTrain` → `Simulation.spawnTrain(config)`. Shows a duplicate-ID inline error (`role="alert"`) when the operator tries to re-use a taken ID; shows an empty-layout hint (`data-testid="spawn-disabled-hint"`) when the layout has no edges. |
 | Realtime-mode auto-advance                 | shipped | `setInterval` + `tick_ms`. No speed multiplier yet.                            |
 | Retained layout state publish              | shipped | `SimRunner.start()` publishes the active layout to `railway/state/layout/<name>` retained. |
 | Mishap rate UI                             | shipped | Overshoot + miss rate exposed on the spawn form; double-read and spurious-read knobs available on the simulator but not yet on the form. |
@@ -180,7 +180,7 @@ Private workspace package. Spawns the simulator-ui Vite preview, an aedes broker
 | ------------------------------------------------- | :----: | ------------------------------------------------------------------------------ |
 | Playwright + Chromium setup                       | shipped | `playwright.config.ts` with `webServer` for `vite preview`; chromium-only project. |
 | `startUiHarness` (aedes WS + server + bridged sim)| shipped | WebSocket listener with MQTT-subprotocol selection. Also wires a device-only `Simulation` to the broker via `BrokerBridge`, so admin HTTP commands actually reach virtual trains/gates. Reused by per-spec `beforeAll`. |
-| Lifecycle smoke test                              | shipped | Start, Spawn, Step against the embedded sim (no broker required). |
+| Lifecycle smoke test                              | shipped | Start, Spawn, Step against the embedded sim (no broker required). Extended with: edgeless-layout hint, duplicate-ID error flow. |
 | Connected-to-broker test                          | shipped | UI connects to aedes via WS, `device_registered` round-trips through the server. |
 | Operator journeys                                 | shipped | `multi-train-journey`, `tag-assignment`, `discovery`, `feature-showcase`, plus five new specs: `route-reassignment` (expects `cleared_edges`-wipe fix), `unknown-tag-closure` (bound-tag → train lands on marker), `spawn-form-mishaps` (overshoot knob → anomaly in EventLog), `layout-swap` (preset swap + invalid-JSON error), `gate-hold-release` (admin HTTP hold/release → train stops/advances). |
 | Visualiser SVG assertions                         | shipped | `data-train-id` / `data-at-marker` / `data-on-edge` / `data-marker-id` / `data-inferred` assertions are routine across the new specs. |

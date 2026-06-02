@@ -30,6 +30,7 @@ export function SimControls({ layout }: SimControlsProps) {
   const [trainId, setTrainId] = useState(computedNextId);
   const [overshootRate, setOvershootRate] = useState('0');
   const [missRate, setMissRate] = useState('0.01');
+  const [spawnError, setSpawnError] = useState<string | null>(null);
 
   // When the train list empties (Stop), reset the form's Train ID so the
   // operator's next spawn doesn't start at the last auto-incremented value
@@ -38,7 +39,7 @@ export function SimControls({ layout }: SimControlsProps) {
     if (snapshot.train_ids.length === 0) setTrainId('T1');
   }, [snapshot.train_ids.length]);
 
-  function handleSpawn(e: React.FormEvent) {
+  function handleSpawn(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (!canSpawn) return;
     const firstEdge = demoRoute[0];
@@ -52,14 +53,21 @@ export function SimControls({ layout }: SimControlsProps) {
     if (!Number.isNaN(parsedMiss)) config.miss_rate = Math.min(1, Math.max(0, parsedMiss));
 
     if (isIdle) start();
-    spawnTrain(trainId, firstEdge, config);
+    const spawned = spawnTrain(trainId, firstEdge, config);
+
+    if (!spawned) {
+      setSpawnError(`Train ${trainId} already exists. Choose a different ID.`);
+      return;
+    }
+
+    setSpawnError(null);
     assignRoute(trainId, demoRoute);
     // Pressing Spawn from idle implies "begin" — auto-resume so the train
     // moves without a second click. If the operator manually paused, respect
     // that: add the train but leave the sim paused for them to inspect.
     if (isIdle) resume();
 
-    // Advance train_id to the next default after spawn
+    // Advance train_id to the next default after a successful spawn
     setTrainId(`T${snapshot.train_ids.length + 2}`);
   }
 
@@ -132,6 +140,16 @@ export function SimControls({ layout }: SimControlsProps) {
             Spawn train
           </button>
         </form>
+        {!canSpawn && (
+          <p data-testid="spawn-disabled-hint">
+            Add at least one edge to the layout to spawn a train.
+          </p>
+        )}
+        {spawnError !== null && (
+          <p role="alert" data-testid="spawn-error">
+            {spawnError}
+          </p>
+        )}
       </fieldset>
     </section>
   );

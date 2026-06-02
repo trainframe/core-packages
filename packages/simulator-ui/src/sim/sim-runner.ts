@@ -161,11 +161,21 @@ export class SimRunner {
     this.notify();
   }
 
-  spawnTrain(train_id: string, startEdge: RouteEdge, config?: Partial<VirtualTrainConfig>): void {
-    if (!this.simulation || this.train_ids.includes(train_id)) return;
+  /**
+   * Spawn a new train with the given ID. Returns `true` if the train was
+   * spawned, or `false` if the ID was already taken (duplicate is silently
+   * ignored to keep the simulation state consistent).
+   */
+  spawnTrain(
+    train_id: string,
+    startEdge: RouteEdge,
+    config?: Partial<VirtualTrainConfig>,
+  ): boolean {
+    if (!this.simulation || this.train_ids.includes(train_id)) return false;
     this.simulation.spawnTrain(train_id, { startEdge, ...(config ? { config } : {}) });
     this.train_ids = [...this.train_ids, train_id];
     this.notify();
+    return true;
   }
 
   assignRoute(train_id: string, edges: ReadonlyArray<RouteEdge>): void {
