@@ -62,15 +62,16 @@ Source: [`docs/spec/simulator-v0.1.md`](spec/simulator-v0.1.md); [`ADR-006`](adr
 
 | Area                                              | Status | Notes                                                                          |
 | ------------------------------------------------- | :----: | ------------------------------------------------------------------------------ |
-| In-process `Simulation` with scheduler + devices  | shipped | Pure-TS, broker-free, deterministic.                                           |
+| In-process `Simulation` (devices + physics, no scheduler) | shipped | Pure-TS, broker-free, deterministic. The scheduler moved to `@trainframe/server` per ADR-013 — the simulator is virtual hardware only. |
 | `VirtualClock`                                    | shipped | Step-driven (`advance(ms)`).                                                   |
 | `SeededRandom`                                    | shipped | Bernoulli + normal sources.                                                    |
 | `VirtualTrain`                                    | shipped | Position/velocity, braking, route execution, marker emission with latency.    |
 | `VirtualGate`                                     | shipped | Withhold/release per marker.                                                   |
 | Despawn → `device_disconnected`                   | shipped | `Simulation.despawnTrain` and `despawnGate` drop the device and emit a `device_disconnected` event so the scheduler can run disconnect hooks and free held blocks/withholds. Stand-in for MQTT LWT in pre-broker tests. |
 | `Simulation.onEvent` listener API                 | shipped | Used by simulator-ui to bridge events onto MQTT.                              |
-| Device-only mode (`disableScheduler` + `BrokerBridge`) | shipped | Run virtual devices against a real broker + server with no embedded scheduler. Bridges `simulation.onEvent` → `railway/events/...` and routes `railway/commands/...` to `simulation.handleCommand()`. E2E covered by `@trainframe/integration`. |
-| Realistic-time mode                               | partial | simulator-ui drives `setInterval` advance; no first-class realtime mode in the package. |
+| `BrokerBridge` against a real server                   | shipped | The simulator's only mode now. Bridges `simulation.onEvent` → `railway/events/...` and routes `railway/commands/...` to `simulation.handleCommand()`. E2E covered by `@trainframe/integration`. |
+| `Simulation.bindIdentityTag(markerId)`                 | shipped | Silent identity bind for callers (the toy-table) that publish their own `tag_assignment` and only need the in-process `markerToTag` populated so virtual trains emit `tag_observed`. |
+| Realistic-time mode                               | partial | simulator-ui drives a `requestAnimationFrame` loop via `useToyHardware`; no first-class realtime mode in the package itself. |
 | Detection: miss rate                              | shipped | `miss_rate` knob on train config.                                              |
 | Detection: latency (mean+stddev)                  | shipped | `detection_latency_ms`.                                                        |
 | Detection: double-read rate                       | shipped | `double_read_rate` knob on `VirtualTrainConfig`. On hit, a second `tag_observed` fires after an additional N(10, 5) ms latency. |
@@ -99,12 +100,13 @@ Source: spec §"Transport: MQTT" (server is what runs the scheduler against a re
 | Subscribe `railway/events/+/+`, dispatch into scheduler | shipped | Loose JSON parsing; malformed/self-emitted events dropped.                     |
 | Publish `SchedulerEffect`s as commands/events     | shipped | `send_command` → `railway/commands/{device_id}`; `publish_event` → `railway/events/{type}/server`; `update_state_snapshot` → `railway/state/{type}/{id}` retained. |
 | Retained `railway/state/layout/<name>` snapshot   | shipped | Published on `Server.start()`.                                                 |
-| Minimal CLI (`tf-server`)                         | shipped | `--layout <path> [--broker mqtt://…]`. SIGINT/SIGTERM clean shutdown.          |
+| Minimal CLI (`tf-server`)                         | shipped | `--layout <path> | --discovery [--broker mqtt://…]`. `--discovery` boots with an empty layout that grows from incoming `tag_assignment` events and inferred edges. SIGINT/SIGTERM clean shutdown. |
+| Docker image + compose service                    | shipped | `packages/server/Dockerfile` (multi-stage pnpm deploy → alpine). `tools/broker/docker-compose.yml` includes `tf-server` alongside mosquitto; `pnpm services` brings both up. `pnpm server:dev` runs the same server locally without docker. |
 | HTTP admin API (assignSchedule, hold/release, tags) | shipped | `AdminHttpServer` on a configurable port (default 3000). Endpoints: `/api/health`, `/api/state`, `/api/trains/:id/route` (body: `{route_id, stops: marker_id[]}`; routes through `Server.assignSchedule`), `/api/trains/:id/revoke_clearance` (routed through `Server.revokeClearance` so the scheduler's view of who owns which block stays in sync with the train's behavior), `/api/gates/:id/hold`, `/api/gates/:id/release`, `/api/tags`. CLI: `--http-port`. No auth (LAN/localhost). ADR-008. |
 | Custom-event dispatch (`railway/events/custom/...`) | not started | Server only subscribes to four-segment core events.                            |
 | Authentication / pairing                          | not started | Spec §"Authentication" defers details to garage-device pairing.                |
 | Discovery mode (learning new edges/markers)       | shipped | ADR-009. Marker creation on `tag_assignment`, edge inference on traversal, confirmation after 3 traversals (configurable). Layout republished as retained state on every change. Edge-length learning and cautious-clearance follow-ups deferred. |
-| Simulator-ui device-only mode                     | not started | The browser sim still runs its own scheduler in-process. Once the real server is in operator use, the sim should publish raw device events and let the server schedule. |
+| Simulator-ui as virtual hardware only             | shipped | `simulator-ui` no longer runs a scheduler. All scheduling routes through `@trainframe/server`. |
 
 Coverage thresholds: 75 lines / 65 branches / 65 functions (new package; ratchet up as the surface stabilises).
 
@@ -120,25 +122,30 @@ Coverage thresholds: 75 lines / 65 branches / 65 functions (new package; ratchet
 | Live event log                             | shipped | Rolling 100, newest-first, loose parsing, custom-event vendor surfaced.       |
 | Layout rendering (markers, edges)          | shipped | SVG canvas. Auto-places markers around a circle when no spatial coords; uses `position.x_mm/y_mm` when present. |
 | Train-position rendering                   | shipped | Mid-edge interpolation from `train_status` events; falls back to last `marker_traversed` marker when no status yet. |
-| Layout snapshot bootstrap                  | shipped | `useLayoutState` subscribes to `railway/state/layout/+`; simulator-ui publishes the active layout retained on start. |
-| Tag-assignment UI                          | shipped | `UnknownTags` component surfaces unknown-tag anomalies and POSTs `tag_assignment` requests to the server's admin HTTP API. Plays the discovery loop: anomaly → operator picks target → registry binds → row vanishes. |
+| Layout snapshot bootstrap                  | shipped | `useLayoutState` subscribes to `railway/state/layout/+`; `@trainframe/server` publishes the active layout retained as the discovery loop learns it. The simulator-ui does NOT publish layout state — that's system knowledge, not hardware knowledge (ADR-013). |
+| Tag-assignment UI                          | shipped | `UnknownTags` component surfaces unknown-tag anomalies and POSTs `tag_assignment` requests to the server's admin HTTP API. Plays the discovery loop: anomaly → operator picks target → registry binds → row vanishes. The simulator-ui's `GARAGE` device auto-binds via wire events directly. |
 | Discovery / topology learning UI           | shipped | Discovered markers and inferred edges show up in the layout SVG live. Inferred edges render dashed (`stroke-dasharray="8 6"`) with `data-inferred="true"`; confirmed edges stay solid. |
+| Schedule assignment (operator intent)      | shipped | `ScheduleAssigner` publishes `railway/operator/assign_schedule`. Train selector appears once any train registers. |
+| Schedule list                              | shipped | `ScheduleList` mirrors `railway/state/schedule/+`. Current stop highlighted. |
+| Deadlock banner + per-train revoke         | shipped | `DeadlockBanner` subscribes to `railway/state/deadlock/+`; per-train Revoke buttons publish `railway/operator/revoke_clearance`. |
+| Devices panel + recently-scanned highlight | shipped | `DevicesPanel` groups every registered device by capability bucket (Trains, Gates, Garages, Markers) with live state. `useLastScanned` watches `tag_observed`/`tag_assignment` and pulses an amber highlight on the matching row for 3s. |
 
 ---
 
 ## Simulator UI: `packages/simulator-ui/`
 
+Reframed per ADR-013 as the **toy table** — a virtual Brio-style table the operator builds on, not a developer control panel. The interaction surface is a unified toybox + canvas + scan-box: pieces sit on the table inert until dragged onto the scan-box, which mediates the act of "this thing exists on the bus."
+
 | Area                                       | Status | Notes                                                                         |
 | ------------------------------------------ | :----: | ----------------------------------------------------------------------------- |
 | Static-shell deployment                    | shipped | Pages-deployed, broker URL via localStorage.                                   |
-| `SimRunner` bridge → MQTT publish          | shipped | Event envelope construction, snapshot listeners.                               |
-| Lifecycle controls                         | shipped | Start / Resume / Pause / Stop / Step.                                          |
-| Track configuration UI                     | shipped | Preset dropdown + custom-JSON editor, persisted in localStorage.               |
-| Spawn-train form (per-train config + stops) | shipped | Inline form on `SimControls` lets the operator pick `train_id`, `overshoot_rate`, `miss_rate`, and an ordered list of *stops* (per ADR-010) before spawning. Each stop is any marker in the layout; the first stop is the spawn marker and the scheduler's planner computes the per-leg transit. Threaded through `useSimRunner` → `SimRunner.spawnTrain` + `SimRunner.assignSchedule` → `Simulation.spawnTrain(config)` + `Simulation.assignSchedule(stops)`. Shows a duplicate-ID inline error (`role="alert"`) when the operator tries to re-use a taken ID; shows an empty-layout hint (`data-testid="spawn-disabled-hint"`) when the layout has no markers. |
-| Realtime-mode auto-advance                 | shipped | `setInterval` + `tick_ms`. No speed multiplier yet.                            |
-| Retained layout state publish              | shipped | `SimRunner.start()` publishes the active layout to `railway/state/layout/<name>` retained. |
-| Mishap rate UI                             | shipped | Overshoot + miss rate exposed on the spawn form; double-read and spurious-read knobs available on the simulator but not yet on the form. |
-| Inbound command subscription (broker → sim)| shipped | `SimRunner` accepts `mode: 'device-only'`, which constructs the `Simulation` without an embedded scheduler and wires `BrokerBridge` to forward `railway/commands/<device>` into the sim. Operator-facing UI still defaults to `embedded`. |
+| Toy table (toybox + canvas + scan-box)     | shipped | `ToyTable` component. Toybox holds track piece types (straight, curve, junction, station, terminus, crossing) and devices (train, gate). Click-to-arm + click-to-place. Pieces start inert; only scanning makes them live on the bus. |
+| Scan-box → wire commissioning              | shipped | Drag a placed piece onto `ScanBox` to fire its identifying events: a synthetic `GARAGE` device announces once per session (`device_registered` with `core.assigns_tags`); track-piece scans emit `tag_assignment` binding `M-{piece.id}`; train/gate scans emit their own `device_registered` for `T-{piece.id}` / `GATE-{piece.id}`. Inert pieces (placed but unscanned) emit nothing. |
+| Power-off via click on live device         | shipped | Click a live train/gate on the canvas to power it off; emits `device_disconnected`. The piece stays on the table but returns to inert. |
+| Physics-only `Simulation` in browser       | shipped | `ToyHardware` class + `useToyHardware` hook own a `Simulation` + `BrokerBridge` wired to the broker. Scanned trains spawn `VirtualTrain` at the nearest outgoing edge; the loop ticks via `requestAnimationFrame` (`performance.now()` delta, capped at 200 ms). No scheduler — the server schedules. |
+| Private layout (per-piece markers)         | shipped | `compileLayout(pieces, ...)` produces an in-browser `Layout` whose markers use the same `M-{piece.id}` ids the scan flow publishes, so server-issued routes line up with the sim's internal physics. Never published. |
+| Train icon rides the rail                  | shipped | Train shape sized 24mm tall vs the rail's 16mm so it doesn't overhang. |
+| `window.trainframeSim` devtools handle     | shipped | Hidden `pause`/`resume`/`step` no-ops (sim ticks forever); kept as a future hook for devtools-driven inspection. |
 
 ---
 
