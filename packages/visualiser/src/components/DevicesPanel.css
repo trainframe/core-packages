@@ -1,0 +1,61 @@
+.tf-devices__group {
+  margin-top: var(--tf-space-sm, 0.5rem);
+}
+
+.tf-devices__group:first-child {
+  margin-top: 0;
+}
+
+.tf-devices__group-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.tf-devices__group-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--tf-color-fg, currentColor);
+}
+
+.tf-devices__group-count {
+  font-size: 0.8rem;
+  color: var(--tf-color-fg-muted, #888);
+}
+
+.tf-devices__list {
+  list-style: none;
+  padding: 0;
+  margin: 0.25rem 0 0 0;
+}
+
+.tf-devices__row {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: 4px;
+  transition: background-color 600ms ease-out;
+}
+
+.tf-devices__row--highlighted {
+  background-color: var(--tf-color-highlight, rgba(255, 213, 79, 0.4));
+  transition: background-color 80ms ease-in;
+}
+
+.tf-devices__row-id {
+  min-width: 6ch;
+}
+
+.tf-devices__row-meta {
+  color: var(--tf-color-fg-muted, #666);
+  font-size: 0.9em;
+}
+
+.tf-devices__empty {
+  color: var(--tf-color-fg-muted, #888);
+  font-size: 0.9em;
+  margin: 0.25rem 0 0 0;
+}

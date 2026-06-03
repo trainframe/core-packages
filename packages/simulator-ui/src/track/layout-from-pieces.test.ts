@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { compileLayout } from './layout-from-pieces.js';
-import type { RotationDeg, TrackPiece } from './pieces.js';
+import { type RotationDeg, type TrackPiece, getEndpoints } from './pieces.js';
 
 let nextId = 0;
 function pid(): string {
@@ -21,75 +21,71 @@ beforeEach(() => {
   nextId = 0;
 });
 
-describe('compileLayout — single piece', () => {
-  it('a single straight produces 2 markers and 1 edge', () => {
-    const layout = compileLayout([piece('straight')], 'test');
-    expect(layout.markers).toHaveLength(2);
-    expect(layout.edges).toHaveLength(1);
+// ---------------------------------------------------------------------------
+// Per-piece markers — the central contract of the new compiler. The scan flow
+// in ToyTable emits `tag_assignment` with tag_id = `M-{piece.id}`; the private
+// compiler must produce markers with the same ids so the server's view of the
+// world and the in-browser sim's view of the world agree.
+// ---------------------------------------------------------------------------
+
+describe('compileLayout — single piece, per-piece markers', () => {
+  it('a single straight produces 1 marker (M-{piece.id}) and 0 edges', () => {
+    const p = piece('straight');
+    const layout = compileLayout([p], 'test');
+    expect(layout.markers).toHaveLength(1);
+    expect(layout.markers[0]?.id).toBe(`M-${p.id}`);
+    expect(layout.markers[0]?.kind).toBe('block_boundary');
+    expect(layout.edges).toHaveLength(0);
     expect(layout.junctions).toHaveLength(0);
     expect(layout.name).toBe('test');
   });
 
-  it('a single curve produces 2 markers and 1 edge', () => {
-    const layout = compileLayout([piece('curve')], 'test');
-    expect(layout.markers).toHaveLength(2);
-    expect(layout.edges).toHaveLength(1);
+  it('a single curve produces 1 marker (block_boundary) and 0 edges', () => {
+    const p = piece('curve');
+    const layout = compileLayout([p], 'test');
+    expect(layout.markers).toHaveLength(1);
+    expect(layout.markers[0]?.id).toBe(`M-${p.id}`);
+    expect(layout.markers[0]?.kind).toBe('block_boundary');
+    expect(layout.edges).toHaveLength(0);
   });
 
-  it('a single station produces 2 markers and 1 edge with length 220', () => {
-    const layout = compileLayout([piece('station')], 'test');
-    expect(layout.markers).toHaveLength(2);
-    expect(layout.edges).toHaveLength(1);
-    expect(layout.edges[0]?.estimated_length_mm).toBe(220);
+  it('a single station produces 1 marker (station_stop) and 0 edges', () => {
+    const p = piece('station');
+    const layout = compileLayout([p], 'test');
+    expect(layout.markers).toHaveLength(1);
+    expect(layout.markers[0]?.id).toBe(`M-${p.id}`);
+    expect(layout.markers[0]?.kind).toBe('station_stop');
+    expect(layout.edges).toHaveLength(0);
   });
 
-  it('a single junction produces 3 markers, 2 edges, and 1 junction entry', () => {
-    const layout = compileLayout([piece('junction')], 'test');
-    expect(layout.markers).toHaveLength(3);
-    expect(layout.edges).toHaveLength(2);
+  it('a single junction produces 1 marker (junction), 0 edges, 1 junction entry', () => {
+    const p = piece('junction');
+    const layout = compileLayout([p], 'test');
+    expect(layout.markers).toHaveLength(1);
+    expect(layout.markers[0]?.id).toBe(`M-${p.id}`);
+    expect(layout.markers[0]?.kind).toBe('junction');
+    expect(layout.edges).toHaveLength(0);
     expect(layout.junctions).toHaveLength(1);
-  });
-
-  it('junction edges have correct switch states', () => {
-    const layout = compileLayout([piece('junction')], 'test');
-    const mainEdge = layout.edges.find((e) => e.requires_switch_state === 'main');
-    const divertEdge = layout.edges.find((e) => e.requires_switch_state === 'divert');
-    expect(mainEdge).toBeDefined();
-    expect(divertEdge).toBeDefined();
-  });
-
-  it('junction entry has valid_positions = [main, divert]', () => {
-    const layout = compileLayout([piece('junction')], 'test');
+    expect(layout.junctions[0]?.marker_id).toBe(`M-${p.id}`);
     expect(layout.junctions[0]?.valid_positions).toEqual(['main', 'divert']);
   });
 
-  it('junction trunk marker has kind = junction', () => {
-    const layout = compileLayout([piece('junction')], 'test');
-    const j = layout.junctions[0];
-    const trunkMarker = layout.markers.find((m) => m.id === j?.marker_id);
-    expect(trunkMarker?.kind).toBe('junction');
+  it('a single terminus produces 1 marker (terminus) and 0 edges', () => {
+    const p = piece('terminus');
+    const layout = compileLayout([p], 'test');
+    expect(layout.markers).toHaveLength(1);
+    expect(layout.markers[0]?.id).toBe(`M-${p.id}`);
+    expect(layout.markers[0]?.kind).toBe('terminus');
+    expect(layout.edges).toHaveLength(0);
   });
 
-  it('a single terminus produces 2 markers and 1 edge with length 60', () => {
-    const layout = compileLayout([piece('terminus')], 'test');
-    expect(layout.markers).toHaveLength(2);
-    expect(layout.edges).toHaveLength(1);
-    expect(layout.edges[0]?.estimated_length_mm).toBe(60);
-  });
-
-  it('terminus dead-end marker has kind = terminus', () => {
-    const layout = compileLayout([piece('terminus')], 'test');
-    // The dead-end marker is the one NOT referenced by the open endpoint (which
-    // connects from the east end). It's the to_marker_id.
-    const toId = layout.edges[0]?.to_marker_id;
-    const dead = layout.markers.find((m) => m.id === toId);
-    expect(dead?.kind).toBe('terminus');
-  });
-
-  it('a single crossing produces 4 markers and 2 edges', () => {
-    const layout = compileLayout([piece('crossing')], 'test');
-    expect(layout.markers).toHaveLength(4);
-    expect(layout.edges).toHaveLength(2);
+  it('a single crossing produces 1 marker (block_boundary) and 0 edges', () => {
+    const p = piece('crossing');
+    const layout = compileLayout([p], 'test');
+    expect(layout.markers).toHaveLength(1);
+    expect(layout.markers[0]?.id).toBe(`M-${p.id}`);
+    expect(layout.markers[0]?.kind).toBe('block_boundary');
+    expect(layout.edges).toHaveLength(0);
   });
 
   it('empty piece array produces empty layout', () => {
@@ -98,103 +94,188 @@ describe('compileLayout — single piece', () => {
     expect(layout.edges).toHaveLength(0);
     expect(layout.junctions).toHaveLength(0);
   });
+
+  it('device pieces (train, gate) contribute no markers and no edges', () => {
+    const train = piece('train', 50, 50);
+    const gate = piece('gate', 60, 60);
+    const layout = compileLayout([train, gate], 'devices-only');
+    expect(layout.markers).toHaveLength(0);
+    expect(layout.edges).toHaveLength(0);
+  });
 });
 
-describe('compileLayout — clustering', () => {
-  it('two adjacent straights share one marker (3 markers total, 2 edges)', () => {
-    // Straight A at x=0: exit at (100, 0)
-    // Straight B at x=200: entry at (100, 0) — exactly on top, distance 0
+// ---------------------------------------------------------------------------
+// Adjacency → bidirectional edges between piece markers
+// ---------------------------------------------------------------------------
+
+describe('compileLayout — adjacency emits bidirectional edges', () => {
+  it('two adjacent straights produce 2 markers and 2 edges (both directions)', () => {
+    // A at x=0 has endpoint at (100,0); B at x=200 has endpoint at (100,0).
     const a = piece('straight', 0, 0);
     const b = piece('straight', 200, 0);
     const layout = compileLayout([a, b], 'two-straights');
-    // A has endpoints at (-100,0) and (100,0)
-    // B has endpoints at (100,0) and (300,0)
-    // (100,0) from A and (100,0) from B cluster together
-    expect(layout.markers).toHaveLength(3);
+    expect(layout.markers).toHaveLength(2);
+    expect(layout.edges).toHaveLength(2);
+    const ids = layout.markers.map((m) => m.id).sort();
+    expect(ids).toEqual([`M-${a.id}`, `M-${b.id}`].sort());
+
+    const aToB = layout.edges.find(
+      (e) => e.from_marker_id === `M-${a.id}` && e.to_marker_id === `M-${b.id}`,
+    );
+    const bToA = layout.edges.find(
+      (e) => e.from_marker_id === `M-${b.id}` && e.to_marker_id === `M-${a.id}`,
+    );
+    expect(aToB).toBeDefined();
+    expect(bToA).toBeDefined();
+  });
+
+  it('edge length is the Euclidean centre-to-centre distance, rounded', () => {
+    const a = piece('straight', 0, 0);
+    const b = piece('straight', 200, 0);
+    const layout = compileLayout([a, b], 'len');
+    for (const edge of layout.edges) {
+      expect(edge.estimated_length_mm).toBe(200);
+    }
+  });
+
+  it('endpoints within SNAP_DISTANCE_MM count as adjacent (edges emitted)', () => {
+    // 20 mm gap < 30 mm snap
+    const a = piece('straight', 0, 0);
+    const b = piece('straight', 220, 0);
+    const layout = compileLayout([a, b], 'near');
     expect(layout.edges).toHaveLength(2);
   });
 
-  it('two adjacent straights share the correct centre marker', () => {
-    const a = piece('straight', 0, 0);
-    const b = piece('straight', 200, 0);
-    const layout = compileLayout([a, b], 'adj');
-    // The shared marker should be the one referenced by both edges
-    const fromIds = layout.edges.map((e) => e.from_marker_id);
-    const toIds = layout.edges.map((e) => e.to_marker_id);
-    const shared = layout.markers.find(
-      (m) =>
-        (fromIds.includes(m.id) || toIds.includes(m.id)) &&
-        fromIds.filter((id) => id === m.id).length + toIds.filter((id) => id === m.id).length >= 2,
-    );
-    expect(shared).toBeDefined();
-  });
-
-  it('endpoints within SNAP_DISTANCE_MM cluster even if not exact', () => {
-    // Put second straight slightly off (20 mm gap < 30 mm snap)
-    const a = piece('straight', 0, 0);
-    const b = piece('straight', 220, 0); // 20 mm gap between A's exit (100) and B's entry (110)
-    const layout = compileLayout([a, b], 'near');
-    expect(layout.markers).toHaveLength(3);
-  });
-
-  it('endpoints beyond SNAP_DISTANCE_MM do NOT cluster', () => {
+  it('endpoints beyond SNAP_DISTANCE_MM do NOT count as adjacent (no edges)', () => {
     // 40 mm gap > 30 mm snap
     const a = piece('straight', 0, 0);
     const b = piece('straight', 240, 0);
     const layout = compileLayout([a, b], 'far');
-    expect(layout.markers).toHaveLength(4);
+    expect(layout.markers).toHaveLength(2);
+    expect(layout.edges).toHaveLength(0);
   });
 
-  it('isolated piece (no neighbours) produces isolated markers', () => {
+  it('isolated pieces produce markers without edges between them', () => {
     const a = piece('straight', 0, 0);
     const b = piece('straight', 1000, 0); // far away
     const layout = compileLayout([a, b], 'isolated');
-    expect(layout.markers).toHaveLength(4);
+    expect(layout.markers).toHaveLength(2);
+    expect(layout.edges).toHaveLength(0);
+  });
+
+  it('three straights in a line produce 4 edges (two adjacencies × 2 directions)', () => {
+    const a = piece('straight', 0, 0);
+    const b = piece('straight', 200, 0);
+    const c = piece('straight', 400, 0);
+    const layout = compileLayout([a, b, c], 'three');
+    expect(layout.markers).toHaveLength(3);
+    expect(layout.edges).toHaveLength(4);
+  });
+
+  it('marker positions sit at piece centres, not at endpoint centroids', () => {
+    const a = piece('straight', 50, 75);
+    const layout = compileLayout([a], 'pos');
+    expect(layout.markers[0]?.position).toEqual({ x_mm: 50, y_mm: 75 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Junction switch states are tagged on outbound edges only
+// ---------------------------------------------------------------------------
+
+describe('compileLayout — junctions and switch states', () => {
+  it('junction with trunk + main + divert neighbours: outbound edges carry switch state', () => {
+    // Place a junction at origin. Its endpoints (rotation 0):
+    //   ep 0 (trunk):  (-100, 0)  angle 180°
+    //   ep 1 (main):   ( 100, 0)  angle   0°
+    //   ep 2 (divert): ( cos45*100, -sin45*100 ) angle 45°
+    const j = piece('junction', 0, 0);
+    // Read the junction's branch endpoint to place the divert neighbour
+    // without having to redo the rotation math.
+    const eps = getEndpoints(j);
+    const trunkEp = eps[0];
+    const mainEp = eps[1];
+    const branchEp = eps[2];
+    expect(trunkEp).toBeDefined();
+    expect(mainEp).toBeDefined();
+    expect(branchEp).toBeDefined();
+    if (trunkEp === undefined || mainEp === undefined || branchEp === undefined) return;
+
+    // Each neighbour is a straight placed so its endpoint 0 (at local (-100,0))
+    // lands on the junction's endpoint. Rotation 0 means endpoint 0 is at
+    // (centre.x - 100, centre.y), so centre = endpoint + (100, 0).
+    const trunkNbr = piece('straight', trunkEp.x + 100, trunkEp.y);
+    const mainNbr = piece('straight', mainEp.x + 100, mainEp.y);
+    const divertNbr = piece('straight', branchEp.x + 100, branchEp.y);
+    const layout = compileLayout([j, trunkNbr, mainNbr, divertNbr], 'fan');
+
+    const jId = `M-${j.id}`;
+    const jToMain = layout.edges.find(
+      (e) => e.from_marker_id === jId && e.to_marker_id === `M-${mainNbr.id}`,
+    );
+    const jToDivert = layout.edges.find(
+      (e) => e.from_marker_id === jId && e.to_marker_id === `M-${divertNbr.id}`,
+    );
+    const jToTrunk = layout.edges.find(
+      (e) => e.from_marker_id === jId && e.to_marker_id === `M-${trunkNbr.id}`,
+    );
+    expect(jToMain?.requires_switch_state).toBe('main');
+    expect(jToDivert?.requires_switch_state).toBe('divert');
+    // Trunk has no switch constraint — always reachable.
+    expect(jToTrunk?.requires_switch_state).toBeUndefined();
+  });
+
+  it('inbound edges (neighbour → junction marker) carry no switch state', () => {
+    const j = piece('junction', 0, 0);
+    const eps = getEndpoints(j);
+    const mainEp = eps[1];
+    expect(mainEp).toBeDefined();
+    if (mainEp === undefined) return;
+    const mainNbr = piece('straight', mainEp.x + 100, mainEp.y);
+    const layout = compileLayout([j, mainNbr], 'junction-main');
+    const inbound = layout.edges.find(
+      (e) => e.from_marker_id === `M-${mainNbr.id}` && e.to_marker_id === `M-${j.id}`,
+    );
+    expect(inbound).toBeDefined();
+    expect(inbound?.requires_switch_state).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Terminus pieces are dead-ends — inbound only, no outbound
+// ---------------------------------------------------------------------------
+
+describe('compileLayout — terminus is a dead-end', () => {
+  it('a terminus adjacent to a straight has an inbound edge but no outbound', () => {
+    // Terminus open endpoint sits at local (30, 0) — when placed at x=0 it's
+    // at (30, 0). Place a straight whose endpoint 0 (local (-100, 0)) lands
+    // on the terminus' open endpoint at (30, 0): straight centre at (130, 0).
+    const t = piece('terminus', 0, 0);
+    const s = piece('straight', 130, 0);
+    const layout = compileLayout([t, s], 'dead-end');
+    expect(layout.markers).toHaveLength(2);
+    // Only one edge: straight → terminus.
+    expect(layout.edges).toHaveLength(1);
+    const edge = layout.edges[0];
+    expect(edge?.from_marker_id).toBe(`M-${s.id}`);
+    expect(edge?.to_marker_id).toBe(`M-${t.id}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Crossings — one marker, edges to all adjacent neighbours
+// ---------------------------------------------------------------------------
+
+describe('compileLayout — crossings', () => {
+  it('a crossing with one neighbour gets bidirectional edges to that neighbour', () => {
+    // Crossing at origin has endpoints at (100,0), (0,-100), (-100,0), (0,100).
+    // Place a straight on the east side: endpoint 0 (-100,0 local) should
+    // land on the crossing's east endpoint (100,0). Centre at (200, 0).
+    const c = piece('crossing', 0, 0);
+    const east = piece('straight', 200, 0);
+    const layout = compileLayout([c, east], 'cross');
+    expect(layout.markers).toHaveLength(2);
     expect(layout.edges).toHaveLength(2);
-    // No marker shared between the two edges
-    const [edgeA, edgeB] = layout.edges;
-    expect(edgeA).toBeDefined();
-    expect(edgeB).toBeDefined();
-    if (edgeA === undefined || edgeB === undefined) return;
-    const aIds = new Set([edgeA.from_marker_id, edgeA.to_marker_id]);
-    const bIds = new Set([edgeB.from_marker_id, edgeB.to_marker_id]);
-    expect([...aIds].some((id) => bIds.has(id))).toBe(false);
-  });
-});
-
-describe('compileLayout — marker kinds', () => {
-  it('station exit marker has kind station_stop', () => {
-    const layout = compileLayout([piece('station')], 'st');
-    // exit (ei=1) → station_stop
-    const toId = layout.edges[0]?.to_marker_id;
-    const exitMarker = layout.markers.find((m) => m.id === toId);
-    expect(exitMarker?.kind).toBe('station_stop');
-  });
-
-  it('crossing markers all have kind block_boundary', () => {
-    const layout = compileLayout([piece('crossing')], 'cr');
-    for (const m of layout.markers) {
-      expect(m.kind).toBe('block_boundary');
-    }
-  });
-});
-
-describe('compileLayout — marker IDs', () => {
-  it('marker IDs are sequential m1, m2, …', () => {
-    const layout = compileLayout([piece('straight')], 'seq');
-    const ids = layout.markers.map((m) => m.id).sort();
-    expect(ids).toEqual(['m1', 'm2']);
-  });
-
-  it('edge marker references resolve to existing markers', () => {
-    const layout = compileLayout([piece('junction')], 'junc');
-    const markerIdSet = new Set(layout.markers.map((m) => m.id));
-    for (const edge of layout.edges) {
-      expect(markerIdSet.has(edge.from_marker_id)).toBe(true);
-      expect(markerIdSet.has(edge.to_marker_id)).toBe(true);
-    }
-    for (const j of layout.junctions) {
-      expect(markerIdSet.has(j.marker_id)).toBe(true);
-    }
+    expect(layout.markers.find((m) => m.id === `M-${c.id}`)?.kind).toBe('block_boundary');
   });
 });

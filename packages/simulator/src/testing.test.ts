@@ -86,7 +86,7 @@ describe('startTestEnvironment', () => {
     // reach the server (or this test's broker capture).
     expect(env.getEventsOfType('tag_assignment')).toHaveLength(0);
     expect(env.getEventsOfType('device_registered').map((e) => e.device_id)).not.toContain(
-      'SIM-GARAGE',
+      'GARAGE',
     );
     env.shutdown();
   });

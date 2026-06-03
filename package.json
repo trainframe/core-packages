@@ -13,8 +13,10 @@
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "typecheck": "pnpm -r typecheck",
-    "broker": "podman compose -f tools/broker/docker-compose.yml up",
-    "broker:down": "podman compose -f tools/broker/docker-compose.yml down"
+    "services": "podman compose -f tools/broker/docker-compose.yml up",
+    "services:build": "podman compose -f tools/broker/docker-compose.yml build",
+    "services:down": "podman compose -f tools/broker/docker-compose.yml down",
+    "server:dev": "node packages/server/dist/cli.js --discovery --broker mqtt://localhost:1883 --http-port 0"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",

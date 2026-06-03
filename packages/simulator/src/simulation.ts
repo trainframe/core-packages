@@ -81,7 +81,7 @@ export class Simulation {
     this.captureEvent({
       at_ms: this.clock.now(),
       event_type: 'device_registered',
-      device_id: 'SIM-GARAGE',
+      device_id: 'GARAGE',
       payload: { capabilities: ['core.assigns_tags'] },
     });
     for (const marker of layout.markers) {
@@ -89,7 +89,7 @@ export class Simulation {
       this.captureEvent({
         at_ms: this.clock.now(),
         event_type: 'tag_assignment',
-        device_id: 'SIM-GARAGE',
+        device_id: 'GARAGE',
         payload: {
           tag_id: marker.id,
           assigned_kind: 'marker',
@@ -97,6 +97,18 @@ export class Simulation {
         },
       });
     }
+  }
+
+  /**
+   * Register a single identity binding `tag_id === marker_id` without
+   * publishing any events. For callers that already published the
+   * `tag_assignment` through some other path (e.g. the toy-table's
+   * `ScanBox` flow) and only need the in-process `markerToTag` map
+   * populated so virtual trains emit `tag_observed` for that marker.
+   * Idempotent.
+   */
+  bindIdentityTag(markerId: string): void {
+    this.markerToTag.set(markerId, markerId);
   }
 
   /** Register a virtual train. Returns the train so tests can inspect it. */

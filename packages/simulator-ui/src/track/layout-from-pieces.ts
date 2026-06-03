@@ -1,10 +1,11 @@
 import type { Layout, LayoutEdge, LayoutJunction, LayoutMarker } from '@trainframe/protocol';
-import { getEndpoints } from './pieces.js';
+import { getEndpoints, pieceMarkerKind } from './pieces.js';
 import type { TrackPiece } from './pieces.js';
 
 /**
  * Snap distance in mm. Two endpoints within this distance are treated as
- * the same physical connection point and mapped to a shared marker.
+ * the same physical connection point — i.e. their owning pieces are
+ * adjacent on the table.
  */
 export const SNAP_DISTANCE_MM = 30;
 
@@ -14,19 +15,6 @@ interface EndpointRef {
   readonly x: number;
   readonly y: number;
 }
-
-// ---------------------------------------------------------------------------
-// Marker-kind precedence (higher number wins on cluster collision)
-// ---------------------------------------------------------------------------
-
-const KIND_PRECEDENCE: Record<LayoutMarker['kind'], number> = {
-  junction: 4,
-  station_stop: 3,
-  terminus: 2,
-  block_boundary: 1,
-  yard_entry: 1,
-  unspecified: 0,
-};
 
 // ---------------------------------------------------------------------------
 // Step 1 — collect endpoints
@@ -48,15 +36,8 @@ function collectEndpoints(pieces: ReadonlyArray<TrackPiece>): EndpointRef[] {
 }
 
 // ---------------------------------------------------------------------------
-// Step 2 — greedy clustering
+// Step 2 — greedy clustering (used only to detect adjacency)
 // ---------------------------------------------------------------------------
-
-interface ClusterResult {
-  /** clusters[c] = indices into allEndpoints that belong to cluster c */
-  readonly clusters: ReadonlyArray<readonly number[]>;
-  /** pieceEndpointKey → cluster index */
-  readonly pieceEpCluster: ReadonlyMap<string, number>;
-}
 
 /** Find the index of the first cluster whose representative endpoint is within snap distance. */
 function findNearbyCluster(
@@ -76,26 +57,10 @@ function findNearbyCluster(
   return -1;
 }
 
-/** Build the pieceEndpointKey→cluster map from the clustering results. */
-function buildPieceEpMap(
+function clusterEndpoints(
   allEndpoints: ReadonlyArray<EndpointRef>,
-  clusterOf: ReadonlyArray<number>,
-): Map<string, number> {
-  const pieceEpCluster = new Map<string, number>();
-  for (let i = 0; i < allEndpoints.length; i++) {
-    const ep = allEndpoints[i];
-    if (ep === undefined) continue;
-    const c = clusterOf[i];
-    if (c === undefined) continue;
-    pieceEpCluster.set(`${ep.pieceIdx}:${ep.endpointIdx}`, c);
-  }
-  return pieceEpCluster;
-}
-
-function clusterEndpoints(allEndpoints: ReadonlyArray<EndpointRef>): ClusterResult {
-  const clusterOf: number[] = new Array(allEndpoints.length).fill(-1);
+): ReadonlyArray<readonly number[]> {
   const clusters: number[][] = [];
-
   for (let i = 0; i < allEndpoints.length; i++) {
     const ep = allEndpoints[i];
     if (ep === undefined) continue;
@@ -104,201 +69,164 @@ function clusterEndpoints(allEndpoints: ReadonlyArray<EndpointRef>): ClusterResu
       assignedCluster = clusters.length;
       clusters.push([]);
     }
-    clusterOf[i] = assignedCluster;
     clusters[assignedCluster]?.push(i);
   }
-
-  return { clusters, pieceEpCluster: buildPieceEpMap(allEndpoints, clusterOf) };
+  return clusters;
 }
 
 // ---------------------------------------------------------------------------
-// Helpers used in the main compile pass
+// Step 3 — switch state for a junction endpoint
 // ---------------------------------------------------------------------------
 
-function getCluster(pieceEpCluster: ReadonlyMap<string, number>, pi: number, ei: number): number {
-  const c = pieceEpCluster.get(`${pi}:${ei}`);
-  if (c === undefined) throw new Error(`No cluster for piece ${pi} endpoint ${ei}`);
-  return c;
+/**
+ * Edges leaving a junction marker (M-junction → neighbour) carry a switch
+ * state that says which physical path through the junction the train will
+ * take. For the three junction endpoints:
+ *   - 0 (trunk):  always reachable; no switch constraint
+ *   - 1 (main):   requires_switch_state = 'main'
+ *   - 2 (divert): requires_switch_state = 'divert'
+ *
+ * Inbound edges (neighbour → M-junction) carry no switch state — the schema's
+ * convention is that `requires_switch_state` applies only when `from_marker_id`
+ * is a junction.
+ */
+function switchStateForJunctionEndpoint(endpointIdx: number): string | undefined {
+  if (endpointIdx === 1) return 'main';
+  if (endpointIdx === 2) return 'divert';
+  return undefined;
 }
 
-function raisePrecedence(
-  clusterKind: Map<number, LayoutMarker['kind']>,
-  c: number,
-  kind: LayoutMarker['kind'],
-): void {
-  const current = clusterKind.get(c) ?? 'block_boundary';
-  if ((KIND_PRECEDENCE[kind] ?? 0) > (KIND_PRECEDENCE[current] ?? 0)) {
-    clusterKind.set(c, kind);
+// ---------------------------------------------------------------------------
+// Step 4 — emit edges from adjacency
+// ---------------------------------------------------------------------------
+
+interface PieceEndpointMember {
+  readonly pieceIdx: number;
+  readonly endpointIdx: number;
+}
+
+function membersOfCluster(
+  cluster: ReadonlyArray<number>,
+  allEndpoints: ReadonlyArray<EndpointRef>,
+): ReadonlyArray<PieceEndpointMember> {
+  const members: PieceEndpointMember[] = [];
+  for (const i of cluster) {
+    const ep = allEndpoints[i];
+    if (ep === undefined) continue;
+    members.push({ pieceIdx: ep.pieceIdx, endpointIdx: ep.endpointIdx });
   }
+  return members;
 }
 
-// ---------------------------------------------------------------------------
-// Step 3 — assign marker kinds
-// ---------------------------------------------------------------------------
+function markerIdForPiece(piece: TrackPiece): string {
+  return `M-${piece.id}`;
+}
 
-function assignMarkerKinds(
+function pieceCenterDistance(a: TrackPiece, b: TrackPiece): number {
+  const dx = a.position.x - b.position.x;
+  const dy = a.position.y - b.position.y;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+/**
+ * Emit a single directed edge from piece A to piece B, respecting the rules
+ * for the FROM piece's type:
+ *   - terminus on the FROM side: no outbound edge (terminus is a dead-end).
+ *   - junction on the FROM side: switch state from the junction endpoint.
+ *   - everything else: a plain edge.
+ *
+ * `estimated_length_mm` is the Euclidean distance between the pieces' centres,
+ * rounded. For two adjacent 200 mm straights that comes out to 200, for a
+ * straight↔station it's 210, and so on — enough fidelity for the in-browser
+ * sim to drive trains at a sensible speed.
+ */
+function emitDirectedEdge(
+  from: TrackPiece,
+  fromEndpointIdx: number,
+  to: TrackPiece,
+): LayoutEdge | undefined {
+  if (from.type === 'terminus') return undefined;
+  const edge: LayoutEdge = {
+    from_marker_id: markerIdForPiece(from),
+    to_marker_id: markerIdForPiece(to),
+    estimated_length_mm: Math.round(pieceCenterDistance(from, to)),
+  };
+  if (from.type === 'junction') {
+    const state = switchStateForJunctionEndpoint(fromEndpointIdx);
+    if (state !== undefined) return { ...edge, requires_switch_state: state };
+  }
+  return edge;
+}
+
+function emitEdgesForCluster(
   pieces: ReadonlyArray<TrackPiece>,
-  pieceEpCluster: ReadonlyMap<string, number>,
-): Map<number, LayoutMarker['kind']> {
-  const clusterKind = new Map<number, LayoutMarker['kind']>();
-
-  function raise(pi: number, ei: number, kind: LayoutMarker['kind']): void {
-    raisePrecedence(clusterKind, getCluster(pieceEpCluster, pi, ei), kind);
-  }
-
-  for (let pi = 0; pi < pieces.length; pi++) {
-    const piece = pieces[pi];
-    if (piece === undefined) continue;
-    switch (piece.type) {
-      case 'straight':
-      case 'curve': {
-        raise(pi, 0, 'block_boundary');
-        raise(pi, 1, 'block_boundary');
-        break;
-      }
-      case 'crossing': {
-        for (let ei = 0; ei < 4; ei++) raise(pi, ei, 'block_boundary');
-        break;
-      }
-      case 'station': {
-        raise(pi, 0, 'block_boundary');
-        raise(pi, 1, 'station_stop');
-        break;
-      }
-      case 'junction': {
-        raise(pi, 0, 'junction');
-        raise(pi, 1, 'block_boundary');
-        raise(pi, 2, 'block_boundary');
-        break;
-      }
-      case 'terminus': {
-        raise(pi, 0, 'block_boundary');
-        break;
-      }
+  members: ReadonlyArray<PieceEndpointMember>,
+  out: LayoutEdge[],
+): void {
+  for (const a of members) {
+    const fromPiece = pieces[a.pieceIdx];
+    if (fromPiece === undefined) continue;
+    for (const b of members) {
+      if (a.pieceIdx === b.pieceIdx) continue;
+      const toPiece = pieces[b.pieceIdx];
+      if (toPiece === undefined) continue;
+      const edge = emitDirectedEdge(fromPiece, a.endpointIdx, toPiece);
+      if (edge !== undefined) out.push(edge);
     }
   }
-  return clusterKind;
 }
 
-// ---------------------------------------------------------------------------
-// Step 4 — synthesise dead-end markers for terminus pieces
-// ---------------------------------------------------------------------------
-
-interface TerminusDeadEnds {
-  readonly deadEndByPieceIdx: ReadonlyMap<number, number>;
-  readonly extraCentroids: ReadonlyArray<{ x: number; y: number }>;
-  readonly deadEndKinds: ReadonlyArray<{ c: number; kind: LayoutMarker['kind'] }>;
-}
-
-function buildTerminusDeadEnds(
+function emitEdgesForClusters(
   pieces: ReadonlyArray<TrackPiece>,
-  startClusterIdx: number,
-): TerminusDeadEnds {
-  const deadEndByPieceIdx = new Map<number, number>();
-  const extraCentroids: { x: number; y: number }[] = [];
-  const deadEndKinds: { c: number; kind: LayoutMarker['kind'] }[] = [];
+  clusters: ReadonlyArray<ReadonlyArray<number>>,
+  allEndpoints: ReadonlyArray<EndpointRef>,
+): LayoutEdge[] {
+  // Every ordered pair of distinct pieces in the same cluster is adjacent and
+  // gets one directed edge (subject to terminus/junction rules).
+  const edges: LayoutEdge[] = [];
+  for (const cluster of clusters) {
+    const members = membersOfCluster(cluster, allEndpoints);
+    emitEdgesForCluster(pieces, members, edges);
+  }
+  return edges;
+}
 
-  let nextC = startClusterIdx;
-  for (let pi = 0; pi < pieces.length; pi++) {
-    const piece = pieces[pi];
-    if (piece === undefined || piece.type !== 'terminus') continue;
-    const deadC = nextC;
-    nextC += 1;
-    deadEndByPieceIdx.set(pi, deadC);
-    deadEndKinds.push({ c: deadC, kind: 'terminus' });
-    // Buffer end is at local (-30, 0) after rotation+translation
-    const rad = (piece.rotationDeg * Math.PI) / 180;
-    extraCentroids.push({
-      x: piece.position.x + -30 * Math.cos(rad),
-      y: piece.position.y + -30 * Math.sin(rad),
+// ---------------------------------------------------------------------------
+// Step 5 — junction entries
+// ---------------------------------------------------------------------------
+
+function emitJunctions(pieces: ReadonlyArray<TrackPiece>): LayoutJunction[] {
+  const junctions: LayoutJunction[] = [];
+  for (const piece of pieces) {
+    if (piece.type !== 'junction') continue;
+    junctions.push({
+      marker_id: markerIdForPiece(piece),
+      valid_positions: ['main', 'divert'],
     });
   }
-  return { deadEndByPieceIdx, extraCentroids, deadEndKinds };
+  return junctions;
 }
 
 // ---------------------------------------------------------------------------
-// Step 5 — emit edges and junctions
+// Step 6 — markers (one per non-device piece, at the piece's centre)
 // ---------------------------------------------------------------------------
 
-interface EdgesAndJunctions {
-  readonly edges: LayoutEdge[];
-  readonly junctions: LayoutJunction[];
-}
-
-function emitEdgesAndJunctions(
-  pieces: ReadonlyArray<TrackPiece>,
-  pieceEpCluster: ReadonlyMap<string, number>,
-  deadEndByPieceIdx: ReadonlyMap<number, number>,
-  idOf: (c: number) => string,
-): EdgesAndJunctions {
-  const edges: LayoutEdge[] = [];
-  const junctions: LayoutJunction[] = [];
-
-  function cid(pi: number, ei: number): string {
-    return idOf(getCluster(pieceEpCluster, pi, ei));
+function emitMarkers(pieces: ReadonlyArray<TrackPiece>): LayoutMarker[] {
+  const markers: LayoutMarker[] = [];
+  for (const piece of pieces) {
+    const endpoints = getEndpoints(piece);
+    // Devices (train, gate) have no endpoints — skip; they aren't topology.
+    if (endpoints.length === 0) continue;
+    markers.push({
+      id: markerIdForPiece(piece),
+      kind: pieceMarkerKind(piece.type),
+      position: {
+        x_mm: Math.round(piece.position.x),
+        y_mm: Math.round(piece.position.y),
+      },
+    });
   }
-
-  for (let pi = 0; pi < pieces.length; pi++) {
-    const piece = pieces[pi];
-    if (piece === undefined) continue;
-    switch (piece.type) {
-      case 'straight':
-      case 'curve':
-        edges.push({
-          from_marker_id: cid(pi, 0),
-          to_marker_id: cid(pi, 1),
-          estimated_length_mm: 200,
-        });
-        break;
-      case 'station':
-        edges.push({
-          from_marker_id: cid(pi, 0),
-          to_marker_id: cid(pi, 1),
-          estimated_length_mm: 220,
-        });
-        break;
-      case 'terminus': {
-        const deadC = deadEndByPieceIdx.get(pi);
-        if (deadC === undefined) break;
-        edges.push({
-          from_marker_id: cid(pi, 0),
-          to_marker_id: idOf(deadC),
-          estimated_length_mm: 60,
-        });
-        break;
-      }
-      case 'junction': {
-        const trunkId = cid(pi, 0);
-        edges.push({
-          from_marker_id: trunkId,
-          to_marker_id: cid(pi, 1),
-          requires_switch_state: 'main',
-          estimated_length_mm: 200,
-        });
-        edges.push({
-          from_marker_id: trunkId,
-          to_marker_id: cid(pi, 2),
-          requires_switch_state: 'divert',
-          estimated_length_mm: 200,
-        });
-        junctions.push({ marker_id: trunkId, valid_positions: ['main', 'divert'] });
-        break;
-      }
-      case 'crossing':
-        edges.push({
-          from_marker_id: cid(pi, 2),
-          to_marker_id: cid(pi, 0),
-          estimated_length_mm: 200,
-        });
-        edges.push({
-          from_marker_id: cid(pi, 1),
-          to_marker_id: cid(pi, 3),
-          estimated_length_mm: 200,
-        });
-        break;
-    }
-  }
-  return { edges, junctions };
+  return markers;
 }
 
 // ---------------------------------------------------------------------------
@@ -308,78 +236,29 @@ function emitEdgesAndJunctions(
 /**
  * Compile an array of placed TrackPiece objects into a Trainframe Layout.
  *
- * Algorithm:
- *  1. Collect every endpoint across all pieces.
- *  2. Greedily cluster endpoints within SNAP_DISTANCE_MM (first-seen wins).
- *  3. Assign marker IDs (m1, m2, …) in cluster-discovery order.
- *  4. Emit edges: one per piece for simple pieces; two for junctions/crossings.
- *  5. Emit LayoutJunction entries for junction pieces.
- *
- * Terminus pieces synthesise a private dead-end marker so we can still emit
- * a directed edge even though the piece has only one open endpoint.
+ * Per-piece markers, edges from adjacency:
+ *  1. One marker per non-device piece, id `M-{piece.id}`, kind derived from
+ *     `pieceMarkerKind` — the same mapping the scan flow publishes from the
+ *     synthetic GARAGE device. The two MUST agree, otherwise the server and
+ *     the in-browser sim disagree on what `M-straight-1` means.
+ *  2. Endpoints are clustered (within SNAP_DISTANCE_MM) only to detect which
+ *     pieces are physically adjacent on the table. No marker is created for
+ *     a cluster itself.
+ *  3. For every pair of distinct pieces in the same cluster, emit directed
+ *     edges in both directions between their markers. Terminus pieces emit
+ *     no outbound edges (dead-end). Junction pieces tag their outbound edges
+ *     with `requires_switch_state` according to which endpoint joins which
+ *     neighbour (trunk = no constraint, main / divert = the matching state).
+ *  4. Edge length is Euclidean centre-to-centre distance, rounded.
+ *  5. Junction pieces also produce a `LayoutJunction` entry declaring the
+ *     marker as a switch with `['main', 'divert']` positions.
  */
 export function compileLayout(pieces: ReadonlyArray<TrackPiece>, name: string): Layout {
   const allEndpoints = collectEndpoints(pieces);
-  const { clusters, pieceEpCluster } = clusterEndpoints(allEndpoints);
-
-  // Compute cluster centroids
-  const clusterCentroid = clusters.map((members) => {
-    let sx = 0;
-    let sy = 0;
-    for (const i of members) {
-      const ep = allEndpoints[i];
-      if (ep !== undefined) {
-        sx += ep.x;
-        sy += ep.y;
-      }
-    }
-    const n = members.length > 0 ? members.length : 1;
-    return { x: sx / n, y: sy / n };
-  });
-
-  const clusterKind = assignMarkerKinds(pieces, pieceEpCluster);
-
-  // Synthesise dead-end markers for terminus pieces
-  const { deadEndByPieceIdx, extraCentroids, deadEndKinds } = buildTerminusDeadEnds(
-    pieces,
-    clusters.length,
-  );
-  for (const { c, kind } of deadEndKinds) {
-    clusterKind.set(c, kind);
-  }
-  const allCentroids = [...clusterCentroid, ...extraCentroids];
-  const totalClusters = clusters.length + extraCentroids.length;
-
-  // Build marker list
-  const markers: LayoutMarker[] = [];
-  for (let c = 0; c < totalClusters; c++) {
-    const kind = clusterKind.get(c) ?? 'block_boundary';
-    const centroid = allCentroids[c];
-    const id = `m${c + 1}`;
-    if (centroid === undefined) {
-      markers.push({ id, kind });
-    } else {
-      markers.push({
-        id,
-        kind,
-        position: { x_mm: Math.round(centroid.x), y_mm: Math.round(centroid.y) },
-      });
-    }
-  }
-
-  function idOf(c: number): string {
-    const id = markers[c]?.id;
-    if (id === undefined) throw new Error(`No marker for cluster ${c}`);
-    return id;
-  }
-
-  const { edges, junctions } = emitEdgesAndJunctions(
-    pieces,
-    pieceEpCluster,
-    deadEndByPieceIdx,
-    idOf,
-  );
-
+  const clusters = clusterEndpoints(allEndpoints);
+  const markers = emitMarkers(pieces);
+  const edges = emitEdgesForClusters(pieces, clusters, allEndpoints);
+  const junctions = emitJunctions(pieces);
   return { name, markers, edges, junctions };
 }
 

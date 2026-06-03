@@ -1,0 +1,125 @@
+.tf-toytable {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+  font-family: var(--tf-font-family, system-ui, sans-serif);
+}
+
+.tf-toytable__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.tf-toytable__header h1 {
+  font-size: 1.25rem;
+  margin: 0;
+}
+
+.tf-toytable__body {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.tf-toytable__sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  min-width: 160px;
+}
+
+.tf-toytable__main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  flex: 1;
+}
+
+.tf-toytable__actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.tf-toytable__status {
+  margin-left: auto;
+  font-size: 0.85em;
+  opacity: 0.75;
+}
+
+.tf-toytable__canvas {
+  border: 1px solid var(--tf-color-border, #ccc);
+  background: var(--tf-color-canvas, #fafafa);
+  border-radius: 4px;
+}
+
+/* Toybox */
+.tf-toybox__group + .tf-toybox__group {
+  margin-top: 0.75rem;
+}
+
+.tf-toybox__heading {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.6;
+  margin: 0 0 0.4rem 0;
+}
+
+.tf-toybox__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.tf-toybox__button {
+  width: 100%;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  cursor: pointer;
+  background: var(--tf-color-surface, #f5f5f5);
+  border: 2px solid #999;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.tf-toybox__button:hover {
+  background: var(--tf-color-surface-hover, #ececec);
+}
+
+.tf-toybox__button--armed {
+  background: var(--tf-color-accent, #fde68a);
+  font-weight: 600;
+}
+
+/* Scan box */
+.tf-scanbox {
+  border: 2px dashed var(--tf-color-border, #999);
+  border-radius: 6px;
+  padding: 1rem 0.5rem;
+  text-align: center;
+  background: var(--tf-color-surface, #f5f5f5);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85em;
+  color: var(--tf-color-fg-muted, #555);
+  user-select: none;
+}
+
+.tf-scanbox__icon {
+  font-size: 1.4em;
+}
+
+.tf-scanbox--hot {
+  background: var(--tf-color-accent-soft, #fef3c7);
+  border-color: var(--tf-color-accent, #f59e0b);
+  color: var(--tf-color-fg, #1c1c1c);
+}

@@ -15,7 +15,43 @@ export type TrackPieceType =
   | 'junction'
   | 'station'
   | 'terminus'
-  | 'crossing';
+  | 'crossing'
+  | 'train'
+  | 'gate';
+
+/**
+ * Piece types that represent devices (trains, gates) rather than track
+ * topology. They sit *on* the table but contribute no endpoints or edges to
+ * the compiled `Layout` — they're scanned onto the bus via `ScanBox`, not
+ * compiled into the world's shape.
+ */
+export const DEVICE_PIECE_TYPES = ['train', 'gate'] as const;
+export type DevicePieceType = (typeof DEVICE_PIECE_TYPES)[number];
+
+export function isDevicePiece(type: TrackPieceType): type is DevicePieceType {
+  return type === 'train' || type === 'gate';
+}
+
+/**
+ * The marker kind a track piece contributes to the layout / scan flow.
+ *
+ * The scan-box (in `ToyTable`) and the private layout compiler (in
+ * `layout-from-pieces`) MUST agree on this mapping; otherwise the server
+ * learns one marker kind from the scan and the in-browser sim invents
+ * another, and routes can't resolve. Defined here, next to the piece types,
+ * to keep the two callers from drifting.
+ *
+ * Device pieces (train, gate) never become markers — they're scanned as
+ * their own devices, not as topology. We return `'block_boundary'` for them
+ * defensively so the function is total, but no caller should reach this path.
+ */
+export type TrackMarkerKind = 'block_boundary' | 'station_stop' | 'junction' | 'terminus';
+export function pieceMarkerKind(type: TrackPieceType): TrackMarkerKind {
+  if (type === 'station') return 'station_stop';
+  if (type === 'junction') return 'junction';
+  if (type === 'terminus') return 'terminus';
+  return 'block_boundary';
+}
 
 /** Rotation is constrained to multiples of 45° in the range [0, 315]. */
 export type RotationDeg = 0 | 45 | 90 | 135 | 180 | 225 | 270 | 315;
@@ -124,6 +160,11 @@ function localEndpoints(
         { lx: -100, ly: 0, localAngle: 180 }, // west
         { lx: 0, ly: 100, localAngle: 90 }, // south
       ];
+    case 'train':
+    case 'gate':
+      // Devices have no track endpoints — they sit on the table but contribute
+      // no topology. compileLayout() ignores them via the empty-array path.
+      return [];
   }
 }
 
@@ -175,6 +216,10 @@ export function getPieceShape(piece: TrackPiece): PieceShape {
       return terminusShape();
     case 'crossing':
       return crossingShape();
+    case 'train':
+      return trainShape();
+    case 'gate':
+      return gateShape();
   }
 }
 
@@ -261,4 +306,21 @@ function crossingShape(): PieceShape {
   const d = `M ${-half} ${-hw} H ${half} V ${hw} H ${-half} Z M ${-hw} ${-half} V ${half} H ${hw} V ${-half} Z`;
 
   return { svgPath: d, width: 200, height: 200 };
+}
+
+function trainShape(): PieceShape {
+  // Small loco silhouette sized to ride on a rail (rail band is 16 mm wide).
+  // 80 mm long, 24 mm wide, nose at east.
+  const d = 'M -40 -12 H 24 L 40 0 L 24 12 H -40 Z';
+
+  return { svgPath: d, width: 80, height: 24 };
+}
+
+function gateShape(): PieceShape {
+  // Stylised lift-barrier sized to straddle a rail. Short post on the west,
+  // horizontal arm to east, with three diagonal stripes. 80 mm wide, 22 mm tall.
+  const d =
+    'M -40 -6 H -32 V 11 H -40 Z M -32 -1 H 40 V 5 H -32 Z M -18 -1 L -10 5 M -2 -1 L 6 5 M 14 -1 L 22 5';
+
+  return { svgPath: d, width: 80, height: 22 };
 }

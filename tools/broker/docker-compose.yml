@@ -7,3 +7,19 @@ services:
       - '9001:9001'
     volumes:
       - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  tf-server:
+    build:
+      context: ../..
+      dockerfile: packages/server/Dockerfile
+    container_name: trainframe-server
+    depends_on:
+      - mosquitto
+    command:
+      - --discovery
+      - --broker
+      - mqtt://mosquitto:1883
+      - --http-port
+      - '3000'
+    ports:
+      - '3000:3000'

@@ -1,0 +1,611 @@
+import { Panel } from '@trainframe/ui-kit';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { SVGAttributes } from 'react';
+import { useBroker } from '../broker/broker-context.js';
+import type { BrokerClient } from '../broker/client.js';
+import { encodeDeviceEvent } from '../broker/encode-event.js';
+import { useToyHardware } from '../sim/use-toy-hardware.js';
+import {
+  type RotationDeg,
+  type TrackPiece,
+  type TrackPieceType,
+  getEndpoints,
+  getPieceShape,
+  isDevicePiece,
+  pieceMarkerKind,
+} from '../track/pieces.js';
+import { ConnectionStatus } from './ConnectionStatus.js';
+import { ScanBox } from './ScanBox.js';
+
+// Canvas scale: 1 mm = SCALE px. Matches the old TrackBuilder so coordinates
+// translate one-for-one across the refactor.
+const SCALE = 2;
+const CANVAS_W_MM = 900;
+const CANVAS_H_MM = 600;
+
+/**
+ * The garage device id used by the toy-table when announcing tag bindings.
+ * Real hardware uses the same id — per ADR-013 the sim must be
+ * indistinguishable from physical kit on the wire.
+ */
+const GARAGE_DEVICE_ID = 'GARAGE';
+
+const TRACK_PIECE_TYPES = [
+  'straight',
+  'curve',
+  'junction',
+  'station',
+  'terminus',
+  'crossing',
+] as const;
+const DEVICE_PIECE_TYPES = ['train', 'gate'] as const;
+
+const PIECE_LABELS: Record<TrackPieceType, string> = {
+  straight: 'Straight',
+  curve: 'Curve',
+  junction: 'Junction',
+  station: 'Station',
+  terminus: 'Terminus',
+  crossing: 'Crossing',
+  train: 'Train',
+  gate: 'Gate',
+};
+
+const PIECE_FILL: Record<TrackPieceType, string> = {
+  straight: '#7b8eac',
+  curve: '#7b9cac',
+  junction: '#8c7bac',
+  station: '#ac9b7b',
+  terminus: '#ac7b7b',
+  crossing: '#7bac8a',
+  train: '#1f6feb',
+  gate: '#d97706',
+};
+
+const POWER_DOT_RADIUS = 6;
+
+let pieceCounter = 0;
+function nextPieceId(prefix: string): string {
+  pieceCounter += 1;
+  return `${prefix}-${pieceCounter}`;
+}
+
+function nextRotation(r: RotationDeg): RotationDeg {
+  const next = (r + 45) % 360;
+  return next as RotationDeg;
+}
+
+/** Device id for a piece's *own* device announcement. Track pieces don't have
+ * their own device; their tag is published by the garage, so this is only
+ * meaningful for device pieces (train / gate). */
+function deviceIdForDevicePiece(piece: TrackPiece): string {
+  if (piece.type === 'train') return `T-${piece.id}`;
+  if (piece.type === 'gate') return `GATE-${piece.id}`;
+  // Unreachable: callers gate on isDevicePiece. Keeping the throw makes the
+  // contract explicit for future maintainers.
+  throw new Error(`deviceIdForDevicePiece called on non-device piece ${piece.type}`);
+}
+
+interface PowerOnAction {
+  readonly type: 'power-on';
+  readonly pieceId: string;
+}
+
+/** Hidden devtools handle. Strictly typed so we don't reach for `any`. */
+interface TrainframeSimHandle {
+  readonly pause: () => void;
+  readonly resume: () => void;
+  readonly step: (ms: number) => void;
+}
+
+declare global {
+  interface Window {
+    trainframeSim?: TrainframeSimHandle | undefined;
+  }
+}
+
+/**
+ * The toy table — v1 of the operator's "Brio table" view of the virtual
+ * hardware. Pick a piece from the toybox, click on the table to place it,
+ * then drag a placed piece into the scan box to bind it to the bus.
+ *
+ * No simulator scheduler runs here. Devices live on the broker only after
+ * scanning, and clicking a live train powers it back off (emits
+ * `device_disconnected`).
+ *
+ * Layout is *system-inferred*: the toy-table never publishes a layout state
+ * topic. Instead a synthetic GARAGE device announces itself once and then
+ * binds tags to markers on each track scan, exactly like real hardware would
+ * commission new pieces. Edges are learned by the server from train
+ * traversals; the simulator-ui contributes neither markers nor edges to a
+ * retained layout document.
+ */
+export function ToyTable() {
+  const { client } = useBroker();
+  const [pieces, setPieces] = useState<ReadonlyArray<TrackPiece>>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** Which piece type the operator has "armed" from the toybox, if any. */
+  const [armedType, setArmedType] = useState<TrackPieceType | null>(null);
+  /** Set of piece IDs whose device is currently live on the broker. */
+  const [liveIds, setLiveIds] = useState<ReadonlySet<string>>(() => new Set());
+  /** Pieces the operator has placed into the scan box. Keyed by piece id. */
+  const piecesRef = useRef(pieces);
+  piecesRef.current = pieces;
+
+  /** Whether the synthetic GARAGE has announced itself on the bus this
+   * session. A ref (not state) so two scans in the same render cycle still
+   * see the same value without stale-closure pitfalls. Resets per mount, so
+   * it's component-scoped rather than a module-level singleton. */
+  const garageRegisteredRef = useRef(false);
+
+  // Stand up an in-browser physics simulation wired to the broker. It hosts
+  // the virtual trains and gates the operator scans onto the bus, and reacts
+  // to clearance commands the real server publishes. Layout is *private* to
+  // the sim — never published, only used so the trains know where the rails
+  // are; the server still infers the public layout from `tag_assignment`
+  // events ToyTable emits on scan.
+  useToyHardware({ pieces, liveIds, client });
+
+  // Devtools handle — a tiny escape hatch for poking the page from the console.
+  // The toy-table v1 has no internal tick loop (devices come and go only via
+  // operator actions), so `pause/resume/step` are no-ops in this build but
+  // present so the API stays stable.
+  useEffect(() => {
+    const handle: TrainframeSimHandle = {
+      pause: () => {},
+      resume: () => {},
+      step: () => {},
+    };
+    window.trainframeSim = handle;
+    return () => {
+      // exactOptionalPropertyTypes forbids `delete`; assign undefined.
+      window.trainframeSim = undefined;
+    };
+  }, []);
+
+  const armPieceType = useCallback((type: TrackPieceType) => {
+    setArmedType((prev) => (prev === type ? null : type));
+  }, []);
+
+  const placePiece = useCallback(
+    (xMm: number, yMm: number) => {
+      if (armedType === null) {
+        setSelectedId(null);
+        return;
+      }
+      const piece: TrackPiece = {
+        id: nextPieceId(armedType),
+        type: armedType,
+        position: { x: xMm, y: yMm },
+        rotationDeg: 0,
+        tagged: false,
+      };
+      setPieces((prev) => [...prev, piece]);
+      setSelectedId(piece.id);
+      // Stay armed so the operator can drop multiple of the same type without
+      // re-clicking the toybox.
+    },
+    [armedType],
+  );
+
+  const rotateSelected = useCallback(() => {
+    if (selectedId === null) return;
+    setPieces((prev) =>
+      prev.map((p) =>
+        p.id === selectedId ? { ...p, rotationDeg: nextRotation(p.rotationDeg) } : p,
+      ),
+    );
+  }, [selectedId]);
+
+  const deleteSelected = useCallback(() => {
+    if (selectedId === null) return;
+    setPieces((prev) => prev.filter((p) => p.id !== selectedId));
+    setLiveIds((prev) => {
+      if (!prev.has(selectedId)) return prev;
+      const next = new Set(prev);
+      next.delete(selectedId);
+      return next;
+    });
+    setSelectedId(null);
+  }, [selectedId]);
+
+  // Keyboard: R rotates, Delete/Backspace deletes, Escape clears selection.
+  useEffect(() => {
+    const handlers: Record<string, () => void> = {
+      r: rotateSelected,
+      R: rotateSelected,
+      Delete: deleteSelected,
+      Backspace: deleteSelected,
+      Escape: () => setSelectedId(null),
+    };
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (selectedId === null) return;
+      const handler = handlers[e.key];
+      if (handler === undefined) return;
+      if (e.key !== 'Escape') e.preventDefault();
+      handler();
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selectedId, rotateSelected, deleteSelected]);
+
+  // Scan handler — fired when a piece is dropped into the scan box.
+  const handleScan = useCallback(
+    (pieceId: string) => {
+      const piece = piecesRef.current.find((p) => p.id === pieceId);
+      if (piece === undefined) return;
+      const announcedGarage = scanPiece(client, piece, garageRegisteredRef.current);
+      if (announcedGarage) garageRegisteredRef.current = true;
+      setLiveIds((prev) => {
+        const next = new Set(prev);
+        next.add(piece.id);
+        return next;
+      });
+    },
+    [client],
+  );
+
+  // Click on a live device → power off (emit `device_disconnected`). The UI
+  // only routes this action for device pieces (see `PieceRenderer.handleClick`);
+  // track pieces don't have their own device so they have no power-off path.
+  const handlePiecePointerAction = useCallback(
+    (pieceId: string, action: 'select' | PowerOnAction) => {
+      if (action === 'select') {
+        setSelectedId(pieceId);
+        return;
+      }
+      // Powering a device off
+      const piece = piecesRef.current.find((p) => p.id === pieceId);
+      if (piece === undefined) return;
+      if (!isDevicePiece(piece.type)) return;
+      const device_id = deviceIdForDevicePiece(piece);
+      const { topic, payload } = encodeDeviceEvent('device_disconnected', device_id, {});
+      client.publish(topic, payload);
+      setLiveIds((prev) => {
+        if (!prev.has(piece.id)) return prev;
+        const next = new Set(prev);
+        next.delete(piece.id);
+        return next;
+      });
+    },
+    [client],
+  );
+
+  const selectedPiece = pieces.find((p) => p.id === selectedId) ?? null;
+
+  return (
+    <div className="tf-toytable">
+      <header className="tf-toytable__header">
+        <h1>Trainframe Toy Table</h1>
+        <ConnectionStatus />
+      </header>
+      <div className="tf-toytable__body">
+        <aside className="tf-toytable__sidebar">
+          <Toybox armedType={armedType} onArm={armPieceType} />
+          <ScanBox onDrop={handleScan} />
+        </aside>
+        <main className="tf-toytable__main">
+          <ActionBar
+            selectedPiece={selectedPiece}
+            onRotate={rotateSelected}
+            onDelete={deleteSelected}
+            armedType={armedType}
+          />
+          <Table
+            pieces={pieces}
+            liveIds={liveIds}
+            selectedId={selectedId}
+            armedType={armedType}
+            onCanvasClick={placePiece}
+            onPieceAction={handlePiecePointerAction}
+          />
+        </main>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Toybox
+// ---------------------------------------------------------------------------
+
+interface ToyboxProps {
+  readonly armedType: TrackPieceType | null;
+  readonly onArm: (type: TrackPieceType) => void;
+}
+
+function Toybox({ armedType, onArm }: ToyboxProps) {
+  return (
+    <Panel label="Toybox" className="tf-toybox">
+      <ToyboxGroup heading="Track" types={TRACK_PIECE_TYPES} armedType={armedType} onArm={onArm} />
+      <ToyboxGroup
+        heading="Devices"
+        types={DEVICE_PIECE_TYPES}
+        armedType={armedType}
+        onArm={onArm}
+      />
+    </Panel>
+  );
+}
+
+interface ToyboxGroupProps {
+  readonly heading: string;
+  readonly types: ReadonlyArray<TrackPieceType>;
+  readonly armedType: TrackPieceType | null;
+  readonly onArm: (type: TrackPieceType) => void;
+}
+
+function ToyboxGroup({ heading, types, armedType, onArm }: ToyboxGroupProps) {
+  return (
+    <section className="tf-toybox__group" aria-label={heading}>
+      <h2 className="tf-toybox__heading">{heading}</h2>
+      <ul className="tf-toybox__list">
+        {types.map((type) => {
+          const armed = armedType === type;
+          return (
+            <li key={type}>
+              <button
+                type="button"
+                className={`tf-toybox__button${armed ? ' tf-toybox__button--armed' : ''}`}
+                onClick={() => onArm(type)}
+                aria-pressed={armed}
+                style={{ borderColor: PIECE_FILL[type] }}
+                data-testid={`toybox-${type}`}
+              >
+                {PIECE_LABELS[type]}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Action bar
+// ---------------------------------------------------------------------------
+
+interface ActionBarProps {
+  readonly selectedPiece: TrackPiece | null;
+  readonly onRotate: () => void;
+  readonly onDelete: () => void;
+  readonly armedType: TrackPieceType | null;
+}
+
+function ActionBar({ selectedPiece, onRotate, onDelete, armedType }: ActionBarProps) {
+  return (
+    <div className="tf-toytable__actions">
+      <button type="button" onClick={onRotate} disabled={selectedPiece === null}>
+        Rotate (R)
+      </button>
+      <button type="button" onClick={onDelete} disabled={selectedPiece === null}>
+        Delete (Del)
+      </button>
+      <span className="tf-toytable__status">
+        {armedType !== null
+          ? `Armed: ${PIECE_LABELS[armedType]} — click the table to place`
+          : selectedPiece !== null
+            ? `Selected: ${PIECE_LABELS[selectedPiece.type]} · ${selectedPiece.rotationDeg}°`
+            : 'Pick a piece from the toybox'}
+      </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Table (canvas)
+// ---------------------------------------------------------------------------
+
+interface TableProps {
+  readonly pieces: ReadonlyArray<TrackPiece>;
+  readonly liveIds: ReadonlySet<string>;
+  readonly selectedId: string | null;
+  readonly armedType: TrackPieceType | null;
+  readonly onCanvasClick: (xMm: number, yMm: number) => void;
+  readonly onPieceAction: (pieceId: string, action: 'select' | PowerOnAction) => void;
+}
+
+function Table({
+  pieces,
+  liveIds,
+  selectedId,
+  armedType,
+  onCanvasClick,
+  onPieceAction,
+}: TableProps) {
+  function handleClick(e: React.MouseEvent<SVGSVGElement>) {
+    // Convert the click point into the SVG's viewBox coordinate system (mm).
+    // `getBoundingClientRect` returns zeros under jsdom; fall back to a
+    // sensible centre placement so tests don't generate NaN coordinates.
+    const svg = e.currentTarget;
+    const rect = svg.getBoundingClientRect();
+    const xMm =
+      rect.width > 0 ? ((e.clientX - rect.left) / rect.width) * CANVAS_W_MM : CANVAS_W_MM / 2;
+    const yMm =
+      rect.height > 0 ? ((e.clientY - rect.top) / rect.height) * CANVAS_H_MM : CANVAS_H_MM / 2;
+    onCanvasClick(xMm, yMm);
+  }
+
+  // The canvas behaves as a placement surface, not an interactive control —
+  // pieces and the toybox buttons handle keyboard. We still satisfy the
+  // useKeyWithClickEvents rule by exposing an Enter/Space → "place at centre"
+  // shortcut that mirrors a click; useful for keyboard-only operators.
+  function handleKeyDown(e: React.KeyboardEvent<SVGSVGElement>) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onCanvasClick(CANVAS_W_MM / 2, CANVAS_H_MM / 2);
+    }
+  }
+
+  return (
+    <svg
+      width={CANVAS_W_MM * SCALE}
+      height={CANVAS_H_MM * SCALE}
+      viewBox={`0 0 ${CANVAS_W_MM} ${CANVAS_H_MM}`}
+      className="tf-toytable__canvas"
+      style={{ cursor: armedType !== null ? 'crosshair' : 'default' }}
+      onClick={handleClick}
+      onKeyDown={handleKeyDown}
+      role="img"
+      aria-label="Toy table"
+      data-testid="toy-table-canvas"
+    >
+      {pieces.map((p) => (
+        <PieceRenderer
+          key={p.id}
+          piece={p}
+          selected={p.id === selectedId}
+          live={liveIds.has(p.id)}
+          onAction={(action) => onPieceAction(p.id, action)}
+        />
+      ))}
+      {/* Endpoint dots for track pieces only. Devices have no endpoints. */}
+      <g>
+        {pieces.flatMap((p) =>
+          getEndpoints(p).map((ep, ei) => (
+            <circle
+              key={`${p.id}-ep${ei}`}
+              cx={ep.x}
+              cy={ep.y}
+              r={4}
+              fill={p.id === selectedId ? '#2563eb' : '#e11d48'}
+              stroke="#fff"
+              strokeWidth={1.5}
+              style={{ pointerEvents: 'none' }}
+            />
+          )),
+        )}
+      </g>
+    </svg>
+  );
+}
+
+interface PieceRendererProps {
+  readonly piece: TrackPiece;
+  readonly selected: boolean;
+  readonly live: boolean;
+  readonly onAction: (action: 'select' | PowerOnAction) => void;
+}
+
+function PieceRenderer({ piece, selected, live, onAction }: PieceRendererProps) {
+  const shape = getPieceShape(piece);
+  const fill = PIECE_FILL[piece.type];
+  const isDevice = isDevicePiece(piece.type);
+
+  function handleClick(e: React.MouseEvent) {
+    e.stopPropagation();
+    // A live device that gets clicked is powered off; everything else just selects.
+    if (live && isDevice) {
+      onAction({ type: 'power-on', pieceId: piece.id });
+      return;
+    }
+    onAction('select');
+  }
+
+  function handleDragStart(e: React.DragEvent) {
+    e.dataTransfer.setData('application/x-trainframe-piece', piece.id);
+    e.dataTransfer.effectAllowed = 'move';
+  }
+
+  const { x, y } = piece.position;
+  const { rotationDeg } = piece;
+
+  // `draggable` is an HTML attribute that also works on SVG nodes but isn't in
+  // React's `SVGProps` type. Pass it through a typed extra-props object rather
+  // than reach for `any`.
+  const draggableProps: SVGAttributes<SVGGElement> & { draggable: boolean } = {
+    draggable: true,
+  };
+
+  return (
+    <g
+      transform={`translate(${x}, ${y}) rotate(${rotationDeg})`}
+      onClick={handleClick}
+      onDragStart={handleDragStart}
+      {...draggableProps}
+      style={{ cursor: live && isDevice ? 'pointer' : 'grab' }}
+      data-testid={`piece-${piece.id}`}
+      data-piece-id={piece.id}
+      data-live={live ? 'true' : 'false'}
+      aria-label={`${piece.type} piece${live ? ' (powered on)' : ''}`}
+    >
+      {selected && (
+        <path d={shape.svgPath} fill="none" stroke="#2563eb" strokeWidth={6} strokeOpacity={0.4} />
+      )}
+      <path
+        d={shape.svgPath}
+        fill={fill}
+        stroke="#333"
+        strokeWidth={1.5}
+        fillOpacity={isDevice && !live ? 0.4 : 1}
+      />
+      {/* Power dot for devices: green when live, grey when inert. */}
+      {isDevice && (
+        <circle
+          cx={shape.width / 2 - POWER_DOT_RADIUS}
+          cy={-shape.height / 2 + POWER_DOT_RADIUS}
+          r={POWER_DOT_RADIUS}
+          fill={live ? '#16a34a' : '#888'}
+          stroke="#1c1c1c"
+          strokeWidth={1}
+          data-testid={`power-${piece.id}`}
+        />
+      )}
+    </g>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Broker-side helpers (scanPiece)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fire the "device / tag just appeared on the bus" events for a scanned piece.
+ *
+ * - Track pieces: ensure the GARAGE is registered (once per session), then
+ *   emit a `tag_assignment` from GARAGE binding `M-{piece.id}` to the marker
+ *   of the appropriate kind.
+ * - Train pieces: emit a `device_registered` from the train itself.
+ * - Gate pieces: emit a `device_registered` from the gate itself.
+ *
+ * Returns `true` when this call announced the GARAGE (so the caller can flip
+ * its once-only flag). All other calls return `false`.
+ */
+function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: boolean): boolean {
+  if (piece.type === 'train') {
+    const device_id = deviceIdForDevicePiece(piece);
+    const reg = encodeDeviceEvent('device_registered', device_id, {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    client.publish(reg.topic, reg.payload);
+    return false;
+  }
+  if (piece.type === 'gate') {
+    const device_id = deviceIdForDevicePiece(piece);
+    const reg = encodeDeviceEvent('device_registered', device_id, {
+      capabilities: ['core.gates_clearance'],
+    });
+    client.publish(reg.topic, reg.payload);
+    return false;
+  }
+  // Track piece — announce GARAGE if needed, then bind the tag.
+  let announced = false;
+  if (!garageRegistered) {
+    const reg = encodeDeviceEvent('device_registered', GARAGE_DEVICE_ID, {
+      capabilities: ['core.assigns_tags'],
+    });
+    client.publish(reg.topic, reg.payload);
+    announced = true;
+  }
+  const markerId = `M-${piece.id}`;
+  const assignment = encodeDeviceEvent('tag_assignment', GARAGE_DEVICE_ID, {
+    tag_id: markerId,
+    assigned_kind: 'marker',
+    target_id: markerId,
+    marker_kind: pieceMarkerKind(piece.type),
+  });
+  client.publish(assignment.topic, assignment.payload);
+  return announced;
+}

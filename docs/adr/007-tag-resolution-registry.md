@@ -74,7 +74,7 @@ Unassignments are not yet implemented; the registry has the API, but the protoco
 Concretely:
 
 - `VirtualTrain` config gets a `marker_to_tag: Record<marker_id, tag_id>` map; the train emits `tag_observed` with the resolved tag ID when it crosses a marker that has an entry. Without an entry, no `tag_observed` is emitted (the train is invisible to the registry until someone tags its markers).
-- `Simulation` gets a constructor option `register_tags?: 'identity'` which, when set, on startup publishes one `tag_assignment` event per marker via a synthetic `SIM-GARAGE` device that declares `core.assigns_tags`. The "identity" mode means each marker `M_x` gets a tag `M_x`. Tests that want this convenience opt in.
+- `Simulation` gets a constructor option `register_tags?: 'identity'` which, when set, on startup publishes one `tag_assignment` event per marker via a synthetic `GARAGE` device that declares `core.assigns_tags`. The "identity" mode means each marker `M_x` gets a tag `M_x`. Tests that want this convenience opt in.
 - Both default off in production builds; tests opt in.
 
 ## Consequences

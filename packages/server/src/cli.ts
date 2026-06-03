@@ -21,14 +21,15 @@ async function main(): Promise<void> {
     printUsage();
     return;
   }
-  if (!args.layout) {
-    stderr.write('Missing --layout <path>\n');
+  if (!args.layout && !args.discovery) {
+    stderr.write('Missing --layout <path> (or pass --discovery to start with an empty layout)\n');
     printUsage();
     exit(1);
   }
   const broker = args.broker ?? env.TRAINFRAME_BROKER ?? 'mqtt://localhost:1883';
-  const layoutPath = resolve(args.layout);
-  const layout = JSON.parse(readFileSync(layoutPath, 'utf8')) as Layout;
+  const layout: Layout = args.layout
+    ? (JSON.parse(readFileSync(resolve(args.layout), 'utf8')) as Layout)
+    : { name: args.discoveryName, markers: [], edges: [], junctions: [] };
 
   const client = new MqttBrokerClient();
   await client.connect(broker);
@@ -56,34 +57,63 @@ async function main(): Promise<void> {
 
 interface CliArgs {
   layout: string | undefined;
+  discovery: boolean;
+  discoveryName: string;
   broker: string | undefined;
   httpPort: number;
   help: boolean;
 }
 
+const FLAG_HANDLERS: Record<string, (args: CliArgs, take: () => string | undefined) => void> = {
+  '--help': (args) => {
+    args.help = true;
+  },
+  '-h': (args) => {
+    args.help = true;
+  },
+  '--layout': (args, take) => {
+    args.layout = take();
+  },
+  '--discovery': (args) => {
+    args.discovery = true;
+  },
+  '--discovery-name': (args, take) => {
+    const next = take();
+    if (next !== undefined) args.discoveryName = next;
+  },
+  '--broker': (args, take) => {
+    args.broker = take();
+  },
+  '--http-port': (args, take) => {
+    const next = take();
+    if (next !== undefined) args.httpPort = Number.parseInt(next, 10);
+  },
+};
+
 function parseArgs(argv: string[]): CliArgs {
   const args: CliArgs = {
     help: false,
     layout: undefined,
+    discovery: false,
+    discoveryName: 'discovery',
     broker: undefined,
     httpPort: 3000,
   };
   for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--help' || a === '-h') args.help = true;
-    else if (a === '--layout') args.layout = argv[++i];
-    else if (a === '--broker') args.broker = argv[++i];
-    else if (a === '--http-port') {
-      const next = argv[++i];
-      if (next !== undefined) args.httpPort = Number.parseInt(next, 10);
-    }
+    const flag = argv[i];
+    if (flag === undefined) continue;
+    const handler = FLAG_HANDLERS[flag];
+    if (handler === undefined) continue;
+    handler(args, () => argv[++i]);
   }
   return args;
 }
 
 function printUsage(): void {
   stdout.write(
-    'Usage: tf-server --layout <path-to-layout.json> [--broker mqtt://host:1883] [--http-port 3000]\n' +
+    'Usage: tf-server [--layout <path-to-layout.json> | --discovery] [--broker mqtt://host:1883] [--http-port 3000]\n' +
+      '  --discovery starts with an empty layout; markers and edges are inferred from incoming wire events.\n' +
+      '  --discovery-name names the empty layout (default "discovery").\n' +
       '  --broker can also be set via TRAINFRAME_BROKER env var.\n' +
       '  --http-port 0 disables the admin HTTP API (default 3000).\n',
   );

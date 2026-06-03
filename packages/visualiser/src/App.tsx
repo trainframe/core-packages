@@ -4,6 +4,7 @@ import type { BrokerSubscriber } from './broker/client.js';
 import { MqttBrokerSubscriber } from './broker/mqtt-client.js';
 import { ConnectionStatus } from './components/ConnectionStatus.js';
 import { DeadlockBanner } from './components/DeadlockBanner.js';
+import { DevicesPanel } from './components/DevicesPanel.js';
 import { EventLog } from './components/EventLog.js';
 import { LayoutCanvas } from './components/LayoutCanvas.js';
 import { ScheduleAssigner } from './components/ScheduleAssigner.js';
@@ -36,6 +37,7 @@ export function App({ client }: AppProps = {}) {
         <DeadlockBanner />
         <ScheduleList />
         <ScheduleAssigner />
+        <DevicesPanel />
         <LayoutCanvas />
         <UnknownTags adminApiUrl={adminApiUrl} />
         <EventLog />
