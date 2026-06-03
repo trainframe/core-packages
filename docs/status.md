@@ -201,6 +201,7 @@ Coverage thresholds: not applicable (Playwright; covered by E2E pass/fail).
 | ADRs 001–006                                   | shipped | Capability extensibility, clearance, MQTT, edge-routes, existentials, mishaps. |
 | ADRs 007–010                                   | shipped | Tag-resolution registry, server admin API, discovery mode, schedule/planner/transit. ADR-010 partially supersedes ADR-004 (sections still the execution unit; operator-facing routes are now sparse stop lists). |
 | ADR-011                                        | shipped | Section as edge + boundary markers; amends ADR-002's clearance model. |
+| ADR-012                                        | shipped | Train length on registration; tail-clearance release derived from train_status internally; per-train EWMA on LayoutState. |
 | `docs/status.md` (this file)                   | shipped | New.                                                                           |
 | ADR for HTTP query API split                   | not started | Spec §"Open questions for v0.3" flags this as undecided.                       |
 | ADR for tag→marker resolution registry         | not started |                                                                                |

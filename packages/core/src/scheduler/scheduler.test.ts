@@ -48,6 +48,33 @@ const registerTrain = (scheduler: Scheduler, trainId: string) =>
     payload: { capabilities: ['core.controls_motion', 'core.accepts_route'] },
   });
 
+const registerLongTrain = (scheduler: Scheduler, trainId: string, lengthMm: number) =>
+  scheduler.handleEvent({
+    event_type: 'device_registered',
+    device_id: trainId,
+    payload: {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      train_length_mm: lengthMm,
+    },
+  });
+
+const sendTrainStatus = (
+  scheduler: Scheduler,
+  trainId: string,
+  currentEdge: { from_marker_id: string; to_marker_id: string },
+  distanceMm: number,
+) =>
+  scheduler.handleEvent({
+    event_type: 'train_status',
+    device_id: trainId,
+    payload: {
+      train_id: trainId,
+      current_edge: currentEdge,
+      estimated_distance_from_edge_start_mm: distanceMm,
+      speed_normalised: 0.5,
+    },
+  });
+
 const registerGate = (scheduler: Scheduler, deviceId: string) =>
   scheduler.handleEvent({
     event_type: 'device_registered',
@@ -1028,6 +1055,173 @@ describe('Scheduler — discovery mode', () => {
 
     const edge = layout.findEdge('M1', 'M-X');
     expect(edge?.inferred).toBe(false);
+  });
+});
+
+describe('Scheduler — train-length-aware tail clearance', () => {
+  it('long train holds the section behind it until train_status reports tail has cleared', () => {
+    // T1 is 150 mm long on a simple loop where every edge is 200 mm.
+    // After T1's head crosses M2 (entering M2→M3), M1→M2 must stay locked
+    // until T1 reports distance >= 150 mm into M2→M3.
+    //
+    // T2 wants M4→M1. While T1 holds M1→M2, that edge shares M1 with T2's
+    // M4→M1, so T2 is denied (ADR-011). Once the tail clears M1→M2 (T1 only
+    // holds M2→M3, markers {M2,M3}), M4→M1 (markers {M4,M1}) has no shared
+    // boundary and T2 is granted.
+    const { scheduler } = setup();
+    registerLongTrain(scheduler, 'T1', 150);
+    registerTrain(scheduler, 'T2');
+
+    // T1: M1→M2→M3.
+    scheduler.assignSchedule('T1', 'r1', ['M1', 'M3']);
+
+    // T2: M4→M1. T2 starts at M4 (stops[0]), planner builds transit M4→M1.
+    // M4→M1 shares M1 with T1's M1→M2 (ADR-011) so the initial grant is denied.
+    const t2Initial = scheduler.assignSchedule('T2', 'r2', ['M4', 'M1']);
+    // Denied — T1 holds M1→M2 (shares M1 with M4→M1, ADR-011).
+    expect(
+      t2Initial.find((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance'),
+    ).toBeUndefined();
+
+    // T1 head crosses M1 then M2.
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    const atM2 = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+
+    // T1's head crossed M2 — for a long train M1→M2 is NOT released yet.
+    // T2 still blocked (retryBlockedClearances runs inside handleTrainAtMarker
+    // but the section has not been dropped from cleared_edges).
+    expect(
+      atM2.find(
+        (e) =>
+          e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+      ),
+    ).toBeUndefined();
+
+    // T1 reports distance = 100 mm into M2→M3. Tail is 50 mm inside M1→M2.
+    const statusNotYet = sendTrainStatus(
+      scheduler,
+      'T1',
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+      100,
+    );
+    expect(
+      statusNotYet.find(
+        (e) =>
+          e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+      ),
+    ).toBeUndefined();
+
+    // T1 reports distance = 150 mm — tail at the M2 boundary, M1→M2 clears.
+    // T1 now holds only M2→M3 (markers {M2,M3}); M4→M1 (markers {M4,M1})
+    // is uncontested and T2 must be granted.
+    const statusCleared = sendTrainStatus(
+      scheduler,
+      'T1',
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+      150,
+    );
+    const t2Grant = statusCleared.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+    );
+    expect(t2Grant).toBeDefined();
+    expect((t2Grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M1');
+  });
+
+  it('long train granting follow-on clearance is still gated by ADR-011 shared-marker rule', () => {
+    // T1 (long) has its tail cleared M1→M2, releasing M1→M2. T2 wants M2→M3.
+    // Even after M1→M2 is released, if T1 still holds M2→M3 (which shares M2
+    // and M3), T2 cannot get M2→M3 — ADR-011 shared-marker rule must apply.
+    const { scheduler } = setup();
+    registerLongTrain(scheduler, 'T1', 150);
+    registerTrain(scheduler, 'T2');
+
+    // T1: full loop M1→M2→M3→M4→M1. T2 wants M2→M3 (clearance_request).
+    scheduler.assignSchedule('T1', 'r1', ['M1', 'M3']);
+
+    // T1's head crosses M1 and M2.
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+    // T1 now holds [M1→M2, M2→M3] (long train, no release yet).
+
+    // T1's tail clears M1→M2 at distance=150 mm. M1→M2 drops out. T1 still
+    // holds M2→M3 (lock set {M2, M3}).
+    sendTrainStatus(scheduler, 'T1', { from_marker_id: 'M2', to_marker_id: 'M3' }, 150);
+
+    // T2 requests M2→M3 — shared markers M2 and M3, must be denied.
+    const t2Probe = scheduler.handleEvent({
+      event_type: 'clearance_request',
+      device_id: 'T2',
+      payload: { train_id: 'T2', next_edge: { from_marker_id: 'M2', to_marker_id: 'M3' } },
+    });
+    expect(
+      t2Probe.find((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance'),
+    ).toBeUndefined();
+  });
+
+  it('point train (length=0) still releases on marker_traversed (regression)', () => {
+    // A train registered with train_length_mm=0 must behave identically to a
+    // train with no length_mm — release on head arrival, not deferred.
+    const { scheduler } = setup();
+    scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'T1',
+      payload: {
+        capabilities: ['core.controls_motion', 'core.accepts_route'],
+        train_length_mm: 0,
+      },
+    });
+    registerTrain(scheduler, 'T2');
+
+    scheduler.assignSchedule('T1', 'r1', ['M1', 'M3']);
+    scheduler.assignSchedule('T2', 'r2', ['M1', 'M2']);
+
+    // T1 crosses M1 then M2.
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    // After M2: T1 point train, so M1→M2 is released immediately. T2 should
+    // still be denied because under ADR-011, T1 holds M2→M3 (lock {M2,M3})
+    // which shares M2 with T2's M1→M2 request.
+    const atM2 = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+
+    // The key regression check: T1's M1→M2 was released on marker_traversed
+    // (not deferred). T2 is still blocked by ADR-011 (M2 in T1's lock set).
+    // Verify state directly.
+    const t1State = scheduler.getTrainState('T1');
+    // cleared_edges should NOT contain M1→M2 (it was released on arrival at M2).
+    expect(
+      t1State?.cleared_edges.some((e) => e.from_marker_id === 'M1' && e.to_marker_id === 'M2'),
+    ).toBe(false);
+
+    // T2 is still denied because T1 holds M2→M3.
+    const t2Grant = atM2.find(
+      (e) =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+    );
+    expect(t2Grant).toBeUndefined();
   });
 });
 

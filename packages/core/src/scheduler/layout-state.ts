@@ -55,6 +55,18 @@ export class LayoutState {
    * Alpha = 0.3: new value contributes 30%, prior average 70%.
    */
   private readonly learnedMs = new Map<string, number>();
+  /**
+   * Per-train EWMA of traversal time in ms. Outer key is train ID, inner key
+   * is the same edge key used by `learnedMs`. Populated when `recordTraversal`
+   * is called with a `trainId`. Allows fast trains and slow shunters to maintain
+   * independent estimates without polluting each other.
+   */
+  private readonly learnedMsByTrain = new Map<string, Map<string, number>>();
+  /**
+   * Per-train timestamp of the previous `recordTraversal` call, used to compute
+   * per-train traversal deltas independently of the global `lastRecordedAt`.
+   */
+  private readonly lastRecordedAtByTrain = new Map<string, number>();
   private readonly now: () => number;
 
   constructor(layout: Layout, options: LayoutStateOptions = {}) {
@@ -170,7 +182,11 @@ export class LayoutState {
    * Returns flags describing what changed so the scheduler can publish
    * a fresh layout snapshot when discovery has moved the graph forward.
    */
-  recordTraversal(fromMarkerId: string, toMarkerId: string): RecordTraversalResult {
+  recordTraversal(
+    fromMarkerId: string,
+    toMarkerId: string,
+    trainId?: string,
+  ): RecordTraversalResult {
     if (!this.markers.has(fromMarkerId) || !this.markers.has(toMarkerId)) {
       return { inferredEdgeAdded: false, edgeConfirmed: false };
     }
@@ -208,6 +224,10 @@ export class LayoutState {
     }
     this.lastRecordedAt = ts;
 
+    if (trainId !== undefined) {
+      this.updatePerTrainEwma(trainId, key, ts);
+    }
+
     return { inferredEdgeAdded: added, edgeConfirmed: shouldConfirm };
   }
 
@@ -216,9 +236,42 @@ export class LayoutState {
    * if the edge has been traversed fewer than twice (not enough data to
    * compute a delta). Per the protocol spec §"Incremental discovery",
    * `learned_traversal_time_ms_at_speed`.
+   *
+   * When `trainId` is supplied, the per-train EWMA takes precedence over the
+   * global one. If no per-train value exists yet, falls back to the global
+   * estimate. If neither exists, returns `undefined`.
    */
-  getLearnedTraversalMs(fromMarkerId: string, toMarkerId: string): number | undefined {
-    return this.learnedMs.get(edgeKey(fromMarkerId, toMarkerId));
+  getLearnedTraversalMs(
+    fromMarkerId: string,
+    toMarkerId: string,
+    trainId?: string,
+  ): number | undefined {
+    const key = edgeKey(fromMarkerId, toMarkerId);
+    if (trainId !== undefined) {
+      const perTrain = this.learnedMsByTrain.get(trainId)?.get(key);
+      if (perTrain !== undefined) return perTrain;
+    }
+    return this.learnedMs.get(key);
+  }
+
+  /**
+   * Update the per-train EWMA for a given train and edge key.
+   * Uses its own per-train `lastRecordedAt` so different trains' timings are
+   * completely independent of each other and of the global timestamp.
+   */
+  private updatePerTrainEwma(trainId: string, key: string, ts: number): void {
+    const lastAt = this.lastRecordedAtByTrain.get(trainId);
+    if (lastAt !== undefined) {
+      const delta = ts - lastAt;
+      let edgeMap = this.learnedMsByTrain.get(trainId);
+      if (edgeMap === undefined) {
+        edgeMap = new Map<string, number>();
+        this.learnedMsByTrain.set(trainId, edgeMap);
+      }
+      const prior = edgeMap.get(key);
+      edgeMap.set(key, prior === undefined ? delta : prior * 0.7 + delta * 0.3);
+    }
+    this.lastRecordedAtByTrain.set(trainId, ts);
   }
 
   /** Flip the inferred flag off on every copy of the edge stored in the indexes. */

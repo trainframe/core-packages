@@ -28,6 +28,7 @@ export function SimControls({ layout }: SimControlsProps) {
   const [trainId, setTrainId] = useState(computedNextId);
   const [overshootRate, setOvershootRate] = useState('0');
   const [missRate, setMissRate] = useState('0.01');
+  const [lengthMm, setLengthMm] = useState('0');
   const [spawnError, setSpawnError] = useState<string | null>(null);
   /** Stops the train will cycle through. */
   const [stops, setStops] = useState<string[]>([]);
@@ -103,7 +104,11 @@ export function SimControls({ layout }: SimControlsProps) {
     }
 
     if (isIdle) start();
-    const spawned = spawnTrain(trainId, startEdge, buildTrainConfig(overshootRate, missRate));
+    const spawned = spawnTrain(
+      trainId,
+      startEdge,
+      buildTrainConfig(overshootRate, missRate, lengthMm),
+    );
     if (!spawned) {
       setSpawnError(`Train ${trainId} already exists. Choose a different ID.`);
       return;
@@ -186,6 +191,16 @@ export function SimControls({ layout }: SimControlsProps) {
               max="1"
               step="0.01"
             />
+          </label>{' '}
+          <label>
+            Train length (mm){' '}
+            <input
+              type="number"
+              value={lengthMm}
+              onChange={(e) => setLengthMm(e.target.value)}
+              min="0"
+              step="1"
+            />
           </label>
           <div>
             <label>
@@ -249,15 +264,20 @@ export function SimControls({ layout }: SimControlsProps) {
 function buildTrainConfig(
   overshootRate: string,
   missRate: string,
-): { overshoot_rate?: number; miss_rate?: number } {
+  lengthMm: string,
+): { overshoot_rate?: number; miss_rate?: number; length_mm?: number } {
   const parsedOvershoot = Number.parseFloat(overshootRate);
   const parsedMiss = Number.parseFloat(missRate);
-  const config: { overshoot_rate?: number; miss_rate?: number } = {};
+  const parsedLength = Number.parseFloat(lengthMm);
+  const config: { overshoot_rate?: number; miss_rate?: number; length_mm?: number } = {};
   if (!Number.isNaN(parsedOvershoot)) {
     config.overshoot_rate = Math.min(1, Math.max(0, parsedOvershoot));
   }
   if (!Number.isNaN(parsedMiss)) {
     config.miss_rate = Math.min(1, Math.max(0, parsedMiss));
+  }
+  if (!Number.isNaN(parsedLength)) {
+    config.length_mm = Math.max(0, parsedLength);
   }
   return config;
 }

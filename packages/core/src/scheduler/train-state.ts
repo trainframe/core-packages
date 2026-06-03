@@ -54,6 +54,15 @@ export interface TrainState {
 
   /** The edge the train is currently on, derived from last marker + transit. */
   current_edge?: EdgeRef | undefined;
+
+  /**
+   * Physical length of the train in millimetres. When undefined or 0 the
+   * scheduler uses point-train semantics (release on marker_traversed).
+   * When > 0 the scheduler waits for `train_status` to report
+   * `estimated_distance_from_edge_start_mm >= length_mm` before releasing
+   * the block behind the head. Populated from `device_registered.train_length_mm`.
+   */
+  length_mm?: number | undefined;
 }
 
 export const initialTrainState = (trainId: string): TrainState => ({

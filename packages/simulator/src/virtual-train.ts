@@ -45,6 +45,12 @@ export interface VirtualTrainConfig {
    * for smooth visualiser interpolation, sparse enough to not flood the bus.
    */
   train_status_interval_ms: number;
+  /**
+   * Physical length of the train in mm. Used by the scheduler to determine
+   * when the tail has cleared a boundary (tail release). Default 0 means
+   * the train is treated as a point mass (tail coincides with the head).
+   */
+  length_mm: number;
 }
 
 export const DEFAULT_TRAIN_CONFIG: VirtualTrainConfig = {
@@ -57,6 +63,7 @@ export const DEFAULT_TRAIN_CONFIG: VirtualTrainConfig = {
   double_read_rate: 0,
   spurious_read_rate: 0,
   train_status_interval_ms: 250,
+  length_mm: 0,
 };
 
 interface TrainEvent {

@@ -74,6 +74,8 @@ export class Scheduler {
         return this.handleSwitchStateChanged(event.payload);
       case 'tag_assignment':
         return this.handleTagAssignment(event.device_id, event.payload);
+      case 'train_status':
+        return this.handleTrainStatus(event.payload);
       default:
         return this.dispatchToCapabilities(event);
     }
@@ -111,10 +113,18 @@ export class Scheduler {
       capability_state: capabilityState,
     });
 
-    // If this device claims to be a train, initialise train state.
+    // If this device claims to be a train, initialise train state and capture
+    // optional physical length for tail-clearance deferral.
     if (capabilities.includes('core.controls_motion')) {
       if (!this.trains.has(deviceId)) {
         this.trains.set(deviceId, initialTrainState(deviceId));
+      }
+      const trainLengthMm = (payload as { train_length_mm?: number }).train_length_mm;
+      if (trainLengthMm !== undefined && trainLengthMm > 0) {
+        const train = this.trains.get(deviceId);
+        if (train) {
+          train.length_mm = trainLengthMm;
+        }
       }
     }
 
@@ -254,7 +264,16 @@ export class Scheduler {
     // Release the block this train has now finished. ADR-002 block exclusivity
     // gates concurrent occupation, not lifetime ownership — without pruning,
     // cleared_edges grows monotonically and every following train is denied.
-    train.cleared_edges = train.cleared_edges.filter((e) => e.to_marker_id !== markerId);
+    //
+    // For trains with a known physical length (length_mm > 0), skip immediate
+    // release on head arrival. The tail still occupies the section behind the
+    // head. Release is deferred until handleTrainStatus reports
+    // estimated_distance_from_edge_start_mm >= length_mm (phase-2 limitation:
+    // train must be shorter than the shortest edge it traverses; no multi-edge
+    // tail spanning is implemented).
+    if (!train.length_mm || train.length_mm === 0) {
+      train.cleared_edges = train.cleared_edges.filter((e) => e.to_marker_id !== markerId);
+    }
 
     // Discovery: when a train moves from one marker to another, either
     // confirm an existing edge (inferred or not) or learn a new one.
@@ -263,7 +282,7 @@ export class Scheduler {
     let inDiscoveryMode = false;
     const out: SchedulerEffect[] = [];
     if (previousMarker && previousMarker !== markerId) {
-      const result = this.layout.recordTraversal(previousMarker, markerId);
+      const result = this.layout.recordTraversal(previousMarker, markerId, trainId);
       const edge = this.layout.findEdge(previousMarker, markerId);
       inDiscoveryMode = edge?.inferred ?? false;
       if (result.inferredEdgeAdded || result.edgeConfirmed) {
@@ -489,6 +508,58 @@ export class Scheduler {
       out.push(...this.retryBlockedClearances());
     }
     return out;
+  }
+
+  // ---------- train_status → tail-clearance release ----------
+
+  /**
+   * Handle a `train_status` event from a length-aware train. For trains with
+   * `length_mm > 0`, the head crossing a boundary marker is not sufficient to
+   * release the section behind it — the tail must also have cleared. This
+   * method checks whether the tail has vacated the previous section by
+   * comparing `estimated_distance_from_edge_start_mm` against `length_mm`.
+   *
+   * When the tail clears, this filters `cleared_edges` by
+   * `to_marker_id === current_edge.from_marker_id` (i.e. releases the
+   * section whose `to` is where the head currently entered from), then
+   * retries blocked clearances so waiting peers are granted in the same call.
+   *
+   * Phase-2 constraint: the implementation assumes `length_mm < shortest edge
+   * length`. Trains spanning more than one section behind the head are not
+   * supported; only the immediately-prior section is released here.
+   *
+   * Point trains (length_mm undefined or 0) release on `marker_traversed`
+   * (handleTrainAtMarker) and are unaffected by this method.
+   */
+  private handleTrainStatus(payload: unknown): ReadonlyArray<SchedulerEffect> {
+    const { train_id, current_edge, estimated_distance_from_edge_start_mm } = payload as {
+      train_id: string;
+      current_edge?: { from_marker_id: string; to_marker_id: string } | undefined;
+      estimated_distance_from_edge_start_mm?: number | undefined;
+    };
+
+    const train = this.trains.get(train_id);
+    if (!train) return [];
+
+    // Only apply tail-deferral logic to trains with a registered length.
+    if (!train.length_mm || train.length_mm === 0) return [];
+
+    // We need both the current edge and a distance reading.
+    if (!current_edge || estimated_distance_from_edge_start_mm === undefined) return [];
+
+    // Tail has cleared the previous section when the head is at least
+    // `length_mm` into the current edge.
+    if (estimated_distance_from_edge_start_mm < train.length_mm) return [];
+
+    // The previous section's `to_marker_id` equals the current edge's
+    // `from_marker_id` — release it.
+    const previousToMarker = current_edge.from_marker_id;
+    const before = train.cleared_edges.length;
+    train.cleared_edges = train.cleared_edges.filter((e) => e.to_marker_id !== previousToMarker);
+    const released = before - train.cleared_edges.length;
+    if (released === 0) return [];
+
+    return this.retryBlockedClearances();
   }
 
   /**

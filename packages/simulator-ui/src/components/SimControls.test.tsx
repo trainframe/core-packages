@@ -215,6 +215,28 @@ describe('SimControls — operator panel', () => {
     expect(screen.getByRole('textbox', { name: /train id/i })).toHaveValue('T1');
     expect(screen.getByRole('spinbutton', { name: /overshoot rate/i })).toHaveValue(0);
     expect(screen.getByRole('spinbutton', { name: /miss rate/i })).toHaveValue(0.01);
+    expect(screen.getByRole('spinbutton', { name: /train length/i })).toHaveValue(0);
+  });
+
+  it('spawning with train length 50 sends a device_registered with train_length_mm: 50 on the broker', async () => {
+    const user = userEvent.setup();
+    const { client } = renderControls();
+
+    const lengthInput = screen.getByRole('spinbutton', { name: /train length/i });
+    await user.clear(lengthInput);
+    await user.type(lengthInput, '50');
+
+    await buildSchedule(user, ['M1', 'M3']);
+    await user.click(screen.getByRole('button', { name: /spawn train/i }));
+
+    const registered = client.published.find((m) =>
+      m.topic.startsWith('railway/events/device_registered/T1'),
+    );
+    expect(registered).toBeDefined();
+    const envelope = JSON.parse(new TextDecoder().decode(registered?.payload)) as {
+      payload: { capabilities: string[]; train_length_mm?: number };
+    };
+    expect(envelope.payload.train_length_mm).toBe(50);
   });
 
   it('the overshoot rate the operator types causes an anomaly event on the broker when the train overshoots', async () => {

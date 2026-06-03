@@ -268,6 +268,38 @@ describe('train_status emission', () => {
   });
 });
 
+describe('train length — device_registered payload', () => {
+  it('includes train_length_mm in device_registered when config.length_mm > 0', () => {
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
+    sim.spawnTrain('T1', {
+      startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+      config: { length_mm: 80 },
+    });
+
+    const registrations = sim
+      .getEventsOfType('device_registered')
+      .filter((e) => e.device_id === 'T1');
+    expect(registrations).toHaveLength(1);
+    const payload = registrations[0]?.payload as {
+      capabilities: string[];
+      train_length_mm?: number;
+    };
+    expect(payload.train_length_mm).toBe(80);
+  });
+
+  it('omits train_length_mm from device_registered when config.length_mm is 0 (default)', () => {
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
+    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+
+    const payload = sim.getEventsOfType('device_registered').filter((e) => e.device_id === 'T1')[0]
+      ?.payload as {
+      capabilities: string[];
+      train_length_mm?: number;
+    };
+    expect(payload.train_length_mm).toBeUndefined();
+  });
+});
+
 describe('despawn → device_disconnected', () => {
   it('despawnGate emits a device_disconnected event and the scheduler releases the gate`s withholds', () => {
     const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });

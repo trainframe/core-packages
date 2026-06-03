@@ -23,6 +23,14 @@ const DeviceRegisteredPayload = Type.Object({
     ),
   ),
   metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  /**
+   * Physical length of the train in millimetres. When present and > 0, the
+   * scheduler defers clearing the section behind the head until
+   * `train_status.estimated_distance_from_edge_start_mm >= train_length_mm`,
+   * ensuring the tail has fully vacated before releasing the block. Only
+   * meaningful for devices declaring `core.controls_motion`.
+   */
+  train_length_mm: Type.Optional(Type.Number({ minimum: 0 })),
 });
 
 export const DeviceRegistered = eventEnvelope('device_registered', DeviceRegisteredPayload);

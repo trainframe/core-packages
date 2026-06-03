@@ -127,6 +127,72 @@ describe('LayoutState.getLearnedTraversalMs', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Per-train EWMA tracking
+// ---------------------------------------------------------------------------
+
+describe('LayoutState per-train getLearnedTraversalMs', () => {
+  it('returns undefined when no per-train or global value exists', () => {
+    const layout = new LayoutState(SIMPLE_LOOP, { now: () => 0 });
+    expect(layout.getLearnedTraversalMs('M1', 'M2', 'express')).toBeUndefined();
+  });
+
+  it('falls back to global EWMA when no per-train value exists for trainId', () => {
+    // Two traversals without a trainId to populate the global EWMA only.
+    const times = [0, 1000];
+    let callIdx = 0;
+    const layout = new LayoutState(SIMPLE_LOOP, { now: () => times[callIdx++] ?? 0 });
+
+    layout.recordTraversal('M1', 'M2'); // global: first call, no delta
+    layout.recordTraversal('M1', 'M2'); // global: delta=1000 → learned=1000
+
+    // 'express' has no per-train value, so it falls back to global=1000.
+    expect(layout.getLearnedTraversalMs('M1', 'M2', 'express')).toBe(1000);
+  });
+
+  it('per-train value takes precedence over global for the requesting train', () => {
+    // Clock sequence (4 calls): 0, 500, 2000, 4000
+    //   call 1 (t=0, shunter):    global: lastRecordedAt=null → no delta; lastRecordedAt=0.
+    //                             shunter per-train: no prior → no delta; perTrain[shunter]=0.
+    //   call 2 (t=500, shunter):  global: delta=500-0=500 → global=500; lastRecordedAt=500.
+    //                             shunter: delta=500-0=500 → per-train=500; perTrain[shunter]=500.
+    //   call 3 (t=2000, no id):   global: delta=2000-500=1500 → EWMA=500*0.7+1500*0.3=800; lastRecordedAt=2000.
+    //   call 4 (t=4000, shunter): global: delta=4000-2000=2000 → EWMA=800*0.7+2000*0.3=1160.
+    //                             shunter: delta=4000-500=3500 → EWMA=500*0.7+3500*0.3=1400.
+    const times = [0, 500, 2000, 4000];
+    let callIdx = 0;
+    const layout = new LayoutState(SIMPLE_LOOP, { now: () => times[callIdx++] ?? 0 });
+
+    layout.recordTraversal('M1', 'M2', 'shunter'); // t=0: global no-delta, shunter no-delta
+    layout.recordTraversal('M1', 'M2', 'shunter'); // t=500: global=500, shunter per-train=500
+    layout.recordTraversal('M1', 'M2'); // t=2000: global EWMA=800 (no per-train update)
+    layout.recordTraversal('M1', 'M2', 'shunter'); // t=4000: global EWMA=1160, shunter per-train EWMA=1400
+
+    // Global value is updated by every call including trainId-attributed ones.
+    expect(layout.getLearnedTraversalMs('M1', 'M2')).toBe(1160);
+    // Shunter's per-train EWMA is driven only by shunter's own timestamps, so
+    // it returns 1400 rather than the global 1160.
+    expect(layout.getLearnedTraversalMs('M1', 'M2', 'shunter')).toBe(1400);
+  });
+
+  it('two trains on the same edge maintain independent EWMAs', () => {
+    // Clock: 0, 1000, 2000, 3000, 4000, 5000
+    // 'express' records at t=0 and t=1000 → per-train delta=1000.
+    // 'shunter' records at t=2000 and t=5000 → per-train delta=3000.
+    const times = [0, 1000, 2000, 5000];
+    let callIdx = 0;
+    const layout = new LayoutState(SIMPLE_LOOP, { now: () => times[callIdx++] ?? 0 });
+
+    layout.recordTraversal('M1', 'M2', 'express'); // t=0: express no per-train delta
+    layout.recordTraversal('M1', 'M2', 'express'); // t=1000: express per-train=1000
+    layout.recordTraversal('M1', 'M2', 'shunter'); // t=2000: shunter no per-train delta
+    layout.recordTraversal('M1', 'M2', 'shunter'); // t=5000: shunter per-train=3000
+
+    expect(layout.getLearnedTraversalMs('M1', 'M2', 'express')).toBe(1000);
+    expect(layout.getLearnedTraversalMs('M1', 'M2', 'shunter')).toBe(3000);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Pre-existing behaviour (smoke tests to ensure nothing regressed)
 // ---------------------------------------------------------------------------
 

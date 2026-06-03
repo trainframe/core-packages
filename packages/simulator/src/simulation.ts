@@ -141,11 +141,20 @@ export class Simulation {
     if (options?.startEdge) {
       train.placeAt(options.startEdge);
     }
-    // Register with the scheduler.
+    // Register with the scheduler. Include train_length_mm when non-zero so
+    // the scheduler (and any broker listeners) can perform tail-release
+    // calculations without assuming a point mass.
+    const registrationPayload: {
+      capabilities: string[];
+      train_length_mm?: number;
+    } = { capabilities: ['core.controls_motion', 'core.accepts_route'] };
+    if (config.length_mm > 0) {
+      registrationPayload.train_length_mm = config.length_mm;
+    }
     this.captureAndDispatch({
       event_type: 'device_registered',
       device_id: train_id,
-      payload: { capabilities: ['core.controls_motion', 'core.accepts_route'] },
+      payload: registrationPayload,
     });
     return train;
   }
