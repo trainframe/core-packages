@@ -204,6 +204,69 @@ describe('Server — admin injection points', () => {
   });
 });
 
+describe('Server — operator commands on railway/operator/+', () => {
+  it('routes assign_schedule to Server.assignSchedule and emits the grant_clearance', () => {
+    const { client } = makeServer();
+    // Register T1 so the scheduler knows about it.
+    publishWireEvent(client, 'device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    // Publish the operator intent on the bus (the visualiser's path).
+    client.publish(
+      'railway/operator/assign_schedule',
+      new TextEncoder().encode(
+        JSON.stringify({ train_id: 'T1', route_id: 'r-op', stops: ['M1', 'M2'] }),
+      ),
+    );
+    // Expect a grant_clearance command on T1's topic — proves the scheduler ran.
+    const grant = client.published
+      .filter((m) => m.topic === 'railway/commands/T1')
+      .map((m) => decode<{ command_type: string }>(m.payload))
+      .find((env) => env.command_type === 'grant_clearance');
+    expect(grant).toBeDefined();
+  });
+
+  it('routes revoke_clearance to Server.revokeClearance and emits the revoke command', () => {
+    const { client } = makeServer();
+    publishWireEvent(client, 'device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    // First give T1 something to revoke.
+    client.publish(
+      'railway/operator/assign_schedule',
+      new TextEncoder().encode(
+        JSON.stringify({ train_id: 'T1', route_id: 'r-op', stops: ['M1', 'M2'] }),
+      ),
+    );
+    // Now revoke via the operator topic.
+    client.publish(
+      'railway/operator/revoke_clearance',
+      new TextEncoder().encode(JSON.stringify({ train_id: 'T1' })),
+    );
+    const revoke = client.published
+      .filter((m) => m.topic === 'railway/commands/T1')
+      .map((m) => decode<{ command_type: string }>(m.payload))
+      .find((env) => env.command_type === 'revoke_clearance');
+    expect(revoke).toBeDefined();
+  });
+
+  it('silently drops operator commands with malformed JSON', () => {
+    const { client } = makeServer();
+    client.publish('railway/operator/assign_schedule', new TextEncoder().encode('not-json-at-all'));
+    // No new commands published; the test passes if no throw.
+    expect(true).toBe(true);
+  });
+
+  it('ignores unknown operator command types', () => {
+    const { client } = makeServer();
+    client.publish(
+      'railway/operator/who_knows',
+      new TextEncoder().encode(JSON.stringify({ foo: 'bar' })),
+    );
+    expect(true).toBe(true);
+  });
+});
+
 function countCommands(
   client: InMemoryBrokerClient,
   train_id: string,

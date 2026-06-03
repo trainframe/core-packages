@@ -1,4 +1,5 @@
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
 import { InMemoryBrokerSubscriber } from '../broker/in-memory-client.js';
@@ -40,6 +41,21 @@ describe('DeadlockBanner', () => {
     expect(banner).toHaveTextContent('T1');
     expect(banner).toHaveTextContent('T2');
     expect(banner).toHaveTextContent(/deadlock/i);
+  });
+
+  it('clicking a Revoke button publishes the operator command for that train', async () => {
+    const user = userEvent.setup();
+    const { client } = renderBanner();
+    publishDeadlockState(client, ['T1', 'T2']);
+    await screen.findByTestId('deadlock-banner');
+
+    await user.click(screen.getByTestId('deadlock-break-T1'));
+
+    const sent = client.published.find((m) => m.topic === 'railway/operator/revoke_clearance');
+    expect(sent).toBeDefined();
+    if (!sent) return;
+    const body = JSON.parse(new TextDecoder().decode(sent.payload)) as { train_id: string };
+    expect(body.train_id).toBe('T1');
   });
 
   it('clears the banner when the deadlock resolves (empty trains)', async () => {

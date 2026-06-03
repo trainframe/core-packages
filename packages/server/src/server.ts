@@ -46,6 +46,7 @@ export class Server {
   private readonly scheduler: Scheduler;
   private readonly newId: () => string;
   private unsubscribe: (() => void) | null = null;
+  private unsubscribeOperator: (() => void) | null = null;
 
   constructor(private readonly options: ServerOptions) {
     this.registry = new CapabilityRegistry();
@@ -63,6 +64,14 @@ export class Server {
     this.unsubscribe = this.options.client.subscribe('railway/events/+/+', (msg) => {
       this.handleMessage(msg.topic, msg.payload);
     });
+    // Operator commands are system-level intents published by the visualiser
+    // (or any other operator surface). See ADR-013. The topic family
+    // `railway/operator/<command>` is intentionally separate from
+    // `railway/commands/<device_id>` because operator intents target the
+    // *system*, not a specific physical device.
+    this.unsubscribeOperator = this.options.client.subscribe('railway/operator/+', (msg) =>
+      this.handleOperatorCommand(msg.topic, msg.payload),
+    );
     this.publishLayoutState();
   }
 
@@ -70,6 +79,52 @@ export class Server {
   stop(): void {
     this.unsubscribe?.();
     this.unsubscribe = null;
+    this.unsubscribeOperator?.();
+    this.unsubscribeOperator = null;
+  }
+
+  /**
+   * Dispatch an operator-side command from the broker. Mirrors the
+   * SimRunner's `handleOperatorCommand` so production deployments and the
+   * in-browser sim accept the same operator-intent payloads. The topic's
+   * last segment is the command name; the payload is a small JSON object
+   * specific to that command.
+   */
+  private handleOperatorCommand(topic: string, payload: Uint8Array): void {
+    const commandType = topic.split('/').pop();
+    if (!commandType) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(payload));
+    } catch {
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object') return;
+    const obj = parsed as Record<string, unknown>;
+    if (commandType === 'assign_schedule') {
+      const trainId = obj.train_id;
+      const stops = obj.stops;
+      const routeId = obj.route_id;
+      if (
+        typeof trainId !== 'string' ||
+        !Array.isArray(stops) ||
+        !stops.every((s): s is string => typeof s === 'string')
+      ) {
+        return;
+      }
+      this.assignSchedule(
+        trainId,
+        typeof routeId === 'string' ? routeId : `op-${this.newId()}`,
+        stops,
+      );
+      return;
+    }
+    if (commandType === 'revoke_clearance') {
+      const trainId = obj.train_id;
+      if (typeof trainId !== 'string') return;
+      this.revokeClearance(trainId);
+      return;
+    }
   }
 
   /**
