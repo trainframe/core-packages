@@ -240,14 +240,22 @@ function trainShapeD(halfL: number, halfW: number): string {
   // length and pointedness are tuned here.
   const noseX = halfL - halfW * 1.5;
   const tipX = halfL;
+  // The triangular sides are straight for most of the nose. Only the last
+  // ~10% rounds off via a Q curve, so the silhouette is a clear triangle
+  // with a subtly rounded apex rather than a needle point.
+  const roundStartX = noseX + (tipX - noseX) * 0.9;
+  const roundStartY = halfW * 0.1;
 
   return [
     // Start at back-left corner.
     `M ${rearX} ${-halfW}`,
     // Straight line along the left side to front-left of the body.
     `L ${noseX} ${-halfW}`,
-    // Triangular nose: two straight lines meeting at a sharp tip.
-    `L ${tipX} 0`,
+    // Triangular nose: straight up to a point just shy of the tip, then a
+    // small quadratic that grazes the tip and comes back out, then a
+    // straight line back down.
+    `L ${roundStartX} ${-roundStartY}`,
+    `Q ${tipX} 0, ${roundStartX} ${roundStartY}`,
     `L ${noseX} ${halfW}`,
     // Straight line along the right side back to back-right.
     `L ${rearX} ${halfW}`,
