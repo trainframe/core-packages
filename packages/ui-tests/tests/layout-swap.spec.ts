@@ -83,6 +83,8 @@ test.describe
       // retained state to the broker.
       await sim.getByLabel(/Source/i).selectOption('long-loop');
       await sim.getByRole('button', { name: /Apply layout/i }).click();
+      // Lifecycle buttons live in the Developer drawer (collapsed by default).
+      await sim.getByRole('button', { name: 'Developer' }).click();
       await sim.getByRole('button', { name: 'Start', exact: true }).click();
 
       await expect(visualiser.locator('[data-marker-id="M5"]')).toBeVisible({ timeout: 10_000 });

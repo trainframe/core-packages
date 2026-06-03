@@ -139,10 +139,8 @@ test.describe('Discovery mode: the visualiser grows as the operator learns the t
       })
       .toBe(true);
 
-    // The visualiser's `edges` group should contain a line for the new
+    // The visualiser's `edges` group should contain a path for the new
     // edge (rendered by LayoutCanvas via the keyed map).
-    await expect(
-      page.locator('[data-testid="edges"] line').filter({ has: page.locator(':scope') }),
-    ).not.toHaveCount(0);
+    await expect(page.locator('[data-testid="edges"] path')).not.toHaveCount(0);
   });
 });

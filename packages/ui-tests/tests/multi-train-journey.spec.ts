@@ -1,6 +1,11 @@
-import { type Browser, expect, test } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import type { Layout } from '@trainframe/protocol';
-import { SIM_URL, VISUALISER_URL } from '../playwright.config.js';
+import {
+  assignSchedule,
+  openSimulatorUi,
+  openVisualiser,
+  spawnTrain,
+} from '../src/playwright-helpers.js';
 import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
 /**
@@ -10,6 +15,9 @@ import { type UiHarness, startUiHarness } from '../src/test-harness.js';
  * see on screen. Encodes the regression for the block exclusivity release
  * (cleared edges must be pruned as a train traverses, otherwise following
  * trains sit at M1 forever).
+ *
+ * Per ADR-013: spawning is on the sim-ui (physical action); schedule
+ * assignment is on the visualiser's ScheduleAssigner (operator system intent).
  */
 
 const SIMPLE_LOOP: Layout = {
@@ -29,33 +37,6 @@ const SIMPLE_LOOP: Layout = {
   junctions: [],
 };
 
-const openVisualiser = async (browser: Browser) => {
-  const ctx = await browser.newContext();
-  await ctx.addInitScript(() =>
-    localStorage.setItem('trainframe.visualiser.brokerUrl', 'ws://127.0.0.1:9001'),
-  );
-  const page = await ctx.newPage();
-  await page.goto(VISUALISER_URL);
-  return page;
-};
-
-const openSimulatorUi = async (browser: Browser, layout: Layout) => {
-  const ctx = await browser.newContext();
-  await ctx.addInitScript(
-    ({ broker, selection }) => {
-      localStorage.setItem('trainframe.simulator-ui.brokerUrl', broker);
-      localStorage.setItem('trainframe.simulator-ui.layout', selection);
-    },
-    {
-      broker: 'ws://127.0.0.1:9001',
-      selection: JSON.stringify({ kind: 'custom', layout }),
-    },
-  );
-  const page = await ctx.newPage();
-  await page.goto(SIM_URL);
-  return page;
-};
-
 test.describe
   .serial('Multi-train operator journey', () => {
     let harness: UiHarness;
@@ -70,27 +51,27 @@ test.describe
 
     test('three trains spawned in succession all advance past the start', async ({ browser }) => {
       const visualiser = await openVisualiser(browser);
-      const sim = await openSimulatorUi(browser, SIMPLE_LOOP);
+      const sim = await openSimulatorUi(browser, { layout: SIMPLE_LOOP });
 
       await expect(visualiser.locator('[data-marker-id="M1"]')).toBeVisible();
 
-      // Operator picks stops (M1, M3) once. The schedule stays in the form
-      // across spawns so each new train gets the same plan; the planner
-      // computes the per-leg transit through M2 on demand.
-      for (const stop of ['M1', 'M3']) {
-        await sim.getByRole('combobox', { name: /stop/i }).selectOption(stop);
-        await sim.getByRole('button', { name: /add stop/i }).click();
-      }
-
-      // Operator drives the lifecycle with three Spawn clicks. Spawn auto-
-      // starts AND auto-resumes the sim; the form's Train ID auto-increments,
-      // so we fill it explicitly to keep the test deterministic across renders.
+      // Operator places trains on the track via the sim-ui (physical action).
+      // The spawn-position auto-selects M1; Train ID is filled explicitly for
+      // determinism. Each Spawn auto-starts and auto-resumes the sim.
       for (const id of ['T1', 'T2', 'T3']) {
-        await sim.getByLabel(/^Train ID/i).fill(id);
-        await sim.getByRole('button', { name: /Spawn train/i }).click();
+        await spawnTrain(sim, { trainId: id, startMarker: 'M1' });
       }
 
-      // All three trains must appear on the visualiser canvas.
+      // Assign a schedule to each train via the visualiser's ScheduleAssigner
+      // (operator system intent). assignSchedule waits for the panel to
+      // appear after each train's device_registered retained state lands.
+      // Stops M1 and M3 route each train through M2.
+      for (const id of ['T1', 'T2', 'T3']) {
+        await assignSchedule(visualiser, { trainId: id, stops: ['M1', 'M3'] });
+      }
+
+      // All three trains must appear on the visualiser canvas once they
+      // start moving (driven by marker_traversed / train_status events).
       for (const id of ['T1', 'T2', 'T3']) {
         await expect(visualiser.locator(`[data-train-id="${id}"]`)).toBeVisible({ timeout: 8_000 });
       }
