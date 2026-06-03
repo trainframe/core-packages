@@ -294,7 +294,13 @@ export class SimRunner {
    */
   private handleStateSnapshot(snapshot: CapturedStateSnapshot): void {
     if (this.mode === 'device-only') return;
-    if (snapshot.entity_type !== 'clearance' && snapshot.entity_type !== 'deadlock') return;
+    if (
+      snapshot.entity_type !== 'clearance' &&
+      snapshot.entity_type !== 'deadlock' &&
+      snapshot.entity_type !== 'schedule'
+    ) {
+      return;
+    }
     const topic = `railway/state/${snapshot.entity_type}/${snapshot.entity_id}`;
     this.client.publish(topic, new TextEncoder().encode(JSON.stringify(snapshot.state)), {
       retain: true,

@@ -167,13 +167,15 @@ export class Scheduler {
 
     this.devices.delete(deviceId);
     if (device.capabilities.includes('core.controls_motion')) {
-      // Emit an empty clearance state so the visualiser removes the overlay
-      // for this train. Publish before deleting the train record.
+      // Emit empty clearance + schedule snapshots so the visualiser removes
+      // the overlay and schedule-list entry for this train. Publish before
+      // deleting the train record.
       out.push(
         effects.updateState('clearance', deviceId, {
           train_id: deviceId,
           cleared_edges: [],
         }),
+        effects.updateState('schedule', deviceId, { train_id: deviceId }),
       );
       this.trains.delete(deviceId);
     }
@@ -836,7 +838,27 @@ export class Scheduler {
       current_stop_index: initialStopIndex,
     };
 
-    return this.planAndExecuteCurrentTransit(train);
+    return [this.scheduleStateEffect(train), ...this.planAndExecuteCurrentTransit(train)];
+  }
+
+  /**
+   * Retained-state snapshot of the train's operator-facing schedule. The
+   * payload mirrors `train.schedule`; subscribers (e.g. the visualiser's
+   * schedule list) read which stops the train cycles through and which
+   * stop it's currently heading to. Published from `assignSchedule` (when
+   * the operator picks the stops) and `advanceScheduleAndReplan` (when
+   * the train arrives at its current target and the pointer advances).
+   */
+  private scheduleStateEffect(train: TrainState): SchedulerEffect {
+    if (!train.schedule) {
+      return effects.updateState('schedule', train.train_id, { train_id: train.train_id });
+    }
+    return effects.updateState('schedule', train.train_id, {
+      train_id: train.train_id,
+      route_id: train.schedule.route_id,
+      stops: train.schedule.stops,
+      current_stop_index: train.schedule.current_stop_index,
+    });
   }
 
   /**
@@ -908,7 +930,9 @@ export class Scheduler {
     if (!train.schedule) return [];
     const nextIndex = (train.schedule.current_stop_index + 1) % train.schedule.stops.length;
     train.schedule = { ...train.schedule, current_stop_index: nextIndex };
-    return this.planAndExecuteCurrentTransit(train);
+    // Publish the updated schedule pointer so the visualiser's schedule
+    // list highlights the new target stop.
+    return [this.scheduleStateEffect(train), ...this.planAndExecuteCurrentTransit(train)];
   }
 
   /**

@@ -220,31 +220,39 @@ function bezierPathD(from: Point, to: Point, c1: Point, c2: Point): string {
  *   back-left (-halfL, -halfW)
  *   back-right (-halfL, +halfW)
  *   front-right (noseX, +halfW)   — where the rectangular body ends
- *   nose tip (halfL, 0)           — the pointed front, smoothly curved via Q
+ *   nose tip (halfL, 0)           — a pointier front, curved sides
  *   front-left (noseX, -halfW)
  *
- *   noseX = halfL - halfW * 1.5   (the nose depth = 1.5× half-width)
+ *   noseX = halfL - halfW * 3     (the nose depth is 3× half-width, giving a
+ *                                   long, pointy front rather than a soft
+ *                                   bullet nose)
  *
  * The back edge and both sides are straight lines (rectangular body).
- * The front is two quadratic curves meeting at the tip, giving a smooth
- * rounded nose.  Back corners are left sharp to give a clear "rear of train"
- * read.
+ * The front is two quadratic curves that meet at the tip; with the control
+ * point pulled most of the way toward the tip, the sides only ease slightly
+ * away from the body line before tapering to a sharp point.  Back corners
+ * are sharp to give a clear "rear of train" read.
  */
 function trainShapeD(halfL: number, halfW: number): string {
   const rearX = -halfL;
-  // The rectangular body runs from rearX to noseX.
-  // noseX leaves enough room for the rounded nose without making the body tiny.
-  const noseX = halfL - halfW * 1.5;
+  // The rectangular body runs from rearX to noseX. The nose protrudes for
+  // ~60% of the body's half-length, giving a long pointed snout rather
+  // than a soft bullet.
+  const noseX = halfL * 0.2;
   const tipX = halfL;
+  // Control points sit close to the tip so the sides stay almost straight
+  // for most of the nose length before tucking in to a sharp point.
+  const ctrlX = noseX + (tipX - noseX) * 0.85;
 
   return [
     // Start at back-left corner.
     `M ${rearX} ${-halfW}`,
     // Straight line along the left side to front-left.
     `L ${noseX} ${-halfW}`,
-    // Quadratic curve: front-left → tip → front-right (smooth rounded nose).
-    `Q ${tipX} ${-halfW}, ${tipX} 0`,
-    `Q ${tipX} ${halfW}, ${noseX} ${halfW}`,
+    // Quadratic curve: front-left → tip → front-right. Control points near
+    // the tip give a long taper rather than a bullet nose.
+    `Q ${ctrlX} ${-halfW}, ${tipX} 0`,
+    `Q ${ctrlX} ${halfW}, ${noseX} ${halfW}`,
     // Straight line along the right side back to back-right.
     `L ${rearX} ${halfW}`,
     // Close (straight back edge).

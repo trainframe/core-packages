@@ -2,18 +2,27 @@
  * Derive a stable hue from a train ID. The hue is deterministic so the same
  * train always gets the same colour across re-renders and page refreshes.
  *
- * The algorithm is a simple polynomial hash that spreads short IDs (T1, T2 …)
- * far enough apart that neighbouring trains look distinct. It returns a value
- * in [0, 360) suitable for use directly in `hsl(hue, …)`.
+ * Uses FNV-1a hashing (32-bit) combined with the golden-ratio conjugate
+ * multiplier (≈ 0.618 of 360°) so that short IDs differing in a single
+ * character — "T1" vs "T2" vs "T3" — land at widely separated hues, not
+ * clustered together as a naïve polynomial hash would. Returns a value in
+ * [0, 360) suitable for use directly in `hsl(hue, …)`.
  */
 export function trainHue(trainId: string): number {
-  let hash = 0;
+  // FNV-1a 32-bit: small offset basis xor'd with each char, then mul by
+  // the FNV prime. A single-character change cascades through every bit
+  // of the output.
+  let hash = 0x811c9dc5;
   for (let i = 0; i < trainId.length; i++) {
-    // Multiply-add hash — fast and good enough for the handful of IDs we have.
-    hash = (hash * 31 + trainId.charCodeAt(i)) | 0;
+    hash ^= trainId.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
   }
-  // Keep positive and map into [0, 360).
-  return ((hash % 360) + 360) % 360;
+  // Spread adjacent hash values around the hue circle via the golden
+  // ratio conjugate. Multiplying by (√5 − 1)/2 ≈ 0.61803 maximises the
+  // angular distance between any small set of inputs, so the first few
+  // train IDs get visually distinct colours.
+  const u32 = hash >>> 0;
+  return Math.floor((u32 * 0.6180339887498949 * 360) % 360);
 }
 
 /**
