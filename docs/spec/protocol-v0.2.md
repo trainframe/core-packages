@@ -24,7 +24,7 @@ Trains are autonomous within their assigned route. The server hands a train an o
 
 **Edge**: a directed connection from one marker to another. Edges carry metadata: estimated length, an optional `requires_switch_state` if the source is a junction, and learned traversal time at known speed. Edges are the unit of routing.
 
-**Block**: typically equivalent to an edge for clearance purposes. A train holds clearance for one or more contiguous edges ahead of it. At most one train holds clearance for any edge at any time.
+**Section** (block): an edge **plus its two boundary markers**. Two sections conflict when they share any boundary marker — not when they have the same edge identity. A train holds clearance for one or more contiguous sections ahead of it; another train cannot acquire a section that shares a marker with one already held. This single rule protects crossings (every X-incident edge shares X), junctions, and gives one-block separation on a straight loop. See [ADR-011](../adr/011-section-as-edge-plus-boundary-markers.md).
 
 **Junction**: a marker with multiple outgoing edges, exactly one active at any time per the switch state. The marker itself has no special role beyond being detected; the structure lives on the edges.
 

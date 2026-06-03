@@ -126,6 +126,95 @@ describe('Scheduler — route assignment and clearance extension', () => {
   });
 });
 
+describe('Scheduler — section-as-edge-plus-boundary-markers (ADR-011)', () => {
+  it('blocks a chaser at the leader`s lock-set boundary on a single loop', () => {
+    // Same loop, both trains. T1 spawned at M1 heading to M3; T2 at M1 also
+    // heading to M3. T1 holds [M1→M2], lock set {M1, M2}. T2 wants M1→M2 too
+    // — would be denied even by edge-equality alone, but the section-pair
+    // rule is what stops a different chaser from skipping ahead into M2's
+    // far side: T2 wanting M2→M3 (which doesn't share an edge but shares M2)
+    // is denied too.
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    registerTrain(scheduler, 'T2');
+    scheduler.assignSchedule('T1', 'r1', ['M1', 'M3']);
+
+    // T1 reaches M2. T1 now holds M2→M3 (lock {M2, M3}). A new schedule for
+    // T2 that wants M2→M3 directly (impossible from a real-train standpoint,
+    // but the planner-shape doesn't care) — denied because M2 and M3 both in
+    // T1's lock set. Use the lower-level edge probe via a clearance_request
+    // event to exercise the rule directly.
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+    const t2Probe = scheduler.handleEvent({
+      event_type: 'clearance_request',
+      device_id: 'T2',
+      payload: { train_id: 'T2', next_edge: { from_marker_id: 'M2', to_marker_id: 'M3' } },
+    });
+    const grant = t2Probe.find(
+      (e) => e.kind === 'send_command' && e.command_type === 'grant_clearance',
+    );
+    expect(grant).toBeUndefined();
+  });
+
+  it('prevents simultaneous crossing at a shared marker (figure-8 X)', () => {
+    // Minimal figure-8: X is a 4-incident crossing. The classic "two trains
+    // arrive at X on opposite diagonals" race must not grant both — they'd
+    // physically occupy X at the same instant on a single-rail crossing.
+    const FIGURE_8: Layout = {
+      name: 'fig8',
+      markers: [
+        { id: 'X', kind: 'block_boundary' },
+        { id: 'R_NE', kind: 'block_boundary' },
+        { id: 'R_SE', kind: 'block_boundary' },
+        { id: 'L_NW', kind: 'block_boundary' },
+        { id: 'L_SW', kind: 'block_boundary' },
+      ],
+      edges: [
+        { from_marker_id: 'X', to_marker_id: 'R_NE' },
+        { from_marker_id: 'R_NE', to_marker_id: 'R_SE' },
+        { from_marker_id: 'R_SE', to_marker_id: 'X' },
+        { from_marker_id: 'X', to_marker_id: 'L_NW' },
+        { from_marker_id: 'L_NW', to_marker_id: 'L_SW' },
+        { from_marker_id: 'L_SW', to_marker_id: 'X' },
+      ],
+      junctions: [],
+    };
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const scheduler = new Scheduler(registry, new LayoutState(FIGURE_8));
+    seedIdentityTags(scheduler, ['X', 'R_NE', 'R_SE', 'L_NW', 'L_SW']);
+    registerTrain(scheduler, 'T1');
+    registerTrain(scheduler, 'T2');
+
+    // T1 wants `R_SE→X` then `X→L_NW` (a SE→NW transit). Grant the entering
+    // edge via clearance_request — T1 holds R_SE→X, lock set {R_SE, X}.
+    const t1Grant = scheduler.handleEvent({
+      event_type: 'clearance_request',
+      device_id: 'T1',
+      payload: { train_id: 'T1', next_edge: { from_marker_id: 'R_SE', to_marker_id: 'X' } },
+    });
+    expect(
+      t1Grant.find((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance'),
+    ).toBeDefined();
+
+    // T2 simultaneously wants `L_SW→X` (the other diagonal). Both edges
+    // share marker X. Section-pair rule denies.
+    const t2Deny = scheduler.handleEvent({
+      event_type: 'clearance_request',
+      device_id: 'T2',
+      payload: { train_id: 'T2', next_edge: { from_marker_id: 'L_SW', to_marker_id: 'X' } },
+    });
+    expect(
+      t2Deny.find((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance'),
+    ).toBeUndefined();
+  });
+});
+
 describe('Scheduler — gating', () => {
   it('withholds clearance when a gate is active at the next marker', () => {
     const { scheduler } = setup();
@@ -225,7 +314,7 @@ describe('Scheduler — block exclusivity', () => {
     expect(grant).toBeUndefined();
   });
 
-  it('releases a block when the holding train traverses past it, granting waiting trains', () => {
+  it('releases a block when the holding train`s lock set has moved past the shared marker', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
@@ -237,19 +326,33 @@ describe('Scheduler — block exclusivity', () => {
       t2Initial.find((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance'),
     ).toBeUndefined();
 
-    // T1 reaches M2 → finishes M1→M2 and the block should release. T2 was
-    // waiting on M1→M2 with no other change, so the scheduler must retry its
-    // grant in the same handler call.
-    const effects = scheduler.handleEvent({
+    // T1 reaches M2 → progress advances, T1 now holds M2→M3. T1's lock set is
+    // still {M2, M3}, so M1→M2 (which shares M2) is still denied to T2 under
+    // ADR-011's section-pair model. One-block separation: a follower can't
+    // pull into the block immediately behind the leader's just-vacated edge.
+    const effectsM2 = scheduler.handleEvent({
       event_type: 'tag_observed',
       device_id: 'T1',
       payload: { tag_id: 'M2' },
     });
-    const t2Grant = effects.find(
+    const t2GrantAtM2 = effectsM2.find(
       (e) =>
         e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
     );
-    expect(t2Grant).toBeDefined();
+    expect(t2GrantAtM2).toBeUndefined();
+
+    // T1 reaches M3 → progress advances again, T1 now holds M3→M4 (lock {M3,
+    // M4}). M2 has dropped out of T1's lock set, so M1→M2 is free for T2.
+    const effectsM3 = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M3' },
+    });
+    const t2GrantAtM3 = effectsM3.find(
+      (e) =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+    );
+    expect(t2GrantAtM3).toBeDefined();
   });
 
   it('releases blocks held by a train when it is reassigned to a route not covering them, granting waiting peers', () => {

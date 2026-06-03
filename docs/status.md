@@ -40,7 +40,7 @@ Source: spec §"Capability model", §"Clearance model"; [`ADR-001`](adr/001-capa
 | Tag-to-entity registry (`TagRegistry`)    | shipped | Sibling of `LayoutState`. Populated only by `tag_assignment` events from `core.assigns_tags` devices; resolves `tag_observed` to `marker_traversed` or `vehicle_identified`. Retained on `railway/state/tags/<tag_id>`. ADR-007. |
 | Scheduler: schedule assignment            | shipped | `assignSchedule(trainId, routeId, stops)`. Sparse stop list per ADR-010; planner computes the per-leg transit; train receives `assign_route(edges)` carrying that transit + initial clearance grant. All trains loop. |
 | Planner (Dijkstra over static layout)     | shipped | `planTransit(layout, from, to)` in `@trainframe/core`. Purely structural — ignores runtime clearance holds and switch state; execution layer handles waits via existing clearance/section-exclusivity machinery. ADR-010. |
-| Scheduler: clearance extension            | shipped | At-marker → grant next edge unless any capability denies. Block exclusivity.                   |
+| Scheduler: clearance extension            | shipped | At-marker → grant next edge unless any capability denies. Block exclusivity (section-as-edge-plus-boundary-markers per ADR-011): two sections conflict when they share a boundary marker — protects figure-8 crossings, junctions, and gives one-block separation on a single loop, all from one rule. |
 | Scheduler: gate-release re-grant          | shipped | After capability state changes, retries blocked clearances.                                    |
 | Scheduler: clearance revocation           | shipped | `Scheduler.revokeClearance(trainId)` drops the train's cleared edges, snaps the limit back to its current marker, emits a `revoke_clearance` command, and retries blocked peers (skipping the revoked train so it can't re-grab the block). |
 | Scheduler: switch-state edge filtering    | shipped | Refuses to clear an edge whose `requires_switch_state` doesn't match the junction's confirmed position. Retries blocked clearances when a switch confirms. |
@@ -200,6 +200,7 @@ Coverage thresholds: not applicable (Playwright; covered by E2E pass/fail).
 | `docs/contributing/new-capability.md`          | shipped |                                                                                |
 | ADRs 001–006                                   | shipped | Capability extensibility, clearance, MQTT, edge-routes, existentials, mishaps. |
 | ADRs 007–010                                   | shipped | Tag-resolution registry, server admin API, discovery mode, schedule/planner/transit. ADR-010 partially supersedes ADR-004 (sections still the execution unit; operator-facing routes are now sparse stop lists). |
+| ADR-011                                        | shipped | Section as edge + boundary markers; amends ADR-002's clearance model. |
 | `docs/status.md` (this file)                   | shipped | New.                                                                           |
 | ADR for HTTP query API split                   | not started | Spec §"Open questions for v0.3" flags this as undecided.                       |
 | ADR for tag→marker resolution registry         | not started |                                                                                |

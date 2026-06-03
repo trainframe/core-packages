@@ -388,10 +388,13 @@ export class Scheduler {
    * Consults all capabilities with `onClearanceConsultation` hooks. If any
    * deny, clearance is withheld. Otherwise it's granted.
    *
-   * Block exclusivity: an edge already cleared to another train always denies.
+   * Block exclusivity (ADR-011): a section is an edge plus its two boundary
+   * markers; two trains conflict if their edges share any marker. This is
+   * what protects crossings (every edge incident to X shares X), junctions,
+   * and gives one-block separation on a straight loop — all from one rule.
    */
   private tryGrantClearance(train: TrainState, nextEdge: EdgeRef): SchedulerEffect | null {
-    if (this.edgeIsClearedToAnotherTrain(train.train_id, nextEdge)) return null;
+    if (this.edgeConflictsWithAnotherTrain(train.train_id, nextEdge)) return null;
     if (this.edgeRequiresMismatchedSwitch(nextEdge)) return null;
     if (this.anyCapabilityDeniesClearance(train, nextEdge)) return null;
     return this.grantClearance(train, nextEdge);
@@ -409,10 +412,24 @@ export class Scheduler {
     return this.layout.getSwitchPosition(edge.from_marker_id) !== required;
   }
 
-  private edgeIsClearedToAnotherTrain(trainId: string, edge: EdgeRef): boolean {
+  /**
+   * Two sections conflict when they share either boundary marker. A train
+   * holding `A→B` therefore locks markers A and B; any edge whose `from` or
+   * `to` is A or B is denied to other trains. ADR-011.
+   */
+  private edgeConflictsWithAnotherTrain(trainId: string, edge: EdgeRef): boolean {
     for (const [otherId, other] of this.trains) {
       if (otherId === trainId) continue;
-      if (other.cleared_edges.some((e) => edgesEqual(e, edge))) return true;
+      for (const held of other.cleared_edges) {
+        if (
+          held.from_marker_id === edge.from_marker_id ||
+          held.from_marker_id === edge.to_marker_id ||
+          held.to_marker_id === edge.from_marker_id ||
+          held.to_marker_id === edge.to_marker_id
+        ) {
+          return true;
+        }
+      }
     }
     return false;
   }
