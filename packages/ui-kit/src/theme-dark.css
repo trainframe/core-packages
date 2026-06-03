@@ -1,0 +1,24 @@
+/**
+ * Dark theme for Trainframe browser apps.
+ * Applied when the document root carries data-theme="dark".
+ * Import alongside theme-light.css and let the attribute selector do the switching.
+ */
+[data-theme="dark"] {
+  --tf-color-bg: #141414;
+  --tf-color-fg: #e8e8e8;
+  --tf-color-fg-muted: #9a9a9a;
+  --tf-color-border: #3a3a3a;
+  --tf-color-accent: #4d9ef5;
+  --tf-color-danger: #ff6d3a;
+  --tf-color-warn: #f5b800;
+
+  --tf-radius-sm: 3px;
+  --tf-radius-md: 6px;
+
+  --tf-space-xs: 4px;
+  --tf-space-sm: 8px;
+  --tf-space-md: 16px;
+  --tf-space-lg: 32px;
+
+  --tf-font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+}

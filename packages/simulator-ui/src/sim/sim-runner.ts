@@ -74,6 +74,7 @@ export class SimRunner {
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private unsubscribeFromSim: (() => void) | null = null;
   private unsubscribeFromStateSnapshots: (() => void) | null = null;
+  private unsubscribeFromOperatorCommands: (() => void) | null = null;
   private events_published = 0;
   private train_ids: string[] = [];
   private readonly snapshotListeners = new Set<SnapshotListener>();
@@ -115,10 +116,62 @@ export class SimRunner {
     if (this.mode === 'device-only') {
       this.bridge = new BrokerBridge(this.simulation, this.client, { newId: this.newId });
       this.bridge.start();
+    } else {
+      // In embedded mode the visualiser publishes operator intents on
+      // `railway/operator/<command>` and we dispatch them to the in-process
+      // scheduler. In device-only mode the real `@trainframe/server` handles
+      // these instead.
+      this.unsubscribeFromOperatorCommands = this.client.subscribe(
+        'railway/operator/+',
+        (message) => this.handleOperatorCommand(message.topic, message.payload),
+      );
     }
     this.publishLayoutState();
     this.spawnStationDwellGates();
     this.notify();
+  }
+
+  /**
+   * Dispatch an operator-side command from the broker. The visualiser is the
+   * canonical publisher; the topic's last segment is the command type and
+   * the payload is a small JSON object specific to that command. Per
+   * ADR-013, schedule assignment and clearance revocation are *operator
+   * intents* that target the system, not physical-device commands, so they
+   * live on this topic family instead of `railway/commands/<device_id>`.
+   */
+  private handleOperatorCommand(topic: string, payload: Uint8Array): void {
+    if (!this.simulation) return;
+    const commandType = topic.split('/').pop();
+    if (!commandType) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(payload));
+    } catch {
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object') return;
+    const obj = parsed as Record<string, unknown>;
+    if (commandType === 'assign_schedule') {
+      const trainId = obj.train_id;
+      const stops = obj.stops;
+      const routeId = obj.route_id;
+      if (
+        typeof trainId !== 'string' ||
+        !Array.isArray(stops) ||
+        !stops.every((s): s is string => typeof s === 'string')
+      ) {
+        return;
+      }
+      const routeArg = typeof routeId === 'string' ? routeId : undefined;
+      this.simulation.assignSchedule(trainId, stops, routeArg);
+      return;
+    }
+    if (commandType === 'revoke_clearance') {
+      const trainId = obj.train_id;
+      if (typeof trainId !== 'string') return;
+      this.simulation.revokeClearance(trainId);
+      return;
+    }
   }
 
   /**
@@ -212,6 +265,8 @@ export class SimRunner {
     this.unsubscribeFromSim = null;
     this.unsubscribeFromStateSnapshots?.();
     this.unsubscribeFromStateSnapshots = null;
+    this.unsubscribeFromOperatorCommands?.();
+    this.unsubscribeFromOperatorCommands = null;
     this.simulation = null;
     this.events_published = 0;
     this.train_ids = [];

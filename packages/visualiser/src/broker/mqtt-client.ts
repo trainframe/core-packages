@@ -1,5 +1,11 @@
 import mqtt, { type MqttClient } from 'mqtt';
-import type { BrokerStatus, BrokerSubscriber, MessageListener, StatusListener } from './client.js';
+import type {
+  BrokerStatus,
+  BrokerSubscriber,
+  MessageListener,
+  PublishOptions,
+  StatusListener,
+} from './client.js';
 import { matchesTopic } from './in-memory-client.js';
 
 /**
@@ -93,6 +99,12 @@ export class MqttBrokerSubscriber implements BrokerSubscriber {
         this.client?.unsubscribe(topic);
       }
     };
+  }
+
+  publish(topic: string, payload: Uint8Array, options?: PublishOptions): void {
+    if (!this.client) return;
+    // mqtt.js accepts a Buffer or a Uint8Array; pass the latter through.
+    this.client.publish(topic, Buffer.from(payload), { retain: options?.retain ?? false });
   }
 
   onStatusChange(listener: StatusListener): () => void {

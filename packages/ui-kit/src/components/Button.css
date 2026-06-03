@@ -1,0 +1,58 @@
+.tf-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--tf-space-xs);
+  padding: var(--tf-space-xs) var(--tf-space-md);
+  border-radius: var(--tf-radius-sm);
+  border: 1px solid transparent;
+  font-family: var(--tf-font-sans);
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.5;
+  cursor: pointer;
+  transition: opacity 0.1s ease, box-shadow 0.1s ease;
+}
+
+.tf-button:focus-visible {
+  outline: 2px solid var(--tf-color-accent);
+  outline-offset: 2px;
+}
+
+.tf-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* primary */
+.tf-button--primary {
+  background-color: var(--tf-color-accent);
+  color: #ffffff;
+  border-color: var(--tf-color-accent);
+}
+
+.tf-button--primary:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+/* secondary */
+.tf-button--secondary {
+  background-color: transparent;
+  color: var(--tf-color-fg);
+  border-color: var(--tf-color-border);
+}
+
+.tf-button--secondary:hover:not(:disabled) {
+  background-color: var(--tf-color-border);
+}
+
+/* danger */
+.tf-button--danger {
+  background-color: var(--tf-color-danger);
+  color: #ffffff;
+  border-color: var(--tf-color-danger);
+}
+
+.tf-button--danger:hover:not(:disabled) {
+  opacity: 0.85;
+}

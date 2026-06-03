@@ -230,6 +230,23 @@ export class Simulation {
   }
 
   /**
+   * Revoke a train's clearance. Mirrors `Server.revokeClearance` for the
+   * in-process simulator: the scheduler decides what to send, this method
+   * dispatches it. Used by operator-side "break the deadlock" / "make this
+   * train stop" actions. Requires the embedded scheduler.
+   */
+  revokeClearance(train_id: string): void {
+    if (!this.scheduler) {
+      throw new Error(
+        'Simulation.revokeClearance called with the embedded scheduler disabled. ' +
+          'Issue commands via the broker (railway/commands/{device_id}) instead.',
+      );
+    }
+    const effects = this.scheduler.revokeClearance(train_id);
+    this.dispatchEffects(effects);
+  }
+
+  /**
    * Apply an external command to a virtual device. Used by the broker bridge
    * (device-only mode) so a real server can drive the simulation through the
    * wire instead of via the embedded scheduler.

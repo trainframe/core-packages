@@ -16,6 +16,7 @@
     "@sinclair/typebox": "^0.33.0",
     "@trainframe/protocol": "workspace:*",
     "@trainframe/simulator": "workspace:*",
+    "@trainframe/ui-kit": "workspace:*",
     "mqtt": "^5.10.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

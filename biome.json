@@ -50,5 +50,59 @@
       "semicolons": "always",
       "trailingCommas": "all"
     }
-  }
+  },
+  "overrides": [
+    {
+      "include": ["packages/simulator-ui/**"],
+      "linter": {
+        "rules": {
+          "nursery": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@trainframe/visualiser": "simulator-ui must not import from visualiser — see ADR-013 and packages/ui-kit for the shared primitives surface."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "include": ["packages/visualiser/**"],
+      "linter": {
+        "rules": {
+          "nursery": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@trainframe/simulator-ui": "visualiser must not import from simulator-ui — see ADR-013 and packages/ui-kit for the shared primitives surface."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "include": ["packages/ui-kit/**"],
+      "linter": {
+        "rules": {
+          "nursery": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@trainframe/simulator-ui": "ui-kit must not depend on either app — it is the shared primitive layer; see ADR-013.",
+                  "@trainframe/visualiser": "ui-kit must not depend on either app — it is the shared primitive layer; see ADR-013."
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }

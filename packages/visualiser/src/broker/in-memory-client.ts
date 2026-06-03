@@ -3,6 +3,7 @@ import type {
   BrokerStatus,
   BrokerSubscriber,
   MessageListener,
+  PublishOptions,
   StatusListener,
 } from './client.js';
 
@@ -19,6 +20,8 @@ export class InMemoryBrokerSubscriber implements BrokerSubscriber {
   private currentStatus: BrokerStatus = 'disconnected';
   private readonly subs = new Map<string, Set<MessageListener>>();
   private readonly statusListeners = new Set<StatusListener>();
+  /** Test-readable log of every publish made through this client. */
+  readonly published: Array<BrokerMessage & { retain: boolean }> = [];
 
   get status(): BrokerStatus {
     return this.currentStatus;
@@ -44,6 +47,16 @@ export class InMemoryBrokerSubscriber implements BrokerSubscriber {
       bucket?.delete(handler);
       if (bucket && bucket.size === 0) this.subs.delete(topic);
     };
+  }
+
+  publish(topic: string, payload: Uint8Array, options?: PublishOptions): void {
+    const retain = options?.retain ?? false;
+    this.published.push({ topic, payload, retain });
+    // Echo the publish back to any subscribers — both for retained messages
+    // (where this is what subscribers want anyway) and for operator commands
+    // (so a test that observes the same in-memory broker on both ends sees
+    // the round-trip).
+    this.deliver({ topic, payload });
   }
 
   onStatusChange(listener: StatusListener): () => void {

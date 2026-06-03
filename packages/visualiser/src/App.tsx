@@ -6,6 +6,7 @@ import { ConnectionStatus } from './components/ConnectionStatus.js';
 import { DeadlockBanner } from './components/DeadlockBanner.js';
 import { EventLog } from './components/EventLog.js';
 import { LayoutCanvas } from './components/LayoutCanvas.js';
+import { ScheduleAssigner } from './components/ScheduleAssigner.js';
 import { ScheduleList } from './components/ScheduleList.js';
 import { Settings } from './components/Settings.js';
 import { UnknownTags } from './components/UnknownTags.js';
@@ -34,6 +35,7 @@ export function App({ client }: AppProps = {}) {
         <Settings initialUrl={initialUrl} />
         <DeadlockBanner />
         <ScheduleList />
+        <ScheduleAssigner />
         <LayoutCanvas />
         <UnknownTags adminApiUrl={adminApiUrl} />
         <EventLog />
