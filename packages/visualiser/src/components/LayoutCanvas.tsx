@@ -236,30 +236,45 @@ function bezierPathD(from: Point, to: Point, c1: Point, c2: Point): string {
 function trainShapeD(halfL: number, halfW: number): string {
   const rearX = -halfL;
   // Rectangular body runs from rearX to noseX. The rectangle's dimensions
-  // are fixed by the caller's halfL/halfW — only the nose's protrusion
-  // length and pointedness are tuned here.
+  // are fixed by the caller's halfL/halfW — only the nose protrusion and
+  // corner softness are tuned here.
   const noseX = halfL - halfW * 1.5;
   const tipX = halfL;
-  // The triangular sides are straight for most of the nose. Only the last
-  // ~10% rounds off via a Q curve, so the silhouette is a clear triangle
-  // with a subtly rounded apex rather than a needle point.
-  const roundStartX = noseX + (tipX - noseX) * 0.9;
-  const roundStartY = halfW * 0.1;
+  // Each corner is rounded with a quadratic Bezier: the straight edges
+  // stop short by `r`, and a Q curve with the control point at the
+  // corner's geometric apex bridges them. Bigger r = softer corners.
+  // `halfW * 0.3` reads as a clear chamfer without losing the
+  // rectangle-plus-triangle silhouette.
+  const r = halfW * 0.3;
+  // The triangular sides are straight for most of the nose. The last
+  // ~30% rounds off into the apex.
+  const roundStartX = noseX + (tipX - noseX) * 0.7;
+  const roundStartY = halfW * 0.3;
 
   return [
-    // Start at back-left corner.
-    `M ${rearX} ${-halfW}`,
-    // Straight line along the left side to front-left of the body.
-    `L ${noseX} ${-halfW}`,
-    // Triangular nose: straight up to a point just shy of the tip, then a
-    // small quadratic that grazes the tip and comes back out, then a
-    // straight line back down.
+    // Start just after the back-left corner, on the top edge.
+    `M ${rearX + r} ${-halfW}`,
+    // Top edge across to just before the body→nose corner on the left.
+    `L ${noseX - r} ${-halfW}`,
+    // Round the left body→nose corner.
+    `Q ${noseX} ${-halfW}, ${noseX + r * 0.5} ${-halfW + r * 0.5}`,
+    // Up the left side of the nose taper to just before the apex.
     `L ${roundStartX} ${-roundStartY}`,
+    // Rounded apex.
     `Q ${tipX} 0, ${roundStartX} ${roundStartY}`,
-    `L ${noseX} ${halfW}`,
-    // Straight line along the right side back to back-right.
-    `L ${rearX} ${halfW}`,
-    // Close (straight back edge).
+    // Down the right side of the nose taper to just after the
+    // right body→nose corner.
+    `L ${noseX + r * 0.5} ${halfW - r * 0.5}`,
+    // Round the right body→nose corner.
+    `Q ${noseX} ${halfW}, ${noseX - r} ${halfW}`,
+    // Bottom edge back to just before the back-right corner.
+    `L ${rearX + r} ${halfW}`,
+    // Round the back-right corner.
+    `Q ${rearX} ${halfW}, ${rearX} ${halfW - r}`,
+    // Back edge up to just before the back-left corner.
+    `L ${rearX} ${-halfW + r}`,
+    // Round the back-left corner, closing the path.
+    `Q ${rearX} ${-halfW}, ${rearX + r} ${-halfW}`,
     'Z',
   ].join(' ');
 }
