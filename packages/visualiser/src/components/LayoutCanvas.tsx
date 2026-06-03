@@ -235,24 +235,27 @@ function bezierPathD(from: Point, to: Point, c1: Point, c2: Point): string {
  */
 function trainShapeD(halfL: number, halfW: number): string {
   const rearX = -halfL;
-  // The rectangular body runs from rearX to noseX. The nose protrudes for
-  // ~60% of the body's half-length, giving a long pointed snout rather
-  // than a soft bullet.
-  const noseX = halfL * 0.2;
+  // Rectangular body runs from rearX to noseX. The nose extends from noseX
+  // out to tipX as two straight lines meeting at a sharp point — a true
+  // pointed snout, not a rounded one. A small quadratic just at the apex
+  // softens the tip enough that it doesn't render as a one-pixel spike on
+  // sub-pixel SVG rasters.
+  const noseX = -halfL * 0.4;
   const tipX = halfL;
-  // Control points sit close to the tip so the sides stay almost straight
-  // for most of the nose length before tucking in to a sharp point.
-  const ctrlX = noseX + (tipX - noseX) * 0.85;
+  // The tip-rounding Q curves stay within the last 4% of the nose, so the
+  // overall silhouette reads as triangular.
+  const ctrlX = noseX + (tipX - noseX) * 0.96;
 
   return [
     // Start at back-left corner.
     `M ${rearX} ${-halfW}`,
-    // Straight line along the left side to front-left.
+    // Straight line along the left side to front-left of the body.
     `L ${noseX} ${-halfW}`,
-    // Quadratic curve: front-left → tip → front-right. Control points near
-    // the tip give a long taper rather than a bullet nose.
-    `Q ${ctrlX} ${-halfW}, ${tipX} 0`,
-    `Q ${ctrlX} ${halfW}, ${noseX} ${halfW}`,
+    // Two straight lines along the tapered sides, joining at a slightly
+    // rounded tip for visual cleanliness.
+    `L ${ctrlX} ${-halfW * 0.15}`,
+    `Q ${tipX} 0, ${ctrlX} ${halfW * 0.15}`,
+    `L ${noseX} ${halfW}`,
     // Straight line along the right side back to back-right.
     `L ${rearX} ${halfW}`,
     // Close (straight back edge).
