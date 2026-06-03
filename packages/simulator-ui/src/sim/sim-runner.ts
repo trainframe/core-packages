@@ -286,13 +286,15 @@ export class SimRunner {
    * Publish a `update_state_snapshot` effect from the embedded scheduler as a
    * retained MQTT state message. Only runs in embedded mode — in device-only
    * mode the real server handles state publishing.
-   * Currently only `clearance` snapshots are forwarded; layout is published via
-   * `publishLayoutState()` and tags/devices are not visualised by the
-   * sim-runner's broker pathway today.
+   * Forwards `clearance` (which edges each train holds) and `deadlock`
+   * (which trains are in a waits-for cycle) — both are subscribed to by the
+   * visualiser. Layout is published via `publishLayoutState()` and
+   * tags/devices are not visualised by the sim-runner's broker pathway
+   * today.
    */
   private handleStateSnapshot(snapshot: CapturedStateSnapshot): void {
     if (this.mode === 'device-only') return;
-    if (snapshot.entity_type !== 'clearance') return;
+    if (snapshot.entity_type !== 'clearance' && snapshot.entity_type !== 'deadlock') return;
     const topic = `railway/state/${snapshot.entity_type}/${snapshot.entity_id}`;
     this.client.publish(topic, new TextEncoder().encode(JSON.stringify(snapshot.state)), {
       retain: true,
