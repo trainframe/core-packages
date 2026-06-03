@@ -5,12 +5,22 @@
  * pre-populated tag registry, and a small set of action+observation helpers.
  * This module provides exactly that.
  *
- * In-process only today: Simulation runs its own scheduler, no broker is
- * spawned. The integration package's `startHarness` covers the broker-backed
- * variant; if a future test needs both shapes, this harness can grow a
- * `withBroker` option that wires up `BrokerBridge`.
+ * The simulator package is virtual-hardware-only — scheduling lives in
+ * `@trainframe/server`. This harness wires a real `Server` to a real
+ * `InMemoryBrokerClient`, then bridges this `Simulation` onto the same
+ * broker via `BrokerBridge`. Because the in-memory broker dispatches
+ * synchronously, every effect of `assignSchedule` lands before `advance()`
+ * returns — no real-time waits are needed.
+ *
+ * Tests observe events through the broker, not through `sim.events`: the
+ * broker is the union of device-emitted events (republished by the bridge)
+ * and server-derived events (`marker_traversed`, `anomaly` with
+ * `device_id === 'server'`). Observing `sim.events` directly would miss
+ * the server-side half.
  */
 import type { Layout } from '@trainframe/protocol';
+import { InMemoryBrokerClient, Server } from '@trainframe/server';
+import { BrokerBridge } from './broker-bridge.js';
 import {
   type CapturedEvent,
   Simulation,
@@ -68,8 +78,8 @@ export interface TestEnvironmentOptions {
   /**
    * Tag-registry seeding. `'identity'` (default) publishes a
    * `tag_assignment` per marker via a synthetic garage so `tag_observed`
-   * events resolve cleanly. `'none'` leaves the registry empty — tests
-   * register tags explicitly.
+   * events resolve cleanly on the server. `'none'` leaves the registry empty
+   * — tests register tags explicitly.
    */
   readonly tags?: 'identity' | 'none';
 }
@@ -94,9 +104,14 @@ export interface WaitForEventOptions {
 
 export interface TestEnvironment {
   readonly simulation: Simulation;
+  readonly server: Server;
+  readonly client: InMemoryBrokerClient;
+  /** Every event observed on `railway/events/+/+`, in arrival order. */
+  readonly events: ReadonlyArray<CapturedEvent>;
   spawnTrain(train_id: string, options?: SpawnTrainOptions): void;
   spawnGate(device_id: string): ReturnType<Simulation['spawnGate']>;
   assignSchedule(train_id: string, stops: ReadonlyArray<string>, route_id?: string): void;
+  revokeClearance(train_id: string): void;
   advance(ms: number): void;
   waitForEvent(opts: WaitForEventOptions): CapturedEvent;
   onEvent(listener: SimulationEventListener): () => void;
@@ -106,21 +121,83 @@ export interface TestEnvironment {
 
 const DEFAULT_FAULTS: FaultProfileName = 'realistic';
 
+interface WireEnvelope {
+  readonly device_id?: unknown;
+  readonly payload?: unknown;
+}
+
 export function startTestEnvironment(opts: TestEnvironmentOptions): TestEnvironment {
   const trainConfig = resolveFaults(opts.faults);
-  const tags = opts.tags ?? 'identity';
+  const tagsMode = opts.tags ?? 'identity';
   const tick_ms = opts.tick_ms ?? 50;
 
   const simOptions: SimulationOptions = {
     layout: opts.layout,
     ...(opts.seed !== undefined ? { seed: opts.seed } : {}),
     tick_ms,
-    ...(tags === 'identity' ? { register_tags: 'identity' as const } : {}),
   };
   const sim = new Simulation(simOptions);
 
+  // Capture every event that flows on the broker (device-republished and
+  // server-derived). This is the single source of truth for assertions —
+  // observing `sim.events` directly would miss everything `device_id ===
+  // 'server'` (e.g. `marker_traversed`).
+  const capturedEvents: CapturedEvent[] = [];
+  const listeners = new Set<SimulationEventListener>();
+  const client = new InMemoryBrokerClient();
+  client.subscribe('railway/events/+/+', (message) => {
+    const parsed = decodeEnvelope(message.payload);
+    if (parsed === null) return;
+    const parts = message.topic.split('/');
+    const event_type = parts[2];
+    const device_id_from_topic = parts[3];
+    if (!event_type || !device_id_from_topic) return;
+    const device_id =
+      typeof parsed.device_id === 'string' ? parsed.device_id : device_id_from_topic;
+    const captured: CapturedEvent = {
+      at_ms: sim.clock.now(),
+      event_type,
+      device_id,
+      payload: parsed.payload ?? parsed,
+    };
+    capturedEvents.push(captured);
+    for (const listener of listeners) listener(captured);
+  });
+
+  let envelopeSeq = 0;
+  const newId = (): string => {
+    envelopeSeq += 1;
+    return `sim-${envelopeSeq}`;
+  };
+  const bridge = new BrokerBridge(sim, client, { newId });
+  bridge.start();
+  const server = new Server({ layout: opts.layout, client, newId });
+  server.start();
+
+  // Seed identity tags AFTER the bridge and server are subscribed; otherwise
+  // the synthetic-garage events would land in `sim.events` but never reach
+  // the server's TagRegistry and `tag_observed` events would never resolve
+  // to `marker_traversed`.
+  if (tagsMode === 'identity') {
+    sim.seedIdentityTags(opts.layout);
+  }
+
+  const matches = (e: CapturedEvent, opts: WaitForEventOptions): boolean => {
+    if (e.event_type !== opts.event_type) return false;
+    if (!opts.matching) return true;
+    const payload = e.payload as Record<string, unknown> | undefined;
+    if (!payload) return false;
+    for (const [key, value] of Object.entries(opts.matching)) {
+      if (payload[key] !== value) return false;
+    }
+    return true;
+  };
+
   return {
     simulation: sim,
+    server,
+    client,
+    events: capturedEvents,
     spawnTrain(train_id, options) {
       const config = { ...trainConfig, ...options?.config };
       sim.spawnTrain(train_id, {
@@ -132,23 +209,41 @@ export function startTestEnvironment(opts: TestEnvironmentOptions): TestEnvironm
       return sim.spawnGate(device_id);
     },
     assignSchedule(train_id, stops, route_id) {
-      sim.assignSchedule(train_id, stops, route_id);
+      server.assignSchedule(train_id, route_id ?? `route-${train_id}-${sim.clock.now()}`, stops);
+    },
+    revokeClearance(train_id) {
+      server.revokeClearance(train_id);
     },
     advance(ms) {
       sim.advance(ms);
     },
     waitForEvent(waitOpts) {
-      return waitForEvent(sim, tick_ms, waitOpts);
+      const existing = capturedEvents.find((e) => matches(e, waitOpts));
+      if (existing) return existing;
+      const budget = waitOpts.timeoutMs ?? 5_000;
+      let spent = 0;
+      while (spent < budget) {
+        sim.advance(tick_ms);
+        spent += tick_ms;
+        const seen = capturedEvents.find((e) => matches(e, waitOpts));
+        if (seen) return seen;
+      }
+      throw new Error(
+        `waitForEvent timed out after ${budget}ms (virtual): no ${waitOpts.event_type} matching ${JSON.stringify(waitOpts.matching ?? {})}`,
+      );
     },
     onEvent(listener) {
-      return sim.onEvent(listener);
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
     },
     getEventsOfType(event_type) {
-      return sim.getEventsOfType(event_type);
+      return capturedEvents.filter((e) => e.event_type === event_type);
     },
     shutdown() {
-      // Symmetric API even though in-process Simulation has nothing to free.
-      // Reserved for the future broker-backed variant.
+      bridge.stop();
+      server.stop();
     },
   };
 }
@@ -159,30 +254,19 @@ function resolveFaults(faults: TestEnvironmentOptions['faults']): Partial<Virtua
   return faults;
 }
 
-function waitForEvent(sim: Simulation, tick_ms: number, opts: WaitForEventOptions): CapturedEvent {
-  const matches = (e: CapturedEvent): boolean => {
-    if (e.event_type !== opts.event_type) return false;
-    if (!opts.matching) return true;
-    const payload = e.payload as Record<string, unknown> | undefined;
-    if (!payload) return false;
-    for (const [key, value] of Object.entries(opts.matching)) {
-      if (payload[key] !== value) return false;
-    }
-    return true;
-  };
-
-  const existing = sim.events.find(matches);
-  if (existing) return existing;
-
-  const budget = opts.timeoutMs ?? 5_000;
-  let spent = 0;
-  while (spent < budget) {
-    sim.advance(tick_ms);
-    spent += tick_ms;
-    const seen = sim.events.find(matches);
-    if (seen) return seen;
+function decodeEnvelope(payload: Uint8Array): WireEnvelope | null {
+  let text: string;
+  try {
+    text = new TextDecoder().decode(payload);
+  } catch {
+    return null;
   }
-  throw new Error(
-    `waitForEvent timed out after ${budget}ms (virtual): no ${opts.event_type} matching ${JSON.stringify(opts.matching ?? {})}`,
-  );
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (raw === null || typeof raw !== 'object') return null;
+  return raw as WireEnvelope;
 }

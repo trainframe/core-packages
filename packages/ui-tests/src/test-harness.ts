@@ -1,8 +1,7 @@
 import { type Server as HttpServer, createServer as createHttpServer } from 'node:http';
-import { PROTOCOL_VERSION } from '@trainframe/protocol';
 import type { Layout } from '@trainframe/protocol';
 import { MqttBrokerClient, Server as TrainframeServer } from '@trainframe/server';
-import { BrokerBridge, type CapturedEvent, Simulation } from '@trainframe/simulator';
+import { BrokerBridge, Simulation } from '@trainframe/simulator';
 import { Aedes } from 'aedes';
 import { WebSocketServer, createWebSocketStream } from 'ws';
 
@@ -68,18 +67,14 @@ export async function startUiHarness(opts: UiHarnessOptions): Promise<UiHarness>
   const simulation = new Simulation({
     layout: opts.layout,
     seed: opts.seed ?? 1,
-    disableScheduler: true,
-    register_tags: 'identity',
   });
   const bridge = new BrokerBridge(simulation, simClient, { newId: defaultNewId });
   bridge.start();
-  // `register_tags: 'identity'` emits its synthetic-garage events during
-  // construction, before the bridge had a chance to subscribe. Replay those
-  // initial events directly onto the broker so the harness server's
-  // scheduler builds its tag registry from them.
-  for (const event of simulation.events) {
-    publishCapturedEvent(simClient, event);
-  }
+  // Seed identity tags AFTER the bridge has subscribed so the synthetic-
+  // garage events flow sim → bridge → broker → server. Seeding before
+  // `bridge.start()` would silently lose them because they're appended to
+  // `sim.events` but no subscriber is attached.
+  simulation.seedIdentityTags(opts.layout);
 
   return {
     brokerWsUrl,
@@ -104,19 +99,6 @@ function defaultNewId(): string {
     return crypto.randomUUID();
   }
   return Math.random().toString(36).slice(2);
-}
-
-function publishCapturedEvent(client: MqttBrokerClient, event: CapturedEvent): void {
-  const envelope = {
-    event_id: defaultNewId(),
-    device_id: event.device_id,
-    timestamp_device: new Date().toISOString(),
-    event_type: event.event_type,
-    protocol_version: PROTOCOL_VERSION,
-    payload: event.payload,
-  };
-  const topic = `railway/events/${event.event_type}/${event.device_id}`;
-  client.publish(topic, new TextEncoder().encode(JSON.stringify(envelope)));
 }
 
 async function listenWebSocketBroker(

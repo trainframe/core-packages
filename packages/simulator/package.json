@@ -25,7 +25,8 @@
   },
   "dependencies": {
     "@trainframe/core": "workspace:*",
-    "@trainframe/protocol": "workspace:*"
+    "@trainframe/protocol": "workspace:*",
+    "@trainframe/server": "workspace:*"
   },
   "devDependencies": {
     "vitest": "^2.1.0",

@@ -82,7 +82,13 @@ describe('startTestEnvironment', () => {
       faults: 'pristine',
       tags: 'none',
     });
-    expect(env.simulation.scheduler?.getTagRegistry().entries()).toHaveLength(0);
+    // No synthetic garage was registered, so no tag_assignment events
+    // reach the server (or this test's broker capture).
+    expect(env.getEventsOfType('tag_assignment')).toHaveLength(0);
+    expect(env.getEventsOfType('device_registered').map((e) => e.device_id)).not.toContain(
+      'SIM-GARAGE',
+    );
+    env.shutdown();
   });
 
   it('waitForEvent throws when the budget is exhausted', () => {

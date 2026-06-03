@@ -1,9 +1,7 @@
 export { Simulation } from './simulation.js';
 export type {
   CapturedEvent,
-  CapturedStateSnapshot,
   SimulationEventListener,
-  SimulationStateSnapshotListener,
   SimulationOptions,
 } from './simulation.js';
 export { VirtualTrain, DEFAULT_TRAIN_CONFIG } from './virtual-train.js';

@@ -71,7 +71,7 @@ const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
 
 describe('BrokerBridge', () => {
   it('a subscriber on the bus sees a newly-spawned virtual train identify itself and advertise what it can do', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, disableScheduler: true });
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
     const broker = new FakeBroker();
     const bridge = new BrokerBridge(sim, broker, { newId: () => 'id-x' });
     bridge.start();
@@ -99,7 +99,7 @@ describe('BrokerBridge', () => {
   });
 
   it('a command published on the bus reaches the virtual train and makes it move', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, disableScheduler: true });
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
     const broker = new FakeBroker();
     const bridge = new BrokerBridge(sim, broker, { newId: () => 'id-x' });
     bridge.start();
@@ -139,7 +139,7 @@ describe('BrokerBridge', () => {
   });
 
   it('ignores malformed command messages without throwing', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, disableScheduler: true });
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
     const broker = new FakeBroker();
     const bridge = new BrokerBridge(sim, broker, { newId: () => 'id-x' });
     bridge.start();
@@ -152,7 +152,7 @@ describe('BrokerBridge', () => {
   });
 
   it('stop() unsubscribes both directions', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, disableScheduler: true });
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
     const broker = new FakeBroker();
     const bridge = new BrokerBridge(sim, broker, { newId: () => 'id-x' });
     bridge.start();
@@ -172,15 +172,9 @@ describe('BrokerBridge', () => {
   });
 });
 
-describe('Simulation device-only mode', () => {
-  it('throws if assignSchedule is called without the embedded scheduler', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, disableScheduler: true });
-    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
-    expect(() => sim.assignSchedule('T1', ['M1', 'M2'])).toThrow(/embedded scheduler disabled/);
-  });
-
+describe('Simulation: device-only behaviour', () => {
   it('handleCommand applies assign_route + grant_clearance to a virtual train', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, disableScheduler: true });
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
     const train = sim.spawnTrain('T1', {
       startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
     });

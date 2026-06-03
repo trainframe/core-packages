@@ -32,7 +32,6 @@ describe('SimRunner — lifecycle', () => {
     // Spawning surfaces the train in the snapshot and on the broker.
     runner.start();
     runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
-    runner.assignSchedule('T1', ['M1', 'M3']);
     expect(runner.snapshot().train_ids).toEqual(['T1']);
 
     // Resuming auto-advances the sim clock; pausing stops it.
@@ -107,27 +106,48 @@ describe('SimRunner — event publishing', () => {
     expect(payload.payload.capabilities).toContain('core.controls_motion');
   });
 
-  it('stepping after spawn produces marker traversal events for the train as it moves', () => {
+  it('the events_published counter grows as the operator steps the sim', () => {
     const { runner, client } = makeRunner();
     runner.start();
     runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
-    runner.assignSchedule('T1', ['M1', 'M3']);
-    runner.step(5_000);
-
-    const traversals = client.published.filter((m) =>
-      m.topic.startsWith('railway/events/marker_traversed/'),
-    );
-    expect(traversals.length).toBeGreaterThan(0);
-  });
-
-  it('the events_published counter grows as the operator steps the sim', () => {
-    const { runner } = makeRunner();
-    runner.start();
-    runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
-    runner.assignSchedule('T1', ['M1', 'M3']);
 
     const afterSpawn = runner.snapshot().events_published;
     expect(afterSpawn).toBeGreaterThan(0);
+
+    // Drive the train via a server-style command sequence so it moves and
+    // emits tag_observed events — the sim package no longer carries an
+    // embedded scheduler, so a route + clearance must arrive over the bus.
+    client.publish(
+      'railway/commands/T1',
+      new TextEncoder().encode(
+        JSON.stringify({
+          command_id: 'c1',
+          device_id: 'T1',
+          command_type: 'assign_route',
+          payload: {
+            route_id: 'r-1',
+            edges: [
+              { from_marker_id: 'M1', to_marker_id: 'M2' },
+              { from_marker_id: 'M2', to_marker_id: 'M3' },
+            ],
+          },
+        }),
+      ),
+    );
+    client.publish(
+      'railway/commands/T1',
+      new TextEncoder().encode(
+        JSON.stringify({
+          command_id: 'c2',
+          device_id: 'T1',
+          command_type: 'grant_clearance',
+          payload: {
+            limit_marker_id: 'M2',
+            edges_newly_cleared: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
+          },
+        }),
+      ),
+    );
 
     runner.step(5_000);
     expect(runner.snapshot().events_published).toBeGreaterThan(afterSpawn);
@@ -152,6 +172,58 @@ describe('SimRunner — event publishing', () => {
     expect(runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' })).toBe(false);
     // A different id still succeeds.
     expect(runner.spawnTrain('T2', { from_marker_id: 'M1', to_marker_id: 'M2' })).toBe(true);
+  });
+
+  it('does not publish server-derived events (no embedded scheduler runs)', () => {
+    const { runner, client } = makeRunner();
+    runner.start();
+    runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
+    runner.step(5_000);
+
+    const fromServer = client.published.filter((m) => m.topic.endsWith('/server'));
+    expect(fromServer).toHaveLength(0);
+  });
+
+  it('routes inbound commands from the broker into the simulation', () => {
+    const { runner, client } = makeRunner();
+    runner.start();
+    runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
+
+    client.publish(
+      'railway/commands/T1',
+      new TextEncoder().encode(
+        JSON.stringify({
+          command_id: 'c1',
+          device_id: 'T1',
+          command_type: 'assign_route',
+          payload: {
+            route_id: 'r-1',
+            edges: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
+          },
+        }),
+      ),
+    );
+    client.publish(
+      'railway/commands/T1',
+      new TextEncoder().encode(
+        JSON.stringify({
+          command_id: 'c2',
+          device_id: 'T1',
+          command_type: 'grant_clearance',
+          payload: {
+            limit_marker_id: 'M2',
+            edges_newly_cleared: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
+          },
+        }),
+      ),
+    );
+
+    // Train should now move and emit a tag_observed at M2 within a few ticks.
+    runner.step(5_000);
+    const tagEvents = client.published.filter((m) =>
+      m.topic.startsWith('railway/events/tag_observed/'),
+    );
+    expect(tagEvents.length).toBeGreaterThan(0);
   });
 });
 
@@ -189,7 +261,6 @@ describe('SimRunner — auto-advance', () => {
       const { runner } = makeRunner();
       runner.start();
       runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
-      runner.assignSchedule('T1', ['M1', 'M2']);
 
       const before = runner.snapshot().sim_time_ms;
       runner.resume();
@@ -203,19 +274,6 @@ describe('SimRunner — auto-advance', () => {
     }
   });
 });
-
-function makeDeviceOnlyRunner(): { runner: SimRunner; client: InMemoryBrokerClient } {
-  const client = new InMemoryBrokerClient();
-  client.connect('ws://test');
-  const runner = new SimRunner(client, {
-    layout: SIMPLE_LOOP,
-    tick_ms: 100,
-    newId: () => FIXED_ID,
-    mode: 'device-only',
-    register_tags: 'identity',
-  });
-  return { runner, client };
-}
 
 describe('SimRunner — station dwell gates', () => {
   it('auto-spawns a STATION-<markerId> gate for every station_stop marker on start', () => {
@@ -331,84 +389,5 @@ describe('SimRunner — station dwell gates', () => {
     } finally {
       vi.useRealTimers();
     }
-  });
-});
-
-describe('SimRunner — device-only mode', () => {
-  it('still publishes device events from spawned trains', () => {
-    const { runner, client } = makeDeviceOnlyRunner();
-    runner.start();
-    runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
-
-    const registered = client.published.find(
-      (m) => m.topic === 'railway/events/device_registered/T1',
-    );
-    expect(registered).toBeDefined();
-  });
-
-  it('does not publish server-derived events (no embedded scheduler runs)', () => {
-    const { runner, client } = makeDeviceOnlyRunner();
-    runner.start();
-    runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
-    runner.step(5_000);
-
-    const fromServer = client.published.filter((m) => m.topic.endsWith('/server'));
-    expect(fromServer).toHaveLength(0);
-  });
-
-  it('routes inbound commands from the broker into the simulation', () => {
-    const { runner, client } = makeDeviceOnlyRunner();
-    runner.start();
-    runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
-
-    client.publish(
-      'railway/commands/T1',
-      new TextEncoder().encode(
-        JSON.stringify({
-          command_id: 'c1',
-          device_id: 'T1',
-          command_type: 'assign_route',
-          payload: {
-            route_id: 'r-1',
-            edges: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
-          },
-        }),
-      ),
-    );
-    client.publish(
-      'railway/commands/T1',
-      new TextEncoder().encode(
-        JSON.stringify({
-          command_id: 'c2',
-          device_id: 'T1',
-          command_type: 'grant_clearance',
-          payload: {
-            limit_marker_id: 'M2',
-            edges_newly_cleared: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
-          },
-        }),
-      ),
-    );
-
-    // Train should now move and emit a tag_observed at M2 within a few ticks.
-    runner.step(5_000);
-    const tagEvents = client.published.filter((m) =>
-      m.topic.startsWith('railway/events/tag_observed/'),
-    );
-    expect(tagEvents.length).toBeGreaterThan(0);
-  });
-
-  it('throws if assignSchedule is called locally - server must drive routing', () => {
-    const { runner } = makeDeviceOnlyRunner();
-    runner.start();
-    runner.spawnTrain('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
-    expect(() => runner.assignSchedule('T1', ['M1', 'M2'])).toThrow(/device-only mode/);
-  });
-
-  it('publishes the layout state as retained on start, same as embedded mode', () => {
-    const { runner, client } = makeDeviceOnlyRunner();
-    runner.start();
-    const layoutMsg = client.published.find((m) => m.topic === 'railway/state/layout/simple-loop');
-    expect(layoutMsg).toBeDefined();
   });
 });

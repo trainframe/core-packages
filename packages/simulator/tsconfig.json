@@ -5,5 +5,5 @@
     "rootDir": "./src"
   },
   "include": ["src/**/*"],
-  "references": [{ "path": "../protocol" }, { "path": "../core" }]
+  "references": [{ "path": "../protocol" }, { "path": "../core" }, { "path": "../server" }]
 }

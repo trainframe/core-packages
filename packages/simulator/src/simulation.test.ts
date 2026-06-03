@@ -1,6 +1,7 @@
 import type { Layout } from '@trainframe/protocol';
 import { describe, expect, it } from 'vitest';
 import { Simulation } from './simulation.js';
+import { startTestEnvironment } from './testing.js';
 
 const SIMPLE_LOOP: Layout = {
   name: 'simple-loop',
@@ -21,50 +22,54 @@ const SIMPLE_LOOP: Layout = {
 
 describe('end-to-end: virtual train obeys clearances', () => {
   it('a train assigned a route moves through markers in order', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
-    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+    const env = startTestEnvironment({ layout: SIMPLE_LOOP, seed: 1, faults: 'pristine' });
+    env.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
 
-    sim.assignSchedule('T1', ['M1', 'M4']);
+    env.assignSchedule('T1', ['M1', 'M4']);
 
     // Run for 10 simulated seconds.
-    sim.advance(10_000);
+    env.advance(10_000);
 
-    const traversals = sim.getEventsOfType('marker_traversed');
+    const traversals = env.getEventsOfType('marker_traversed');
     const markerOrder = traversals.map((t) => (t.payload as { marker_id: string }).marker_id);
     // Under the cyclic schedule the train continues past M4; check the first
     // three traversals to verify the order without pinning the cycle count.
     expect(markerOrder.slice(0, 3)).toEqual(['M2', 'M3', 'M4']);
+
+    env.shutdown();
   });
 
   it('a gated marker stops the train, releasing the gate lets it continue', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
-    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
-    const gate = sim.spawnGate('GATE-M3');
+    const env = startTestEnvironment({ layout: SIMPLE_LOOP, seed: 1, faults: 'pristine' });
+    env.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+    const gate = env.spawnGate('GATE-M3');
     gate.withhold('M3', 'crane busy');
 
-    sim.assignSchedule('T1', ['M1', 'M4']);
+    env.assignSchedule('T1', ['M1', 'M4']);
 
-    sim.advance(10_000);
+    env.advance(10_000);
 
     // Train should have reached M2 but not M3.
-    const traversals = sim
+    const traversals = env
       .getEventsOfType('marker_traversed')
       .map((t) => (t.payload as { marker_id: string }).marker_id);
     expect(traversals).toEqual(['M2']);
 
-    const train = sim.getTrain('T1');
+    const train = env.simulation.getTrain('T1');
     expect(train?.getVelocity()).toBe(0);
 
     // Release the gate.
     gate.release('M3');
-    sim.advance(10_000);
+    env.advance(10_000);
 
-    const traversalsAfter = sim
+    const traversalsAfter = env
       .getEventsOfType('marker_traversed')
       .map((t) => (t.payload as { marker_id: string }).marker_id);
     // Under the cyclic schedule the train continues past M4; check the first
     // three traversals after gate release to verify M3 and M4 were cleared.
     expect(traversalsAfter.slice(0, 3)).toEqual(['M2', 'M3', 'M4']);
+
+    env.shutdown();
   });
 
   it('a train on a short edge still advances when the next-edge grant arrives', () => {
@@ -85,82 +90,92 @@ describe('end-to-end: virtual train obeys clearances', () => {
       ],
       junctions: [],
     };
-    const sim = new Simulation({ layout: SHORT_LOOP, seed: 1, register_tags: 'identity' });
-    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
-    sim.assignSchedule('T1', ['M1', 'M3']);
+    const env = startTestEnvironment({ layout: SHORT_LOOP, seed: 1, faults: 'pristine' });
+    env.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+    env.assignSchedule('T1', ['M1', 'M3']);
 
-    sim.advance(10_000);
+    env.advance(10_000);
 
-    const traversals = sim
+    const traversals = env
       .getEventsOfType('marker_traversed')
       .map((t) => (t.payload as { marker_id: string }).marker_id);
     expect(traversals).toEqual(['M2', 'M3']);
+
+    env.shutdown();
   });
 
   it('two trains on the same route do not occupy the same edge', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 2, register_tags: 'identity' });
-    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
-    sim.spawnTrain('T2', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+    const env = startTestEnvironment({ layout: SIMPLE_LOOP, seed: 2, faults: 'pristine' });
+    env.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+    env.spawnTrain('T2', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
 
-    sim.assignSchedule('T1', ['M1', 'M3']);
-    sim.assignSchedule('T2', ['M1', 'M3']);
+    env.assignSchedule('T1', ['M1', 'M3']);
+    env.assignSchedule('T2', ['M1', 'M3']);
 
     // Advance only far enough for T1 to start moving but not yet cross M2 and
     // free the block. Under the cyclic schedule both trains keep moving
     // indefinitely; we observe the initial-grant exclusivity in the first 2s.
-    sim.advance(2_000);
+    env.advance(2_000);
 
     // T1 has clearance and moves; T2 was denied initial clearance and shouldn't move.
-    const t1 = sim.getTrain('T1');
-    const t2 = sim.getTrain('T2');
+    const t1 = env.simulation.getTrain('T1');
+    const t2 = env.simulation.getTrain('T2');
     expect(t1?.getDistanceIntoEdge()).toBeGreaterThan(0);
     expect(t2?.getVelocity()).toBe(0);
+
+    env.shutdown();
   });
 });
 
 describe('physical mishaps — overshoot', () => {
   it('emits an anomaly event when overshoot_rate forces a brake to fail', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
-    sim.spawnTrain('T1', {
+    const env = startTestEnvironment({ layout: SIMPLE_LOOP, seed: 1, faults: 'pristine' });
+    env.spawnTrain('T1', {
       startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
       config: { overshoot_rate: 1, stopping_noise: 0 },
     });
-    sim.assignSchedule('T1', ['M1', 'M2']);
-    sim.advance(10_000);
+    env.assignSchedule('T1', ['M1', 'M2']);
+    env.advance(10_000);
 
-    const anomalies = sim
+    const anomalies = env
       .getEventsOfType('anomaly')
       .filter((e) => e.device_id === 'T1')
       .map((e) => (e.payload as { description: string }).description);
     expect(anomalies.length).toBeGreaterThan(0);
     expect(anomalies[0]).toMatch(/T1 overshot clearance limit at M2/);
+
+    env.shutdown();
   });
 
   it('does not emit an overshoot anomaly with overshoot_rate at 0', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
-    sim.spawnTrain('T1', {
+    const env = startTestEnvironment({ layout: SIMPLE_LOOP, seed: 1, faults: 'pristine' });
+    env.spawnTrain('T1', {
       startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
       config: { overshoot_rate: 0 },
     });
-    sim.assignSchedule('T1', ['M1', 'M2']);
-    sim.advance(10_000);
+    env.assignSchedule('T1', ['M1', 'M2']);
+    env.advance(10_000);
 
-    const overshootAnomalies = sim.getEventsOfType('anomaly').filter((e) => e.device_id === 'T1');
+    const overshootAnomalies = env.getEventsOfType('anomaly').filter((e) => e.device_id === 'T1');
     expect(overshootAnomalies).toEqual([]);
+
+    env.shutdown();
   });
 });
 
 describe('event listener hook', () => {
-  it('streams every captured event to subscribers in order', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 7, register_tags: 'identity' });
+  it('streams every broker-observed event to subscribers in order', () => {
+    const env = startTestEnvironment({ layout: SIMPLE_LOOP, seed: 7, faults: 'pristine' });
     const seen: Array<{ event_type: string; device_id: string }> = [];
-    const off = sim.onEvent((e) => seen.push({ event_type: e.event_type, device_id: e.device_id }));
+    const off = env.onEvent((e) => seen.push({ event_type: e.event_type, device_id: e.device_id }));
 
-    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
-    sim.assignSchedule('T1', ['M1', 'M2']);
-    sim.advance(5_000);
+    env.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+    env.assignSchedule('T1', ['M1', 'M2']);
+    env.advance(5_000);
 
-    expect(seen[0]).toEqual({ event_type: 'device_registered', device_id: 'T1' });
+    // First observable T1 event on the wire is its device_registered.
+    const firstT1 = seen.find((e) => e.device_id === 'T1');
+    expect(firstT1).toEqual({ event_type: 'device_registered', device_id: 'T1' });
     expect(seen.some((e) => e.event_type === 'tag_observed' && e.device_id === 'T1')).toBe(true);
     expect(seen.some((e) => e.event_type === 'marker_traversed' && e.device_id === 'server')).toBe(
       true,
@@ -168,23 +183,25 @@ describe('event listener hook', () => {
 
     off();
     const before = seen.length;
-    sim.advance(1_000);
+    env.advance(1_000);
     expect(seen.length).toBe(before);
+
+    env.shutdown();
   });
 });
 
 describe('detection mishaps — double reads', () => {
   it('emits two tag_observed events for a single marker crossing when double_read_rate is 1', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
-    sim.spawnTrain('T1', {
+    const env = startTestEnvironment({ layout: SIMPLE_LOOP, seed: 1, faults: 'pristine' });
+    env.spawnTrain('T1', {
       startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
       // miss_rate: 0 so the primary read is guaranteed to arrive
       config: { double_read_rate: 1, miss_rate: 0 },
     });
-    sim.assignSchedule('T1', ['M1', 'M2']);
-    sim.advance(10_000);
+    env.assignSchedule('T1', ['M1', 'M2']);
+    env.advance(10_000);
 
-    const tagEvents = sim
+    const tagEvents = env
       .getEventsOfType('tag_observed')
       .filter((e) => e.device_id === 'T1' && (e.payload as { tag_id: string }).tag_id === 'M2');
     expect(tagEvents.length).toBe(2);
@@ -193,12 +210,19 @@ describe('detection mishaps — double reads', () => {
     const second = tagEvents[1];
     if (!first || !second) throw new Error('unreachable');
     expect(second.at_ms).toBeGreaterThan(first.at_ms);
+
+    env.shutdown();
   });
 });
 
 describe('detection mishaps — spurious reads', () => {
   it('emits tag_observed events with a spurious- prefix after a few ticks when spurious_read_rate is 1', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
+    // Spurious reads are a pure device-emission concern; no server scheduling
+    // is required, so we drive the simulation directly. `seedIdentityTags`
+    // populates the train's marker→tag map; the events go nowhere (no
+    // bridge), which is fine because the assertion is on `sim.events`.
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
+    sim.seedIdentityTags(SIMPLE_LOOP);
     sim.spawnTrain('T1', {
       startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
       config: { spurious_read_rate: 1 },
@@ -219,14 +243,16 @@ describe('detection mishaps — spurious reads', () => {
 describe('determinism', () => {
   it('produces identical outputs with the same seed', () => {
     const run = (seed: number) => {
-      const sim = new Simulation({ layout: SIMPLE_LOOP, seed, register_tags: 'identity' });
-      sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
-      sim.assignSchedule('T1', ['M1', 'M3']);
-      sim.advance(5_000);
-      return sim.getEventsOfType('marker_traversed').map((e) => ({
+      const env = startTestEnvironment({ layout: SIMPLE_LOOP, seed, faults: 'pristine' });
+      env.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+      env.assignSchedule('T1', ['M1', 'M3']);
+      env.advance(5_000);
+      const out = env.getEventsOfType('marker_traversed').map((e) => ({
         at_ms: e.at_ms,
         marker_id: (e.payload as { marker_id: string }).marker_id,
       }));
+      env.shutdown();
+      return out;
     };
 
     expect(run(99)).toEqual(run(99));
@@ -235,15 +261,15 @@ describe('determinism', () => {
 
 describe('train_status emission', () => {
   it('emits train_status events at the configured interval with edge + distance + speed', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
-    sim.spawnTrain('T1', {
+    const env = startTestEnvironment({ layout: SIMPLE_LOOP, seed: 1, faults: 'pristine' });
+    env.spawnTrain('T1', {
       startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
       config: { train_status_interval_ms: 100 },
     });
-    sim.assignSchedule('T1', ['M1', 'M3']);
-    sim.advance(1_000); // 10 status windows
+    env.assignSchedule('T1', ['M1', 'M3']);
+    env.advance(1_000); // 10 status windows
 
-    const statuses = sim.getEventsOfType('train_status');
+    const statuses = env.getEventsOfType('train_status');
     expect(statuses.length).toBeGreaterThanOrEqual(8);
     const first = statuses[0]?.payload as {
       train_id: string;
@@ -254,17 +280,21 @@ describe('train_status emission', () => {
     expect(first.current_edge?.from_marker_id).toBe('M1');
     expect(first.speed_normalised).toBeGreaterThanOrEqual(0);
     expect(first.speed_normalised).toBeLessThanOrEqual(1);
+
+    env.shutdown();
   });
 
   it('does not emit train_status when interval is 0', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
-    sim.spawnTrain('T1', {
+    const env = startTestEnvironment({ layout: SIMPLE_LOOP, seed: 1, faults: 'pristine' });
+    env.spawnTrain('T1', {
       startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
       config: { train_status_interval_ms: 0 },
     });
-    sim.assignSchedule('T1', ['M1', 'M2']);
-    sim.advance(2_000);
-    expect(sim.getEventsOfType('train_status')).toHaveLength(0);
+    env.assignSchedule('T1', ['M1', 'M2']);
+    env.advance(2_000);
+    expect(env.getEventsOfType('train_status')).toHaveLength(0);
+
+    env.shutdown();
   });
 });
 
@@ -301,66 +331,72 @@ describe('train length — device_registered payload', () => {
 });
 
 describe('despawn → device_disconnected', () => {
-  it('despawnGate emits a device_disconnected event and the scheduler releases the gate`s withholds', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
-    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
-    const gate = sim.spawnGate('GATE-M3');
+  it('despawnGate emits a device_disconnected event and the server releases the gate`s withholds', () => {
+    const env = startTestEnvironment({ layout: SIMPLE_LOOP, seed: 1, faults: 'pristine' });
+    env.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+    const gate = env.spawnGate('GATE-M3');
     gate.withhold('M3', 'crane busy');
 
-    sim.assignSchedule('T1', ['M1', 'M4']);
-    sim.advance(10_000);
+    env.assignSchedule('T1', ['M1', 'M4']);
+    env.advance(10_000);
 
     // Train is stopped at M2.
     expect(
-      sim
+      env
         .getEventsOfType('marker_traversed')
         .map((e) => (e.payload as { marker_id: string }).marker_id),
     ).toEqual(['M2']);
-    expect(sim.getTrain('T1')?.getVelocity()).toBe(0);
+    expect(env.simulation.getTrain('T1')?.getVelocity()).toBe(0);
 
     // Gate vanishes.
-    sim.despawnGate('GATE-M3');
+    env.simulation.despawnGate('GATE-M3');
 
-    expect(sim.getEventsOfType('device_disconnected')).toHaveLength(1);
-    expect(sim.getEventsOfType('device_disconnected')[0]?.device_id).toBe('GATE-M3');
+    const disconnects = env.getEventsOfType('device_disconnected');
+    expect(disconnects).toHaveLength(1);
+    expect(disconnects[0]?.device_id).toBe('GATE-M3');
 
     // Train resumes after the disconnect-triggered re-grant.
-    sim.advance(10_000);
-    const traversals = sim
+    env.advance(10_000);
+    const traversals = env
       .getEventsOfType('marker_traversed')
       .map((e) => (e.payload as { marker_id: string }).marker_id);
     expect(traversals).toContain('M3');
+
+    env.shutdown();
   });
 
   it('despawnTrain emits a device_disconnected event and frees its held block for a waiting peer', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
-    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
-    sim.spawnTrain('T2', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+    const env = startTestEnvironment({ layout: SIMPLE_LOOP, seed: 1, faults: 'pristine' });
+    env.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+    env.spawnTrain('T2', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
 
-    sim.assignSchedule('T1', ['M1', 'M2']);
-    sim.assignSchedule('T2', ['M1', 'M2']);
+    env.assignSchedule('T1', ['M1', 'M2']);
+    env.assignSchedule('T2', ['M1', 'M2']);
 
     // T2 was blocked by T1.
-    const t2GrantsBefore = sim
+    const t2GrantsBefore = env.simulation
       .getCommandsForDevice('T2')
       .filter((c) => c.event_type === 'grant_clearance');
     expect(t2GrantsBefore).toHaveLength(0);
 
     // T1 vanishes (e.g. derailed and unplugged).
-    sim.despawnTrain('T1');
+    env.simulation.despawnTrain('T1');
 
-    expect(sim.getEventsOfType('device_disconnected')).toHaveLength(1);
-    expect(sim.getEventsOfType('device_disconnected')[0]?.device_id).toBe('T1');
+    const disconnects = env.getEventsOfType('device_disconnected');
+    expect(disconnects).toHaveLength(1);
+    expect(disconnects[0]?.device_id).toBe('T1');
 
-    const t2Grants = sim
+    const t2Grants = env.simulation
       .getCommandsForDevice('T2')
       .filter((c) => c.event_type === 'grant_clearance');
     expect(t2Grants).toHaveLength(1);
     expect((t2Grants[0]?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M2');
+
+    env.shutdown();
   });
 
   it('despawning an unknown train or gate is a no-op', () => {
-    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1, register_tags: 'identity' });
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
     sim.despawnTrain('NEVER-SPAWNED');
     sim.despawnGate('NEVER-SPAWNED');
     expect(sim.getEventsOfType('device_disconnected')).toHaveLength(0);

@@ -16,7 +16,6 @@ export interface SimRunnerControls {
     edge: { from_marker_id: string; to_marker_id: string },
     config?: Partial<VirtualTrainConfig>,
   ) => boolean;
-  readonly assignSchedule: (train_id: string, stops: ReadonlyArray<string>) => void;
 }
 
 /**
@@ -63,6 +62,5 @@ export function useSimRunner(layout: Layout, tick_ms: number): SimRunnerControls
     stop: () => runner.stop(),
     step: (ms) => runner.step(ms),
     spawnTrain: (id, edge, config) => runner.spawnTrain(id, edge, config),
-    assignSchedule: (id, stops) => runner.assignSchedule(id, stops),
   };
 }

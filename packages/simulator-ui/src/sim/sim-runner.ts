@@ -1,9 +1,7 @@
-import { PROTOCOL_VERSION } from '@trainframe/protocol';
 import type { Layout } from '@trainframe/protocol';
 import {
   BrokerBridge,
   type CapturedEvent,
-  type CapturedStateSnapshot,
   Simulation,
   type VirtualTrainConfig,
 } from '@trainframe/simulator';
@@ -26,8 +24,6 @@ export interface SimRunnerSnapshot {
   readonly train_ids: ReadonlyArray<string>;
 }
 
-export type SimRunnerMode = 'embedded' | 'device-only';
-
 export interface SimRunnerOptions {
   /** Layout the sim is built around. */
   readonly layout: Layout;
@@ -36,21 +32,11 @@ export interface SimRunnerOptions {
   /** Source of UUIDs for outbound envelopes. Defaults to crypto.randomUUID. */
   readonly newId?: () => string;
   /**
-   * `embedded` (default): the simulation runs its own scheduler in-browser
-   * and publishes both device events and server-derived events to the broker.
-   * Use when there's no other server on the bus.
-   *
-   * `device-only`: the simulation has no embedded scheduler; the bridge
-   * forwards device events to the broker and routes inbound commands from
-   * `railway/commands/<device_id>` back into the simulation. Use when a real
-   * `@trainframe/server` is also on the bus.
-   */
-  readonly mode?: SimRunnerMode;
-  /**
    * If set, the simulation publishes identity tag_assignment events for
-   * every marker on startup (see `SimulationOptions.register_tags`). Trains
+   * every marker on startup (see `Simulation.seedIdentityTags`). Trains
    * spawned afterwards emit `tag_observed` with the resolved tag IDs.
-   * Default off; embedded-mode demos and tests typically want `'identity'`.
+   * Default off; in-browser demos that pair with a `@trainframe/server`
+   * running in the same tab typically want `'identity'`.
    */
   readonly register_tags?: 'identity';
 }
@@ -59,27 +45,19 @@ type SnapshotListener = (snapshot: SimRunnerSnapshot) => void;
 
 /**
  * Drives a `Simulation` instance and bridges its events onto an MQTT broker.
- *
- * The sim core stays transport-agnostic — `Simulation.onEvent` exposes a flat
- * stream of captured events; this class wraps each one in the wire envelope
- * (event_id, timestamp_device, protocol_version) and publishes it to the
- * appropriate `railway/events/<type>/<device>` topic.
- *
- * UI state is exposed through `snapshot()` / `onSnapshotChange`, so the React
- * layer can render counts and statuses without reaching into private fields.
+ * The sim package is virtual-hardware-only — scheduling lives in
+ * `@trainframe/server`. This runner spawns a `Simulation`, wires it to the
+ * broker via `BrokerBridge`, and exposes lifecycle controls to the React
+ * layer through `snapshot()` / `onSnapshotChange`.
  */
 export class SimRunner {
   private simulation: Simulation | null = null;
   private bridge: BrokerBridge | null = null;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
-  private unsubscribeFromSim: (() => void) | null = null;
-  private unsubscribeFromStateSnapshots: (() => void) | null = null;
-  private unsubscribeFromOperatorCommands: (() => void) | null = null;
   private events_published = 0;
   private train_ids: string[] = [];
   private readonly snapshotListeners = new Set<SnapshotListener>();
   private readonly newId: () => string;
-  private readonly mode: SimRunnerMode;
   /**
    * Interval handles for station-dwell gates, keyed by the gate's device ID.
    * Populated on `start()` for every `station_stop` marker in the layout and
@@ -97,7 +75,6 @@ export class SimRunner {
     private readonly options: SimRunnerOptions,
   ) {
     this.newId = options.newId ?? defaultNewId;
-    this.mode = options.mode ?? 'embedded';
   }
 
   /** Initialise a fresh `Simulation`. Idempotent — does nothing if already started. */
@@ -106,72 +83,22 @@ export class SimRunner {
     this.simulation = new Simulation({
       layout: this.options.layout,
       tick_ms: this.options.tick_ms,
-      disableScheduler: this.mode === 'device-only',
-      ...(this.options.register_tags ? { register_tags: this.options.register_tags } : {}),
     });
-    this.unsubscribeFromSim = this.simulation.onEvent((event) => this.handleEvent(event));
-    this.unsubscribeFromStateSnapshots = this.simulation.onStateSnapshot((snapshot) =>
-      this.handleStateSnapshot(snapshot),
-    );
-    if (this.mode === 'device-only') {
-      this.bridge = new BrokerBridge(this.simulation, this.client, { newId: this.newId });
-      this.bridge.start();
-    } else {
-      // In embedded mode the visualiser publishes operator intents on
-      // `railway/operator/<command>` and we dispatch them to the in-process
-      // scheduler. In device-only mode the real `@trainframe/server` handles
-      // these instead.
-      this.unsubscribeFromOperatorCommands = this.client.subscribe(
-        'railway/operator/+',
-        (message) => this.handleOperatorCommand(message.topic, message.payload),
-      );
+    this.bridge = new BrokerBridge(this.simulation, this.client, { newId: this.newId });
+    this.bridge.start();
+    // Count every event the simulation publishes through the bridge. We
+    // observe via `onEvent` rather than counting outbound broker frames so
+    // the counter matches what subscribers see one-for-one.
+    this.simulation.onEvent(() => {
+      this.events_published += 1;
+      this.notify();
+    });
+    if (this.options.register_tags === 'identity') {
+      this.simulation.seedIdentityTags(this.options.layout);
     }
     this.publishLayoutState();
     this.spawnStationDwellGates();
     this.notify();
-  }
-
-  /**
-   * Dispatch an operator-side command from the broker. The visualiser is the
-   * canonical publisher; the topic's last segment is the command type and
-   * the payload is a small JSON object specific to that command. Per
-   * ADR-013, schedule assignment and clearance revocation are *operator
-   * intents* that target the system, not physical-device commands, so they
-   * live on this topic family instead of `railway/commands/<device_id>`.
-   */
-  private handleOperatorCommand(topic: string, payload: Uint8Array): void {
-    if (!this.simulation) return;
-    const commandType = topic.split('/').pop();
-    if (!commandType) return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(new TextDecoder().decode(payload));
-    } catch {
-      return;
-    }
-    if (!parsed || typeof parsed !== 'object') return;
-    const obj = parsed as Record<string, unknown>;
-    if (commandType === 'assign_schedule') {
-      const trainId = obj.train_id;
-      const stops = obj.stops;
-      const routeId = obj.route_id;
-      if (
-        typeof trainId !== 'string' ||
-        !Array.isArray(stops) ||
-        !stops.every((s): s is string => typeof s === 'string')
-      ) {
-        return;
-      }
-      const routeArg = typeof routeId === 'string' ? routeId : undefined;
-      this.simulation.assignSchedule(trainId, stops, routeArg);
-      return;
-    }
-    if (commandType === 'revoke_clearance') {
-      const trainId = obj.train_id;
-      if (typeof trainId !== 'string') return;
-      this.simulation.revokeClearance(trainId);
-      return;
-    }
   }
 
   /**
@@ -247,9 +174,9 @@ export class SimRunner {
     this.stationDwellHandles.clear();
     // Despawn each train and each auto-spawned station gate through the
     // Simulation BEFORE we drop our reference to it. Despawn emits
-    // `device_disconnected` through the captured-event sink, which we route
-    // to the broker — so subscribers like the visualiser stop drawing
-    // entities that are no longer present.
+    // `device_disconnected` through the captured-event sink, which the
+    // bridge routes to the broker — so subscribers like the visualiser stop
+    // drawing entities that are no longer present.
     if (this.simulation) {
       for (const trainId of this.train_ids) {
         this.simulation.despawnTrain(trainId);
@@ -261,12 +188,6 @@ export class SimRunner {
     this.stationGateIds.length = 0;
     this.bridge?.stop();
     this.bridge = null;
-    this.unsubscribeFromSim?.();
-    this.unsubscribeFromSim = null;
-    this.unsubscribeFromStateSnapshots?.();
-    this.unsubscribeFromStateSnapshots = null;
-    this.unsubscribeFromOperatorCommands?.();
-    this.unsubscribeFromOperatorCommands = null;
     this.simulation = null;
     this.events_published = 0;
     this.train_ids = [];
@@ -297,16 +218,6 @@ export class SimRunner {
     return true;
   }
 
-  assignSchedule(train_id: string, stops: ReadonlyArray<string>): void {
-    if (this.mode === 'device-only') {
-      throw new Error(
-        'SimRunner.assignSchedule is unavailable in device-only mode. Issue the ' +
-          'assign_route command from a server on the broker instead.',
-      );
-    }
-    this.simulation?.assignSchedule(train_id, stops);
-  }
-
   snapshot(): SimRunnerSnapshot {
     return {
       status: this.computeStatus(),
@@ -329,52 +240,6 @@ export class SimRunner {
     return this.intervalHandle === null ? 'paused' : 'running';
   }
 
-  private handleEvent(event: CapturedEvent): void {
-    if (this.mode !== 'device-only') {
-      this.publishEvent(event);
-    }
-    this.events_published += 1;
-    this.notify();
-  }
-
-  /**
-   * Publish a `update_state_snapshot` effect from the embedded scheduler as a
-   * retained MQTT state message. Only runs in embedded mode — in device-only
-   * mode the real server handles state publishing.
-   * Forwards `clearance` (which edges each train holds) and `deadlock`
-   * (which trains are in a waits-for cycle) — both are subscribed to by the
-   * visualiser. Layout is published via `publishLayoutState()` and
-   * tags/devices are not visualised by the sim-runner's broker pathway
-   * today.
-   */
-  private handleStateSnapshot(snapshot: CapturedStateSnapshot): void {
-    if (this.mode === 'device-only') return;
-    if (
-      snapshot.entity_type !== 'clearance' &&
-      snapshot.entity_type !== 'deadlock' &&
-      snapshot.entity_type !== 'schedule'
-    ) {
-      return;
-    }
-    const topic = `railway/state/${snapshot.entity_type}/${snapshot.entity_id}`;
-    this.client.publish(topic, new TextEncoder().encode(JSON.stringify(snapshot.state)), {
-      retain: true,
-    });
-  }
-
-  private publishEvent(event: CapturedEvent): void {
-    const envelope = {
-      event_id: this.newId(),
-      device_id: event.device_id,
-      timestamp_device: new Date().toISOString(),
-      event_type: event.event_type,
-      protocol_version: PROTOCOL_VERSION,
-      payload: event.payload,
-    };
-    const topic = `railway/events/${event.event_type}/${event.device_id}`;
-    this.client.publish(topic, new TextEncoder().encode(JSON.stringify(envelope)));
-  }
-
   private notify(): void {
     const snap = this.snapshot();
     for (const listener of this.snapshotListeners) listener(snap);
@@ -387,3 +252,8 @@ function defaultNewId(): string {
   }
   return Math.random().toString(36).slice(2);
 }
+
+// Re-export the CapturedEvent type for consumers that subscribe to the
+// bridge-published broker stream and want to type-narrow on the same shape
+// the sim emits internally.
+export type { CapturedEvent };

@@ -35,14 +35,12 @@ beforeEach(async () => {
   await harness.testClient.seedIdentityTags(['M1', 'M2', 'M3', 'M4']);
 
   // Pass the same identity mapping to the simulation so its VirtualTrains
-  // know which tag_id to emit per marker. No tag_assignment events fire on
-  // construction here - the harness already populated the server.
-  simulation = new Simulation({
-    layout: SIMPLE_LOOP,
-    seed: 1,
-    disableScheduler: true,
-    register_tags: 'identity',
-  });
+  // know which tag_id to emit per marker. The bridge will republish these
+  // synthetic-garage events too, but the server's TagRegistry already has
+  // them from the harness.testClient.seedIdentityTags call above and
+  // de-dupes idempotently.
+  simulation = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
+  simulation.seedIdentityTags(SIMPLE_LOOP);
 
   simBrokerClient = new MqttBrokerClient();
   await simBrokerClient.connect(harness.brokerUrl);

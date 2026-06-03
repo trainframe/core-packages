@@ -114,6 +114,9 @@ importers:
       '@trainframe/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@trainframe/server':
+        specifier: workspace:*
+        version: link:../server
     devDependencies:
       typescript:
         specifier: ^5.6.0
