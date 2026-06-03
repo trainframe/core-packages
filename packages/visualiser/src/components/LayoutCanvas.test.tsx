@@ -2,7 +2,7 @@ import { act, render, screen, within } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
 import { InMemoryBrokerSubscriber } from '../broker/in-memory-client.js';
-import { LayoutCanvas } from './LayoutCanvas.js';
+import { LayoutCanvas, buildMarkerTangents } from './LayoutCanvas.js';
 
 const SIMPLE_LOOP_LAYOUT = {
   name: 'simple-loop',
@@ -250,5 +250,105 @@ describe('LayoutCanvas', () => {
     const trainNode = screen.getByTestId('trains').querySelector('[data-train-id="T1"]');
     expect(trainNode?.getAttribute('data-on-edge')).toBe('M1->M2');
     expect(trainNode?.getAttribute('data-at-marker')).toBeNull();
+  });
+});
+
+describe('buildMarkerTangents — tangent continuity', () => {
+  /**
+   * Three markers in a horizontal straight line: A(0,0) B(100,0) C(200,0).
+   * Edges: A→B and B→C.
+   *
+   * The tangent at B should be (1,0) (pointing right, along the line).
+   * This means:
+   *   - The C2 handle of edge A→B lies at B - k*(1,0) → y=0
+   *   - The C1 handle of edge B→C lies at B + k*(1,0) → y=0
+   *
+   * Both handles are collinear with the A–C line, which proves C1 continuity.
+   *
+   * We verify by rendering the layout and checking that both edge path `d`
+   * strings have their control point y-values equal (within floating-point
+   * tolerance) to the y-coordinate of B, i.e. all on y=0.
+   */
+  it('gives C1-continuous bezier handles at a straight-through marker', () => {
+    const markers = [{ id: 'A' }, { id: 'B' }, { id: 'C' }];
+    const edges = [
+      { from_marker_id: 'A', to_marker_id: 'B' },
+      { from_marker_id: 'B', to_marker_id: 'C' },
+    ];
+    const markerPositions = new Map([
+      ['A', { x: 0, y: 0 }],
+      ['B', { x: 100, y: 0 }],
+      ['C', { x: 200, y: 0 }],
+    ]);
+
+    const tangents = buildMarkerTangents(markers, edges, markerPositions);
+
+    // Tangent at B must be (1,0) — or very close — so that both adjacent
+    // edges share the same horizontal direction at B.
+    const tB = tangents.get('B');
+    expect(tB).toBeDefined();
+    expect(tB?.x ?? 0).toBeCloseTo(1, 5);
+    expect(tB?.y ?? 1).toBeCloseTo(0, 5);
+
+    // Tangent at A and C should also point right (single outgoing/incoming edge each).
+    const tA = tangents.get('A');
+    expect(tA?.x ?? 0).toBeCloseTo(1, 5);
+    expect(tA?.y ?? 1).toBeCloseTo(0, 5);
+
+    const tC = tangents.get('C');
+    expect(tC?.x ?? 0).toBeCloseTo(1, 5);
+    expect(tC?.y ?? 1).toBeCloseTo(0, 5);
+  });
+
+  it('renders a straight three-marker chain with collinear control points at the shared marker', () => {
+    // Layout: A, B, C in a horizontal line (same y_mm).
+    // All markers share y_mm=50; x_mm increases left to right.
+    const straightLineLayout = {
+      name: 'straight-line',
+      markers: [
+        { id: 'A', kind: 'block_boundary', position: { x_mm: 0, y_mm: 50 } },
+        { id: 'B', kind: 'block_boundary', position: { x_mm: 100, y_mm: 50 } },
+        { id: 'C', kind: 'block_boundary', position: { x_mm: 200, y_mm: 50 } },
+      ],
+      edges: [
+        { from_marker_id: 'A', to_marker_id: 'B' },
+        { from_marker_id: 'B', to_marker_id: 'C' },
+      ],
+      junctions: [],
+    };
+
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/straight-line', straightLineLayout));
+
+    const edgesGroup = screen.getByTestId('edges');
+    const paths = Array.from(edgesGroup.querySelectorAll('path[d]'));
+    expect(paths.length).toBe(2);
+
+    // Extract the start-y (sy) and both control-point y values from a path `d`.
+    // d format: "M sx sy C cx1 cy1, cx2 cy2, ex ey"
+    const parsePathYs = (d: string): { startY: number; cy1: number; cy2: number } | undefined => {
+      const match =
+        /M [0-9.e+-]+ ([0-9.e+-]+) C [0-9.e+-]+ ([0-9.e+-]+),\s*[0-9.e+-]+ ([0-9.e+-]+),/.exec(d);
+      if (!match) return undefined;
+      return { startY: Number(match[1]), cy1: Number(match[2]), cy2: Number(match[3]) };
+    };
+
+    // Both paths should exist and have d attributes.
+    const dA = paths[0]?.getAttribute('d') ?? '';
+    const dB = paths[1]?.getAttribute('d') ?? '';
+    expect(dA).toMatch(/^M /);
+    expect(dB).toMatch(/^M /);
+
+    // For a straight horizontal chain, all control-point y values must equal
+    // the marker y (the start-y of their respective path), since the tangent
+    // at every marker points horizontally and handles lie on the same y-axis.
+    for (const d of [dA, dB]) {
+      const ys = parsePathYs(d);
+      expect(ys).toBeDefined();
+      if (!ys) continue;
+      const { startY, cy1, cy2 } = ys;
+      expect(cy1).toBeCloseTo(startY, 2);
+      expect(cy2).toBeCloseTo(startY, 2);
+    }
   });
 });

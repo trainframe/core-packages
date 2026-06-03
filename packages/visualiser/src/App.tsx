@@ -3,6 +3,7 @@ import { BrokerProvider } from './broker/broker-context.js';
 import type { BrokerSubscriber } from './broker/client.js';
 import { MqttBrokerSubscriber } from './broker/mqtt-client.js';
 import { ConnectionStatus } from './components/ConnectionStatus.js';
+import { DeadlockBanner } from './components/DeadlockBanner.js';
 import { EventLog } from './components/EventLog.js';
 import { LayoutCanvas } from './components/LayoutCanvas.js';
 import { Settings } from './components/Settings.js';
@@ -30,6 +31,7 @@ export function App({ client }: AppProps = {}) {
         <h1>Trainframe Visualiser</h1>
         <ConnectionStatus />
         <Settings initialUrl={initialUrl} />
+        <DeadlockBanner />
         <LayoutCanvas />
         <UnknownTags adminApiUrl={adminApiUrl} />
         <EventLog />

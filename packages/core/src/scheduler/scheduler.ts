@@ -25,6 +25,13 @@ export class Scheduler {
   private readonly devices = new Map<string, DeviceRecord>();
   private readonly trains = new Map<string, TrainState>();
   private readonly tags = new TagRegistry();
+  /**
+   * The set of trains currently part of a detected waits-for cycle (sorted,
+   * for stable equality checks). Kept on the scheduler so we only publish a
+   * `railway/state/deadlock/active` retained snapshot when the deadlock set
+   * actually changes — not on every event.
+   */
+  private currentDeadlock: ReadonlyArray<string> = [];
 
   constructor(
     private readonly registry: CapabilityRegistry,
@@ -615,7 +622,93 @@ export class Scheduler {
       if (train.cleared_edges.some((e) => edgesEqual(e, nextEdge))) continue;
       out.push(...this.tryGrantClearance(train, nextEdge));
     }
+    out.push(...this.maybeEmitDeadlockState());
     return out;
+  }
+
+  /**
+   * Run a waits-for cycle detection over the trains that currently have a
+   * next-edge they want but haven't been granted. A cycle means two or more
+   * trains are mutually blocking each other under the section-pair rule
+   * (ADR-011): T1 holds an edge that shares a marker with T2's wanted edge,
+   * and T2 holds an edge sharing a marker with T1's wanted edge.
+   *
+   * We don't try to *resolve* the deadlock — the topology change that fixes
+   * it (more markers, an actual passing siding) is an authoring decision.
+   * We just surface the state so the operator sees it on the visualiser.
+   *
+   * Emits an `update_state_snapshot` on `railway/state/deadlock/active`
+   * carrying the sorted list of train IDs in the cycle. When the deadlock
+   * resolves (any train moves and the cycle disappears), publishes an empty
+   * list so the banner clears. Only publishes when the set changes —
+   * `retryBlockedClearances` is called from many event handlers and we don't
+   * want to thrash the topic.
+   */
+  private maybeEmitDeadlockState(): ReadonlyArray<SchedulerEffect> {
+    const cycle = this.detectWaitsForCycle();
+    const sorted = cycle ? [...cycle].sort() : [];
+    if (
+      sorted.length === this.currentDeadlock.length &&
+      sorted.every((t, i) => t === this.currentDeadlock[i])
+    ) {
+      return [];
+    }
+    this.currentDeadlock = sorted;
+    return [effects.updateState('deadlock', 'active', { trains: sorted })];
+  }
+
+  /**
+   * Build the waits-for graph over currently-blocked trains and return any
+   * one cycle in it (as a list of train IDs in cycle order), or null if no
+   * cycle exists.
+   *
+   * A train is "waiting" if it has a transit, has a next edge to traverse,
+   * and that edge is not yet in its `cleared_edges`. A train T waits-for
+   * another train T' when any edge T' holds shares a marker with T's wanted
+   * edge — i.e. the section-pair rule denies T because T' is in the way.
+   */
+  private detectWaitsForCycle(): ReadonlyArray<string> | null {
+    const waiting = this.collectWaitingTrains();
+    if (waiting.size < 2) return null;
+    const waitsFor = this.buildWaitsForGraph(waiting);
+    return findCycleStartingFromAny(waiting.keys(), waitsFor);
+  }
+
+  /**
+   * Trains that have a transit, have a next edge to traverse, and that
+   * edge isn't yet in their `cleared_edges`. They're the candidates for
+   * a waits-for cycle.
+   */
+  private collectWaitingTrains(): Map<string, EdgeRef> {
+    const waiting = new Map<string, EdgeRef>();
+    for (const train of this.trains.values()) {
+      if (!train.transit) continue;
+      const nextEdge = train.transit.edges[train.transit.progress_index];
+      if (!nextEdge) continue;
+      if (train.cleared_edges.some((e) => edgesEqual(e, nextEdge))) continue;
+      waiting.set(train.train_id, nextEdge);
+    }
+    return waiting;
+  }
+
+  /**
+   * For each waiting train, the set of trains whose currently-held edges
+   * share a boundary marker with the train's wanted edge — i.e. the
+   * trains denying it clearance under the section-pair rule.
+   */
+  private buildWaitsForGraph(
+    waiting: ReadonlyMap<string, EdgeRef>,
+  ): Map<string, ReadonlyArray<string>> {
+    const graph = new Map<string, ReadonlyArray<string>>();
+    for (const [trainId, wanted] of waiting) {
+      const blockers: string[] = [];
+      for (const [otherId, other] of this.trains) {
+        if (otherId === trainId) continue;
+        if (anyEdgeSharesMarker(other.cleared_edges, wanted)) blockers.push(otherId);
+      }
+      graph.set(trainId, blockers);
+    }
+    return graph;
   }
 
   // ---------- generic capability dispatch ----------
@@ -870,4 +963,53 @@ type MarkerKind =
 
 function isMarkerKind(value: unknown): value is MarkerKind {
   return typeof value === 'string' && VALID_MARKER_KINDS.has(value);
+}
+
+function anyEdgeSharesMarker(held: ReadonlyArray<EdgeRef>, wanted: EdgeRef): boolean {
+  for (const e of held) {
+    if (
+      e.from_marker_id === wanted.from_marker_id ||
+      e.from_marker_id === wanted.to_marker_id ||
+      e.to_marker_id === wanted.from_marker_id ||
+      e.to_marker_id === wanted.to_marker_id
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Iterative DFS for a cycle in the waits-for graph that returns to one of
+ * the start nodes. Returns the cycle as an ordered list of train IDs, or
+ * null if none exists.
+ */
+function findCycleStartingFromAny(
+  starts: Iterable<string>,
+  graph: ReadonlyMap<string, ReadonlyArray<string>>,
+): ReadonlyArray<string> | null {
+  for (const start of starts) {
+    const found = dfsForCycleBackToStart(start, graph);
+    if (found) return found;
+  }
+  return null;
+}
+
+function dfsForCycleBackToStart(
+  start: string,
+  graph: ReadonlyMap<string, ReadonlyArray<string>>,
+): ReadonlyArray<string> | null {
+  const stack: Array<{ node: string; path: string[] }> = [{ node: start, path: [start] }];
+  const visited = new Set<string>();
+  while (stack.length > 0) {
+    const frame = stack.pop();
+    if (!frame) break;
+    for (const next of graph.get(frame.node) ?? []) {
+      if (next === start && frame.path.length >= 2) return frame.path;
+      if (visited.has(next)) continue;
+      visited.add(next);
+      stack.push({ node: next, path: [...frame.path, next] });
+    }
+  }
+  return null;
 }

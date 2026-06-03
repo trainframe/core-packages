@@ -21,44 +21,154 @@ const RADIUS = CENTER - 60;
 const MARKER_RADIUS = 14;
 
 /**
- * Fraction of the edge half-length used as the perpendicular bezier offset.
- * Larger values give more pronounced curves; 0.25 gives a gentle arc.
+ * Fraction of the edge length used as the bezier handle length (k factor).
+ * Controls how tightly curved the arcs are. 0.3 gives smooth, readable arcs.
  */
-const BEZIER_OFFSET_FRACTION = 0.25;
+const BEZIER_HANDLE_FRACTION = 0.3;
+
+/** Accumulate unit-vector edge contributions into a per-marker sum map. */
+function accumulateEdgeContributions(
+  edges: ReadonlyArray<{ from_marker_id: string; to_marker_id: string }>,
+  markerPositions: Map<string, Point>,
+  sums: Map<string, { x: number; y: number }>,
+): void {
+  for (const edge of edges) {
+    const fromPos = markerPositions.get(edge.from_marker_id);
+    const toPos = markerPositions.get(edge.to_marker_id);
+    if (!fromPos || !toPos) continue;
+
+    const dx = toPos.x - fromPos.x;
+    const dy = toPos.y - fromPos.y;
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len === 0) continue;
+
+    const ux = dx / len;
+    const uy = dy / len;
+
+    // Both endpoints get the same unit vector: the tangent convention is
+    // "the direction this edge flows" (from → to). For the `from` marker it
+    // is an outgoing contribution; for `to` it is the incoming direction
+    // (arriving from the same direction), which is the same vector. Summing
+    // and re-normalising produces a tangent that "points through" each marker.
+    const fromSum = sums.get(edge.from_marker_id);
+    if (fromSum) {
+      fromSum.x += ux;
+      fromSum.y += uy;
+    }
+    const toSum = sums.get(edge.to_marker_id);
+    if (toSum) {
+      toSum.x += ux;
+      toSum.y += uy;
+    }
+  }
+}
 
 /**
- * Compute the two cubic bezier control points for a gently curved edge.
- * The control points are offset perpendicularly from the midpoint of the
- * straight line, creating a smooth arc. Alternating sign per edge key keeps
- * adjacent bidirectional edges visually separated.
+ * Return a degenerate-fallback tangent for a marker whose directional sum
+ * cancelled out to zero: perpendicular to the first incident edge found,
+ * or (1, 0) if no edge can be located.
  */
-function edgeBezierControls(from: Point, to: Point, edgeKey: string): { c1: Point; c2: Point } {
-  const mx = (from.x + to.x) / 2;
-  const my = (from.y + to.y) / 2;
+function degenerateTangent(
+  markerId: string,
+  edges: ReadonlyArray<{ from_marker_id: string; to_marker_id: string }>,
+  markerPositions: Map<string, Point>,
+): Point {
+  for (const edge of edges) {
+    if (edge.from_marker_id !== markerId && edge.to_marker_id !== markerId) continue;
+    const fromPos = markerPositions.get(edge.from_marker_id);
+    const toPos = markerPositions.get(edge.to_marker_id);
+    if (!fromPos || !toPos) continue;
+    const dx = toPos.x - fromPos.x;
+    const dy = toPos.y - fromPos.y;
+    const elen = Math.sqrt(dx * dx + dy * dy);
+    if (elen > 1e-9) return { x: -dy / elen, y: dx / elen };
+  }
+  return { x: 1, y: 0 };
+}
+
+/**
+ * Build a map from marker ID to unit tangent vector for that marker.
+ *
+ * The tangent at a marker is the normalised sum of all incident edge
+ * direction contributions (outgoing and incoming both contribute the edge's
+ * unit direction vector). This makes consecutive edges share their tangent at
+ * the meeting marker, giving C1-continuous bezier arcs.
+ *
+ * If the sum is zero (symmetric opposing edges exactly cancel), falls back to
+ * the right-hand perpendicular of the first incident edge, or (1, 0) if none.
+ */
+export function buildMarkerTangents(
+  markers: ReadonlyArray<{ id: string }>,
+  edges: ReadonlyArray<{ from_marker_id: string; to_marker_id: string }>,
+  markerPositions: Map<string, Point>,
+): Map<string, Point> {
+  const tangents = new Map<string, Point>();
+  const sums = new Map<string, { x: number; y: number }>();
+  for (const m of markers) sums.set(m.id, { x: 0, y: 0 });
+
+  accumulateEdgeContributions(edges, markerPositions, sums);
+
+  for (const m of markers) {
+    const sum = sums.get(m.id);
+    if (!sum) continue;
+    const len = Math.sqrt(sum.x * sum.x + sum.y * sum.y);
+    tangents.set(
+      m.id,
+      len > 1e-9
+        ? { x: sum.x / len, y: sum.y / len }
+        : degenerateTangent(m.id, edges, markerPositions),
+    );
+  }
+
+  return tangents;
+}
+
+/**
+ * Compute the two cubic bezier control points for an edge using
+ * marker tangents for C1 continuity at shared markers.
+ *
+ * C1: from + tangent[from] * k  (departs `from` along its tangent)
+ * C2: to   - tangent[to]   * k  (arrives at `to` along its tangent)
+ *
+ * k = BEZIER_HANDLE_FRACTION * distance(from, to)
+ *
+ * Sign of tangent[to] is negated because the control point must lie
+ * *before* `to` on the curve (i.e. on the side that the edge comes from).
+ * Since the tangent convention is "forward" (the direction the track flows
+ * through the marker), arriving at `to` from the `from` direction means the
+ * handle is placed at `to - tangent[to] * k`.
+ */
+function edgeBezierControls(
+  from: Point,
+  to: Point,
+  tangentFrom: Point,
+  tangentTo: Point,
+): { c1: Point; c2: Point } {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const len = Math.sqrt(dx * dx + dy * dy);
   if (len === 0) return { c1: from, c2: to };
 
-  // Perpendicular unit vector.
-  const px = -dy / len;
-  const py = dx / len;
+  const k = len * BEZIER_HANDLE_FRACTION;
 
-  // Use a hash of the edge key to get a consistent sign so forward/reverse
-  // edges of the same pair curve to opposite sides.
-  let keyHash = 0;
-  for (let i = 0; i < edgeKey.length; i++) {
-    keyHash = (keyHash * 31 + edgeKey.charCodeAt(i)) | 0;
-  }
-  const sign = keyHash % 2 === 0 ? 1 : -1;
-  const offset = len * BEZIER_OFFSET_FRACTION * sign;
+  // Ensure the handle at `from` points toward `to` (not away from it).
+  // The tangent is a unit "forward through marker" vector; if it points
+  // mostly away from `to`, flip it so the curve exits toward `to`.
+  const dotFrom = tangentFrom.x * dx + tangentFrom.y * dy;
+  const signFrom = dotFrom >= 0 ? 1 : -1;
 
-  // One control point each side of the midpoint, offset perpendicularly.
-  const cpx = mx + px * offset;
-  const cpy = my + py * offset;
+  // Similarly for the `to` handle: tangent[to] should point *away* from
+  // the edge (the curve arrives at `to`, so the handle sits behind `to`).
+  // The arriving direction is from→to, so the handle direction must align
+  // with that: we subtract tangent[to]*k from `to`. If tangent[to] points
+  // away from `from` (dot > 0), we negate so the handle lands on the correct side.
+  const dotTo = tangentTo.x * dx + tangentTo.y * dy;
+  const signTo = dotTo >= 0 ? 1 : -1;
 
-  // For a symmetric arc, both control points are the same midpoint-offset.
-  return { c1: { x: cpx, y: cpy }, c2: { x: cpx, y: cpy } };
+  return {
+    c1: { x: from.x + signFrom * tangentFrom.x * k, y: from.y + signFrom * tangentFrom.y * k },
+    c2: { x: to.x - signTo * tangentTo.x * k, y: to.y - signTo * tangentTo.y * k },
+  };
 }
 
 /**
@@ -103,32 +213,78 @@ function bezierPathD(from: Point, to: Point, c1: Point, c2: Point): string {
 }
 
 /**
- * Build an SVG `<path>` `d` for the 5-point train body shape.
+ * Build an SVG `<path>` `d` for the train body shape.
  *
- * The shape (in local coordinates, before rotation):
- *   - Tip at (halfL, 0) — front, pointing right
- *   - Shoulders at (shX, ±shY)  — just behind the tip
- *   - Rear corners at (-halfL, ±halfW)
- *   - Q-curve from shoulder to rear corner gives smooth hull sides
+ * Shape (local coordinates, x-axis is forward, tip points right):
  *
- * After building the path we transform it via a rotate + translate.
+ *   back-left (-halfL, -halfW)
+ *   back-right (-halfL, +halfW)
+ *   front-right (noseX, +halfW)   — where the rectangular body ends
+ *   nose tip (halfL, 0)           — the pointed front, smoothly curved via Q
+ *   front-left (noseX, -halfW)
+ *
+ *   noseX = halfL - halfW * 1.5   (the nose depth = 1.5× half-width)
+ *
+ * The back edge and both sides are straight lines (rectangular body).
+ * The front is two quadratic curves meeting at the tip, giving a smooth
+ * rounded nose.  Back corners are left sharp to give a clear "rear of train"
+ * read.
  */
 function trainShapeD(halfL: number, halfW: number): string {
-  const tipX = halfL;
-  const shX = halfL * 0.35;
-  const shY = halfW * 0.6;
   const rearX = -halfL;
-  const rearY = halfW;
+  // The rectangular body runs from rearX to noseX.
+  // noseX leaves enough room for the rounded nose without making the body tiny.
+  const noseX = halfL - halfW * 1.5;
+  const tipX = halfL;
 
-  // Start at tip, Q-curve through shoulder to rear-right corner,
-  // straight across the back, Q-curve up to left shoulder, close at tip.
   return [
-    `M ${tipX} 0`,
-    `Q ${shX} ${shY}, ${rearX} ${rearY}`,
-    `L ${rearX} ${-rearY}`,
-    `Q ${shX} ${-shY}, ${tipX} 0`,
+    // Start at back-left corner.
+    `M ${rearX} ${-halfW}`,
+    // Straight line along the left side to front-left.
+    `L ${noseX} ${-halfW}`,
+    // Quadratic curve: front-left → tip → front-right (smooth rounded nose).
+    `Q ${tipX} ${-halfW}, ${tipX} 0`,
+    `Q ${tipX} ${halfW}, ${noseX} ${halfW}`,
+    // Straight line along the right side back to back-right.
+    `L ${rearX} ${halfW}`,
+    // Close (straight back edge).
     'Z',
   ].join(' ');
+}
+
+/** Render a single edge as a `<path>`, or null if endpoint positions are missing. */
+function renderEdge(
+  edge: VisualiserEdge,
+  markerPositions: Map<string, Point>,
+  markerTangents: Map<string, Point>,
+  clearanceMap: ClearanceMap,
+): JSX.Element | null {
+  const from = markerPositions.get(edge.from_marker_id);
+  const to = markerPositions.get(edge.to_marker_id);
+  if (!from || !to) return null;
+
+  const key = `${edge.from_marker_id}->${edge.to_marker_id}`;
+  const clearedTo = clearanceMap.get(key) ?? '';
+  const tFrom = markerTangents.get(edge.from_marker_id) ?? { x: 1, y: 0 };
+  const tTo = markerTangents.get(edge.to_marker_id) ?? { x: 1, y: 0 };
+  const { c1, c2 } = edgeBezierControls(from, to, tFrom, tTo);
+  const d = bezierPathD(from, to, c1, c2);
+  const stroke = clearedTo ? trainColor(clearedTo) : edge.inferred ? '#aaa' : '#888';
+  const inferredProps =
+    edge.inferred && !clearedTo ? { strokeDasharray: '8 6', 'data-inferred': 'true' } : {};
+
+  return (
+    <path
+      key={key}
+      d={d}
+      fill="none"
+      stroke={stroke}
+      strokeWidth={clearedTo ? 9 : 6}
+      strokeLinecap="round"
+      data-cleared-to={clearedTo}
+      {...inferredProps}
+    />
+  );
 }
 
 /**
@@ -155,6 +311,7 @@ export function LayoutCanvas() {
 
   const markerPositions = computeMarkerPositions(layout);
   const edgeIndex = indexEdges(layout.edges);
+  const markerTangents = buildMarkerTangents(layout.markers, layout.edges, markerPositions);
 
   return (
     <section aria-label="Layout">
@@ -168,29 +325,9 @@ export function LayoutCanvas() {
       >
         <title>Track diagram for {layout.name}</title>
         <g data-testid="edges">
-          {layout.edges.map((edge) => {
-            const from = markerPositions.get(edge.from_marker_id);
-            const to = markerPositions.get(edge.to_marker_id);
-            if (!from || !to) return null;
-            const key = `${edge.from_marker_id}->${edge.to_marker_id}`;
-            const clearedTo = clearanceMap.get(key) ?? '';
-            const { c1, c2 } = edgeBezierControls(from, to, key);
-            const d = bezierPathD(from, to, c1, c2);
-            return (
-              <path
-                key={key}
-                d={d}
-                fill="none"
-                stroke={clearedTo ? trainColor(clearedTo) : edge.inferred ? '#aaa' : '#888'}
-                strokeWidth={clearedTo ? 9 : 6}
-                strokeLinecap="round"
-                data-cleared-to={clearedTo}
-                {...(edge.inferred && !clearedTo
-                  ? { strokeDasharray: '8 6', 'data-inferred': 'true' }
-                  : {})}
-              />
-            );
-          })}
+          {layout.edges.map((edge) =>
+            renderEdge(edge, markerPositions, markerTangents, clearanceMap),
+          )}
         </g>
         <g data-testid="markers">
           {layout.markers.map((marker) => {
@@ -214,16 +351,20 @@ export function LayoutCanvas() {
           })}
         </g>
         <g data-testid="trains">
-          {renderTrains(trains, trainStatuses, markerPositions, edgeIndex)}
+          {renderTrains(trains, trainStatuses, markerPositions, edgeIndex, markerTangents)}
         </g>
       </svg>
     </section>
   );
 }
 
-/** Half-length and half-width of the train shape in SVG units. */
-const TRAIN_HALF_L = MARKER_RADIUS * 1.1;
-const TRAIN_HALF_W = MARKER_RADIUS * 0.55;
+/**
+ * Half-length and half-width of the train shape in SVG units.
+ * The total body length is 2 * TRAIN_HALF_L plus the nose protrusion.
+ * Proportions: roughly 2.5× as long as wide when the nose is included.
+ */
+const TRAIN_HALF_L = MARKER_RADIUS * 1.3;
+const TRAIN_HALF_W = MARKER_RADIUS * 0.6;
 
 const TRAIN_SHAPE_D = trainShapeD(TRAIN_HALF_L, TRAIN_HALF_W);
 
@@ -232,12 +373,20 @@ function renderTrains(
   statuses: TrainStatuses,
   markerPositions: Map<string, Point>,
   edgeIndex: Map<string, VisualiserEdge>,
+  markerTangents: Map<string, Point>,
 ): JSX.Element[] {
   const out: JSX.Element[] = [];
   const trainIds = new Set<string>([...trains.keys(), ...statuses.keys()]);
 
   for (const trainId of trainIds) {
-    const placement = placeTrain(trainId, trains, statuses, markerPositions, edgeIndex);
+    const placement = placeTrain(
+      trainId,
+      trains,
+      statuses,
+      markerPositions,
+      edgeIndex,
+      markerTangents,
+    );
     if (!placement) continue;
     const { x, y, angleDeg, atMarker, onEdge } = placement;
 
@@ -295,6 +444,7 @@ function placeTrain(
   statuses: TrainStatuses,
   markerPositions: Map<string, Point>,
   edgeIndex: Map<string, VisualiserEdge>,
+  markerTangents: Map<string, Point>,
 ): TrainPlacement | undefined {
   const status = statuses.get(trainId);
   if (status?.current_edge) {
@@ -306,7 +456,9 @@ function placeTrain(
       const length = edge?.estimated_length_mm;
       const distance = status.distance_into_edge_mm ?? 0;
       const t = length && length > 0 ? Math.min(1, Math.max(0, distance / length)) : 0;
-      const { c1, c2 } = edgeBezierControls(from, to, key);
+      const tFrom = markerTangents.get(status.current_edge.from_marker_id) ?? { x: 1, y: 0 };
+      const tTo = markerTangents.get(status.current_edge.to_marker_id) ?? { x: 1, y: 0 };
+      const { c1, c2 } = edgeBezierControls(from, to, tFrom, tTo);
       const pt = cubicBezierPoint(from, c1, c2, to, t);
       const tangent = cubicBezierTangent(from, c1, c2, to, t);
       const angleDeg = Math.atan2(tangent.y, tangent.x) * (180 / Math.PI);
