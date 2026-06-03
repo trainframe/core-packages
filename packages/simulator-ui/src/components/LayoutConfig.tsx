@@ -7,6 +7,7 @@ import {
   saveLayoutSelection,
 } from '../config/layout-config.js';
 import { PRESET_LAYOUTS, PRESET_LAYOUT_IDS, isPresetLayoutId } from '../sim/layouts.js';
+import { TrackBuilder } from './TrackBuilder.js';
 
 interface LayoutConfigProps {
   /** Currently-applied selection (from App-level state). */
@@ -17,6 +18,7 @@ interface LayoutConfigProps {
 
 const DROPDOWN_CUSTOM = 'custom';
 const DROPDOWN_BUILD = 'build';
+const DROPDOWN_TRACK_BUILDER = 'track-builder';
 
 const MARKER_KINDS = [
   'block_boundary',
@@ -112,6 +114,42 @@ export function LayoutConfig({ selection, onChange }: LayoutConfigProps) {
 
   const isCustom = draftKind === DROPDOWN_CUSTOM;
   const isBuild = draftKind === DROPDOWN_BUILD;
+  const isTrackBuilder = draftKind === DROPDOWN_TRACK_BUILDER;
+
+  function handleTrackBuilderApply(layout: Layout) {
+    const next: StoredLayoutSelection = { kind: 'custom', layout };
+    saveLayoutSelection(next);
+    onChange(next);
+    setError(null);
+  }
+
+  // When the track-builder mode is active its own Apply button drives the flow,
+  // so we suppress the outer form submit to avoid ambiguous double-apply.
+  if (isTrackBuilder) {
+    return (
+      <div aria-label="Layout configuration">
+        <h2>Layout</h2>
+        <div>
+          <label htmlFor={dropdownId}>Source</label>
+          <select
+            id={dropdownId}
+            value={draftKind}
+            onChange={(e) => handleDropdownChange(e.target.value)}
+          >
+            {PRESET_LAYOUT_IDS.map((id) => (
+              <option key={id} value={id}>
+                Preset · {id}
+              </option>
+            ))}
+            <option value={DROPDOWN_CUSTOM}>Custom JSON</option>
+            <option value={DROPDOWN_BUILD}>Build (step-by-step)</option>
+            <option value={DROPDOWN_TRACK_BUILDER}>Track builder (visual)</option>
+          </select>
+        </div>
+        <TrackBuilder onApply={handleTrackBuilderApply} />
+      </div>
+    );
+  }
 
   return (
     <form onSubmit={handleSubmit} aria-label="Layout configuration">
@@ -130,6 +168,7 @@ export function LayoutConfig({ selection, onChange }: LayoutConfigProps) {
           ))}
           <option value={DROPDOWN_CUSTOM}>Custom JSON</option>
           <option value={DROPDOWN_BUILD}>Build (step-by-step)</option>
+          <option value={DROPDOWN_TRACK_BUILDER}>Track builder (visual)</option>
         </select>
       </div>
       {isCustom ? (
@@ -145,7 +184,7 @@ export function LayoutConfig({ selection, onChange }: LayoutConfigProps) {
           />
         </div>
       ) : null}
-      {isBuild ? <TrackBuilder state={builder} onChange={setBuilder} /> : null}
+      {isBuild ? <BuildForm state={builder} onChange={setBuilder} /> : null}
       {error ? (
         <p role="alert" data-testid="layout-error">
           {error}
@@ -156,12 +195,12 @@ export function LayoutConfig({ selection, onChange }: LayoutConfigProps) {
   );
 }
 
-interface TrackBuilderProps {
+interface BuildFormProps {
   readonly state: BuilderState;
   readonly onChange: (next: BuilderState) => void;
 }
 
-function TrackBuilder({ state, onChange }: TrackBuilderProps) {
+function BuildForm({ state, onChange }: BuildFormProps) {
   const nameId = useId();
   return (
     <fieldset aria-label="Track builder">
@@ -183,7 +222,7 @@ function TrackBuilder({ state, onChange }: TrackBuilderProps) {
   );
 }
 
-function MarkersSection({ state, onChange }: TrackBuilderProps) {
+function MarkersSection({ state, onChange }: BuildFormProps) {
   const idFieldId = useId();
   const kindFieldId = useId();
   const xId = useId();
@@ -258,7 +297,7 @@ function MarkersSection({ state, onChange }: TrackBuilderProps) {
   );
 }
 
-function EdgesSection({ state, onChange }: TrackBuilderProps) {
+function EdgesSection({ state, onChange }: BuildFormProps) {
   const fromId = useId();
   const toId = useId();
   const lengthId = useId();
@@ -357,7 +396,7 @@ function EdgesSection({ state, onChange }: TrackBuilderProps) {
   );
 }
 
-function JunctionsSection({ state, onChange }: TrackBuilderProps) {
+function JunctionsSection({ state, onChange }: BuildFormProps) {
   const markerSelectId = useId();
   const positionsId = useId();
   const initialId = useId();
