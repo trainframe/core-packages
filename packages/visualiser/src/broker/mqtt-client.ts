@@ -103,8 +103,12 @@ export class MqttBrokerSubscriber implements BrokerSubscriber {
 
   publish(topic: string, payload: Uint8Array, options?: PublishOptions): void {
     if (!this.client) return;
-    // mqtt.js accepts a Buffer or a Uint8Array; pass the latter through.
-    this.client.publish(topic, Buffer.from(payload), { retain: options?.retain ?? false });
+    // Decode to a UTF-8 string before publishing: mqtt.js's Node-flavoured
+    // types want `string | Buffer`, and Buffer is not available in the
+    // browser without a polyfill. Our payloads are always JSON-encoded
+    // UTF-8 bytes, so the round-trip is lossless.
+    const text = new TextDecoder().decode(payload);
+    this.client.publish(topic, text, { retain: options?.retain ?? false });
   }
 
   onStatusChange(listener: StatusListener): () => void {

@@ -13,6 +13,65 @@ import { SIM_URL, VISUALISER_URL } from '../playwright.config.js';
  * aedes, etc.) belongs in `test-harness.ts`.
  */
 
+export interface SpawnTrainOptions {
+  /** Train ID to fill in. Defaults to `'T1'`. */
+  readonly trainId?: string;
+  /**
+   * Marker ID to select as the starting position. When omitted the
+   * spawn-position select's current value (auto-set to the first valid
+   * marker) is used unchanged.
+   */
+  readonly startMarker?: string;
+}
+
+/**
+ * Drive the simulator-ui's spawn form (ADR-013 physical-twin surface):
+ * optionally set the Train ID and starting-position marker, then click
+ * "Spawn train". No stops — schedule assignment lives on the visualiser
+ * side via {@link assignSchedule}.
+ */
+export async function spawnTrain(sim: Page, opts: SpawnTrainOptions = {}): Promise<void> {
+  if (opts.trainId !== undefined) {
+    await sim.getByRole('textbox', { name: /Train ID/i }).fill(opts.trainId);
+  }
+  if (opts.startMarker !== undefined) {
+    await sim.getByTestId('spawn-position').selectOption(opts.startMarker);
+  }
+  await sim.getByRole('button', { name: /spawn train/i }).click();
+}
+
+export interface AssignScheduleOptions {
+  /** Train ID to select in the ScheduleAssigner train picker. */
+  readonly trainId: string;
+  /** Ordered list of stop marker IDs to add before clicking Assign. */
+  readonly stops: ReadonlyArray<string>;
+}
+
+/**
+ * Drive the visualiser's `ScheduleAssigner` component (ADR-013 system-view
+ * surface): pick the train, build the stops list, and click Assign.
+ *
+ * The ScheduleAssigner is only rendered once at least one train is
+ * registered, so call this after the train has appeared in the visualiser.
+ */
+export async function assignSchedule(vis: Page, opts: AssignScheduleOptions): Promise<void> {
+  const assigner = vis.getByTestId('schedule-assigner');
+  await assigner.waitFor({ state: 'visible' });
+
+  // Pick the train. The select's id is generated (useId), so target by
+  // the accessible name "Train" which the <label> provides via htmlFor.
+  await assigner.getByRole('combobox', { name: /\btrain\b/i }).selectOption(opts.trainId);
+
+  // Add each stop in order. The label toggles between "First stop" (empty
+  // list) and "Next stop" (list has items) — match both with /stop/i.
+  for (const stop of opts.stops) {
+    await assigner.getByRole('combobox', { name: /stop/i }).selectOption(stop);
+    await assigner.getByRole('button', { name: /add stop/i }).click();
+  }
+
+  await assigner.getByRole('button', { name: /^assign$/i }).click();
+}
+
 export interface OpenVisualiserOptions {
   /** Override the broker WS URL the visualiser connects to. */
   readonly brokerUrl?: string;

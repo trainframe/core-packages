@@ -1,6 +1,11 @@
 import { expect, test } from '@playwright/test';
 import type { Layout } from '@trainframe/protocol';
-import { openSimulatorUi, openVisualiser } from '../src/playwright-helpers.js';
+import {
+  assignSchedule,
+  openSimulatorUi,
+  openVisualiser,
+  spawnTrain,
+} from '../src/playwright-helpers.js';
 import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
 /**
@@ -10,6 +15,10 @@ import { type UiHarness, startUiHarness } from '../src/test-harness.js';
  * each train through the Simulation (which emits `device_disconnected`)
  * before the sim is destroyed, and have the visualiser's train hooks
  * remove the entry when they see the disconnect.
+ *
+ * Per ADR-013: spawning is on the sim-ui (physical action); schedule
+ * assignment is on the visualiser's ScheduleAssigner (operator system intent).
+ * The Stop button is inside the Developer drawer.
  */
 
 const STOP_LOOP: Layout = {
@@ -47,13 +56,18 @@ test.describe
 
       await expect(visualiser.locator('[data-marker-id="M1"]')).toBeVisible();
 
-      for (const stop of ['M1', 'M2']) {
-        await sim.getByRole('combobox', { name: /stop/i }).selectOption(stop);
-        await sim.getByRole('button', { name: /add stop/i }).click();
-      }
-      await sim.getByRole('button', { name: /Spawn train/i }).click();
+      // Spawn the train (physical action on the sim-ui).
+      await spawnTrain(sim, { trainId: 'T1', startMarker: 'M1' });
+
+      // Assign a schedule via the visualiser so the train moves and its icon
+      // appears. assignSchedule waits for the ScheduleAssigner panel to
+      // become visible (it appears once T1's device_registered retained state
+      // reaches the visualiser), then the train icon follows after movement.
+      await assignSchedule(visualiser, { trainId: 'T1', stops: ['M1', 'M2'] });
       await expect(visualiser.locator('[data-train-id="T1"]')).toBeVisible({ timeout: 8_000 });
 
+      // Open the Developer drawer to access the Stop button.
+      await sim.getByRole('button', { name: 'Developer' }).click();
       await sim.getByRole('button', { name: 'Stop', exact: true }).click();
       await expect(visualiser.locator('[data-train-id="T1"]')).toHaveCount(0, { timeout: 5_000 });
     });

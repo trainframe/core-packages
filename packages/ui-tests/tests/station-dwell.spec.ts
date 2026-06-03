@@ -1,6 +1,11 @@
-import { type Page, expect, test } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import type { Layout } from '@trainframe/protocol';
-import { openSimulatorUi, openVisualiser } from '../src/playwright-helpers.js';
+import {
+  assignSchedule,
+  openSimulatorUi,
+  openVisualiser,
+  spawnTrain,
+} from '../src/playwright-helpers.js';
 import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
 /**
@@ -10,6 +15,10 @@ import { type UiHarness, startUiHarness } from '../src/test-harness.js';
  * timing — the gate cycles asynchronously — so we just assert the train
  * stalls (data-on-edge / data-at-marker don't change) for at least a
  * couple consecutive polls within the test window.
+ *
+ * Per ADR-013: spawning the train (physical action) is on the simulator-ui;
+ * assigning the schedule (operator system intent) is on the visualiser's
+ * ScheduleAssigner.
  */
 
 const STATION_LOOP: Layout = {
@@ -28,14 +37,6 @@ const STATION_LOOP: Layout = {
   ],
   junctions: [],
 };
-
-/** Pick each stop ID in order and click Add stop. */
-async function buildSchedule(sim: Page, stops: ReadonlyArray<string>): Promise<void> {
-  for (const stop of stops) {
-    await sim.getByRole('combobox', { name: /stop/i }).selectOption(stop);
-    await sim.getByRole('button', { name: /add stop/i }).click();
-  }
-}
 
 test.describe
   .serial('Trains visibly dwell at a station_stop marker', () => {
@@ -57,11 +58,17 @@ test.describe
 
       await expect(visualiser.locator('[data-marker-id="M3"]')).toBeVisible();
 
-      // Pick stops that route the train through the M3 station. The cyclic
-      // schedule M1→M3→M1→... causes the planner to find M1→M2→M3 then
-      // M3→M4→M1, so the train visits M3 on every lap.
-      await buildSchedule(sim, ['M1', 'M3']);
-      await sim.getByRole('button', { name: /spawn train/i }).click();
+      // Spawn the train at M1 (physical action on the sim-ui).
+      await spawnTrain(sim, { trainId: 'T1', startMarker: 'M1' });
+
+      // Assign a schedule via the visualiser's ScheduleAssigner.
+      // assignSchedule waits for the panel to appear — it becomes visible
+      // once the retained device_registered state reaches the visualiser.
+      // The cyclic schedule M1→M3→M1→... causes the planner to find
+      // M1→M2→M3 then M3→M4→M1, so the train visits M3 on every lap.
+      await assignSchedule(visualiser, { trainId: 'T1', stops: ['M1', 'M3'] });
+
+      // Wait for the train icon to appear (driven by marker_traversed events).
       await expect(visualiser.locator('[data-train-id="T1"]')).toBeVisible({ timeout: 8_000 });
 
       // Poll the train's position every 500ms for up to 20s. Each tick we

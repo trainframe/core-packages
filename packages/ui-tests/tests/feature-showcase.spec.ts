@@ -239,11 +239,9 @@ test.describe
       });
       await page.goto(SIM_URL);
       await expect(page.getByRole('heading', { name: /Trainframe Simulator/i })).toBeVisible();
-      await page.getByRole('button', { name: 'Start', exact: true }).click();
-      for (const stop of ['M1', 'M3']) {
-        await page.getByRole('combobox', { name: /stop/i }).selectOption(stop);
-        await page.getByRole('button', { name: /add stop/i }).click();
-      }
+      // The spawn-position auto-selects the first valid marker; Spawn is
+      // ready immediately. Schedules are assigned from the visualiser per
+      // ADR-013 — this screenshot captures the sim-ui's physical-twin surface.
       await page.getByRole('button', { name: /Spawn train/i }).click();
       await settle(page);
       await page.screenshot({

@@ -23,7 +23,7 @@ export function ScheduleList() {
         {rows.map((row) => (
           <li
             key={row.train_id}
-            data-train-id={row.train_id}
+            data-schedule-train-id={row.train_id}
             style={{ padding: '0.25rem 0', display: 'flex', gap: '0.5rem' }}
           >
             <span style={{ color: trainColor(row.train_id), fontWeight: 'bold' }}>

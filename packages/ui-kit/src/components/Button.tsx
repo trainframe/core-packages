@@ -15,11 +15,11 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
  * theme-dark.css and switched by the document's `data-theme` attribute.
  * No runtime style objects — just class names.
  */
-export function Button({ variant = 'primary', className, children, ...rest }: ButtonProps) {
+export function Button({ type, variant = 'primary', className, children, ...rest }: ButtonProps) {
   const variantClass = `tf-button--${variant}`;
   const classes = ['tf-button', variantClass, className].filter(Boolean).join(' ');
   return (
-    <button type="button" className={classes} {...rest}>
+    <button type={type ?? 'button'} className={classes} {...rest}>
       {children}
     </button>
   );

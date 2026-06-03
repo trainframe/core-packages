@@ -46,9 +46,9 @@ test.describe('Simulator UI: connected to a real broker + server', () => {
   test('events published by the UI surface in the server`s retained device state', async ({
     page,
   }) => {
-    await page.getByRole('button', { name: 'Start', exact: true }).click();
-    await page.getByLabel(/stop/i).selectOption('M1');
-    await page.getByRole('button', { name: /add stop/i }).click();
+    // The spawn-position auto-selects the first valid marker, so Spawn is
+    // ready immediately. No schedule needed — device_registered is what
+    // the server tracks.
     await page.getByRole('button', { name: /Spawn train/i }).click();
 
     // The server subscribes to railway/events/+/+ and, on a device_registered

@@ -1,13 +1,20 @@
-import { type Page, expect, test } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import type { Layout } from '@trainframe/protocol';
-import { openSimulatorUi, openVisualiser } from '../src/playwright-helpers.js';
+import {
+  assignSchedule,
+  openSimulatorUi,
+  openVisualiser,
+  spawnTrain,
+} from '../src/playwright-helpers.js';
 import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
 /**
- * Operator journey for the schedule builder. The operator picks stops the
- * train will cycle through; the planner computes the per-leg transit through
- * the layout graph on demand (ADR-010). We assert the train visits the branch
- * the operator selected by watching the visualiser as edges advance.
+ * Operator journey for the schedule builder. Per ADR-013, spawning a train
+ * (physical action) happens on the simulator-ui; assigning the stops the
+ * train will cycle through (operator system intent) happens on the
+ * visualiser's ScheduleAssigner. The planner computes the per-leg transit
+ * through the layout graph on demand (ADR-010). We assert the train visits
+ * the branch the operator selected by watching the visualiser as edges advance.
  */
 
 const BRANCHED: Layout = {
@@ -34,14 +41,6 @@ const BRANCHED: Layout = {
   junctions: [],
 };
 
-/** Pick each stop ID in order and click Add stop. */
-async function buildSchedule(sim: Page, stops: ReadonlyArray<string>): Promise<void> {
-  for (const stop of stops) {
-    await sim.getByRole('combobox', { name: /stop/i }).selectOption(stop);
-    await sim.getByRole('button', { name: /add stop/i }).click();
-  }
-}
-
 test.describe
   .serial('Operator builds a schedule by picking stops', () => {
     let harness: UiHarness;
@@ -62,19 +61,24 @@ test.describe
 
       await expect(visualiser.locator('[data-marker-id="M1"]')).toBeVisible();
 
-      // Operator picks M1 as the first stop (spawn marker) and M5 as the
-      // second stop. Spawn is enabled as soon as there is at least one stop.
-      await expect(sim.getByRole('button', { name: /spawn train/i })).toBeDisabled();
-      await buildSchedule(sim, ['M1']);
+      // Operator places the train at M1 (its starting position) and spawns.
+      // The spawn-position select auto-selects M1 (first marker with an
+      // outgoing edge), so Spawn is enabled immediately.
       await expect(sim.getByRole('button', { name: /spawn train/i })).toBeEnabled();
-      await buildSchedule(sim, ['M5']);
-      await expect(sim.getByRole('button', { name: /spawn train/i })).toBeEnabled();
+      await spawnTrain(sim, { trainId: 'T1', startMarker: 'M1' });
 
-      // The visible planned-stops list reflects the operator's clicks.
-      await expect(sim.getByRole('list', { name: /planned stops/i })).toHaveText(/M1.*M5/);
+      // Operator assigns a schedule via the visualiser's ScheduleAssigner.
+      // assignSchedule waits for the panel to appear — it becomes visible
+      // once the retained device_registered state reaches the visualiser.
+      // Stops M1 and M5 cause the planner to find M1→M2→M5, exercising the
+      // branch that a trivial first-edge walk would never take.
+      await assignSchedule(visualiser, { trainId: 'T1', stops: ['M1', 'M5'] });
 
-      // Spawn the train. The planner computes M1→M2→M5 from the two stops.
-      await sim.getByRole('button', { name: /spawn train/i }).click();
+      // Confirm the assigner shows the sent confirmation.
+      await expect(visualiser.getByTestId('schedule-assigner-sent')).toBeVisible();
+
+      // Now that the train has a schedule it starts moving. Wait for its
+      // icon to appear (driven by marker_traversed / train_status events).
       await expect(visualiser.locator('[data-train-id="T1"]')).toBeVisible({ timeout: 8_000 });
 
       // The branch from M2 has M5 as its destination — the train must reach

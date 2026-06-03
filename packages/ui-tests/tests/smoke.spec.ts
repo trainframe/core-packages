@@ -1,20 +1,14 @@
-import { type Page, expect, test } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 
 /**
  * Operator-facing smoke. Each test is framed as "what does the operator do
  * and see?" rather than "what internal state transitions?". The journey
  * regression for multi-train block release lives in multi-train-journey.spec.
+ *
+ * Per ADR-013 the spawn form now only sets a starting position (single
+ * marker). Schedule assignment lives on the visualiser's ScheduleAssigner.
+ * Lifecycle controls (Pause, Stop, Step) are in the Developer drawer.
  */
-
-/**
- * The default sim-ui starts with the SIMPLE_LOOP preset. The schedule builder
- * starts empty, so every spawn-driving test first picks a stop (M1) to enable
- * the Spawn button — a single stop is sufficient.
- */
-async function buildDefaultSchedule(page: Page): Promise<void> {
-  await page.getByLabel(/stop/i).selectOption('M1');
-  await page.getByRole('button', { name: /add stop/i }).click();
-}
 
 test.describe('Simulator UI: operator panel', () => {
   test.beforeEach(async ({ page }) => {
@@ -35,17 +29,18 @@ test.describe('Simulator UI: operator panel', () => {
   }) => {
     await expect(page.getByRole('heading', { name: /Trainframe Simulator/i })).toBeVisible();
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/none/i);
-    // Spawn is gated on building a route — after the operator picks
-    // markers, Spawn becomes available.
-    await buildDefaultSchedule(page);
+    // Spawn is gated on picking a starting position. The simple-loop preset
+    // has outgoing edges on M1, so spawn-position auto-selects M1 and the
+    // button is enabled immediately.
     await expect(page.getByRole('button', { name: /spawn train/i })).toBeEnabled();
-    // Pause and Stop are not yet meaningful — the operator hasn't started anything.
+    // Lifecycle controls (Pause, Stop) are inside the Developer drawer.
+    // Open it before asserting their state.
+    await page.getByRole('button', { name: 'Developer' }).click();
     await expect(page.getByRole('button', { name: /^pause$/i })).toBeDisabled();
     await expect(page.getByRole('button', { name: /^stop$/i })).toBeDisabled();
   });
 
   test('after spawning a train, the operator sees it listed in the snapshot', async ({ page }) => {
-    await buildDefaultSchedule(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1/);
   });
@@ -53,7 +48,6 @@ test.describe('Simulator UI: operator panel', () => {
   test('spawning from idle leaves the simulation running so the operator sees motion without further input', async ({
     page,
   }) => {
-    await buildDefaultSchedule(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(page.getByTestId('sim-status')).toHaveText('running');
   });
@@ -61,12 +55,12 @@ test.describe('Simulator UI: operator panel', () => {
   test('stepping the simulation after spawning advances the clock the operator sees', async ({
     page,
   }) => {
-    await buildDefaultSchedule(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
 
     const clock = page.locator('dt:has-text("Sim time") + dd');
     await expect(clock).toHaveText('0.0s');
 
+    await page.getByRole('button', { name: 'Developer' }).click();
     await page.getByRole('button', { name: /step 1s/i }).click();
     await expect(clock).not.toHaveText('0.0s');
   });
@@ -75,18 +69,17 @@ test.describe('Simulator UI: operator panel', () => {
     page,
   }) => {
     // Spawn from idle: auto-resumes, sim runs.
-    await buildDefaultSchedule(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(page.getByTestId('sim-status')).toHaveText('running');
 
-    // Operator pauses to inspect / adjust.
+    // Operator opens Developer drawer and pauses to inspect / adjust.
+    await page.getByRole('button', { name: 'Developer' }).click();
     await page.getByRole('button', { name: /^pause$/i }).click();
     await expect(page.getByTestId('sim-status')).toHaveText('paused');
 
     // A second Spawn while paused should add the train but leave the
     // sim paused — the operator paused for a reason and a side-effect
-    // resume would override their intent. The route is still on the form
-    // from the first spawn, so the second Spawn is enabled.
+    // resume would override their intent.
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1, T2/);
     await expect(page.getByTestId('sim-status')).toHaveText('paused');
@@ -98,10 +91,10 @@ test.describe('Simulator UI: operator panel', () => {
     const trainIdInput = page.getByRole('textbox', { name: /Train ID/i });
     await expect(trainIdInput).toHaveValue('T1');
 
-    await buildDefaultSchedule(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(trainIdInput).toHaveValue('T2');
 
+    await page.getByRole('button', { name: 'Developer' }).click();
     await page.getByRole('button', { name: /^stop$/i }).click();
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/none/i);
     // No trains exist anymore — the form should reflect that.
@@ -114,7 +107,6 @@ test.describe('Simulator UI: operator panel', () => {
     const trainIdInput = page.getByRole('textbox', { name: /Train ID/i });
 
     // Spawn T1 — succeeds, counter advances to T2.
-    await buildDefaultSchedule(page);
     await page.getByRole('button', { name: /spawn train/i }).click();
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1/);
     await expect(trainIdInput).toHaveValue('T2');
@@ -141,11 +133,11 @@ test.describe('Simulator UI: operator panel', () => {
     await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1, T2/);
   });
 
-  test('applying a no-stop schedule disables Spawn and shows an explanatory hint', async ({
+  test('a layout with markers but no outgoing edges disables Spawn and shows an explanatory hint', async ({
     page,
   }) => {
-    // Paste a layout with markers but no edges. The operator has markers to
-    // pick as stops, but has not picked any yet, so Spawn remains disabled.
+    // Paste a layout with markers but no edges. No marker has an outgoing
+    // edge, so there is no valid starting position and Spawn is disabled.
     const edgelessJson = JSON.stringify(
       {
         name: 'edgeless-test',
@@ -165,6 +157,6 @@ test.describe('Simulator UI: operator panel', () => {
     await expect(page.getByRole('button', { name: /spawn train/i })).toBeDisabled();
     // The operator gets a clear explanation, not just a greyed-out button.
     await expect(page.getByTestId('spawn-stops-hint')).toBeVisible();
-    await expect(page.getByTestId('spawn-stops-hint')).toContainText(/stop/i);
+    await expect(page.getByTestId('spawn-stops-hint')).toContainText(/outgoing edge/i);
   });
 });
