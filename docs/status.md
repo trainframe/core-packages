@@ -203,6 +203,7 @@ Coverage thresholds: not applicable (Playwright; covered by E2E pass/fail).
 | ADR-011                                        | shipped | Section as edge + boundary markers; amends ADR-002's clearance model. |
 | ADR-012                                        | shipped | Train length on registration; tail-clearance release derived from train_status internally; per-train EWMA on LayoutState. |
 | Live clearance overlay                         | shipped | Retained `railway/state/clearance/<train_id>` topic per train; visualiser renders cleared edges with `data-cleared-to` + per-train hue. ADR-011 made it useful; phase 3 made it visible. |
+| Visualiser facelift                            | shipped | Edges as cubic bezier `<path>` arcs (perpendicular offset per edge; forward/reverse pairs bow apart), 6px → 9px stroke when cleared. Trains as top-down pointed 5-point shapes rotated to the bezier tangent at their current `t`, filled with `trainColor(train_id)`. All `data-*` attributes preserved for ui-tests + the live-driving doc. |
 | `docs/status.md` (this file)                   | shipped | New.                                                                           |
 | ADR for HTTP query API split                   | not started | Spec §"Open questions for v0.3" flags this as undecided.                       |
 | ADR for tag→marker resolution registry         | not started |                                                                                |

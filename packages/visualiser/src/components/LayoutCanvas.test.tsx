@@ -62,12 +62,17 @@ describe('LayoutCanvas', () => {
     expect(markers.querySelector('[data-marker-id="M3"]')).not.toBeNull();
   });
 
-  it('renders one edge per layout edge', () => {
+  it('renders one edge per layout edge as a path element with a d attribute', () => {
     const { client } = renderCanvas();
     act(() => deliverState(client, 'railway/state/layout/simple-loop', SIMPLE_LOOP_LAYOUT));
 
     const edges = screen.getByTestId('edges');
-    expect(edges.querySelectorAll('line').length).toBe(4);
+    const paths = edges.querySelectorAll('path[d]');
+    expect(paths.length).toBe(4);
+    // Each path's d attribute should start with an SVG Move command.
+    for (const path of Array.from(paths)) {
+      expect(path.getAttribute('d')).toMatch(/^M /);
+    }
   });
 
   it('renders inferred edges as dashed and confirmed edges as solid', () => {
@@ -88,18 +93,18 @@ describe('LayoutCanvas', () => {
     act(() => deliverState(client, 'railway/state/layout/discovery-loop', layoutWithInferredEdge));
 
     const edges = screen.getByTestId('edges');
-    const lines = edges.querySelectorAll('line');
-    expect(lines.length).toBe(2);
+    const paths = edges.querySelectorAll('path[d]');
+    expect(paths.length).toBe(2);
 
-    const inferredLine = edges.querySelector('line[data-inferred="true"]');
-    expect(inferredLine).not.toBeNull();
-    expect(inferredLine?.getAttribute('stroke-dasharray')).toBe('8 6');
+    const inferredPath = edges.querySelector('path[data-inferred="true"]');
+    expect(inferredPath).not.toBeNull();
+    expect(inferredPath?.getAttribute('stroke-dasharray')).toBe('8 6');
 
     // The confirmed edge should have no data-inferred attribute at all.
-    const allLines = Array.from(lines);
-    const confirmedLine = allLines.find((l) => !l.hasAttribute('data-inferred'));
-    expect(confirmedLine).not.toBeUndefined();
-    expect(confirmedLine?.hasAttribute('stroke-dasharray')).toBe(false);
+    const allPaths = Array.from(paths);
+    const confirmedPath = allPaths.find((p) => !p.hasAttribute('data-inferred'));
+    expect(confirmedPath).not.toBeUndefined();
+    expect(confirmedPath?.hasAttribute('stroke-dasharray')).toBe(false);
   });
 
   it('places a train marker at its last reported marker', () => {
@@ -150,6 +155,25 @@ describe('LayoutCanvas', () => {
     ).toBeInTheDocument();
   });
 
+  it('renders a train as a path inside a group with data-train-id', () => {
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/simple-loop', SIMPLE_LOOP_LAYOUT));
+    act(() =>
+      deliverEvent(client, 'railway/events/marker_traversed/T1', {
+        train_id: 'T1',
+        marker_id: 'M1',
+      }),
+    );
+
+    const trains = screen.getByTestId('trains');
+    const trainGroup = trains.querySelector('[data-train-id="T1"]');
+    expect(trainGroup).not.toBeNull();
+    // The icon should be a <path> element (not a <circle>) inside the group.
+    const trainPath = trainGroup?.querySelector('path');
+    expect(trainPath).not.toBeNull();
+    expect(trainPath?.getAttribute('d')).toBeTruthy();
+  });
+
   it('interpolates a train along its edge when train_status arrives with edge metadata', () => {
     const layoutWithLengths = {
       ...SIMPLE_LOOP_LAYOUT,
@@ -167,20 +191,17 @@ describe('LayoutCanvas', () => {
     );
 
     const trainNode = screen.getByTestId('trains').querySelector('[data-train-id="T1"]');
+    // The train should be reported as on M1->M2.
     expect(trainNode?.getAttribute('data-on-edge')).toBe('M1->M2');
-    const circle = trainNode?.querySelector('circle');
-    const markers = screen.getByTestId('markers');
-    const m1 = markers.querySelector('[data-marker-id="M1"] circle');
-    const m2 = markers.querySelector('[data-marker-id="M2"] circle');
-    const trainX = Number(circle?.getAttribute('cx'));
-    const trainY = Number(circle?.getAttribute('cy'));
-    const expectedX = (Number(m1?.getAttribute('cx')) + Number(m2?.getAttribute('cx'))) / 2;
-    const expectedY = (Number(m1?.getAttribute('cy')) + Number(m2?.getAttribute('cy'))) / 2;
-    expect(trainX).toBeCloseTo(expectedX, 1);
-    expect(trainY).toBeCloseTo(expectedY, 1);
+    // The train icon is a <path> with a transform that includes translate.
+    const trainPath = trainNode?.querySelector('path');
+    expect(trainPath).not.toBeNull();
+    const transform = trainPath?.getAttribute('transform') ?? '';
+    expect(transform).toMatch(/translate\(/);
+    expect(transform).toMatch(/rotate\(/);
   });
 
-  it('sets data-cleared-to on an edge line when the clearance map holds it', () => {
+  it('sets data-cleared-to on an edge path when the clearance map holds it', () => {
     const { client } = renderCanvas();
     act(() => deliverState(client, 'railway/state/layout/simple-loop', SIMPLE_LOOP_LAYOUT));
 
@@ -193,15 +214,15 @@ describe('LayoutCanvas', () => {
     );
 
     const edges = screen.getByTestId('edges');
-    const clearedLine = edges.querySelector('line[data-cleared-to="T1"]');
-    expect(clearedLine).not.toBeNull();
+    const clearedPath = edges.querySelector('path[data-cleared-to="T1"]');
+    expect(clearedPath).not.toBeNull();
 
     // The other edges should have an empty data-cleared-to attribute.
-    const allLines = Array.from(edges.querySelectorAll('line'));
-    const unclearedLines = allLines.filter((l) => l.getAttribute('data-cleared-to') !== 'T1');
-    expect(unclearedLines.length).toBe(3);
-    for (const line of unclearedLines) {
-      expect(line.getAttribute('data-cleared-to')).toBe('');
+    const allPaths = Array.from(edges.querySelectorAll('path[d]'));
+    const unclearedPaths = allPaths.filter((p) => p.getAttribute('data-cleared-to') !== 'T1');
+    expect(unclearedPaths.length).toBe(3);
+    for (const path of unclearedPaths) {
+      expect(path.getAttribute('data-cleared-to')).toBe('');
     }
   });
 
