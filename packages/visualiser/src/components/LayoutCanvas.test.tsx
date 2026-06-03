@@ -180,6 +180,31 @@ describe('LayoutCanvas', () => {
     expect(trainY).toBeCloseTo(expectedY, 1);
   });
 
+  it('sets data-cleared-to on an edge line when the clearance map holds it', () => {
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/simple-loop', SIMPLE_LOOP_LAYOUT));
+
+    // Deliver a retained clearance state: T1 holds M1→M2.
+    act(() =>
+      deliverState(client, 'railway/state/clearance/T1', {
+        train_id: 'T1',
+        cleared_edges: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
+      }),
+    );
+
+    const edges = screen.getByTestId('edges');
+    const clearedLine = edges.querySelector('line[data-cleared-to="T1"]');
+    expect(clearedLine).not.toBeNull();
+
+    // The other edges should have an empty data-cleared-to attribute.
+    const allLines = Array.from(edges.querySelectorAll('line'));
+    const unclearedLines = allLines.filter((l) => l.getAttribute('data-cleared-to') !== 'T1');
+    expect(unclearedLines.length).toBe(3);
+    for (const line of unclearedLines) {
+      expect(line.getAttribute('data-cleared-to')).toBe('');
+    }
+  });
+
   it('prefers the latest train_status over a stale marker_traversed', () => {
     const layoutWithLengths = {
       ...SIMPLE_LOOP_LAYOUT,

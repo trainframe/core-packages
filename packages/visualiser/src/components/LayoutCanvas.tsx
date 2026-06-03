@@ -1,4 +1,5 @@
 import type { JSX } from 'react';
+import { type ClearanceMap, useClearanceState } from '../state/use-clearance-state.js';
 import {
   type VisualiserEdge,
   type VisualiserLayout,
@@ -7,6 +8,7 @@ import {
 } from '../state/use-layout-state.js';
 import { type TrainPositions, useTrainPositions } from '../state/use-train-positions.js';
 import { type TrainStatuses, useTrainStatuses } from '../state/use-train-statuses.js';
+import { trainColor } from '../train-color.js';
 
 interface Point {
   readonly x: number;
@@ -30,6 +32,7 @@ export function LayoutCanvas() {
   const layout = useLayoutState();
   const trains = useTrainPositions();
   const trainStatuses = useTrainStatuses();
+  const clearanceMap = useClearanceState();
 
   if (!layout) {
     return (
@@ -59,16 +62,21 @@ export function LayoutCanvas() {
             const from = markerPositions.get(edge.from_marker_id);
             const to = markerPositions.get(edge.to_marker_id);
             if (!from || !to) return null;
+            const key = `${edge.from_marker_id}->${edge.to_marker_id}`;
+            const clearedTo = clearanceMap.get(key) ?? '';
             return (
               <line
-                key={`${edge.from_marker_id}->${edge.to_marker_id}`}
+                key={key}
                 x1={from.x}
                 y1={from.y}
                 x2={to.x}
                 y2={to.y}
-                stroke={edge.inferred ? '#aaa' : '#888'}
-                strokeWidth={3}
-                {...(edge.inferred ? { strokeDasharray: '8 6', 'data-inferred': 'true' } : {})}
+                stroke={clearedTo ? trainColor(clearedTo) : edge.inferred ? '#aaa' : '#888'}
+                strokeWidth={clearedTo ? 6 : 3}
+                data-cleared-to={clearedTo}
+                {...(edge.inferred && !clearedTo
+                  ? { strokeDasharray: '8 6', 'data-inferred': 'true' }
+                  : {})}
               />
             );
           })}

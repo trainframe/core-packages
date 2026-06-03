@@ -1300,3 +1300,62 @@ describe('Scheduler — referential validation', () => {
     expect((anomaly?.payload as { description: string }).description).toContain('NOPE');
   });
 });
+
+describe('Scheduler — clearance state snapshots', () => {
+  const findClearanceSnapshot = (
+    effects: ReadonlyArray<SchedulerEffect>,
+    trainId: string,
+  ): Extract<SchedulerEffect, { kind: 'update_state_snapshot' }> | undefined =>
+    effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'update_state_snapshot' }> =>
+        e.kind === 'update_state_snapshot' &&
+        e.entity_type === 'clearance' &&
+        e.entity_id === trainId,
+    );
+
+  it('emits a clearance snapshot when a train is granted an edge', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+
+    const effects = scheduler.assignSchedule('T1', 'r1', ['M1', 'M3']);
+
+    const snapshot = findClearanceSnapshot(effects, 'T1');
+    expect(snapshot).toBeDefined();
+    expect(snapshot?.entity_type).toBe('clearance');
+    const state = snapshot?.state as { train_id: string; cleared_edges: unknown[] };
+    expect(state.train_id).toBe('T1');
+    expect(state.cleared_edges).toHaveLength(1);
+    expect(state.cleared_edges[0]).toMatchObject({ from_marker_id: 'M1', to_marker_id: 'M2' });
+  });
+
+  it('emits a clearance snapshot with empty cleared_edges when revoke drops all blocks', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'r1', ['M1', 'M3']);
+
+    const revokeEffects = scheduler.revokeClearance('T1');
+
+    const snapshot = findClearanceSnapshot(revokeEffects, 'T1');
+    expect(snapshot).toBeDefined();
+    const state = snapshot?.state as { train_id: string; cleared_edges: unknown[] };
+    expect(state.cleared_edges).toHaveLength(0);
+  });
+
+  it('emits a clearance snapshot with empty cleared_edges when a train disconnects', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'r1', ['M1', 'M3']);
+
+    const disconnectEffects = scheduler.handleEvent({
+      event_type: 'device_disconnected',
+      device_id: 'T1',
+      payload: {},
+    });
+
+    const snapshot = findClearanceSnapshot(disconnectEffects, 'T1');
+    expect(snapshot).toBeDefined();
+    const state = snapshot?.state as { train_id: string; cleared_edges: unknown[] };
+    expect(state.train_id).toBe('T1');
+    expect(state.cleared_edges).toHaveLength(0);
+  });
+});

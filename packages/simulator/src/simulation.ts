@@ -20,6 +20,14 @@ export interface CapturedEvent {
 
 export type SimulationEventListener = (event: CapturedEvent) => void;
 
+export interface CapturedStateSnapshot {
+  readonly entity_type: string;
+  readonly entity_id: string;
+  readonly state: unknown;
+}
+
+export type SimulationStateSnapshotListener = (snapshot: CapturedStateSnapshot) => void;
+
 export interface SimulationOptions {
   layout: Layout;
   seed?: number;
@@ -69,6 +77,7 @@ export class Simulation {
   readonly commands: CapturedEvent[] = [];
 
   private readonly eventListeners = new Set<SimulationEventListener>();
+  private readonly stateSnapshotListeners = new Set<SimulationStateSnapshotListener>();
   private readonly trains = new Map<string, VirtualTrain>();
   private readonly gates = new Map<string, VirtualGate>();
   private readonly tick_ms: number;
@@ -270,6 +279,19 @@ export class Simulation {
     };
   }
 
+  /**
+   * Subscribe to `update_state_snapshot` effects emitted by the embedded
+   * scheduler. The sim-runner uses this to publish retained MQTT state messages
+   * (e.g. clearance state) on behalf of the embedded scheduler — mirroring
+   * what `@trainframe/server`'s `dispatchEffects` does in server mode.
+   */
+  onStateSnapshot(listener: SimulationStateSnapshotListener): () => void {
+    this.stateSnapshotListeners.add(listener);
+    return () => {
+      this.stateSnapshotListeners.delete(listener);
+    };
+  }
+
   private captureEvent(event: CapturedEvent): void {
     this.events.push(event);
     for (const listener of this.eventListeners) listener(event);
@@ -302,6 +324,17 @@ export class Simulation {
           device_id: 'server',
           payload: effect.payload,
         });
+      } else if (effect.kind === 'update_state_snapshot') {
+        // State updates (clearance, layout, tags). Forwarded to snapshot
+        // listeners so external transports (sim-runner in embedded mode) can
+        // publish them as retained MQTT state messages.
+        for (const listener of this.stateSnapshotListeners) {
+          listener({
+            entity_type: effect.entity_type,
+            entity_id: effect.entity_id,
+            state: effect.state,
+          });
+        }
       }
     }
   }

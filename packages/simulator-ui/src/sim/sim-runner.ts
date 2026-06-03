@@ -3,6 +3,7 @@ import type { Layout } from '@trainframe/protocol';
 import {
   BrokerBridge,
   type CapturedEvent,
+  type CapturedStateSnapshot,
   Simulation,
   type VirtualTrainConfig,
 } from '@trainframe/simulator';
@@ -72,6 +73,7 @@ export class SimRunner {
   private bridge: BrokerBridge | null = null;
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
   private unsubscribeFromSim: (() => void) | null = null;
+  private unsubscribeFromStateSnapshots: (() => void) | null = null;
   private events_published = 0;
   private train_ids: string[] = [];
   private readonly snapshotListeners = new Set<SnapshotListener>();
@@ -107,6 +109,9 @@ export class SimRunner {
       ...(this.options.register_tags ? { register_tags: this.options.register_tags } : {}),
     });
     this.unsubscribeFromSim = this.simulation.onEvent((event) => this.handleEvent(event));
+    this.unsubscribeFromStateSnapshots = this.simulation.onStateSnapshot((snapshot) =>
+      this.handleStateSnapshot(snapshot),
+    );
     if (this.mode === 'device-only') {
       this.bridge = new BrokerBridge(this.simulation, this.client, { newId: this.newId });
       this.bridge.start();
@@ -205,6 +210,8 @@ export class SimRunner {
     this.bridge = null;
     this.unsubscribeFromSim?.();
     this.unsubscribeFromSim = null;
+    this.unsubscribeFromStateSnapshots?.();
+    this.unsubscribeFromStateSnapshots = null;
     this.simulation = null;
     this.events_published = 0;
     this.train_ids = [];
@@ -273,6 +280,23 @@ export class SimRunner {
     }
     this.events_published += 1;
     this.notify();
+  }
+
+  /**
+   * Publish a `update_state_snapshot` effect from the embedded scheduler as a
+   * retained MQTT state message. Only runs in embedded mode — in device-only
+   * mode the real server handles state publishing.
+   * Currently only `clearance` snapshots are forwarded; layout is published via
+   * `publishLayoutState()` and tags/devices are not visualised by the
+   * sim-runner's broker pathway today.
+   */
+  private handleStateSnapshot(snapshot: CapturedStateSnapshot): void {
+    if (this.mode === 'device-only') return;
+    if (snapshot.entity_type !== 'clearance') return;
+    const topic = `railway/state/${snapshot.entity_type}/${snapshot.entity_id}`;
+    this.client.publish(topic, new TextEncoder().encode(JSON.stringify(snapshot.state)), {
+      retain: true,
+    });
   }
 
   private publishEvent(event: CapturedEvent): void {

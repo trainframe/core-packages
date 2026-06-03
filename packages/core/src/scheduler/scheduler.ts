@@ -160,6 +160,14 @@ export class Scheduler {
 
     this.devices.delete(deviceId);
     if (device.capabilities.includes('core.controls_motion')) {
+      // Emit an empty clearance state so the visualiser removes the overlay
+      // for this train. Publish before deleting the train record.
+      out.push(
+        effects.updateState('clearance', deviceId, {
+          train_id: deviceId,
+          cleared_edges: [],
+        }),
+      );
       this.trains.delete(deviceId);
     }
 
@@ -271,8 +279,11 @@ export class Scheduler {
     // estimated_distance_from_edge_start_mm >= length_mm (phase-2 limitation:
     // train must be shorter than the shortest edge it traverses; no multi-edge
     // tail spanning is implemented).
+    let edgesReleased = false;
     if (!train.length_mm || train.length_mm === 0) {
+      const before = train.cleared_edges.length;
       train.cleared_edges = train.cleared_edges.filter((e) => e.to_marker_id !== markerId);
+      edgesReleased = train.cleared_edges.length !== before;
     }
 
     // Discovery: when a train moves from one marker to another, either
@@ -281,6 +292,9 @@ export class Scheduler {
     // the edge we just crossed is still inferred after this traversal.
     let inDiscoveryMode = false;
     const out: SchedulerEffect[] = [];
+    if (edgesReleased) {
+      out.push(this.clearanceStateEffect(train));
+    }
     if (previousMarker && previousMarker !== markerId) {
       const result = this.layout.recordTraversal(previousMarker, markerId, trainId);
       const edge = this.layout.findEdge(previousMarker, markerId);
@@ -305,8 +319,7 @@ export class Scheduler {
     if (scheduleReplanEffects.length > 0) {
       out.push(...scheduleReplanEffects);
     } else {
-      const grant = this.maybeExtendClearance(train, markerId);
-      if (grant) out.push(grant);
+      out.push(...this.maybeExtendClearance(train, markerId));
     }
 
     out.push(...this.retryBlockedClearances());
@@ -354,10 +367,13 @@ export class Scheduler {
    * If the train has just reached its clearance limit and the transit has
    * more edges ahead, attempt to grant clearance for the next edge.
    */
-  private maybeExtendClearance(train: TrainState, markerId: string): SchedulerEffect | null {
-    if (train.clearance_limit_marker_id !== markerId || !train.transit) return null;
+  private maybeExtendClearance(
+    train: TrainState,
+    markerId: string,
+  ): ReadonlyArray<SchedulerEffect> {
+    if (train.clearance_limit_marker_id !== markerId || !train.transit) return [];
     const nextEdge = train.transit.edges[train.transit.progress_index];
-    if (!nextEdge) return null;
+    if (!nextEdge) return [];
     return this.tryGrantClearance(train, nextEdge);
   }
 
@@ -379,8 +395,7 @@ export class Scheduler {
     const train = this.trains.get(train_id);
     if (!train) return [];
 
-    const grant = this.tryGrantClearance(train, next_edge);
-    return grant ? [grant] : [];
+    return this.tryGrantClearance(train, next_edge);
   }
 
   /**
@@ -412,10 +427,10 @@ export class Scheduler {
    * what protects crossings (every edge incident to X shares X), junctions,
    * and gives one-block separation on a straight loop — all from one rule.
    */
-  private tryGrantClearance(train: TrainState, nextEdge: EdgeRef): SchedulerEffect | null {
-    if (this.edgeConflictsWithAnotherTrain(train.train_id, nextEdge)) return null;
-    if (this.edgeRequiresMismatchedSwitch(nextEdge)) return null;
-    if (this.anyCapabilityDeniesClearance(train, nextEdge)) return null;
+  private tryGrantClearance(train: TrainState, nextEdge: EdgeRef): ReadonlyArray<SchedulerEffect> {
+    if (this.edgeConflictsWithAnotherTrain(train.train_id, nextEdge)) return [];
+    if (this.edgeRequiresMismatchedSwitch(nextEdge)) return [];
+    if (this.anyCapabilityDeniesClearance(train, nextEdge)) return [];
     return this.grantClearance(train, nextEdge);
   }
 
@@ -472,14 +487,30 @@ export class Scheduler {
     return false;
   }
 
-  private grantClearance(train: TrainState, nextEdge: EdgeRef): SchedulerEffect {
+  private grantClearance(train: TrainState, nextEdge: EdgeRef): ReadonlyArray<SchedulerEffect> {
     train.clearance_limit_marker_id = nextEdge.to_marker_id;
     train.cleared_edges = [...train.cleared_edges, nextEdge];
-    return effects.sendCommand(
-      train.train_id,
-      'grant_clearance',
-      grantClearancePayload(nextEdge.to_marker_id, [nextEdge]),
-    );
+    return [
+      effects.sendCommand(
+        train.train_id,
+        'grant_clearance',
+        grantClearancePayload(nextEdge.to_marker_id, [nextEdge]),
+      ),
+      this.clearanceStateEffect(train),
+    ];
+  }
+
+  /**
+   * Emit a retained-state snapshot of which edges this train currently holds.
+   * Published every time `cleared_edges` is mutated (grant, release, revoke,
+   * disconnect). An empty array clears the visual — the visualiser drops the
+   * train's overlay entries when it sees [].
+   */
+  private clearanceStateEffect(train: TrainState): SchedulerEffect {
+    return effects.updateState('clearance', train.train_id, {
+      train_id: train.train_id,
+      cleared_edges: train.cleared_edges,
+    });
   }
 
   // ---------- switch state ----------
@@ -559,7 +590,7 @@ export class Scheduler {
     const released = before - train.cleared_edges.length;
     if (released === 0) return [];
 
-    return this.retryBlockedClearances();
+    return [this.clearanceStateEffect(train), ...this.retryBlockedClearances()];
   }
 
   /**
@@ -582,8 +613,7 @@ export class Scheduler {
       const nextEdge = train.transit.edges[train.transit.progress_index];
       if (!nextEdge) continue;
       if (train.cleared_edges.some((e) => edgesEqual(e, nextEdge))) continue;
-      const grant = this.tryGrantClearance(train, nextEdge);
-      if (grant) out.push(grant);
+      out.push(...this.tryGrantClearance(train, nextEdge));
     }
     return out;
   }
@@ -767,8 +797,7 @@ export class Scheduler {
         edges: transitEdges,
       }),
     ];
-    const grant = this.tryGrantClearance(train, firstEdge);
-    if (grant) out.push(grant);
+    out.push(...this.tryGrantClearance(train, firstEdge));
 
     // Wiping cleared_edges in assignSchedule may have released blocks that
     // peer trains were waiting on. Retry so they don't sit blocked until an
@@ -816,6 +845,7 @@ export class Scheduler {
         reason: 'admin',
         immediate: true,
       }),
+      this.clearanceStateEffect(train),
       ...this.retryBlockedClearances(new Set([trainId])),
     ];
   }
