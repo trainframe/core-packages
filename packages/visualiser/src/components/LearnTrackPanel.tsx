@@ -29,7 +29,7 @@ export function LearnTrackPanel() {
 
   return (
     <Panel label="Track learning" data-testid="learn-track-panel">
-      <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+      <div className="tf-vis-learn-track__row">
         <Button
           type="button"
           variant={isActive ? 'secondary' : 'primary'}
@@ -41,7 +41,7 @@ export function LearnTrackPanel() {
         <span
           data-testid="learn-track-status"
           data-state={state.state}
-          style={{ color: 'var(--tf-color-fg-muted)', fontSize: '0.9em' }}
+          className="tf-vis-learn-track__status"
         >
           {describe(state)}
         </span>

@@ -296,7 +296,13 @@ function renderEdge(
   const tTo = markerTangents.get(edge.to_marker_id) ?? { x: 1, y: 0 };
   const { c1, c2 } = edgeBezierControls(from, to, tFrom, tTo);
   const d = bezierPathD(from, to, c1, c2);
-  const stroke = clearedTo ? trainColor(clearedTo) : edge.inferred ? '#aaa' : '#888';
+  // SVG presentation attributes ignore CSS var() in real browsers.
+  // Use inline style for theme-token colours.
+  const stroke = clearedTo
+    ? trainColor(clearedTo)
+    : edge.inferred
+      ? 'var(--tf-vis-color-edge-inferred, #aaa)'
+      : 'var(--tf-vis-color-edge, #888)';
   const inferredProps =
     edge.inferred && !clearedTo ? { strokeDasharray: '8 6', 'data-inferred': 'true' } : {};
 
@@ -305,7 +311,7 @@ function renderEdge(
       key={key}
       d={d}
       fill="none"
-      stroke={stroke}
+      style={{ stroke }}
       strokeWidth={clearedTo ? 9 : 6}
       strokeLinecap="round"
       data-cleared-to={clearedTo}
@@ -366,8 +372,10 @@ export function LayoutCanvas() {
                   cx={p.x}
                   cy={p.y}
                   r={MARKER_RADIUS}
-                  fill="#fff"
-                  stroke="#333"
+                  style={{
+                    fill: 'var(--tf-vis-color-marker, #fff)',
+                    stroke: 'var(--tf-vis-color-marker-stroke, #333)',
+                  }}
                   strokeWidth={2}
                 />
                 <text x={p.x} y={p.y + 4} textAnchor="middle" fontSize={12} fontFamily="sans-serif">

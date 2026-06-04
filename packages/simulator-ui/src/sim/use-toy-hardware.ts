@@ -7,6 +7,17 @@ interface UseToyHardwareArgs {
   readonly pieces: ReadonlyArray<TrackPiece>;
   readonly liveIds: ReadonlySet<string>;
   readonly client: BrokerClient;
+  /**
+   * Optional callback invoked after each RAF tick so callers can react to
+   * the sim advancing. Used by the carriage-position driver to schedule a
+   * React state bump when the train is moving.
+   */
+  readonly onTick?: () => void;
+}
+
+export interface UseToyHardwareResult {
+  /** Stable ref to the live `ToyHardware` instance (null until first mount). */
+  readonly hardwareRef: React.RefObject<ToyHardware | null>;
 }
 
 /**
@@ -15,11 +26,20 @@ interface UseToyHardwareArgs {
  * keeps the simulation in sync with whatever the operator is doing on the
  * canvas (placing pieces, scanning trains, powering devices off).
  *
- * Exposes nothing — the broker is the system source of truth, so callers
- * observe sim output by subscribing to MQTT topics like everyone else.
+ * Returns a stable ref to the hardware instance so callers can read the
+ * current simulation state each render (e.g. for carriage position tracking).
+ * Reading `getSimulation()` from the ref each render is safe — `syncLayout`
+ * rebuilds the simulation on topology changes, but the ref itself is stable.
  */
-export function useToyHardware({ pieces, liveIds, client }: UseToyHardwareArgs): void {
+export function useToyHardware({
+  pieces,
+  liveIds,
+  client,
+  onTick,
+}: UseToyHardwareArgs): UseToyHardwareResult {
   const hardwareRef = useRef<ToyHardware | null>(null);
+  const onTickRef = useRef<(() => void) | undefined>(onTick);
+  onTickRef.current = onTick;
 
   // Construct the hardware once per `client`. Tearing it down when the
   // BrokerClient changes is the right thing; in production the client is
@@ -44,6 +64,9 @@ export function useToyHardware({ pieces, liveIds, client }: UseToyHardwareArgs):
 
   // RAF loop — advance the sim by real elapsed time, capped inside
   // `ToyHardware.tick` so background tabs can't fast-forward minutes.
+  // After each tick we call `onTick` (if provided) so that the carriage-
+  // position driver can schedule a React state bump without introducing a
+  // second timer.
   useEffect(() => {
     let lastMs = performance.now();
     let rafHandle: number | null = null;
@@ -51,6 +74,7 @@ export function useToyHardware({ pieces, liveIds, client }: UseToyHardwareArgs):
       const dt = nowMs - lastMs;
       lastMs = nowMs;
       hardwareRef.current?.tick(dt);
+      onTickRef.current?.();
       rafHandle = requestAnimationFrame(step);
     };
     rafHandle = requestAnimationFrame(step);
@@ -58,4 +82,6 @@ export function useToyHardware({ pieces, liveIds, client }: UseToyHardwareArgs):
       if (rafHandle !== null) cancelAnimationFrame(rafHandle);
     };
   }, []);
+
+  return { hardwareRef };
 }

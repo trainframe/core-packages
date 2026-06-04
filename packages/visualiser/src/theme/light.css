@@ -1,0 +1,47 @@
+/**
+ * Visualiser light theme.
+ *
+ * Extends @trainframe/ui-kit's --tf-color-* base tokens with
+ * visualiser-specific --tf-vis-* tokens. Import alongside theme-dark.css;
+ * the data-theme attribute on <html> controls which set is active.
+ *
+ * Token naming convention:
+ *   --tf-vis-color-<role>
+ *
+ * Roles:
+ *   bg               — page / canvas background
+ *   fg               — primary text / foreground
+ *   fg-muted         — secondary / helper text
+ *   marker           — known-marker fill (white in light, dark in dark)
+ *   marker-stroke    — marker circle border
+ *   marker-inferred  — inferred marker visual
+ *   edge             — confirmed edge stroke
+ *   edge-inferred    — inferred / dashed edge stroke
+ *   highlight        — brief row-highlight on scan events
+ *   error            — error / warn banner background
+ *   error-border     — error / warn banner border
+ *   error-text       — error / warn banner text colour
+ *   muted-text       — descriptive text in banners
+ */
+:root,
+[data-theme="light"] {
+  --tf-vis-color-bg: var(--tf-color-bg, #ffffff);
+  --tf-vis-color-fg: var(--tf-color-fg, #1a1a1a);
+  --tf-vis-color-fg-muted: var(--tf-color-fg-muted, #5a5a5a);
+
+  --tf-vis-color-marker: #ffffff;
+  --tf-vis-color-marker-stroke: #333333;
+  --tf-vis-color-marker-inferred: #cccccc;
+
+  --tf-vis-color-edge: #888888;
+  --tf-vis-color-edge-inferred: #aaaaaa;
+
+  /* Row highlight on tag-scan flash */
+  --tf-vis-color-highlight: var(--tf-color-highlight, rgba(255, 213, 79, 0.4));
+
+  /* Deadlock banner (warning palette) */
+  --tf-vis-color-warn-bg: #fff4e0;
+  --tf-vis-color-warn-border: #b04500;
+  --tf-vis-color-warn-text: #b04500;
+  --tf-vis-color-warn-muted: #555555;
+}

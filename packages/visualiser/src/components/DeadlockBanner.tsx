@@ -30,39 +30,25 @@ export function DeadlockBanner() {
   };
 
   return (
-    <div
-      role="alert"
-      data-testid="deadlock-banner"
-      style={{
-        backgroundColor: '#fff4e0',
-        border: '2px solid #b04500',
-        padding: '0.75rem 1rem',
-        margin: '0.5rem 0',
-        borderRadius: '4px',
-        fontWeight: 'bold',
-      }}
-    >
+    <div role="alert" data-testid="deadlock-banner" className="tf-vis-deadlock-banner">
       <div>
-        <span style={{ color: '#b04500' }}>⚠ Deadlock detected:</span>{' '}
+        <span className="tf-vis-deadlock-banner__heading">⚠ Deadlock detected:</span>{' '}
         {trains.map((trainId, i) => (
           <span key={trainId}>
             <span
               data-train-id={trainId}
-              style={{
-                color: trainColor(trainId),
-                padding: '0 0.25rem',
-              }}
+              style={{ color: trainColor(trainId), padding: '0 0.25rem' }}
             >
               {trainId}
             </span>
             {i < trains.length - 1 ? ' ↔ ' : ''}
           </span>
         ))}{' '}
-        <span style={{ fontWeight: 'normal', color: '#555' }}>
+        <span className="tf-vis-deadlock-banner__desc">
           — both trains are waiting on a section the other holds.
         </span>
       </div>
-      <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+      <div className="tf-vis-deadlock-banner__actions">
         {trains.map((trainId) => (
           <Button
             key={trainId}

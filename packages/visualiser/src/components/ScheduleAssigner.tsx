@@ -89,7 +89,7 @@ export function ScheduleAssigner() {
   return (
     <Panel label="Assign schedule" data-testid="schedule-assigner">
       <form onSubmit={handleSubmit}>
-        <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center' }}>
+        <div className="tf-vis-schedule-assigner__row">
           <label htmlFor={trainSelectId}>Train</label>
           <select id={trainSelectId} value={trainId} onChange={(e) => setTrainId(e.target.value)}>
             {trains.map((t) => (
@@ -99,16 +99,14 @@ export function ScheduleAssigner() {
             ))}
           </select>
           {currentSchedule ? (
-            <span style={{ color: 'var(--tf-color-fg-muted)', fontSize: '0.9em' }}>
+            <span className="tf-vis-schedule-assigner__hint">
               currently: {currentSchedule.stops.join(' → ')}
             </span>
           ) : (
-            <span style={{ color: 'var(--tf-color-fg-muted)', fontSize: '0.9em' }}>
-              no schedule yet
-            </span>
+            <span className="tf-vis-schedule-assigner__hint">no schedule yet</span>
           )}
         </div>
-        <div style={{ marginTop: 'var(--tf-space-sm, 0.5rem)' }}>
+        <div className="tf-vis-schedule-assigner__stops-row">
           <label htmlFor={stopSelectId}>{stops.length === 0 ? 'First stop' : 'Next stop'}</label>{' '}
           <select
             id={stopSelectId}
@@ -148,25 +146,19 @@ export function ScheduleAssigner() {
           </Button>
         </div>
         {stops.length > 0 && (
-          <ol aria-label="Pending stops" style={{ marginTop: 'var(--tf-space-sm, 0.5rem)' }}>
+          <ol aria-label="Pending stops" className="tf-vis-schedule-assigner__stops-row">
             {stops.map((s, i) => (
               // biome-ignore lint/suspicious/noArrayIndexKey: position is the identity of a stop in the list
               <li key={`${s}-${i}`}>{s}</li>
             ))}
           </ol>
         )}
-        <div style={{ marginTop: 'var(--tf-space-sm, 0.5rem)' }}>
+        <div className="tf-vis-schedule-assigner__submit-row">
           <Button type="submit" variant="primary" disabled={!canSubmit}>
             Assign
           </Button>
           {sent !== null && (
-            <span
-              style={{
-                marginLeft: 'var(--tf-space-sm, 0.5rem)',
-                color: 'var(--tf-color-fg-muted)',
-              }}
-              data-testid="schedule-assigner-sent"
-            >
+            <span className="tf-vis-schedule-assigner__sent" data-testid="schedule-assigner-sent">
               Sent {sent.stops.join(' → ')} to {sent.trainId}
             </span>
           )}

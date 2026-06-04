@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { COUPLING_DISTANCE_MM, computeTrainTrails } from './coupling.js';
+import {
+  CARRIAGE_SPACING_MM,
+  COUPLING_DISTANCE_MM,
+  carriageWorldPos,
+  computeTrainTrails,
+} from './coupling.js';
 import type { TrackPiece } from './pieces.js';
 
 function makePiece(id: string, type: TrackPiece['type'], x: number, y: number): TrackPiece {
@@ -158,5 +163,83 @@ describe('computeTrainTrails — non-carriage pieces ignored', () => {
     const pieces = [makePiece('T1', 'train', 0, 0), makePiece('G1', 'gate', 50, 0)];
     const result = computeTrainTrails(pieces, makeLiveIds('T1'));
     expect(result.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// carriageWorldPos — pure physics positioning
+// ---------------------------------------------------------------------------
+
+describe('carriageWorldPos — position along a horizontal edge', () => {
+  // Edge M-A at (0,0) → M-B at (200,0). Length = 200mm.
+  const FROM = { x: 0, y: 0 };
+  const TO = { x: 200, y: 0 };
+  const LENGTH = 200;
+
+  it('places a train at d=100 at world (100, 0) with 0° rotation', () => {
+    const pos = carriageWorldPos(FROM, TO, LENGTH, 100);
+    expect(pos.x).toBeCloseTo(100);
+    expect(pos.y).toBeCloseTo(0);
+    expect(pos.rotationDeg).toBeCloseTo(0);
+  });
+
+  it('places the first coupled carriage (trail index 0) at (50, 0) given d=100 and spacing 50', () => {
+    // d_carriage = 100 - (0 + 1) * CARRIAGE_SPACING_MM = 100 - 50 = 50
+    const carriageDist = 100 - 1 * CARRIAGE_SPACING_MM;
+    const pos = carriageWorldPos(FROM, TO, LENGTH, carriageDist);
+    expect(pos.x).toBeCloseTo(50);
+    expect(pos.y).toBeCloseTo(0);
+    expect(pos.rotationDeg).toBeCloseTo(0);
+  });
+
+  it('places train at edge start (d=0) at world (0, 0)', () => {
+    const pos = carriageWorldPos(FROM, TO, LENGTH, 0);
+    expect(pos.x).toBeCloseTo(0);
+    expect(pos.y).toBeCloseTo(0);
+  });
+
+  it('places train at edge end (d=L) at world (200, 0)', () => {
+    const pos = carriageWorldPos(FROM, TO, LENGTH, 200);
+    expect(pos.x).toBeCloseTo(200);
+    expect(pos.y).toBeCloseTo(0);
+  });
+});
+
+describe('carriageWorldPos — position along a vertical edge', () => {
+  // Edge from (0,0) pointing south to (0, 200).
+  const FROM = { x: 0, y: 0 };
+  const TO = { x: 0, y: 200 };
+  const LENGTH = 200;
+
+  it('rotation is 90° for a south-pointing edge', () => {
+    const pos = carriageWorldPos(FROM, TO, LENGTH, 100);
+    expect(pos.x).toBeCloseTo(0);
+    expect(pos.y).toBeCloseTo(100);
+    expect(pos.rotationDeg).toBeCloseTo(90);
+  });
+});
+
+describe('carriageWorldPos — diagonal edge', () => {
+  // Edge from (0,0) to (100,100). Length = sqrt(20000).
+  const FROM = { x: 0, y: 0 };
+  const TO = { x: 100, y: 100 };
+  const LENGTH = Math.sqrt(100 * 100 + 100 * 100);
+
+  it('rotation is 45° for a northeast-pointing edge', () => {
+    const pos = carriageWorldPos(FROM, TO, LENGTH, LENGTH / 2);
+    expect(pos.x).toBeCloseTo(50);
+    expect(pos.y).toBeCloseTo(50);
+    expect(pos.rotationDeg).toBeCloseTo(45);
+  });
+});
+
+describe('carriageWorldPos — zero-length edge guard', () => {
+  it('does not divide by zero when edgeLengthMm = 0', () => {
+    const FROM = { x: 10, y: 20 };
+    const TO = { x: 10, y: 20 };
+    const pos = carriageWorldPos(FROM, TO, 0, 50);
+    // t = 0 when edgeLengthMm = 0; piece stays at FROM.
+    expect(pos.x).toBeCloseTo(10);
+    expect(pos.y).toBeCloseTo(20);
   });
 });

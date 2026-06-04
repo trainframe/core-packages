@@ -1,0 +1,96 @@
+/**
+ * Global component styles for the Trainframe visualiser.
+ * References --tf-vis-* tokens (defined in theme/light.css + theme/dark.css)
+ * and --tf-color-* / --tf-space-* tokens from @trainframe/ui-kit.
+ *
+ * Import order in main.tsx:
+ *   1. @trainframe/ui-kit/theme-light.css  (base tokens, light defaults)
+ *   2. src/theme/light.css                 (vis-specific light overrides)
+ *   3. src/theme/dark.css                  (vis-specific dark overrides, attr-scoped)
+ *   4. this file                           (component classes referencing tokens)
+ */
+
+/* ─── DeadlockBanner ─────────────────────────────────────────────── */
+
+.tf-vis-deadlock-banner {
+  background-color: var(--tf-vis-color-warn-bg);
+  border: 2px solid var(--tf-vis-color-warn-border);
+  padding: 0.75rem 1rem;
+  margin: 0.5rem 0;
+  border-radius: var(--tf-radius-sm, 4px);
+  font-weight: bold;
+}
+
+.tf-vis-deadlock-banner__heading {
+  color: var(--tf-vis-color-warn-text);
+}
+
+.tf-vis-deadlock-banner__desc {
+  font-weight: normal;
+  color: var(--tf-vis-color-warn-muted);
+}
+
+.tf-vis-deadlock-banner__actions {
+  margin-top: 0.5rem;
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* ─── LayoutCanvas — SVG element styles ─────────────────────────── */
+/* SVG presentation attributes cannot use var() — these are applied via
+ * inline style={{ fill: 'var(...)' }} in JSX. See LayoutCanvas.tsx. */
+
+/* ─── ScheduleList ───────────────────────────────────────────────── */
+
+.tf-vis-schedule-list {
+  list-style: none;
+  padding: 0;
+}
+
+.tf-vis-schedule-list__row {
+  padding: 0.25rem 0;
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* ─── ScheduleAssigner ───────────────────────────────────────────── */
+
+.tf-vis-schedule-assigner__row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.tf-vis-schedule-assigner__hint {
+  color: var(--tf-color-fg-muted, var(--tf-vis-color-fg-muted));
+  font-size: 0.9em;
+}
+
+.tf-vis-schedule-assigner__stops-row {
+  margin-top: var(--tf-space-sm, 0.5rem);
+}
+
+.tf-vis-schedule-assigner__submit-row {
+  margin-top: var(--tf-space-sm, 0.5rem);
+}
+
+.tf-vis-schedule-assigner__sent {
+  margin-left: var(--tf-space-sm, 0.5rem);
+  color: var(--tf-color-fg-muted, var(--tf-vis-color-fg-muted));
+}
+
+/* ─── LearnTrackPanel ────────────────────────────────────────────── */
+
+.tf-vis-learn-track__row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.tf-vis-learn-track__status {
+  color: var(--tf-color-fg-muted, var(--tf-vis-color-fg-muted));
+  font-size: 0.9em;
+}

@@ -1,3 +1,4 @@
+// TODO: extract — see src/view/index.ts for the extraction pattern (RegisteredTrainsView, derives from RegisteredDevicesView).
 import { useMemo } from 'react';
 import { useRegisteredDevices } from './use-registered-devices.js';
 

@@ -19,12 +19,12 @@ export function ScheduleList() {
   return (
     <section aria-label="Train schedules" data-testid="schedule-list">
       <h2>Schedules</h2>
-      <ul style={{ listStyle: 'none', padding: 0 }}>
+      <ul className="tf-vis-schedule-list">
         {rows.map((row) => (
           <li
             key={row.train_id}
             data-schedule-train-id={row.train_id}
-            style={{ padding: '0.25rem 0', display: 'flex', gap: '0.5rem' }}
+            className="tf-vis-schedule-list__row"
           >
             <span style={{ color: trainColor(row.train_id), fontWeight: 'bold' }}>
               {row.train_id}

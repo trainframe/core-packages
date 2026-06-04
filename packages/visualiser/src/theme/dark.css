@@ -1,0 +1,32 @@
+/**
+ * Visualiser dark theme.
+ *
+ * Applied when <html data-theme="dark">. Layers over the ui-kit dark theme
+ * (which flips --tf-color-* tokens) with visualiser-specific --tf-vis-*
+ * overrides. Import alongside theme-light.css.
+ *
+ * Activate via:
+ *   document.documentElement.dataset.theme = 'dark';
+ * or from localStorage (see main.tsx bootstrap).
+ */
+[data-theme="dark"] {
+  --tf-vis-color-bg: var(--tf-color-bg, #141414);
+  --tf-vis-color-fg: var(--tf-color-fg, #e8e8e8);
+  --tf-vis-color-fg-muted: var(--tf-color-fg-muted, #9a9a9a);
+
+  --tf-vis-color-marker: #2a2a2a;
+  --tf-vis-color-marker-stroke: #cccccc;
+  --tf-vis-color-marker-inferred: #444444;
+
+  --tf-vis-color-edge: #666666;
+  --tf-vis-color-edge-inferred: #4a4a4a;
+
+  /* Row highlight on tag-scan flash */
+  --tf-vis-color-highlight: rgba(200, 160, 20, 0.35);
+
+  /* Deadlock banner — adapted for dark background */
+  --tf-vis-color-warn-bg: #2a1a00;
+  --tf-vis-color-warn-border: #f5830a;
+  --tf-vis-color-warn-text: #f5830a;
+  --tf-vis-color-warn-muted: #aaaaaa;
+}

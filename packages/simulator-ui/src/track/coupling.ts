@@ -1,5 +1,5 @@
 /**
- * Carriage coupling detection for the toy table.
+ * Carriage coupling detection and physics positioning for the toy table.
  *
  * A carriage is "coupled" to a train when its centre is within
  * COUPLING_DISTANCE_MM of the train's centre OR of another carriage already
@@ -8,9 +8,57 @@
  *
  * Ties (a carriage equidistant from two live trains) are resolved by which
  * train appears first in the pieces array.
+ *
+ * Once coupled, each carriage (and the train itself) is given a
+ * `WorldPosition` derived from the train's simulated `distance_into_edge_mm`.
+ * The formula is a linear interpolation along the current edge endpoints,
+ * with carriages placed at fixed intervals behind the train.
  */
 
 import type { TrackPiece } from './pieces.js';
+
+/** Centre-to-centre carriage spacing in mm (train head → first carriage → …). */
+export const CARRIAGE_SPACING_MM = 50;
+
+/** A rendered world position for a piece on the canvas. */
+export interface WorldPosition {
+  readonly x: number;
+  readonly y: number;
+  /** Degrees clockwise from east (SVG convention, matching piece.rotationDeg). */
+  readonly rotationDeg: number;
+}
+
+/**
+ * Compute the world position of a piece placed along an edge at a given
+ * distance from the edge start.
+ *
+ * `fromPos` / `toPos` are the world-space mm coordinates of the edge's start
+ * and end markers. `edgeLengthMm` is the total length of the edge (used only
+ * for normalisation, not clamping — callers are responsible for clamping `d`).
+ *
+ * `distanceMm` is the piece's distance from `fromPos` along the edge.
+ * A value of 0 places the piece at `fromPos`; `edgeLengthMm` places it at
+ * `toPos`.
+ *
+ * Returns the interpolated (x, y) and the heading angle (atan2 of the edge
+ * direction) as `rotationDeg`.
+ *
+ * @pure — no side effects, no I/O, fully deterministic.
+ */
+export function carriageWorldPos(
+  fromPos: { readonly x: number; readonly y: number },
+  toPos: { readonly x: number; readonly y: number },
+  edgeLengthMm: number,
+  distanceMm: number,
+): WorldPosition {
+  const dx = toPos.x - fromPos.x;
+  const dy = toPos.y - fromPos.y;
+  const t = edgeLengthMm > 0 ? distanceMm / edgeLengthMm : 0;
+  const x = fromPos.x + t * dx;
+  const y = fromPos.y + t * dy;
+  const rotationDeg = (Math.atan2(dy, dx) * 180) / Math.PI;
+  return { x, y, rotationDeg };
+}
 
 /** Centre-to-centre coupling distance in mm. */
 export const COUPLING_DISTANCE_MM = 100;

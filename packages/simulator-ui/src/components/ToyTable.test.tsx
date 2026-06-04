@@ -1077,3 +1077,120 @@ describe('ToyTable — carriage coupling', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Carriage physics: coupled carriages render at simulated world position
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the two-straight + train setup needed by the carriage physics tests.
+ *
+ * Places straight-A at (450, 300), straight-B snapped to (650, 300), a train
+ * on top of straight-A, scans all three, and returns the train piece id.
+ * The canvas mock rect MUST be active when called.
+ */
+function setupTwoStraightsThenTrain(canvas: Element): string {
+  const straightButton = screen.getByTestId('toybox-straight');
+
+  // Place straight-A at canvas centre (450, 300mm). clientX=900 → 450mm.
+  dispatchToyboxDragStart(straightButton, 'straight');
+  dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 900, 600);
+  const straightAEl = canvas.querySelector(
+    '[data-testid^="piece-straight-"]',
+  ) as HTMLElement | null;
+  const straightAId = straightAEl?.getAttribute('data-piece-id') ?? '';
+
+  // Place straight-B snapping to A's east endpoint. Drop at 660mm → 1320px:
+  // B's west endpoint (560mm) is 10mm from A's east (550mm) → snaps to 650mm.
+  dispatchToyboxDragStart(straightButton, 'straight');
+  dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 1320, 600);
+  const straightEls = canvas.querySelectorAll('[data-testid^="piece-straight-"]');
+  const straightBEl = straightEls[1] as HTMLElement | undefined;
+  const straightBId = straightBEl?.getAttribute('data-piece-id') ?? '';
+
+  // Scan both straights to bind their markers.
+  dropPieceOnScanBox(screen.getByTestId('scan-box'), straightAId);
+  dropPieceOnScanBox(screen.getByTestId('scan-box'), straightBId);
+
+  // Place and scan a train on straight-A (450, 300mm). clientX=900.
+  const trainButton = screen.getByTestId('toybox-train');
+  dispatchToyboxDragStart(trainButton, 'train');
+  dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'train', 900, 600);
+  const trainEl = canvas.querySelector('[data-testid^="piece-train-"]') as HTMLElement | null;
+  const trainPieceId = trainEl?.getAttribute('data-piece-id') ?? '';
+  dropPieceOnScanBox(screen.getByTestId('scan-box'), trainPieceId);
+
+  return trainPieceId;
+}
+
+describe('ToyTable — carriage render positions follow sim physics', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('coupled carriage renders at the edge-start world position, not its drop position', () => {
+    // Two straights + train setup so the train spawns in-sim on edge
+    // M-straight-A(450,300) → M-straight-B(650,300). RAF never fires in jsdom
+    // so distance_into_edge stays 0. Carriage clamped to 0 → renders at (450,300).
+    //
+    // Carriage is dropped at (370, 300) — 80mm west of the train, within
+    // coupling range. Its transform must reflect the sim position (450,300),
+    // NOT the placement position (370,300).
+    const restore = mockCanvasRect();
+    try {
+      renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+
+      const trainPieceId = setupTwoStraightsThenTrain(canvas);
+
+      // Place a carriage 80mm west of the train at (370, 300):
+      // clientX = (370/900)*1800 = 740px.
+      const carriageButton = screen.getByTestId('toybox-carriage');
+      dispatchToyboxDragStart(carriageButton, 'carriage');
+      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'carriage', 740, 600);
+
+      const carriageEl = canvas.querySelector(
+        '[data-testid^="piece-carriage-"]',
+      ) as HTMLElement | null;
+      if (!carriageEl) throw new Error('carriage not placed');
+
+      // Coupling: data-coupled-to must reference the train.
+      expect(carriageEl.getAttribute('data-coupled-to')).toBe(trainPieceId);
+
+      // Physics: transform must be from-marker position (450, 300), not drop (370, 300).
+      const transform = carriageEl.getAttribute('transform') ?? '';
+      expect(transform).toContain('translate(450, 300)');
+      expect(transform).not.toContain('translate(370, 300)');
+    } finally {
+      restore();
+    }
+  });
+
+  it('uncoupled carriage (no track) renders at its drop position, not a sim position', () => {
+    // A carriage placed with no live train nearby must stay at piece.position.
+    const restore = mockCanvasRect();
+    try {
+      renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+
+      // Place carriage at canvas centre (450mm, 300mm). clientX=900.
+      const carriageButton = screen.getByTestId('toybox-carriage');
+      dispatchToyboxDragStart(carriageButton, 'carriage');
+      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'carriage', 900, 600);
+
+      const carriageEl = canvas.querySelector(
+        '[data-testid^="piece-carriage-"]',
+      ) as HTMLElement | null;
+      if (!carriageEl) throw new Error('carriage not placed');
+
+      // No coupled train → data-coupled-to is absent.
+      expect(carriageEl.getAttribute('data-coupled-to')).toBeNull();
+
+      // Rendered at placement position (450, 300).
+      const transform = carriageEl.getAttribute('transform') ?? '';
+      expect(transform).toContain('translate(450, 300)');
+    } finally {
+      restore();
+    }
+  });
+});

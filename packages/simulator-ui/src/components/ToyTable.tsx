@@ -4,8 +4,14 @@ import type { SVGAttributes } from 'react';
 import { useBroker } from '../broker/broker-context.js';
 import type { BrokerClient } from '../broker/client.js';
 import { encodeDeviceEvent } from '../broker/encode-event.js';
+import type { ToyHardware } from '../sim/toy-hardware.js';
 import { useToyHardware } from '../sim/use-toy-hardware.js';
-import { computeTrainTrails } from '../track/coupling.js';
+import {
+  CARRIAGE_SPACING_MM,
+  type WorldPosition,
+  carriageWorldPos,
+  computeTrainTrails,
+} from '../track/coupling.js';
 import { SNAP_DISTANCE } from '../track/layout-from-pieces.js';
 import {
   type RotationDeg,
@@ -96,6 +102,106 @@ function deviceIdForDevicePiece(piece: TrackPiece): string {
   // Unreachable: callers gate on isWireDevice. Keeping the throw makes the
   // contract explicit for future maintainers.
   throw new Error(`deviceIdForDevicePiece called on non-wire-device piece ${piece.type}`);
+}
+
+/**
+ * Extract the piece id from a marker id of the form `M-{pieceId}`.
+ * Returns undefined when the id doesn't match the expected prefix.
+ */
+function pieceIdFromMarkerId(markerId: string): string | undefined {
+  return markerId.startsWith('M-') ? markerId.slice(2) : undefined;
+}
+
+/**
+ * Attempt to resolve the edge endpoints for a given sim train. Returns
+ * `undefined` when the train is deferred (no current edge) or when either
+ * endpoint marker can't be matched to a placed piece.
+ */
+function resolveEdgeEndpoints(
+  simTrain: { getCurrentEdge(): { from_marker_id: string; to_marker_id: string } | null },
+  piecesById: ReadonlyMap<string, TrackPiece>,
+):
+  | {
+      fromPos: { readonly x: number; readonly y: number };
+      toPos: { readonly x: number; readonly y: number };
+      fromMarkerId: string;
+      toMarkerId: string;
+    }
+  | undefined {
+  const edge = simTrain.getCurrentEdge();
+  if (edge === null) return undefined;
+  const fromPieceId = pieceIdFromMarkerId(edge.from_marker_id);
+  const toPieceId = pieceIdFromMarkerId(edge.to_marker_id);
+  if (fromPieceId === undefined || toPieceId === undefined) return undefined;
+  const fromPiece = piecesById.get(fromPieceId);
+  const toPiece = piecesById.get(toPieceId);
+  if (fromPiece === undefined || toPiece === undefined) return undefined;
+  return {
+    fromPos: fromPiece.position,
+    toPos: toPiece.position,
+    fromMarkerId: edge.from_marker_id,
+    toMarkerId: edge.to_marker_id,
+  };
+}
+
+/**
+ * Compute render-time world positions for all live trains and their coupled
+ * carriages from the current simulation state.
+ *
+ * Each live train that has a `current_edge` in the simulation drives:
+ *   - its own rendered position (the train sprite follows the sim, not the
+ *     placement position),
+ *   - each coupled carriage at `CARRIAGE_SPACING_MM * (trailIndex + 1)` behind.
+ *
+ * If a carriage's computed offset is negative (it would trail onto the
+ * previous edge) it is clamped to distance 0 (edge start). Full multi-edge
+ * trailing is a TODO for a future revision.
+ *
+ * Pieces with no resolvable sim edge (train deferred — scanned but no track
+ * yet) are omitted; the renderer falls back to `piece.position`.
+ *
+ * @pure — reads from sim and pieces only; returns a new Map each call.
+ */
+function computeRenderPositions(
+  pieces: ReadonlyArray<TrackPiece>,
+  trainTrails: ReadonlyMap<string, ReadonlyArray<string>>,
+  hardware: ToyHardware,
+): Map<string, WorldPosition> {
+  const result = new Map<string, WorldPosition>();
+
+  // Build a quick lookup: pieceId → TrackPiece
+  const piecesById = new Map<string, TrackPiece>();
+  for (const p of pieces) piecesById.set(p.id, p);
+
+  const sim = hardware.getSimulation();
+
+  for (const [trainPieceId, carriageIds] of trainTrails) {
+    const simTrain = sim.getTrain(`T-${trainPieceId}`);
+    if (simTrain === undefined) continue;
+
+    const endpoints = resolveEdgeEndpoints(simTrain, piecesById);
+    if (endpoints === undefined) continue;
+
+    const { fromPos, toPos, fromMarkerId, toMarkerId } = endpoints;
+
+    // Edge length from sim's LayoutState (matches what VirtualTrain uses).
+    const edgeLengthMm = sim.layout.findEdge(fromMarkerId, toMarkerId)?.estimated_length_mm ?? 200;
+
+    const trainDist = simTrain.getDistanceIntoEdge();
+
+    // Train sprite position
+    result.set(trainPieceId, carriageWorldPos(fromPos, toPos, edgeLengthMm, trainDist));
+
+    // Carriage positions — clamp to 0 (v1: no multi-edge trailing)
+    for (let i = 0; i < carriageIds.length; i++) {
+      const carriageId = carriageIds[i];
+      if (carriageId === undefined) continue;
+      const carriageDist = Math.max(0, trainDist - (i + 1) * CARRIAGE_SPACING_MM);
+      result.set(carriageId, carriageWorldPos(fromPos, toPos, edgeLengthMm, carriageDist));
+    }
+  }
+
+  return result;
 }
 
 interface PowerOnAction {
@@ -240,13 +346,31 @@ export function ToyTable() {
    * it's component-scoped rather than a module-level singleton. */
   const garageRegisteredRef = useRef(false);
 
+  // Tick counter — bumped after each RAF frame when at least one coupled train
+  // is moving, so React re-renders with fresh sim positions. We keep the bump
+  // cheap: only increment when `trainTrails` is non-empty (carriage coupling
+  // exists) so idle/empty tables don't churn.
+  const [_tickCount, setTickCount] = useState(0);
+  const trainTrailsRef = useRef<ReadonlyMap<string, string[]>>(new Map());
+
   // Stand up an in-browser physics simulation wired to the broker. It hosts
   // the virtual trains and gates the operator scans onto the bus, and reacts
   // to clearance commands the real server publishes. Layout is *private* to
   // the sim — never published, only used so the trains know where the rails
   // are; the server still infers the public layout from `tag_assignment`
   // events ToyTable emits on scan.
-  useToyHardware({ pieces, liveIds, client });
+  const { hardwareRef } = useToyHardware({
+    pieces,
+    liveIds,
+    client,
+    onTick: () => {
+      // Only bump the tick counter when there are coupled carriages — avoids
+      // churn on tables with no carriages or no live trains.
+      if (trainTrailsRef.current.size > 0) {
+        setTickCount((n) => n + 1);
+      }
+    },
+  });
 
   // Devtools handle — a tiny escape hatch for poking the page from the console.
   // The toy-table v1 has no internal tick loop (devices come and go only via
@@ -414,6 +538,18 @@ export function ToyTable() {
 
   const selectedPiece = pieces.find((p) => p.id === selectedId) ?? null;
 
+  // Coupling: derive which carriages are coupled to which live train each render.
+  const trainTrails = computeTrainTrails(pieces, liveIds);
+  trainTrailsRef.current = trainTrails;
+
+  // Compute render positions from the live simulation. Only non-empty when
+  // there are coupled carriages and the train has a resolved sim edge.
+  const hardware = hardwareRef.current;
+  const renderPositions =
+    hardware !== null && trainTrails.size > 0
+      ? computeRenderPositions(pieces, trainTrails, hardware)
+      : new Map<string, WorldPosition>();
+
   return (
     <div className="tf-toytable">
       <header className="tf-toytable__header">
@@ -437,6 +573,8 @@ export function ToyTable() {
             liveIds={liveIds}
             selectedId={selectedId}
             armedType={armedType}
+            trainTrails={trainTrails}
+            renderPositions={renderPositions}
             onCanvasClick={placePiece}
             onPieceAction={handlePiecePointerAction}
           />
@@ -562,6 +700,18 @@ interface TableProps {
   readonly liveIds: ReadonlySet<string>;
   readonly selectedId: string | null;
   readonly armedType: TrackPieceType | null;
+  /**
+   * Pre-computed train→carriages coupling map (from `computeTrainTrails`).
+   * Passed from the parent so coupling and render-position logic share one
+   * computation.
+   */
+  readonly trainTrails: ReadonlyMap<string, string[]>;
+  /**
+   * World positions to render live trains + coupled carriages at, derived from
+   * the sim each RAF tick. When empty the renderer falls back to
+   * `piece.position` (carriages not yet coupled / train deferred).
+   */
+  readonly renderPositions: ReadonlyMap<string, WorldPosition>;
   readonly onCanvasClick: (
     xMm: number,
     yMm: number,
@@ -576,16 +726,14 @@ function Table({
   liveIds,
   selectedId,
   armedType,
+  trainTrails,
+  renderPositions,
   onCanvasClick,
   onPieceAction,
 }: TableProps) {
   const svgRef = useRef<SVGSVGElement>(null);
 
-  // Coupling: derive which carriages are coupled to which live train each render.
-  // Carriages within COUPLING_DISTANCE_MM of a live train (or another already-
-  // coupled carriage) are pulled into that train's trail. See coupling.ts.
-  const trainTrails = computeTrainTrails(pieces, liveIds);
-  // Build reverse map: carriageId → trainPieceId
+  // Build reverse map: carriageId → trainPieceId (for data-coupled-to attr)
   const carriageCoupledTo = new Map<string, string>();
   for (const [trainId, carriageIds] of trainTrails) {
     for (const carriageId of carriageIds) {
@@ -808,6 +956,7 @@ function Table({
           live={liveIds.has(p.id)}
           armedType={armedType}
           coupledToTrainId={carriageCoupledTo.get(p.id)}
+          renderPosition={renderPositions.get(p.id)}
           onAction={(action) => onPieceAction(p.id, action)}
           onToyboxDragStart={setDraggingToyboxType}
         />
@@ -858,6 +1007,13 @@ interface PieceRendererProps {
    * Undefined for all non-carriage piece types.
    */
   readonly coupledToTrainId: string | undefined;
+  /**
+   * When set, overrides the piece's `position` and `rotationDeg` for rendering.
+   * Used to drive live trains and their coupled carriages from the simulation's
+   * physics state. When undefined the renderer falls back to `piece.position`
+   * (uncoupled or deferred pieces sit at their placement coordinates).
+   */
+  readonly renderPosition: WorldPosition | undefined;
   readonly onAction: (action: 'select' | PowerOnAction) => void;
   /** Notifies Table of the type being dragged from the toybox area, so snap
    * highlighting can work during dragover (dataTransfer not readable then). */
@@ -870,6 +1026,7 @@ function PieceRenderer({
   live,
   armedType,
   coupledToTrainId,
+  renderPosition,
   onAction,
   onToyboxDragStart,
 }: PieceRendererProps) {
@@ -904,8 +1061,11 @@ function PieceRenderer({
     onToyboxDragStart(null);
   }
 
-  const { x, y } = piece.position;
-  const { rotationDeg } = piece;
+  // Use the simulated world position when available; fall back to the piece's
+  // static placement position for uncoupled / deferred pieces.
+  const x = renderPosition?.x ?? piece.position.x;
+  const y = renderPosition?.y ?? piece.position.y;
+  const rotationDeg = renderPosition?.rotationDeg ?? piece.rotationDeg;
 
   // `draggable` is an HTML attribute that also works on SVG nodes but isn't in
   // React's `SVGProps` type. Pass it through a typed extra-props object rather

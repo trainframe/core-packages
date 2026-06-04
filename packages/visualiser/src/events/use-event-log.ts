@@ -1,3 +1,4 @@
+// TODO: extract — see src/view/index.ts for the extraction pattern (EventLogView).
 import { useEffect, useState } from 'react';
 import { useBroker } from '../broker/broker-context.js';
 import type { BrokerMessage } from '../broker/client.js';
