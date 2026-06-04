@@ -8,6 +8,7 @@ import {
 } from '@trainframe/core';
 import { type Layout, PROTOCOL_VERSION } from '@trainframe/protocol';
 import type { BrokerClient } from './broker/client.js';
+import { LearnMode, type LearnModeStateSnapshot } from './learn-mode.js';
 
 export interface ServerOptions {
   /** Layout the server reasons against. Published as retained state on start. */
@@ -44,6 +45,7 @@ export class Server {
   private readonly registry: CapabilityRegistry;
   private readonly layoutState: LayoutState;
   private readonly scheduler: Scheduler;
+  private readonly learnMode: LearnMode;
   private readonly newId: () => string;
   private unsubscribe: (() => void) | null = null;
   private unsubscribeOperator: (() => void) | null = null;
@@ -56,6 +58,14 @@ export class Server {
     this.layoutState = new LayoutState(options.layout);
     this.scheduler = new Scheduler(this.registry, this.layoutState);
     this.newId = options.newId ?? defaultNewId;
+    this.learnMode = new LearnMode({
+      layoutState: this.layoutState,
+      registeredTrains: () => this.scheduler.getTrainIds(),
+      trainLastMarker: (trainId) => this.scheduler.getTrainState(trainId)?.last_marker_id,
+      sendCommand: (deviceId, commandType, payload) =>
+        this.publishCommand(deviceId, commandType, payload),
+      publishState: (snapshot) => this.publishLearnModeState(snapshot),
+    });
   }
 
   /** Begin processing wire events. Publishes the current layout retained. */
@@ -73,6 +83,7 @@ export class Server {
       this.handleOperatorCommand(msg.topic, msg.payload),
     );
     this.publishLayoutState();
+    this.learnMode.publishInitialState();
   }
 
   /** Detach from the broker without disconnecting the underlying client. */
@@ -101,6 +112,9 @@ export class Server {
     }
     if (!parsed || typeof parsed !== 'object') return;
     const obj = parsed as Record<string, unknown>;
+    // Track-learn lives in its own module — let it consume the command
+    // first if it recognises it.
+    if (this.learnMode.handleOperatorCommand(commandType, obj)) return;
     if (commandType === 'assign_schedule') {
       const trainId = obj.train_id;
       const stops = obj.stops;
@@ -187,6 +201,11 @@ export class Server {
     return this.layoutState;
   }
 
+  /** Test/observability hook. */
+  getLearnMode(): LearnMode {
+    return this.learnMode;
+  }
+
   // ----------------- internals -----------------
 
   private handleMessage(topic: string, payload: Uint8Array): void {
@@ -211,6 +230,10 @@ export class Server {
       payload: event_payload,
     });
     this.dispatchEffects(effects);
+    // LearnMode reads `LayoutState` and the train's last marker — both updated
+    // by the scheduler during `handleEvent`. Forward *after* dispatch so the
+    // graph is fresh.
+    this.learnMode.onEvent(event_type, device_id, event_payload);
   }
 
   private dispatchEffects(effects: ReadonlyArray<SchedulerEffect>): void {
@@ -241,6 +264,12 @@ export class Server {
       encodeJson(this.options.layout),
       { retain: true },
     );
+  }
+
+  private publishLearnModeState(snapshot: LearnModeStateSnapshot): void {
+    this.options.client.publish('railway/state/track_learning/active', encodeJson(snapshot), {
+      retain: true,
+    });
   }
 
   private encodeEvent(event_type: string, device_id: string, payload: unknown): Uint8Array {

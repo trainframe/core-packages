@@ -7,6 +7,7 @@ import { DeadlockBanner } from './components/DeadlockBanner.js';
 import { DevicesPanel } from './components/DevicesPanel.js';
 import { EventLog } from './components/EventLog.js';
 import { LayoutCanvas } from './components/LayoutCanvas.js';
+import { LearnTrackPanel } from './components/LearnTrackPanel.js';
 import { ScheduleAssigner } from './components/ScheduleAssigner.js';
 import { ScheduleList } from './components/ScheduleList.js';
 import { Settings } from './components/Settings.js';
@@ -37,6 +38,7 @@ export function App({ client }: AppProps = {}) {
         <DeadlockBanner />
         <ScheduleList />
         <ScheduleAssigner />
+        <LearnTrackPanel />
         <DevicesPanel />
         <LayoutCanvas />
         <UnknownTags adminApiUrl={adminApiUrl} />

@@ -32,9 +32,9 @@ describe('end-to-end: virtual train obeys clearances', () => {
 
     const traversals = env.getEventsOfType('marker_traversed');
     const markerOrder = traversals.map((t) => (t.payload as { marker_id: string }).marker_id);
-    // Under the cyclic schedule the train continues past M4; check the first
-    // three traversals to verify the order without pinning the cycle count.
-    expect(markerOrder.slice(0, 3)).toEqual(['M2', 'M3', 'M4']);
+    // Train emits its starting marker M1 on spawn (RFID reads what's under
+    // it); the planned route then takes it through M2, M3, M4 cyclically.
+    expect(markerOrder.slice(0, 4)).toEqual(['M1', 'M2', 'M3', 'M4']);
 
     env.shutdown();
   });
@@ -49,11 +49,12 @@ describe('end-to-end: virtual train obeys clearances', () => {
 
     env.advance(10_000);
 
-    // Train should have reached M2 but not M3.
+    // Train emits M1 on spawn, then advances to M2, but the gate stops it
+    // there so M3 isn't yet traversed.
     const traversals = env
       .getEventsOfType('marker_traversed')
       .map((t) => (t.payload as { marker_id: string }).marker_id);
-    expect(traversals).toEqual(['M2']);
+    expect(traversals).toEqual(['M1', 'M2']);
 
     const train = env.simulation.getTrain('T1');
     expect(train?.getVelocity()).toBe(0);
@@ -65,9 +66,8 @@ describe('end-to-end: virtual train obeys clearances', () => {
     const traversalsAfter = env
       .getEventsOfType('marker_traversed')
       .map((t) => (t.payload as { marker_id: string }).marker_id);
-    // Under the cyclic schedule the train continues past M4; check the first
-    // three traversals after gate release to verify M3 and M4 were cleared.
-    expect(traversalsAfter.slice(0, 3)).toEqual(['M2', 'M3', 'M4']);
+    // Spawn-tag (M1) + initial advance to M2 + post-release M3/M4 cycle.
+    expect(traversalsAfter.slice(0, 4)).toEqual(['M1', 'M2', 'M3', 'M4']);
 
     env.shutdown();
   });
@@ -99,7 +99,8 @@ describe('end-to-end: virtual train obeys clearances', () => {
     const traversals = env
       .getEventsOfType('marker_traversed')
       .map((t) => (t.payload as { marker_id: string }).marker_id);
-    expect(traversals).toEqual(['M2', 'M3']);
+    // Spawn at M1 emits the starting tag, then M2 and M3 on traversal.
+    expect(traversals).toEqual(['M1', 'M2', 'M3']);
 
     env.shutdown();
   });
@@ -340,12 +341,12 @@ describe('despawn → device_disconnected', () => {
     env.assignSchedule('T1', ['M1', 'M4']);
     env.advance(10_000);
 
-    // Train is stopped at M2.
+    // Train is stopped at M2 (spawn-tag M1, then advance to M2).
     expect(
       env
         .getEventsOfType('marker_traversed')
         .map((e) => (e.payload as { marker_id: string }).marker_id),
-    ).toEqual(['M2']);
+    ).toEqual(['M1', 'M2']);
     expect(env.simulation.getTrain('T1')?.getVelocity()).toBe(0);
 
     // Gate vanishes.

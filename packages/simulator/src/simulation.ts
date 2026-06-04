@@ -149,6 +149,21 @@ export class Simulation {
       device_id: train_id,
       payload: registrationPayload,
     });
+    // A real train powering up on top of a marker would read whatever tag is
+    // under it and emit a tag_observed. Mirror that so the system learns where
+    // the train sits at startup without waiting for it to move.
+    if (options?.startEdge) {
+      const startMarkerId = options.startEdge.from_marker_id;
+      const tagId = this.markerToTag.get(startMarkerId);
+      if (tagId !== undefined) {
+        this.captureEvent({
+          at_ms: this.clock.now(),
+          event_type: 'tag_observed',
+          device_id: train_id,
+          payload: { tag_id: tagId, direction: 'forward' },
+        });
+      }
+    }
     return train;
   }
 
