@@ -223,3 +223,35 @@ describe('LayoutState core graph operations', () => {
     expect(ls.findEdge('M1', 'M2')?.inferred).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Switch pairing
+// ---------------------------------------------------------------------------
+
+describe('LayoutState — switch pairing', () => {
+  it('switchDeviceForMarker returns undefined before any pairing is recorded', () => {
+    const layout = new LayoutState(SIMPLE_LOOP);
+    expect(layout.switchDeviceForMarker('M1')).toBeUndefined();
+  });
+
+  it('recordSwitchPairing + switchDeviceForMarker round-trips the device id', () => {
+    const layout = new LayoutState(SIMPLE_LOOP);
+    layout.recordSwitchPairing('SWITCH-M1', 'M1');
+    expect(layout.switchDeviceForMarker('M1')).toBe('SWITCH-M1');
+  });
+
+  it('re-registering the same marker updates the pairing (idempotent)', () => {
+    const layout = new LayoutState(SIMPLE_LOOP);
+    layout.recordSwitchPairing('SWITCH-M1-v1', 'M1');
+    layout.recordSwitchPairing('SWITCH-M1-v2', 'M1');
+    expect(layout.switchDeviceForMarker('M1')).toBe('SWITCH-M1-v2');
+  });
+
+  it('multiple junctions are tracked independently', () => {
+    const layout = new LayoutState(SIMPLE_LOOP);
+    layout.recordSwitchPairing('SWITCH-M1', 'M1');
+    layout.recordSwitchPairing('SWITCH-M2', 'M2');
+    expect(layout.switchDeviceForMarker('M1')).toBe('SWITCH-M1');
+    expect(layout.switchDeviceForMarker('M2')).toBe('SWITCH-M2');
+  });
+});

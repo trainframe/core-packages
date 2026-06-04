@@ -298,7 +298,7 @@ describe('LearnMode — learn_track_stop returns to idle', () => {
 });
 
 describe('LearnMode — junction routing', () => {
-  it('issues set_switch_position to the unexplored position before assign_route', () => {
+  it('issues set_switch_position to the switch device (not the marker) before assign_route', () => {
     const { client } = makeServer(JUNCTION_LAYOUT);
     publishWireEvent(client, 'device_registered', 'T1', {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
@@ -313,13 +313,20 @@ describe('LearnMode — junction routing', () => {
         target_id: m,
       });
     }
+    // Register the switch motor for the junction with controls_marker_id so
+    // the server records the pairing and LearnMode can resolve JCT → SWITCH-JCT.
+    publishWireEvent(client, 'device_registered', 'SWITCH-JCT', {
+      capabilities: ['core.controls_switch'],
+      controls_marker_id: 'JCT',
+    });
     publishOperatorCommand(client, 'learn_track_start', {});
     publishWireEvent(client, 'tag_observed', 'T1', { tag_id: 'M1' });
     publishWireEvent(client, 'tag_observed', 'T1', { tag_id: 'JCT' });
 
     // After reaching JCT, LearnMode chose one of the outgoing edges
     // ({main, divert}). Whatever it chose, if the switch wasn't already at
-    // that position it should emit set_switch_position to JCT first.
+    // that position it should emit set_switch_position to SWITCH-JCT (the
+    // device), not to JCT (the marker).
     const routes = commandsFor(client, 'T1', 'assign_route');
     const lastRoute = routes[routes.length - 1];
     if (!lastRoute) throw new Error('expected a route from JCT');
@@ -328,13 +335,17 @@ describe('LearnMode — junction routing', () => {
     expect(chosenTo === 'MAIN' || chosenTo === 'DIV').toBe(true);
 
     if (chosenTo === 'DIV') {
-      // The initial switch state is 'main' — LearnMode must have asked JCT
-      // to flip to 'divert' first.
-      const switches = commandsFor(client, 'JCT', 'set_switch_position');
+      // The initial switch state is 'main' — LearnMode must have asked
+      // SWITCH-JCT (the device) to flip to 'divert' first.
+      const switches = commandsFor(client, 'SWITCH-JCT', 'set_switch_position');
       expect(switches.length).toBeGreaterThanOrEqual(1);
       const last = switches[switches.length - 1];
       expect(last?.payload.position).toBe('divert');
     }
+
+    // Confirm no commands were addressed to the marker id directly.
+    const wrongTarget = commandsFor(client, 'JCT', 'set_switch_position');
+    expect(wrongTarget).toHaveLength(0);
   });
 });
 

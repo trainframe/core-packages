@@ -1557,3 +1557,40 @@ describe('Scheduler — clearance state snapshots', () => {
     expect(state.cleared_edges).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Switch device pairing via device_registered + controls_marker_id
+// ---------------------------------------------------------------------------
+
+describe('Scheduler — switch device pairing', () => {
+  it('records the pairing when a device_registered carries controls_marker_id', () => {
+    const { scheduler } = setup();
+    scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'SWITCH-M1',
+      payload: { capabilities: ['core.controls_switch'], controls_marker_id: 'M1' },
+    });
+    expect(scheduler.getLayout().switchDeviceForMarker('M1')).toBe('SWITCH-M1');
+  });
+
+  it('does not record a pairing when controls_marker_id is absent', () => {
+    const { scheduler } = setup();
+    scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'SWITCH-M1',
+      payload: { capabilities: ['core.controls_switch'] },
+    });
+    expect(scheduler.getLayout().switchDeviceForMarker('M1')).toBeUndefined();
+  });
+
+  it('does not record a pairing for non-switch devices that happen to carry controls_marker_id', () => {
+    const { scheduler } = setup();
+    scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'SOME-DEVICE',
+      payload: { capabilities: ['core.controls_motion'], controls_marker_id: 'M1' },
+    });
+    // No switch capability → pairing must not be recorded.
+    expect(scheduler.getLayout().switchDeviceForMarker('M1')).toBeUndefined();
+  });
+});

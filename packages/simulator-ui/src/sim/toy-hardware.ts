@@ -175,12 +175,13 @@ export class ToyHardware {
     const markerId = `M-${piece.id}`;
     this.simulation.bindIdentityTag(markerId);
 
-    // Junction pieces also need a virtual switch motor so LearnMode's
-    // `set_switch_position` commands (sent to the junction marker id) are
-    // handled. The motor id matches the marker id, matching LearnMode's
-    // command routing.
+    // Junction pieces need a virtual switch motor. The motor is registered
+    // under `SWITCH-{piece.id}` with `controls_marker_id: markerId` so the
+    // server can build the marker → device pairing. LearnMode then addresses
+    // `set_switch_position` commands to the device id (looked up via
+    // LayoutState.switchDeviceForMarker), not directly to the marker id.
     if (piece.type === 'junction') {
-      this.simulation.spawnSwitch(markerId, markerId);
+      this.simulation.spawnSwitch(`SWITCH-${piece.id}`, markerId);
     }
   }
 
@@ -198,7 +199,7 @@ export class ToyHardware {
       return;
     }
     if (piece.type === 'junction') {
-      this.simulation.despawnSwitch(`M-${piece.id}`);
+      this.simulation.despawnSwitch(`SWITCH-${piece.id}`);
     }
   }
 

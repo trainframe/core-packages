@@ -7,25 +7,28 @@ import { VirtualSwitch } from './virtual-switch.js';
 // ---------------------------------------------------------------------------
 
 describe('VirtualSwitch', () => {
-  function makeSwitch(): {
+  function makeSwitch(
+    deviceId = 'SWITCH-jct-1',
+    junctionMarkerId = 'M-jct-1',
+  ): {
     sw: VirtualSwitch;
     events: Array<{ event_type: string; device_id: string; payload: unknown }>;
   } {
     const events: Array<{ event_type: string; device_id: string; payload: unknown }> = [];
-    const sw = new VirtualSwitch('M-jct-1', 'M-jct-1', (e) => events.push(e));
+    const sw = new VirtualSwitch(deviceId, junctionMarkerId, (e) => events.push(e));
     return { sw, events };
   }
 
-  it('register() emits device_registered with core.controls_switch', () => {
+  it('register() emits device_registered with core.controls_switch and controls_marker_id', () => {
     const { sw, events } = makeSwitch();
     sw.register();
     expect(events).toHaveLength(1);
     const ev = events[0];
     expect(ev?.event_type).toBe('device_registered');
-    expect(ev?.device_id).toBe('M-jct-1');
-    expect((ev?.payload as { capabilities: string[] }).capabilities).toEqual([
-      'core.controls_switch',
-    ]);
+    expect(ev?.device_id).toBe('SWITCH-jct-1');
+    const payload = ev?.payload as { capabilities: string[]; controls_marker_id: string };
+    expect(payload.capabilities).toEqual(['core.controls_switch']);
+    expect(payload.controls_marker_id).toBe('M-jct-1');
   });
 
   it('acceptCommand(set_switch_position) emits switch_state_changed with confirmed: true', () => {
@@ -35,8 +38,10 @@ describe('VirtualSwitch', () => {
     expect(events).toHaveLength(2);
     const ev = events[1];
     expect(ev?.event_type).toBe('switch_state_changed');
-    expect(ev?.device_id).toBe('M-jct-1');
+    // device_id on switch_state_changed is the switch device id, not the marker id.
+    expect(ev?.device_id).toBe('SWITCH-jct-1');
     const p = ev?.payload as { junction_marker_id: string; position: string; confirmed: boolean };
+    // junction_marker_id in the payload is the logical junction marker.
     expect(p.junction_marker_id).toBe('M-jct-1');
     expect(p.position).toBe('divert');
     expect(p.confirmed).toBe(true);
@@ -58,19 +63,23 @@ describe('VirtualSwitch', () => {
 describe('Simulation.spawnSwitch', () => {
   const EMPTY_LAYOUT = { name: 'test', markers: [], edges: [], junctions: [] };
 
-  it('registers the switch and broadcasts device_registered', () => {
+  it('registers the switch and broadcasts device_registered with controls_marker_id', () => {
     const sim = new Simulation({ layout: EMPTY_LAYOUT, seed: 1 });
-    sim.spawnSwitch('M-jct-1', 'M-jct-1');
+    sim.spawnSwitch('SWITCH-jct-1', 'M-jct-1');
     const regs = sim.getEventsOfType('device_registered');
     expect(regs.length).toBe(1);
-    const payload = regs[0]?.payload as { capabilities: string[] };
+    const reg = regs[0];
+    expect(reg?.device_id).toBe('SWITCH-jct-1');
+    const payload = reg?.payload as { capabilities: string[]; controls_marker_id: string };
     expect(payload.capabilities).toEqual(['core.controls_switch']);
+    expect(payload.controls_marker_id).toBe('M-jct-1');
   });
 
-  it('routes set_switch_position to the switch and emits switch_state_changed', () => {
+  it('routes set_switch_position to the switch device and emits switch_state_changed', () => {
     const sim = new Simulation({ layout: EMPTY_LAYOUT, seed: 1 });
-    sim.spawnSwitch('M-jct-1', 'M-jct-1');
-    sim.handleCommand('M-jct-1', 'set_switch_position', {
+    sim.spawnSwitch('SWITCH-jct-1', 'M-jct-1');
+    // Commands are addressed to the switch device id, not the marker id.
+    sim.handleCommand('SWITCH-jct-1', 'set_switch_position', {
       junction_marker_id: 'M-jct-1',
       position: 'main',
     });
@@ -81,6 +90,7 @@ describe('Simulation.spawnSwitch', () => {
       position: string;
       confirmed: boolean;
     };
+    // switch_state_changed still carries the logical junction marker id.
     expect(p.junction_marker_id).toBe('M-jct-1');
     expect(p.position).toBe('main');
     expect(p.confirmed).toBe(true);
@@ -88,14 +98,14 @@ describe('Simulation.spawnSwitch', () => {
 
   it('despawnSwitch emits device_disconnected and stops dispatching commands', () => {
     const sim = new Simulation({ layout: EMPTY_LAYOUT, seed: 1 });
-    sim.spawnSwitch('M-jct-1', 'M-jct-1');
-    sim.despawnSwitch('M-jct-1');
+    sim.spawnSwitch('SWITCH-jct-1', 'M-jct-1');
+    sim.despawnSwitch('SWITCH-jct-1');
     const disconnects = sim.getEventsOfType('device_disconnected');
     expect(disconnects).toHaveLength(1);
-    expect(disconnects[0]?.device_id).toBe('M-jct-1');
+    expect(disconnects[0]?.device_id).toBe('SWITCH-jct-1');
 
     // Commands after despawn should be silently ignored (no switch_state_changed).
-    sim.handleCommand('M-jct-1', 'set_switch_position', { position: 'divert' });
+    sim.handleCommand('SWITCH-jct-1', 'set_switch_position', { position: 'divert' });
     expect(sim.getEventsOfType('switch_state_changed')).toHaveLength(0);
   });
 
@@ -110,8 +120,8 @@ describe('Simulation.spawnSwitch', () => {
     const sim = new Simulation({ layout: EMPTY_LAYOUT, seed: 1 });
     const captured: string[] = [];
     sim.onEvent((e) => captured.push(e.event_type));
-    sim.spawnSwitch('M-jct-1', 'M-jct-1');
-    sim.handleCommand('M-jct-1', 'set_switch_position', { position: 'divert' });
+    sim.spawnSwitch('SWITCH-jct-1', 'M-jct-1');
+    sim.handleCommand('SWITCH-jct-1', 'set_switch_position', { position: 'divert' });
     expect(captured).toEqual(['device_registered', 'switch_state_changed']);
   });
 
@@ -120,17 +130,17 @@ describe('Simulation.spawnSwitch', () => {
     // still reaches the switch. Covered by the routing test above; this
     // documents intent that no internal fields are inspected.
     const sim = new Simulation({ layout: EMPTY_LAYOUT, seed: 1 });
-    const sw = sim.spawnSwitch('M-jct-2', 'M-jct-2');
+    const sw = sim.spawnSwitch('SWITCH-jct-2', 'M-jct-2');
     // sw is a real VirtualSwitch — no mocking.
     expect(sw).toBeInstanceOf(VirtualSwitch);
-    sim.handleCommand('M-jct-2', 'set_switch_position', { position: 'main' });
+    sim.handleCommand('SWITCH-jct-2', 'set_switch_position', { position: 'main' });
     const changed = sim.getEventsOfType('switch_state_changed');
     expect(changed).toHaveLength(1);
   });
 
   it('spy-less: confirms VirtualSwitch is exported and constructable', () => {
     const events: unknown[] = [];
-    const sw = new VirtualSwitch('M-test', 'M-test', (e) => events.push(e));
+    const sw = new VirtualSwitch('SWITCH-test', 'M-test', (e) => events.push(e));
     sw.register();
     expect(events).toHaveLength(1);
   });

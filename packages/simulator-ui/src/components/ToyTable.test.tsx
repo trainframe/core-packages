@@ -18,7 +18,7 @@ function renderToyTable(): RenderResult {
   client.connect('ws://test');
   render(
     <BrokerProvider client={client}>
-      <ToyTable />
+      <ToyTable initialUrl="ws://test" />
     </BrokerProvider>,
   );
   return { client };
@@ -557,22 +557,29 @@ describe('ToyTable — junction switch device', () => {
     localStorage.clear();
   });
 
-  it('scanning a junction emits device_registered for core.controls_switch with marker id', async () => {
+  it('scanning a junction emits device_registered for SWITCH-{pieceId} with controls_marker_id', async () => {
     const { client } = renderToyTable();
     const pieceId = await placeArmedPiece('junction');
 
     dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
 
+    const switchDeviceId = `SWITCH-${pieceId}`;
     const markerId = `M-${pieceId}`;
     const switchRegs = client.published.filter(
-      (m) => m.topic === `railway/events/device_registered/${markerId}`,
+      (m) => m.topic === `railway/events/device_registered/${switchDeviceId}`,
     );
     expect(switchRegs.length).toBeGreaterThanOrEqual(1);
     const reg = switchRegs[0];
     if (!reg) throw new Error('unreachable');
     const envelope = decodeEnvelope(reg.payload);
-    const payload = envelope.payload as { capabilities: string[] };
+    const payload = envelope.payload as { capabilities: string[]; controls_marker_id: string };
     expect(payload.capabilities).toEqual(['core.controls_switch']);
+    expect(payload.controls_marker_id).toBe(markerId);
+    // The switch device registers under SWITCH-{pieceId}, not M-{pieceId}.
+    const wrongTarget = client.published.filter(
+      (m) => m.topic === `railway/events/device_registered/${markerId}`,
+    );
+    expect(wrongTarget).toHaveLength(0);
   });
 
   it('scanning a non-junction track piece does NOT emit a switch device_registered', async () => {

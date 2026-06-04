@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from 'react';
 import { BrokerProvider } from './broker/broker-context.js';
 import type { BrokerClient } from './broker/client.js';
 import { MqttBrokerClient } from './broker/mqtt-client.js';
-import { Settings } from './components/Settings.js';
 import { ToyTable } from './components/ToyTable.js';
 import './components/ToyTable.css';
 import { loadBrokerUrl } from './config/broker-config.js';
@@ -16,8 +15,10 @@ interface AppProps {
  * hardware. The previous developer panel (SimControls / LayoutConfig /
  * Settings) has been retired; everything lives inside `<ToyTable />` now.
  *
- * `<Settings>` is kept as a separate component outside `<ToyTable>` so the
- * operator can reconfigure the broker URL without touching the canvas state.
+ * The broker-URL settings are tucked behind a cog icon in the ToyTable
+ * header so the toy-table framing is preserved while the operator can still
+ * reach them when needed. `initialUrl` is threaded down to ToyTable so the
+ * Settings form knows its starting value.
  */
 export function App({ client }: AppProps = {}) {
   const resolvedClient = useMemo(() => client ?? new MqttBrokerClient(), [client]);
@@ -30,8 +31,7 @@ export function App({ client }: AppProps = {}) {
 
   return (
     <BrokerProvider client={resolvedClient}>
-      <Settings initialUrl={initialUrl} />
-      <ToyTable />
+      <ToyTable initialUrl={initialUrl} />
     </BrokerProvider>
   );
 }

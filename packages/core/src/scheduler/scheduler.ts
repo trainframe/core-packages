@@ -120,22 +120,45 @@ export class Scheduler {
       capability_state: capabilityState,
     });
 
-    // If this device claims to be a train, initialise train state and capture
-    // optional physical length for tail-clearance deferral.
     if (capabilities.includes('core.controls_motion')) {
-      if (!this.trains.has(deviceId)) {
-        this.trains.set(deviceId, initialTrainState(deviceId));
-      }
-      const trainLengthMm = (payload as { train_length_mm?: number }).train_length_mm;
-      if (trainLengthMm !== undefined && trainLengthMm > 0) {
-        const train = this.trains.get(deviceId);
-        if (train) {
-          train.length_mm = trainLengthMm;
-        }
-      }
+      this.initTrainState(deviceId, payload);
+    }
+
+    if (capabilities.includes('core.controls_switch')) {
+      this.maybeRecordSwitchPairing(deviceId, payload);
     }
 
     return [effects.updateState('devices', deviceId, { capabilities })];
+  }
+
+  /**
+   * Initialise (or re-initialise) train state when a device declares
+   * `core.controls_motion`. Captures optional physical length for
+   * tail-clearance deferral.
+   */
+  private initTrainState(deviceId: string, payload: unknown): void {
+    if (!this.trains.has(deviceId)) {
+      this.trains.set(deviceId, initialTrainState(deviceId));
+    }
+    const trainLengthMm = (payload as { train_length_mm?: number }).train_length_mm;
+    if (trainLengthMm !== undefined && trainLengthMm > 0) {
+      const train = this.trains.get(deviceId);
+      if (train) {
+        train.length_mm = trainLengthMm;
+      }
+    }
+  }
+
+  /**
+   * Record the junction marker → switch device pairing when a device declares
+   * `core.controls_switch` with a `controls_marker_id` field. The field is
+   * optional and non-breaking for devices that omit it.
+   */
+  private maybeRecordSwitchPairing(deviceId: string, payload: unknown): void {
+    const controlsMarkerId = (payload as { controls_marker_id?: unknown }).controls_marker_id;
+    if (typeof controlsMarkerId === 'string') {
+      this.layout.recordSwitchPairing(deviceId, controlsMarkerId);
+    }
   }
 
   // ---------- device disconnect ----------

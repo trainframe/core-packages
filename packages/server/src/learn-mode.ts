@@ -253,16 +253,8 @@ export class LearnMode {
     }
 
     // If the marker is a junction with a known unexplored position, set the
-    // switch first.
-    if (nextEdge.requires_switch_state !== undefined) {
-      const current = this.ports.layoutState.getSwitchPosition(markerId);
-      if (current !== nextEdge.requires_switch_state) {
-        this.ports.sendCommand(markerId, 'set_switch_position', {
-          junction_marker_id: markerId,
-          position: nextEdge.requires_switch_state,
-        });
-      }
-    }
+    // switch first. Extracted to keep driveOneStep within complexity budget.
+    this.maybeFlipSwitch(markerId, nextEdge.requires_switch_state);
 
     this.session.routeIdCounter += 1;
     const routeId = `learn-${this.session.routeIdCounter}`;
@@ -281,6 +273,25 @@ export class LearnMode {
     });
 
     this.publishCurrentState();
+  }
+
+  /**
+   * If the marker is a junction whose required switch state differs from the
+   * current position, send `set_switch_position` to the paired switch device.
+   * The device id is resolved via `LayoutState.switchDeviceForMarker`; if no
+   * pairing has been recorded yet, the command is silently skipped — the
+   * clearance gate will keep the train stopped until the position confirms.
+   */
+  private maybeFlipSwitch(markerId: string, requiredState: string | undefined): void {
+    if (requiredState === undefined) return;
+    const current = this.ports.layoutState.getSwitchPosition(markerId);
+    if (current === requiredState) return;
+    const switchDeviceId = this.ports.layoutState.switchDeviceForMarker(markerId);
+    if (switchDeviceId === undefined) return;
+    this.ports.sendCommand(switchDeviceId, 'set_switch_position', {
+      junction_marker_id: markerId,
+      position: requiredState,
+    });
   }
 
   private publishCurrentState(): void {

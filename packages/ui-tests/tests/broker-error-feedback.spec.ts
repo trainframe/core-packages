@@ -75,8 +75,11 @@ test.describe
       // Sanity-check: sim-ui starts connected to the harness.
       await expect(page.getByRole('status')).toHaveText(/connected/i, { timeout: 10_000 });
 
-      // Operator opens Settings (already visible) and types a URL that has no
-      // broker behind it.
+      // Operator opens the Settings popover via the cog button (the sim-ui
+      // hides settings behind a cog icon; the visualiser shows them inline).
+      await page.getByRole('button', { name: /settings/i }).click();
+
+      // Operator types a URL that has no broker behind it.
       const urlInput = page.getByRole('textbox', { name: /broker url/i });
       await urlInput.fill('ws://127.0.0.1:9999');
       await page.getByRole('button', { name: /connect/i }).click();

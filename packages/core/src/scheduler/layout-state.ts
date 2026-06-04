@@ -38,6 +38,13 @@ export class LayoutState {
   private readonly outgoingEdges = new Map<string, LayoutEdge[]>();
   private readonly incomingEdges = new Map<string, LayoutEdge[]>();
   private readonly switchPositions = new Map<string, string>();
+  /**
+   * Pairing from junction marker id → switch device id, populated when a
+   * `device_registered` event with `core.controls_switch` + `controls_marker_id`
+   * is processed by the scheduler. Read by LearnMode when it needs to target
+   * the hardware device, not the logical marker.
+   */
+  private readonly switchDeviceByMarker = new Map<string, string>();
   private readonly junctionsByMarkerId = new Map<
     string,
     { marker_id: string; initial_state?: string }
@@ -144,6 +151,26 @@ export class LayoutState {
 
   getSwitchPosition(junctionMarkerId: string): string | undefined {
     return this.switchPositions.get(junctionMarkerId);
+  }
+
+  /**
+   * Record the pairing between a junction marker and its controlling switch
+   * device. Called by the scheduler when a `device_registered` event carries
+   * `core.controls_switch` + a `controls_marker_id` field. Idempotent —
+   * re-registering the same device updates the record.
+   */
+  recordSwitchPairing(deviceId: string, junctionMarkerId: string): void {
+    this.switchDeviceByMarker.set(junctionMarkerId, deviceId);
+  }
+
+  /**
+   * Return the switch device id that controls the given junction marker, or
+   * `undefined` if no device has declared itself as the controller. Used by
+   * LearnMode to address `set_switch_position` commands to the real device
+   * rather than the marker id.
+   */
+  switchDeviceForMarker(junctionMarkerId: string): string | undefined {
+    return this.switchDeviceByMarker.get(junctionMarkerId);
   }
 
   /**

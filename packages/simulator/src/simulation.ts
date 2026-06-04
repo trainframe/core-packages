@@ -215,9 +215,11 @@ export class Simulation {
 
   /**
    * Register a virtual switch motor paired with `junction_marker_id`.
-   * In the toy-table flow both `device_id` and `junction_marker_id` are
-   * `M-{piece.id}` — matching the device_id that LearnMode addresses when
-   * it sends `set_switch_position` to the junction's marker.
+   * In the toy-table flow `device_id` is `SWITCH-{piece.id}` and
+   * `junction_marker_id` is `M-{piece.id}`. The motor emits `device_registered`
+   * with `controls_marker_id: junction_marker_id` so the server records the
+   * pairing and LearnMode can address `set_switch_position` to the device,
+   * not to the marker id.
    */
   spawnSwitch(device_id: string, junction_marker_id: string): VirtualSwitch {
     const sw = new VirtualSwitch(device_id, junction_marker_id, (e) =>

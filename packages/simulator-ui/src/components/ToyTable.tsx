@@ -25,6 +25,7 @@ import {
 } from '../track/pieces.js';
 import { ConnectionStatus } from './ConnectionStatus.js';
 import { ScanBox } from './ScanBox.js';
+import { Settings } from './Settings.js';
 
 // Canvas scale: 1 mm = SCALE px. Matches the old TrackBuilder so coordinates
 // translate one-for-one across the refactor.
@@ -324,7 +325,12 @@ function findSnapOffset(
  * traversals; the simulator-ui contributes neither markers nor edges to a
  * retained layout document.
  */
-export function ToyTable() {
+interface ToyTableProps {
+  /** Initial broker URL, forwarded to the Settings popover. */
+  readonly initialUrl: string;
+}
+
+export function ToyTable({ initialUrl }: ToyTableProps) {
   const { client } = useBroker();
   const [pieces, setPieces] = useState<ReadonlyArray<TrackPiece>>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -555,6 +561,7 @@ export function ToyTable() {
       <header className="tf-toytable__header">
         <h1>Trainframe Toy Table</h1>
         <ConnectionStatus />
+        <Settings initialUrl={initialUrl} />
       </header>
       <div className="tf-toytable__body">
         <aside className="tf-toytable__sidebar">
@@ -1172,13 +1179,15 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
   client.publish(assignment.topic, assignment.payload);
 
   // Junction pieces also need a switch-motor device so LearnMode can send
-  // `set_switch_position` commands to the junction. The motor's device_id
-  // matches the junction marker id — this is the id LearnMode targets when
-  // it sends `set_switch_position` commands (it uses the marker id, not a
-  // separate "SWITCH-" identifier).
+  // `set_switch_position` commands to it. The motor registers under
+  // `SWITCH-{piece.id}` and declares `controls_marker_id` so the server can
+  // build the marker → device pairing. LearnMode then looks up the device id
+  // via LayoutState.switchDeviceForMarker and targets the device directly.
   if (piece.type === 'junction') {
-    const switchReg = encodeDeviceEvent('device_registered', markerId, {
+    const switchDeviceId = `SWITCH-${piece.id}`;
+    const switchReg = encodeDeviceEvent('device_registered', switchDeviceId, {
       capabilities: ['core.controls_switch'],
+      controls_marker_id: markerId,
     });
     client.publish(switchReg.topic, switchReg.payload);
   }

@@ -10,10 +10,12 @@ interface SwitchEvent {
  * enough for LearnMode's auto-flip path to observe that the switch moved.
  *
  * The `junction_marker_id` identifies which junction this motor is paired with.
- * In the toy-table flow that is always `M-{piece.id}`, and the device_id for
- * the virtual switch is the same value — matching the device_id that
- * LearnMode addresses when it sends `set_switch_position` commands (which use
- * the junction marker id as the target device).
+ * The device is registered under its own device id (e.g. `SWITCH-{piece.id}`)
+ * with a `controls_marker_id` field in the `device_registered` payload, so
+ * the server can resolve the marker → device pairing without magic naming
+ * conventions. LearnMode addresses `set_switch_position` commands to the
+ * device id (not the marker id); `switch_state_changed` still carries the
+ * `junction_marker_id` so the scheduler can update its switch-position map.
  */
 export class VirtualSwitch {
   constructor(
@@ -22,12 +24,19 @@ export class VirtualSwitch {
     private readonly emit: (e: SwitchEvent) => void,
   ) {}
 
-  /** Initial registration call. Announces `core.controls_switch`. */
+  /**
+   * Initial registration call. Announces `core.controls_switch` and
+   * declares `controls_marker_id` so the server records the pairing between
+   * this device and its junction marker.
+   */
   register(): void {
     this.emit({
       event_type: 'device_registered',
       device_id: this.device_id,
-      payload: { capabilities: ['core.controls_switch'] },
+      payload: {
+        capabilities: ['core.controls_switch'],
+        controls_marker_id: this.junction_marker_id,
+      },
     });
   }
 

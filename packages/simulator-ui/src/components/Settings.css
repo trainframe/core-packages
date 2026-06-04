@@ -1,0 +1,123 @@
+/* ---------------------------------------------------------------------------
+   Settings cog + popover panel
+   Uses the same --tf-color-* tokens as ToyTable.css for visual consistency.
+   --------------------------------------------------------------------------- */
+
+.tf-settings {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Gear icon button */
+.tf-settings__cog {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  background: transparent;
+  border: 1px solid var(--tf-color-border, #ccc);
+  border-radius: 6px;
+  padding: 0.3rem;
+  cursor: pointer;
+  color: var(--tf-color-fg-muted, #555);
+  line-height: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.tf-settings__cog:hover {
+  background: var(--tf-color-surface-hover, #ececec);
+  color: var(--tf-color-fg, #1c1c1c);
+}
+
+.tf-settings__cog--error {
+  color: var(--tf-color-danger, #dc2626);
+  border-color: var(--tf-color-danger, #dc2626);
+}
+
+.tf-settings__cog--error:hover {
+  background: #fef2f2;
+}
+
+/* Red dot badge — sits at the top-right of the cog button. */
+.tf-settings__error-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--tf-color-danger, #dc2626);
+  border: 1.5px solid #fff;
+  display: block;
+}
+
+/* Popover panel — uses the native <dialog> element.
+   <dialog> is hidden by default (UA stylesheet); adding `open` makes it
+   visible. We reset UA centering (margin: auto; left: 0) so the panel
+   anchors to the cog's right edge instead of stretching to fill. */
+.tf-settings__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  /* Explicitly unset `left` to override the UA stylesheet's inset-inline-start:0 */
+  left: auto;
+  min-width: 260px;
+  width: max-content;
+  background: var(--tf-color-surface, #f5f5f5);
+  border: 1px solid var(--tf-color-border, #ccc);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  padding: 1rem;
+  z-index: 100;
+  /* Reset UA dialog default centering */
+  margin: 0;
+}
+
+.tf-settings__panel form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.tf-settings__panel label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.875rem;
+}
+
+.tf-settings__panel input[type="url"] {
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--tf-color-border, #ccc);
+  border-radius: 4px;
+  font-size: 0.875rem;
+  width: 100%;
+  box-sizing: border-box;
+  background: #fff;
+}
+
+.tf-settings__panel button[type="submit"] {
+  align-self: flex-start;
+  padding: 0.35rem 0.9rem;
+  background: var(--tf-color-accent, #f59e0b);
+  border: none;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.tf-settings__panel button[type="submit"]:hover {
+  background: var(--tf-color-accent-hover, #d97706);
+}
+
+.tf-settings__panel p {
+  font-size: 0.8rem;
+  margin: 0;
+  color: var(--tf-color-fg-muted, #555);
+}
+
+.tf-settings__panel [role="alert"] {
+  color: var(--tf-color-danger, #dc2626);
+  font-size: 0.85rem;
+}
