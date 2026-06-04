@@ -5,6 +5,7 @@ import { useBroker } from '../broker/broker-context.js';
 import type { BrokerClient } from '../broker/client.js';
 import { encodeDeviceEvent } from '../broker/encode-event.js';
 import { useToyHardware } from '../sim/use-toy-hardware.js';
+import { SNAP_DISTANCE } from '../track/layout-from-pieces.js';
 import {
   type RotationDeg,
   type TrackPiece,
@@ -22,6 +23,13 @@ import { ScanBox } from './ScanBox.js';
 const SCALE = 2;
 const CANVAS_W_MM = 900;
 const CANVAS_H_MM = 600;
+
+/** Minimum and maximum zoom levels. */
+const MIN_ZOOM = 0.1;
+const MAX_ZOOM = 10;
+
+/** MIME type for pieces being dragged from the toybox onto the canvas. */
+const TOYBOX_DRAG_MIME = 'application/x-trainframe-toybox-type';
 
 /**
  * The garage device id used by the toy-table when announcing tag bindings.
@@ -104,10 +112,96 @@ declare global {
   }
 }
 
+/** Viewport state: world-space origin (top-left corner) and zoom level. */
+interface Viewport {
+  readonly x: number;
+  readonly y: number;
+  readonly zoom: number;
+}
+
+/** Snap target: an existing endpoint that a dragged piece is near enough to snap to. */
+interface SnapTarget {
+  readonly x: number;
+  readonly y: number;
+}
+
+/**
+ * Convert a client-space pointer position to world-space mm, accounting for
+ * the current viewport.  Falls back to the canvas centre when the rect has
+ * zero dimensions (jsdom).
+ */
+function clientToMm(
+  rect: DOMRect,
+  clientX: number,
+  clientY: number,
+  viewport: Viewport,
+): { x: number; y: number } {
+  if (rect.width <= 0 || rect.height <= 0) {
+    return { x: CANVAS_W_MM / 2, y: CANVAS_H_MM / 2 };
+  }
+  const worldW = CANVAS_W_MM / viewport.zoom;
+  const worldH = CANVAS_H_MM / viewport.zoom;
+  const xMm = viewport.x + ((clientX - rect.left) / rect.width) * worldW;
+  const yMm = viewport.y + ((clientY - rect.top) / rect.height) * worldH;
+  return { x: xMm, y: yMm };
+}
+
+/**
+ * Find the snap offset for a candidate piece placement.
+ *
+ * Given a candidate (x, y, rotationDeg) and the existing placed pieces, if
+ * any endpoint of the candidate is within SNAP_DISTANCE_MM of any existing
+ * piece's endpoint, return a position offset so the nearest pair of endpoints
+ * coincide exactly.  Returns null when no snap candidate is within range.
+ */
+function findSnapOffset(
+  candidateX: number,
+  candidateY: number,
+  candidateRotation: RotationDeg,
+  type: TrackPieceType,
+  existingPieces: ReadonlyArray<TrackPiece>,
+): { offsetX: number; offsetY: number; snapTarget: SnapTarget } | null {
+  // Build a temporary piece to compute its endpoints in world space.
+  const candidate: TrackPiece = {
+    id: '__snap_candidate__',
+    type,
+    position: { x: candidateX, y: candidateY },
+    rotationDeg: candidateRotation,
+    tagged: false,
+  };
+  const candidateEndpoints = getEndpoints(candidate);
+  if (candidateEndpoints.length === 0) return null;
+
+  let bestDist = SNAP_DISTANCE;
+  let bestOffset: { offsetX: number; offsetY: number; snapTarget: SnapTarget } | null = null;
+
+  for (const existing of existingPieces) {
+    const existingEndpoints = getEndpoints(existing);
+    for (const existingEp of existingEndpoints) {
+      for (const candidateEp of candidateEndpoints) {
+        const dx = existingEp.x - candidateEp.x;
+        const dy = existingEp.y - candidateEp.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestOffset = {
+            offsetX: dx,
+            offsetY: dy,
+            snapTarget: { x: existingEp.x, y: existingEp.y },
+          };
+        }
+      }
+    }
+  }
+
+  return bestOffset;
+}
+
 /**
  * The toy table — v1 of the operator's "Brio table" view of the virtual
  * hardware. Pick a piece from the toybox, click on the table to place it,
- * then drag a placed piece into the scan box to bind it to the bus.
+ * or drag a toybox entry onto the canvas to drop it at a specific position.
+ * Drag a placed piece into the scan box to bind it to the bus.
  *
  * No simulator scheduler runs here. Devices live on the broker only after
  * scanning, and clicking a live train powers it back off (emits
@@ -168,16 +262,17 @@ export function ToyTable() {
   }, []);
 
   const placePiece = useCallback(
-    (xMm: number, yMm: number) => {
-      if (armedType === null) {
+    (xMm: number, yMm: number, type?: TrackPieceType, rotation?: RotationDeg) => {
+      const pieceType = type ?? armedType;
+      if (pieceType === null) {
         setSelectedId(null);
         return;
       }
       const piece: TrackPiece = {
-        id: nextPieceId(armedType),
-        type: armedType,
+        id: nextPieceId(pieceType),
+        type: pieceType,
         position: { x: xMm, y: yMm },
-        rotationDeg: 0,
+        rotationDeg: rotation ?? 0,
         tagged: false,
       };
       setPieces((prev) => [...prev, piece]);
@@ -345,21 +440,40 @@ function ToyboxGroup({ heading, types, armedType, onArm }: ToyboxGroupProps) {
           const armed = armedType === type;
           return (
             <li key={type}>
-              <button
-                type="button"
-                className={`tf-toybox__button${armed ? ' tf-toybox__button--armed' : ''}`}
-                onClick={() => onArm(type)}
-                aria-pressed={armed}
-                style={{ borderColor: PIECE_FILL[type] }}
-                data-testid={`toybox-${type}`}
-              >
-                {PIECE_LABELS[type]}
-              </button>
+              <ToyboxButton type={type} armed={armed} onArm={onArm} />
             </li>
           );
         })}
       </ul>
     </section>
+  );
+}
+
+interface ToyboxButtonProps {
+  readonly type: TrackPieceType;
+  readonly armed: boolean;
+  readonly onArm: (type: TrackPieceType) => void;
+}
+
+function ToyboxButton({ type, armed, onArm }: ToyboxButtonProps) {
+  function handleDragStart(e: React.DragEvent<HTMLButtonElement>) {
+    e.dataTransfer.setData(TOYBOX_DRAG_MIME, type);
+    e.dataTransfer.effectAllowed = 'copy';
+  }
+
+  return (
+    <button
+      type="button"
+      className={`tf-toybox__button${armed ? ' tf-toybox__button--armed' : ''}`}
+      onClick={() => onArm(type)}
+      onDragStart={handleDragStart}
+      draggable
+      aria-pressed={armed}
+      style={{ borderColor: PIECE_FILL[type] }}
+      data-testid={`toybox-${type}`}
+    >
+      {PIECE_LABELS[type]}
+    </button>
   );
 }
 
@@ -385,7 +499,7 @@ function ActionBar({ selectedPiece, onRotate, onDelete, armedType }: ActionBarPr
       </button>
       <span className="tf-toytable__status">
         {armedType !== null
-          ? `Armed: ${PIECE_LABELS[armedType]} — click the table to place`
+          ? `Armed: ${PIECE_LABELS[armedType]} — click or drag to place`
           : selectedPiece !== null
             ? `Selected: ${PIECE_LABELS[selectedPiece.type]} · ${selectedPiece.rotationDeg}°`
             : 'Pick a piece from the toybox'}
@@ -403,7 +517,12 @@ interface TableProps {
   readonly liveIds: ReadonlySet<string>;
   readonly selectedId: string | null;
   readonly armedType: TrackPieceType | null;
-  readonly onCanvasClick: (xMm: number, yMm: number) => void;
+  readonly onCanvasClick: (
+    xMm: number,
+    yMm: number,
+    type?: TrackPieceType,
+    rotation?: RotationDeg,
+  ) => void;
   readonly onPieceAction: (pieceId: string, action: 'select' | PowerOnAction) => void;
 }
 
@@ -415,16 +534,131 @@ function Table({
   onCanvasClick,
   onPieceAction,
 }: TableProps) {
-  function handleClick(e: React.MouseEvent<SVGSVGElement>) {
-    // Convert the click point into the SVG's viewBox coordinate system (mm).
-    // `getBoundingClientRect` returns zeros under jsdom; fall back to a
-    // sensible centre placement so tests don't generate NaN coordinates.
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, zoom: 1 });
+
+  /** The piece type currently being dragged from the toybox. Stored in state
+   * so the dragover handler can compute snap candidates without being able to
+   * read dataTransfer (forbidden by HTML5 security during dragover). */
+  const [draggingToyboxType, setDraggingToyboxType] = useState<TrackPieceType | null>(null);
+
+  /** The snap highlight target while a toybox piece is being dragged. */
+  const [snapHighlight, setSnapHighlight] = useState<SnapTarget | null>(null);
+
+  // Pan state stored in refs — no render needed while panning in progress.
+  const isPanningRef = useRef(false);
+  const panStartClientRef = useRef<{ x: number; y: number } | null>(null);
+  const panStartViewportRef = useRef<Viewport | null>(null);
+
+  /** Tracks whether a pan gesture moved enough to suppress the click-to-place. */
+  const movedDuringPanRef = useRef(false);
+  const suppressNextClickRef = useRef(false);
+
+  // Attach a non-passive wheel listener so we can call preventDefault() to
+  // block page scroll while zooming on the canvas.
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (svg === null) return;
+
+    function onWheel(e: WheelEvent) {
+      e.preventDefault();
+      const rect = svg?.getBoundingClientRect() ?? new DOMRect();
+      setViewport((prev) => {
+        // Where the cursor is in world space (mm) before the zoom.
+        const worldPos = clientToMm(rect, e.clientX, e.clientY, prev);
+        const zoomFactor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+        const newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, prev.zoom * zoomFactor));
+        // Adjust origin so the cursor stays at the same world position.
+        const worldW = CANVAS_W_MM / newZoom;
+        const worldH = CANVAS_H_MM / newZoom;
+        const fracX = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5;
+        const fracY = rect.height > 0 ? (e.clientY - rect.top) / rect.height : 0.5;
+        return {
+          x: worldPos.x - fracX * worldW,
+          y: worldPos.y - fracY * worldH,
+          zoom: newZoom,
+        };
+      });
+    }
+
+    svg.addEventListener('wheel', onWheel, { passive: false });
+    return () => svg.removeEventListener('wheel', onWheel);
+  }, []);
+
+  function getRect(): DOMRect {
+    return svgRef.current?.getBoundingClientRect() ?? new DOMRect();
+  }
+
+  function handlePointerDown(e: React.PointerEvent<SVGSVGElement>) {
+    // Middle mouse always pans. Left mouse pans only when nothing is armed
+    // and the pointer is on the background canvas (not a piece).
+    const isMiddle = e.button === 1;
+    const isLeftOnBackground = e.button === 0 && armedType === null && e.target === e.currentTarget;
+    if (!isMiddle && !isLeftOnBackground) return;
+
+    e.preventDefault();
+    isPanningRef.current = true;
+    movedDuringPanRef.current = false;
+    panStartClientRef.current = { x: e.clientX, y: e.clientY };
+    panStartViewportRef.current = viewport;
     const svg = e.currentTarget;
-    const rect = svg.getBoundingClientRect();
-    const xMm =
-      rect.width > 0 ? ((e.clientX - rect.left) / rect.width) * CANVAS_W_MM : CANVAS_W_MM / 2;
-    const yMm =
-      rect.height > 0 ? ((e.clientY - rect.top) / rect.height) * CANVAS_H_MM : CANVAS_H_MM / 2;
+    if (typeof svg.setPointerCapture === 'function') {
+      svg.setPointerCapture(e.pointerId);
+    }
+  }
+
+  function handlePointerMove(e: React.PointerEvent<SVGSVGElement>) {
+    if (!isPanningRef.current) return;
+    if (panStartClientRef.current === null || panStartViewportRef.current === null) return;
+
+    const dx = e.clientX - panStartClientRef.current.x;
+    const dy = e.clientY - panStartClientRef.current.y;
+
+    // Track movement to suppress the click-to-place on pointer-up.
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+      movedDuringPanRef.current = true;
+    }
+
+    const rect = getRect();
+    const worldW = CANVAS_W_MM / panStartViewportRef.current.zoom;
+    const worldH = CANVAS_H_MM / panStartViewportRef.current.zoom;
+    const dxMm = rect.width > 0 ? -(dx / rect.width) * worldW : 0;
+    const dyMm = rect.height > 0 ? -(dy / rect.height) * worldH : 0;
+
+    setViewport({
+      x: panStartViewportRef.current.x + dxMm,
+      y: panStartViewportRef.current.y + dyMm,
+      zoom: panStartViewportRef.current.zoom,
+    });
+  }
+
+  function handlePointerUp(e: React.PointerEvent<SVGSVGElement>) {
+    if (!isPanningRef.current) return;
+    isPanningRef.current = false;
+    panStartClientRef.current = null;
+    panStartViewportRef.current = null;
+    const svg = e.currentTarget;
+    if (typeof svg.releasePointerCapture === 'function') {
+      try {
+        svg.releasePointerCapture(e.pointerId);
+      } catch {
+        // jsdom may throw if the pointer was never captured.
+      }
+    }
+    if (movedDuringPanRef.current) {
+      suppressNextClickRef.current = true;
+    }
+    movedDuringPanRef.current = false;
+  }
+
+  function handleClick(e: React.MouseEvent<SVGSVGElement>) {
+    // Suppress click immediately after a pan gesture.
+    if (suppressNextClickRef.current) {
+      suppressNextClickRef.current = false;
+      return;
+    }
+    const rect = getRect();
+    const { x: xMm, y: yMm } = clientToMm(rect, e.clientX, e.clientY, viewport);
     onCanvasClick(xMm, yMm);
   }
 
@@ -439,18 +673,75 @@ function Table({
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // HTML5 drag-from-toybox: dragover + drop on the canvas
+  // ---------------------------------------------------------------------------
+
+  function handleDragOver(e: React.DragEvent<SVGSVGElement>) {
+    // Only accept toybox-type drags; reject piece-to-scan-box drags.
+    if (!e.dataTransfer.types.includes(TOYBOX_DRAG_MIME)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+
+    if (draggingToyboxType === null) return;
+    const rect = getRect();
+    const { x: xMm, y: yMm } = clientToMm(rect, e.clientX, e.clientY, viewport);
+
+    // Compute snap highlight during drag.
+    const snap = findSnapOffset(xMm, yMm, 0, draggingToyboxType, pieces);
+    setSnapHighlight(snap !== null ? snap.snapTarget : null);
+  }
+
+  function handleDragLeave() {
+    setSnapHighlight(null);
+  }
+
+  function handleDrop(e: React.DragEvent<SVGSVGElement>) {
+    e.preventDefault();
+    setSnapHighlight(null);
+    setDraggingToyboxType(null);
+
+    const pieceType = e.dataTransfer.getData(TOYBOX_DRAG_MIME) as TrackPieceType | '';
+    if (pieceType === '') return;
+
+    const rect = getRect();
+    const { x: xMm, y: yMm } = clientToMm(rect, e.clientX, e.clientY, viewport);
+
+    // Apply snap offset if applicable.
+    const snap = findSnapOffset(xMm, yMm, 0, pieceType, pieces);
+    const finalX = snap !== null ? xMm + snap.offsetX : xMm;
+    const finalY = snap !== null ? yMm + snap.offsetY : yMm;
+
+    onCanvasClick(finalX, finalY, pieceType, 0);
+  }
+
+  // Cursor logic: crosshair when armed, grabbing while panning, default otherwise.
+  const cursor = armedType !== null ? 'crosshair' : isPanningRef.current ? 'grabbing' : 'default';
+
+  const viewBox = `${viewport.x} ${viewport.y} ${CANVAS_W_MM / viewport.zoom} ${CANVAS_H_MM / viewport.zoom}`;
+
   return (
     <svg
+      ref={svgRef}
       width={CANVAS_W_MM * SCALE}
       height={CANVAS_H_MM * SCALE}
-      viewBox={`0 0 ${CANVAS_W_MM} ${CANVAS_H_MM}`}
+      viewBox={viewBox}
       className="tf-toytable__canvas"
-      style={{ cursor: armedType !== null ? 'crosshair' : 'default' }}
+      style={{ cursor }}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
       role="img"
       aria-label="Toy table"
       data-testid="toy-table-canvas"
+      data-viewport-zoom={viewport.zoom}
+      data-viewport-x={viewport.x}
+      data-viewport-y={viewport.y}
     >
       {pieces.map((p) => (
         <PieceRenderer
@@ -459,6 +750,7 @@ function Table({
           selected={p.id === selectedId}
           live={liveIds.has(p.id)}
           onAction={(action) => onPieceAction(p.id, action)}
+          onToyboxDragStart={setDraggingToyboxType}
         />
       ))}
       {/* Endpoint dots for track pieces only. Devices have no endpoints. */}
@@ -478,6 +770,20 @@ function Table({
           )),
         )}
       </g>
+      {/* Snap highlight — a faint ring drawn over the would-snap-to endpoint. */}
+      {snapHighlight !== null && (
+        <circle
+          cx={snapHighlight.x}
+          cy={snapHighlight.y}
+          r={SNAP_DISTANCE / 2}
+          fill="none"
+          stroke="#facc15"
+          strokeWidth={3}
+          strokeOpacity={0.85}
+          style={{ pointerEvents: 'none' }}
+          data-testid="snap-highlight"
+        />
+      )}
     </svg>
   );
 }
@@ -487,9 +793,12 @@ interface PieceRendererProps {
   readonly selected: boolean;
   readonly live: boolean;
   readonly onAction: (action: 'select' | PowerOnAction) => void;
+  /** Notifies Table of the type being dragged from the toybox area, so snap
+   * highlighting can work during dragover (dataTransfer not readable then). */
+  readonly onToyboxDragStart: (type: TrackPieceType | null) => void;
 }
 
-function PieceRenderer({ piece, selected, live, onAction }: PieceRendererProps) {
+function PieceRenderer({ piece, selected, live, onAction, onToyboxDragStart }: PieceRendererProps) {
   const shape = getPieceShape(piece);
   const fill = PIECE_FILL[piece.type];
   const isDevice = isDevicePiece(piece.type);
@@ -505,8 +814,12 @@ function PieceRenderer({ piece, selected, live, onAction }: PieceRendererProps) 
   }
 
   function handleDragStart(e: React.DragEvent) {
+    // Piece-to-scan-box drag: use the scan-box MIME type.
     e.dataTransfer.setData('application/x-trainframe-piece', piece.id);
     e.dataTransfer.effectAllowed = 'move';
+    // Ensure dragging a placed piece doesn't bleed into the snap-highlight
+    // logic (which is only for toybox drags).
+    onToyboxDragStart(null);
   }
 
   const { x, y } = piece.position;

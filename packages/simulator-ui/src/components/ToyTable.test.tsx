@@ -1,6 +1,6 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
 import { InMemoryBrokerClient } from '../broker/in-memory-client.js';
 import { SCANBOX_DATA_MIME } from './ScanBox.js';
@@ -98,6 +98,119 @@ function dropPieceOnScanBox(scanBox: HTMLElement, pieceId: string): void {
     effectAllowed: 'move',
   };
   fireEvent.drop(scanBox, { dataTransfer });
+}
+
+// Canvas dimensions (must match the ToyTable constants).
+const CANVAS_W_MM = 900;
+const CANVAS_H_MM = 600;
+const SCALE = 2;
+const CANVAS_W_PX = CANVAS_W_MM * SCALE;
+const CANVAS_H_PX = CANVAS_H_MM * SCALE;
+
+/**
+ * Mock getBoundingClientRect on Element.prototype so that coordinate-to-mm
+ * conversions return deterministic values in jsdom. Returns a restore fn.
+ *
+ * All elements return the same mock rect so tests should call this ONLY for
+ * the portions of the test that need the mock active, and restore right after.
+ */
+function mockCanvasRect(): () => void {
+  const spy = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+    left: 0,
+    top: 0,
+    right: CANVAS_W_PX,
+    bottom: CANVAS_H_PX,
+    width: CANVAS_W_PX,
+    height: CANVAS_H_PX,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  });
+  return () => spy.mockRestore();
+}
+
+/** Build a stub DragEvent dataTransfer with a given MIME payload.
+ *  jsdom does not implement DataTransfer or DragEvent; we stub them. */
+function makeDataTransfer(mime: string, value: string): object {
+  const store: Record<string, string> = { [mime]: value };
+  return {
+    types: [mime],
+    getData: (m: string) => store[m] ?? '',
+    setData: (m: string, v: string) => {
+      store[m] = v;
+    },
+    effectAllowed: 'copy' as string,
+    dropEffect: 'copy' as string,
+  };
+}
+
+/**
+ * Dispatch a synthetic dragover + drop on the given element, carrying both
+ * clientX/Y coordinates AND a dataTransfer stub.
+ *
+ * jsdom's `fireEvent.drop` does not propagate `clientX`/`clientY` — it only
+ * passes the `dataTransfer` object. We must use `MouseEvent('drop', ...)` +
+ * `Object.defineProperty(evt, 'dataTransfer', ...)` to get coordinates through
+ * to the handler.
+ */
+function dispatchDragWithCoords(
+  element: Element,
+  mime: string,
+  value: string,
+  clientX: number,
+  clientY: number,
+): void {
+  const dt = makeDataTransfer(mime, value);
+
+  // dragover first — fires setDraggingToyboxType → snap-highlight state update.
+  // Wrapped in act() so React state updates (snap highlight) flush before drop.
+  act(() => {
+    const overEvt = new MouseEvent('dragover', {
+      bubbles: true,
+      cancelable: true,
+      clientX,
+      clientY,
+    });
+    Object.defineProperty(overEvt, 'dataTransfer', { value: dt });
+    element.dispatchEvent(overEvt);
+  });
+
+  // drop carries the same coordinates and dataTransfer.
+  // act() ensures the piece placement state update flushes synchronously.
+  act(() => {
+    const dropEvt = new MouseEvent('drop', {
+      bubbles: true,
+      cancelable: true,
+      clientX,
+      clientY,
+    });
+    Object.defineProperty(dropEvt, 'dataTransfer', { value: dt });
+    element.dispatchEvent(dropEvt);
+  });
+}
+
+/** Dispatch a synthetic toybox drag start on the button so React's
+ * `onDragStart` fires and updates `draggingToyboxType` state. */
+function dispatchToyboxDragStart(button: HTMLElement, type: string): void {
+  const TOYBOX_MIME = 'application/x-trainframe-toybox-type';
+  const store: Record<string, string> = {};
+  const dt = {
+    types: [TOYBOX_MIME],
+    getData: (m: string) => store[m] ?? '',
+    setData: (m: string, v: string) => {
+      store[m] = v;
+    },
+    effectAllowed: 'copy' as string,
+    dropEffect: 'copy' as string,
+  };
+  // act() ensures the React onDragStart handler's state update (draggingToyboxType)
+  // flushes before the subsequent dragover/drop events.
+  act(() => {
+    fireEvent.dragStart(button, { dataTransfer: dt });
+    // The handler calls setData(TOYBOX_MIME, type); our stub captures it.
+    // Also ensure the store has the type so subsequent getData calls see it.
+    store[TOYBOX_MIME] = type;
+  });
 }
 
 describe('ToyTable — palette and placement', () => {
@@ -373,5 +486,298 @@ describe('ToyTable — keyboard and selection', () => {
     expect(document.querySelectorAll('[data-testid^="piece-"]').length).toBe(1);
     await user.keyboard('{Delete}');
     expect(document.querySelectorAll('[data-testid^="piece-"]').length).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// New tests: drag-from-toybox, snap, pan, zoom
+// ---------------------------------------------------------------------------
+
+describe('ToyTable — drag-from-toybox', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('dragging a toybox entry onto the canvas places a piece', () => {
+    const restore = mockCanvasRect();
+    try {
+      renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+      const straight = screen.getByTestId('toybox-straight');
+
+      dispatchToyboxDragStart(straight, 'straight');
+      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 600, 400);
+
+      const placed = canvas.querySelectorAll('[data-testid^="piece-"]');
+      expect(placed.length).toBe(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('dragging a toybox entry places the piece at the drop mm coordinates', () => {
+    const restore = mockCanvasRect();
+    try {
+      renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+      const straight = screen.getByTestId('toybox-straight');
+
+      // Canvas is 1800px wide = 900mm, 1200px high = 600mm (zoom=1, pan=(0,0)).
+      // clientX=900 → 450mm, clientY=600 → 300mm.
+      dispatchToyboxDragStart(straight, 'straight');
+      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 900, 600);
+
+      const pieceEl = canvas.querySelector('[data-testid^="piece-"]') as SVGGElement | null;
+      expect(pieceEl).not.toBeNull();
+      // transform should encode the mm position at canvas centre: translate(450, 300).
+      const transform = pieceEl?.getAttribute('transform') ?? '';
+      expect(transform).toContain('translate(450, 300)');
+    } finally {
+      restore();
+    }
+  });
+
+  it('toybox drag does not affect the scan-box (different MIME type)', () => {
+    const restore = mockCanvasRect();
+    try {
+      renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+      const straight = screen.getByTestId('toybox-straight');
+
+      // Drop with the scan-box MIME on the canvas — should be ignored.
+      dispatchToyboxDragStart(straight, 'straight');
+      dispatchDragWithCoords(canvas, 'application/x-trainframe-piece', 'some-piece-id', 900, 600);
+
+      // No piece placed (wrong MIME).
+      const placed = canvas.querySelectorAll('[data-testid^="piece-"]');
+      expect(placed.length).toBe(0);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('ToyTable — snap-to-connect', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('dropping near an existing endpoint snaps the new piece to coincide', () => {
+    const restore = mockCanvasRect();
+    try {
+      renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+      const straightButton = screen.getByTestId('toybox-straight');
+
+      // Place first straight at canvas centre (450mm, 300mm).
+      // Its east endpoint is at 450+100=550mm, 300mm.
+      dispatchToyboxDragStart(straightButton, 'straight');
+      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 900, 600);
+
+      // Drop second straight near the east endpoint so snap triggers.
+      // East endpoint of piece 1: x=550mm. For snap: the new piece's west endpoint
+      // (piece.x - 100) must be within SNAP_DISTANCE(30mm) of 550mm.
+      // Drop at x=660mm: candidate.x=660, candidate.west=560, distance to ep=10mm < 30mm.
+      // After snap: offsetX = 550-560 = -10 → finalX = 660+(-10) = 650mm.
+      // 660mm → 660/900*1800 = 1320px.
+      dispatchToyboxDragStart(straightButton, 'straight');
+      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 1320, 600);
+
+      const pieces = canvas.querySelectorAll('[data-testid^="piece-"]');
+      expect(pieces.length).toBe(2);
+
+      // The second piece should have snapped: its translate-x should be 650.
+      const piece2 = pieces[1] as SVGGElement | undefined;
+      const transform2 = piece2?.getAttribute('transform') ?? '';
+      expect(transform2).toContain('translate(650,');
+    } finally {
+      restore();
+    }
+  });
+
+  it('dropping far from any endpoint does not snap the piece', () => {
+    const restore = mockCanvasRect();
+    try {
+      renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+      const straightButton = screen.getByTestId('toybox-straight');
+
+      // Place first straight at canvas centre (450mm, 300mm).
+      dispatchToyboxDragStart(straightButton, 'straight');
+      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 900, 600);
+
+      // Drop second straight far away at (100mm, 100mm).
+      // 100mm → 100/900*1800 = 200px
+      dispatchToyboxDragStart(straightButton, 'straight');
+      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 200, 200);
+
+      const pieces = canvas.querySelectorAll('[data-testid^="piece-"]');
+      expect(pieces.length).toBe(2);
+
+      // Second piece should land near (100mm, 100mm), not snapped to 650.
+      const piece2 = pieces[1] as SVGGElement | undefined;
+      const transform2 = piece2?.getAttribute('transform') ?? '';
+      expect(transform2).toContain('translate(100,');
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('ToyTable — pan', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('left-mouse drag on empty canvas (nothing armed) translates the viewport', () => {
+    const restore = mockCanvasRect();
+    try {
+      renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+
+      const initialX = Number(canvas.getAttribute('data-viewport-x'));
+      const initialY = Number(canvas.getAttribute('data-viewport-y'));
+
+      // Use native MouseEvent so clientX/Y are actually passed through.
+      // Drag 200px right, 100px down → pans the viewport left/up (negative world coords).
+      // At zoom=1 and canvas 1800x1200px: 200px = 100mm, 100px = 50mm.
+      // act() ensures React state updates from the pan flush before asserting.
+      act(() => {
+        canvas.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            clientX: 500,
+            clientY: 300,
+          }),
+        );
+        canvas.dispatchEvent(
+          new MouseEvent('pointermove', {
+            bubbles: true,
+            cancelable: true,
+            clientX: 700,
+            clientY: 400,
+          }),
+        );
+        canvas.dispatchEvent(
+          new MouseEvent('pointerup', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            clientX: 700,
+            clientY: 400,
+          }),
+        );
+      });
+
+      const afterX = Number(canvas.getAttribute('data-viewport-x'));
+      const afterY = Number(canvas.getAttribute('data-viewport-y'));
+
+      // Viewport pan: dragging right means world origin moves left (negative x).
+      expect(afterX).not.toBe(initialX);
+      expect(afterY).not.toBe(initialY);
+    } finally {
+      restore();
+    }
+  });
+
+  it('left-mouse drag does NOT pan when a piece type is armed', async () => {
+    const user = userEvent.setup();
+    const restore = mockCanvasRect();
+    try {
+      renderToyTable();
+      await user.click(screen.getByTestId('toybox-straight'));
+
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+      const initialX = Number(canvas.getAttribute('data-viewport-x'));
+      const initialY = Number(canvas.getAttribute('data-viewport-y'));
+
+      // Attempt to pan — but since a type is armed, left-drag should not pan.
+      act(() => {
+        canvas.dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 500, clientY: 300 }),
+        );
+        canvas.dispatchEvent(
+          new MouseEvent('pointermove', { bubbles: true, clientX: 700, clientY: 400 }),
+        );
+        canvas.dispatchEvent(
+          new MouseEvent('pointerup', { bubbles: true, button: 0, clientX: 700, clientY: 400 }),
+        );
+      });
+
+      const afterX = Number(canvas.getAttribute('data-viewport-x'));
+      const afterY = Number(canvas.getAttribute('data-viewport-y'));
+
+      // Viewport should NOT have changed.
+      expect(afterX).toBe(initialX);
+      expect(afterY).toBe(initialY);
+    } finally {
+      restore();
+    }
+  });
+});
+
+describe('ToyTable — zoom', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('wheel event on the canvas changes the viewBox dimensions (zoom in)', () => {
+    renderToyTable();
+    const canvas = screen.getByTestId('toy-table-canvas');
+
+    const initialZoom = Number(canvas.getAttribute('data-viewport-zoom'));
+    expect(initialZoom).toBe(1);
+
+    // Scroll up (zoom in): deltaY < 0.
+    fireEvent.wheel(canvas, { deltaY: -100, clientX: 900, clientY: 600 });
+
+    const afterZoom = Number(canvas.getAttribute('data-viewport-zoom'));
+    expect(afterZoom).toBeGreaterThan(initialZoom);
+
+    // The viewBox width should be smaller (zoomed in).
+    const viewBox = canvas.getAttribute('viewBox') ?? '';
+    const parts = viewBox.split(' ').map(Number);
+    const viewBoxWidth = parts[2];
+    expect(viewBoxWidth).toBeDefined();
+    expect(viewBoxWidth).toBeLessThan(900); // < CANVAS_W_MM at zoom > 1
+  });
+
+  it('wheel event zooming out increases the viewBox dimensions', () => {
+    renderToyTable();
+    const canvas = screen.getByTestId('toy-table-canvas');
+
+    // Scroll down (zoom out): deltaY > 0.
+    fireEvent.wheel(canvas, { deltaY: 100, clientX: 900, clientY: 600 });
+
+    const afterZoom = Number(canvas.getAttribute('data-viewport-zoom'));
+    expect(afterZoom).toBeLessThan(1);
+
+    const viewBox = canvas.getAttribute('viewBox') ?? '';
+    const parts = viewBox.split(' ').map(Number);
+    const viewBoxWidth = parts[2];
+    expect(viewBoxWidth).toBeDefined();
+    expect(viewBoxWidth).toBeGreaterThan(900); // > CANVAS_W_MM at zoom < 1
+  });
+
+  it('zoom clamps at MIN_ZOOM = 0.1', () => {
+    renderToyTable();
+    const canvas = screen.getByTestId('toy-table-canvas');
+
+    // Zoom out many times to hit the floor.
+    for (let i = 0; i < 50; i++) {
+      fireEvent.wheel(canvas, { deltaY: 500, clientX: 900, clientY: 600 });
+    }
+
+    const minZoom = Number(canvas.getAttribute('data-viewport-zoom'));
+    expect(minZoom).toBeCloseTo(0.1, 5);
+
+    // viewBox width should be capped at CANVAS_W_MM / 0.1 = 9000.
+    const viewBox = canvas.getAttribute('viewBox') ?? '';
+    const parts = viewBox.split(' ').map(Number);
+    const viewBoxWidth = parts[2];
+    expect(viewBoxWidth).toBeDefined();
+    expect(viewBoxWidth).toBeLessThanOrEqual(9000 + 0.01); // CANVAS_W_MM / MIN_ZOOM
   });
 });
