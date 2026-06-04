@@ -1,162 +1,85 @@
 import { expect, test } from '@playwright/test';
+import {
+  openSimulatorUi,
+  openVisualiser,
+  placePieceOnToyTable,
+  scanPiece,
+  waitForVisualiserConnected,
+} from '../src/playwright-helpers.js';
+import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
 /**
- * Operator-facing smoke. Each test is framed as "what does the operator do
- * and see?" rather than "what internal state transitions?". The journey
- * regression for multi-train block release lives in multi-train-journey.spec.
+ * Smoke tests for the toy-table architecture. Each test is framed as
+ * "what does the operator do and see?" rather than "what internal state
+ * transitions?".
  *
- * Per ADR-013 the spawn form now only sets a starting position (single
- * marker). Schedule assignment lives on the visualiser's ScheduleAssigner.
- * Lifecycle controls (Pause, Stop, Step) are in the Developer drawer.
+ * The sim-UI is now a toy table: place pieces, scan them into the bus,
+ * observe them go live. No spawn form, no lifecycle controls, no layout
+ * publishing — just virtual hardware on a canvas.
  */
 
-test.describe('Simulator UI: operator panel', () => {
-  test.beforeEach(async ({ page }) => {
-    // Seed the broker URL so the page mounts even before a broker exists —
-    // the panel is meant to be usable without a live broker for setup work.
-    await page.addInitScript(() => {
-      try {
-        localStorage.setItem('trainframe.simulator-ui.brokerUrl', 'ws://127.0.0.1:9001');
-      } catch {
-        /* ignore */
-      }
-    });
-    await page.goto('/');
+let harness: UiHarness;
+
+test.describe('Toy table: basic operator flow', () => {
+  test.beforeAll(async () => {
+    harness = await startUiHarness({ discovery: true, wsPort: 9001 });
   });
 
-  test('the operator lands on a ready panel with no trains and Spawn available', async ({
-    page,
+  test.afterAll(async () => {
+    await harness.shutdown();
+  });
+
+  test('the operator lands on a toy table with a toybox and a canvas', async ({ browser }) => {
+    const sim = await openSimulatorUi(browser, { brokerUrl: harness.brokerWsUrl });
+
+    await expect(sim.getByRole('heading', { name: /Trainframe Toy Table/i })).toBeVisible();
+    await expect(sim.getByTestId('toy-table-canvas')).toBeVisible();
+    await expect(sim.getByTestId('toybox-straight')).toBeVisible();
+    await expect(sim.getByTestId('toybox-train')).toBeVisible();
+    await expect(sim.getByTestId('scan-box')).toBeVisible();
+  });
+
+  test('placing a straight piece and scanning it makes it live and appears in the visualiser', async ({
+    browser,
   }) => {
-    await expect(page.getByRole('heading', { name: /Trainframe Simulator/i })).toBeVisible();
-    await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/none/i);
-    // Spawn is gated on picking a starting position. The simple-loop preset
-    // has outgoing edges on M1, so spawn-position auto-selects M1 and the
-    // button is enabled immediately.
-    await expect(page.getByRole('button', { name: /spawn train/i })).toBeEnabled();
-    // Lifecycle controls (Pause, Stop) are inside the Developer drawer.
-    // Open it before asserting their state.
-    await page.getByRole('button', { name: 'Developer' }).click();
-    await expect(page.getByRole('button', { name: /^pause$/i })).toBeDisabled();
-    await expect(page.getByRole('button', { name: /^stop$/i })).toBeDisabled();
+    const sim = await openSimulatorUi(browser, { brokerUrl: harness.brokerWsUrl });
+    const vis = await openVisualiser(browser, { brokerUrl: harness.brokerWsUrl });
+
+    await waitForVisualiserConnected(vis);
+
+    // Place a straight piece at the canvas centre.
+    const pieceId = await placePieceOnToyTable(sim, { type: 'straight', xMm: 450, yMm: 300 });
+
+    // Before scanning, the piece is inert (data-live="false").
+    const piece = sim.getByTestId(`piece-${pieceId}`);
+    await expect(piece).toHaveAttribute('data-live', 'false');
+
+    // Scan it — this emits tag_assignment from GARAGE to the server.
+    await scanPiece(sim, pieceId);
+
+    // After scanning, the piece flips to live.
+    await expect(piece).toHaveAttribute('data-live', 'true');
+
+    // The server republishes retained layout state, which the visualiser
+    // renders as a marker node in its SVG.
+    const markerId = `M-${pieceId}`;
+    await expect(vis.locator(`[data-marker-id="${markerId}"]`)).toBeVisible({ timeout: 10_000 });
   });
 
-  test('after spawning a train, the operator sees it listed in the snapshot', async ({ page }) => {
-    await page.getByRole('button', { name: /spawn train/i }).click();
-    await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1/);
-  });
+  test('scanning a train piece flips it live', async ({ browser }) => {
+    const sim = await openSimulatorUi(browser, { brokerUrl: harness.brokerWsUrl });
 
-  test('spawning from idle leaves the simulation running so the operator sees motion without further input', async ({
-    page,
-  }) => {
-    await page.getByRole('button', { name: /spawn train/i }).click();
-    await expect(page.getByTestId('sim-status')).toHaveText('running');
-  });
+    // Place a straight first (trains need track to spawn onto).
+    await placePieceOnToyTable(sim, { type: 'straight', xMm: 300, yMm: 300 });
 
-  test('stepping the simulation after spawning advances the clock the operator sees', async ({
-    page,
-  }) => {
-    await page.getByRole('button', { name: /spawn train/i }).click();
+    // Place a train at a different position to avoid clicking the straight.
+    const trainId = await placePieceOnToyTable(sim, { type: 'train', xMm: 600, yMm: 300 });
 
-    const clock = page.locator('dt:has-text("Sim time") + dd');
-    await expect(clock).toHaveText('0.0s');
+    const trainEl = sim.getByTestId(`piece-${trainId}`);
+    await expect(trainEl).toHaveAttribute('data-live', 'false');
 
-    await page.getByRole('button', { name: 'Developer' }).click();
-    await page.getByRole('button', { name: /step 1s/i }).click();
-    await expect(clock).not.toHaveText('0.0s');
-  });
+    await scanPiece(sim, trainId);
 
-  test("spawning while paused respects the operator's pause — sim stays paused", async ({
-    page,
-  }) => {
-    // Spawn from idle: auto-resumes, sim runs.
-    await page.getByRole('button', { name: /spawn train/i }).click();
-    await expect(page.getByTestId('sim-status')).toHaveText('running');
-
-    // Operator opens Developer drawer and pauses to inspect / adjust.
-    await page.getByRole('button', { name: 'Developer' }).click();
-    await page.getByRole('button', { name: /^pause$/i }).click();
-    await expect(page.getByTestId('sim-status')).toHaveText('paused');
-
-    // A second Spawn while paused should add the train but leave the
-    // sim paused — the operator paused for a reason and a side-effect
-    // resume would override their intent.
-    await page.getByRole('button', { name: /spawn train/i }).click();
-    await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1, T2/);
-    await expect(page.getByTestId('sim-status')).toHaveText('paused');
-  });
-
-  test('stopping the sim resets the Train ID field so the next spawn starts at T1 again', async ({
-    page,
-  }) => {
-    const trainIdInput = page.getByRole('textbox', { name: /Train ID/i });
-    await expect(trainIdInput).toHaveValue('T1');
-
-    await page.getByRole('button', { name: /spawn train/i }).click();
-    await expect(trainIdInput).toHaveValue('T2');
-
-    await page.getByRole('button', { name: 'Developer' }).click();
-    await page.getByRole('button', { name: /^stop$/i }).click();
-    await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/none/i);
-    // No trains exist anymore — the form should reflect that.
-    await expect(trainIdInput).toHaveValue('T1');
-  });
-
-  test('re-using a train ID shows an inline error and the counter does not skip ahead', async ({
-    page,
-  }) => {
-    const trainIdInput = page.getByRole('textbox', { name: /Train ID/i });
-
-    // Spawn T1 — succeeds, counter advances to T2.
-    await page.getByRole('button', { name: /spawn train/i }).click();
-    await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1/);
-    await expect(trainIdInput).toHaveValue('T2');
-
-    // Operator types T1 again and tries to spawn.
-    await trainIdInput.fill('T1');
-    await page.getByRole('button', { name: /spawn train/i }).click();
-
-    // The smoke setup has no live broker, so the broker-error alert is
-    // already on the page — match by the conflict text directly, which is
-    // both semantic and specific.
-    const dupAlert = page.getByText(/T1 already exists/i);
-    await expect(dupAlert).toBeVisible();
-
-    // The counter must NOT have advanced — the input stays at T1 (the
-    // operator typed), and there's still only one train in the snapshot.
-    await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/^T1$/);
-    await expect(trainIdInput).toHaveValue('T1');
-
-    // Fixing the ID clears the duplicate error.
-    await trainIdInput.fill('T2');
-    await page.getByRole('button', { name: /spawn train/i }).click();
-    await expect(dupAlert).toHaveCount(0);
-    await expect(page.locator('dt:has-text("Trains") + dd')).toHaveText(/T1, T2/);
-  });
-
-  test('a layout with markers but no outgoing edges disables Spawn and shows an explanatory hint', async ({
-    page,
-  }) => {
-    // Paste a layout with markers but no edges. No marker has an outgoing
-    // edge, so there is no valid starting position and Spawn is disabled.
-    const edgelessJson = JSON.stringify(
-      {
-        name: 'edgeless-test',
-        markers: [{ id: 'M1', kind: 'block_boundary' }],
-        edges: [],
-        junctions: [],
-      },
-      null,
-      2,
-    );
-
-    await page.getByLabel(/Source/i).selectOption('custom');
-    await page.getByLabel(/Layout JSON/i).fill(edgelessJson);
-    await page.getByRole('button', { name: /Apply layout/i }).click();
-
-    // Spawn must be disabled with no ambiguity.
-    await expect(page.getByRole('button', { name: /spawn train/i })).toBeDisabled();
-    // The operator gets a clear explanation, not just a greyed-out button.
-    await expect(page.getByTestId('spawn-stops-hint')).toBeVisible();
-    await expect(page.getByTestId('spawn-stops-hint')).toContainText(/outgoing edge/i);
+    await expect(trainEl).toHaveAttribute('data-live', 'true');
   });
 });

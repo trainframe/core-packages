@@ -1,0 +1,162 @@
+import { describe, expect, it } from 'vitest';
+import { COUPLING_DISTANCE_MM, computeTrainTrails } from './coupling.js';
+import type { TrackPiece } from './pieces.js';
+
+function makePiece(id: string, type: TrackPiece['type'], x: number, y: number): TrackPiece {
+  return { id, type, position: { x, y }, rotationDeg: 0, tagged: false };
+}
+
+function makeLiveIds(...ids: string[]): ReadonlySet<string> {
+  return new Set(ids);
+}
+
+describe('computeTrainTrails — basic coupling', () => {
+  it('returns empty map when there are no carriages', () => {
+    const pieces = [makePiece('T1', 'train', 0, 0)];
+    const result = computeTrainTrails(pieces, makeLiveIds('T1'));
+    expect(result.size).toBe(0);
+  });
+
+  it('returns empty map when there are no live trains', () => {
+    const pieces = [makePiece('T1', 'train', 0, 0), makePiece('C1', 'carriage', 50, 0)];
+    // T1 is NOT live
+    const result = computeTrainTrails(pieces, makeLiveIds());
+    expect(result.size).toBe(0);
+  });
+
+  it('couples a carriage within COUPLING_DISTANCE_MM of a live train', () => {
+    const d = COUPLING_DISTANCE_MM - 10; // just inside threshold
+    const pieces = [makePiece('T1', 'train', 0, 0), makePiece('C1', 'carriage', d, 0)];
+    const result = computeTrainTrails(pieces, makeLiveIds('T1'));
+    expect(result.get('T1')).toEqual(['C1']);
+  });
+
+  it('does not couple a carriage beyond COUPLING_DISTANCE_MM of a live train', () => {
+    const d = COUPLING_DISTANCE_MM + 10; // just outside threshold
+    const pieces = [makePiece('T1', 'train', 0, 0), makePiece('C1', 'carriage', d, 0)];
+    const result = computeTrainTrails(pieces, makeLiveIds('T1'));
+    expect(result.size).toBe(0);
+  });
+
+  it('couples a carriage exactly at COUPLING_DISTANCE_MM', () => {
+    const pieces = [
+      makePiece('T1', 'train', 0, 0),
+      makePiece('C1', 'carriage', COUPLING_DISTANCE_MM, 0),
+    ];
+    const result = computeTrainTrails(pieces, makeLiveIds('T1'));
+    expect(result.get('T1')).toEqual(['C1']);
+  });
+
+  it('does not couple a dead train (not in liveIds)', () => {
+    const d = COUPLING_DISTANCE_MM - 10;
+    const pieces = [makePiece('T1', 'train', 0, 0), makePiece('C1', 'carriage', d, 0)];
+    // T1 not live
+    const result = computeTrainTrails(pieces, makeLiveIds());
+    expect(result.size).toBe(0);
+  });
+});
+
+describe('computeTrainTrails — chained coupling', () => {
+  it('chains a carriage via another coupled carriage (flood-fill)', () => {
+    // T1 at 0,0 — C1 at 80mm — C2 at 160mm.
+    // C1 is within COUPLING_DISTANCE_MM(100) of T1; C2 is within 100 of C1.
+    // Both should be pulled into T1's trail.
+    const d = 80;
+    const pieces = [
+      makePiece('T1', 'train', 0, 0),
+      makePiece('C1', 'carriage', d, 0),
+      makePiece('C2', 'carriage', d * 2, 0),
+    ];
+    const result = computeTrainTrails(pieces, makeLiveIds('T1'));
+    const trail = result.get('T1') ?? [];
+    expect(trail).toContain('C1');
+    expect(trail).toContain('C2');
+    expect(trail.length).toBe(2);
+  });
+
+  it('does not chain a carriage that is only reachable via an uncoupled gap', () => {
+    // T1 at 0 — C1 at 80mm — [gap: 200mm] — C2 at 280mm.
+    // C1 couples to T1 (80 < 100). C2 is 200mm from C1, > 100mm, so not reached.
+    const pieces = [
+      makePiece('T1', 'train', 0, 0),
+      makePiece('C1', 'carriage', 80, 0),
+      makePiece('C2', 'carriage', 280, 0),
+    ];
+    const result = computeTrainTrails(pieces, makeLiveIds('T1'));
+    const trail = result.get('T1') ?? [];
+    expect(trail).toContain('C1');
+    expect(trail).not.toContain('C2');
+  });
+});
+
+describe('computeTrainTrails — multiple trains and tie-breaking', () => {
+  it('does not let two trains claim the same carriage', () => {
+    // T1 at -60, T2 at +60, C1 at 0 — equidistant from both.
+    // T1 appears first in the array, so it claims C1.
+    const pieces = [
+      makePiece('T1', 'train', -60, 0),
+      makePiece('T2', 'train', 60, 0),
+      makePiece('C1', 'carriage', 0, 0),
+    ];
+    const result = computeTrainTrails(pieces, makeLiveIds('T1', 'T2'));
+    // Exactly one train should have C1.
+    const t1Trail = result.get('T1') ?? [];
+    const t2Trail = result.get('T2') ?? [];
+    const claimCount = (t1Trail.includes('C1') ? 1 : 0) + (t2Trail.includes('C1') ? 1 : 0);
+    expect(claimCount).toBe(1);
+  });
+
+  it('first-in-array train wins the tie (T1 before T2)', () => {
+    const pieces = [
+      makePiece('T1', 'train', -60, 0),
+      makePiece('T2', 'train', 60, 0),
+      makePiece('C1', 'carriage', 0, 0),
+    ];
+    const result = computeTrainTrails(pieces, makeLiveIds('T1', 'T2'));
+    expect(result.get('T1')).toContain('C1');
+    expect(result.get('T2')).toBeUndefined();
+  });
+
+  it('second train claims its own nearby carriage', () => {
+    const d = 60;
+    const pieces = [
+      makePiece('T1', 'train', 0, 0),
+      makePiece('C1', 'carriage', d, 0),
+      makePiece('T2', 'train', 500, 0),
+      makePiece('C2', 'carriage', 500 + d, 0),
+    ];
+    const result = computeTrainTrails(pieces, makeLiveIds('T1', 'T2'));
+    expect(result.get('T1')).toEqual(['C1']);
+    expect(result.get('T2')).toEqual(['C2']);
+  });
+
+  it('returns only trains that have at least one coupled carriage', () => {
+    const pieces = [
+      makePiece('T1', 'train', 0, 0),
+      makePiece('T2', 'train', 500, 0),
+      makePiece('C1', 'carriage', 50, 0), // near T1
+    ];
+    const result = computeTrainTrails(pieces, makeLiveIds('T1', 'T2'));
+    expect(result.has('T1')).toBe(true);
+    expect(result.has('T2')).toBe(false);
+  });
+});
+
+describe('computeTrainTrails — non-carriage pieces ignored', () => {
+  it('ignores track pieces (straight, station etc.) in proximity calculation', () => {
+    const d = 50;
+    const pieces = [
+      makePiece('T1', 'train', 0, 0),
+      makePiece('S1', 'straight', d, 0), // not a carriage
+      makePiece('C1', 'carriage', d * 3, 0), // too far
+    ];
+    const result = computeTrainTrails(pieces, makeLiveIds('T1'));
+    expect(result.size).toBe(0);
+  });
+
+  it('ignores gate pieces', () => {
+    const pieces = [makePiece('T1', 'train', 0, 0), makePiece('G1', 'gate', 50, 0)];
+    const result = computeTrainTrails(pieces, makeLiveIds('T1'));
+    expect(result.size).toBe(0);
+  });
+});

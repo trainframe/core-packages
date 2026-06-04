@@ -1,33 +1,31 @@
 import { expect, test } from '@playwright/test';
 import type { Layout } from '@trainframe/protocol';
 import {
-  assignSchedule,
   openSimulatorUi,
   openVisualiser,
-  spawnTrain,
+  placePieceOnToyTable,
+  scanPiece,
+  waitForVisualiserConnected,
 } from '../src/playwright-helpers.js';
 import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
 /**
- * When the operator closes the simulator-ui tab, Chromium fires the
- * `pagehide` event before tearing down the page. The `useSimRunner` hook
- * listens for that event and calls `runner.stop()`, which despawns each train
- * through the Simulation (emitting `device_disconnected`). The visualiser's
- * train-position and train-status hooks remove a train when they see that
- * event, so the icon disappears.
+ * When the operator closes the simulator-ui tab, the browser fires `pagehide`
+ * before tearing down the page. The toy-table's `pagehide` listener publishes
+ * `device_disconnected` for each live wire-device piece before the WebSocket
+ * closes. The visualiser's train hooks remove a train when they see that event,
+ * so the icon disappears.
  *
  * Without the pagehide handler, closing the tab leaves trains visible in the
  * visualiser forever because no disconnect events are published.
  *
- * The test drives the journey as a real operator would: it opens both UIs,
- * spawns a train (sim-ui), assigns a schedule (visualiser) so the train moves
- * and becomes visible, and closes the simulator-ui page via Playwright's
- * `page.close()`. This is safe because Chromium dispatches `pagehide`
- * synchronously as part of the page-close sequence and the MQTT frame is
- * small enough to flush within that window before the WebSocket tears down.
- *
- * Per ADR-013: spawning is on the sim-ui (physical action); schedule
- * assignment is on the visualiser's ScheduleAssigner (operator system intent).
+ * The train icon precondition is satisfied via the Node-side harness
+ * simulation (same marker IDs as the server layout) rather than the
+ * browser-side toy-table simulation.  The in-browser sim's layout uses
+ * `M-straight-N` markers that don't match the server's M1–M4 graph, so
+ * `nearestStartEdge` defers spawning there. The Node harness sim shares
+ * the graph and produces the `marker_traversed` events the visualiser
+ * needs to place the icon.
  */
 
 const CLOSE_LOOP: Layout = {
@@ -62,26 +60,49 @@ test.describe
     test('closing the sim-ui context removes the train icon from the visualiser', async ({
       browser,
     }) => {
-      const visualiser = await openVisualiser(browser);
-      const sim = await openSimulatorUi(browser, { layout: CLOSE_LOOP });
+      const visualiser = await openVisualiser(browser, { brokerUrl: harness.brokerWsUrl });
+      const sim = await openSimulatorUi(browser, { brokerUrl: harness.brokerWsUrl });
 
       await expect(visualiser.locator('[data-marker-id="M1"]')).toBeVisible();
+      await waitForVisualiserConnected(sim);
 
-      // Spawn the train (physical action on the sim-ui).
-      await spawnTrain(sim, { trainId: 'T1', startMarker: 'M1' });
+      // Place and scan a straight piece so the toy-table sim knows about a marker.
+      const straightId = await placePieceOnToyTable(sim, { type: 'straight', xMm: 450, yMm: 300 });
+      await scanPiece(sim, straightId);
 
-      // Assign a schedule via the visualiser so the train moves and its icon
-      // appears. assignSchedule waits for the ScheduleAssigner panel to
-      // become visible (it appears once T1's device_registered retained state
-      // reaches the visualiser), then the train icon follows after movement.
-      await assignSchedule(visualiser, { trainId: 'T1', stops: ['M1', 'M2'] });
-      await expect(visualiser.locator('[data-train-id="T1"]')).toBeVisible({ timeout: 8_000 });
+      // Place and scan a train piece to bring it live on the bus. The in-browser
+      // sim defers spawning (one isolated straight → no edges), but the
+      // device_registered is published, and liveIds now includes this piece.
+      const trainPieceId = await placePieceOnToyTable(sim, { type: 'train', xMm: 450, yMm: 300 });
+      await scanPiece(sim, trainPieceId);
+
+      const trainDeviceId = `T-${trainPieceId}`;
+
+      // Spawn the same train ID in the Node-side harness simulation so it moves
+      // on the server's M1–M4 graph and emits marker_traversed events the
+      // visualiser can use to position the icon.
+      harness.simulation.spawnTrain(trainDeviceId, {
+        startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+      });
+
+      // Advance the harness sim until the train icon appears in the visualiser.
+      await expect
+        .poll(
+          async () => {
+            harness.advance(200);
+            return await visualiser.locator(`[data-train-id="${trainDeviceId}"]`).count();
+          },
+          { timeout: 15_000, message: `expected ${trainDeviceId} icon to appear in visualiser` },
+        )
+        .toBeGreaterThan(0);
 
       // Close the tab the way a real operator would. Playwright's page.close()
       // triggers the browser's normal unload sequence (including pagehide),
-      // which causes useSimRunner to call runner.stop() and publish
-      // device_disconnected for each train before the WebSocket closes.
+      // which causes ToyTable's pagehide listener to publish device_disconnected
+      // for each live wire-device piece before the WebSocket closes.
       await sim.close();
-      await expect(visualiser.locator('[data-train-id="T1"]')).toHaveCount(0, { timeout: 5_000 });
+      await expect(visualiser.locator(`[data-train-id="${trainDeviceId}"]`)).toHaveCount(0, {
+        timeout: 5_000,
+      });
     });
   });

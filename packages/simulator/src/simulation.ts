@@ -8,6 +8,7 @@ import type { Layout } from '@trainframe/protocol';
 import { VirtualClock } from './clock.js';
 import { SeededRandom } from './random.js';
 import { VirtualGate } from './virtual-gate.js';
+import { VirtualSwitch } from './virtual-switch.js';
 import { DEFAULT_TRAIN_CONFIG, VirtualTrain, type VirtualTrainConfig } from './virtual-train.js';
 
 export interface CapturedEvent {
@@ -50,6 +51,7 @@ export class Simulation {
   private readonly eventListeners = new Set<SimulationEventListener>();
   private readonly trains = new Map<string, VirtualTrain>();
   private readonly gates = new Map<string, VirtualGate>();
+  private readonly switches = new Map<string, VirtualSwitch>();
   private readonly tick_ms: number;
   private last_tick_ms = 0;
   private readonly markerToTag: Map<string, string> = new Map();
@@ -212,6 +214,36 @@ export class Simulation {
   }
 
   /**
+   * Register a virtual switch motor paired with `junction_marker_id`.
+   * In the toy-table flow both `device_id` and `junction_marker_id` are
+   * `M-{piece.id}` — matching the device_id that LearnMode addresses when
+   * it sends `set_switch_position` to the junction's marker.
+   */
+  spawnSwitch(device_id: string, junction_marker_id: string): VirtualSwitch {
+    const sw = new VirtualSwitch(device_id, junction_marker_id, (e) =>
+      this.captureEvent({ at_ms: this.clock.now(), ...e }),
+    );
+    this.switches.set(device_id, sw);
+    sw.register();
+    return sw;
+  }
+
+  /**
+   * Despawn a virtual switch motor. Emits `device_disconnected` so the server
+   * observes the motor going offline.
+   */
+  despawnSwitch(device_id: string): void {
+    if (!this.switches.has(device_id)) return;
+    this.switches.delete(device_id);
+    this.captureEvent({
+      at_ms: this.clock.now(),
+      event_type: 'device_disconnected',
+      device_id,
+      payload: {},
+    });
+  }
+
+  /**
    * Apply an external command to a virtual device. Used by the broker bridge
    * so a real server drives the simulation through the wire.
    */
@@ -221,6 +253,8 @@ export class Simulation {
     train?.acceptCommand(command_type, payload);
     const gate = this.gates.get(device_id);
     gate?.acceptCommand(command_type, payload);
+    const sw = this.switches.get(device_id);
+    sw?.acceptCommand(command_type, payload);
   }
 
   /**

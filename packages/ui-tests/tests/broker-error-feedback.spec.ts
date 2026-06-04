@@ -1,5 +1,4 @@
 import { expect, test } from '@playwright/test';
-import type { Layout } from '@trainframe/protocol';
 import { openSimulatorUi, openVisualiser } from '../src/playwright-helpers.js';
 import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
@@ -12,29 +11,12 @@ import { type UiHarness, startUiHarness } from '../src/test-harness.js';
  * Settings components.
  */
 
-const SIMPLE_LOOP: Layout = {
-  name: 'simple-loop',
-  markers: [
-    { id: 'M1', kind: 'block_boundary' },
-    { id: 'M2', kind: 'block_boundary' },
-    { id: 'M3', kind: 'station_stop' },
-    { id: 'M4', kind: 'block_boundary' },
-  ],
-  edges: [
-    { from_marker_id: 'M1', to_marker_id: 'M2', estimated_length_mm: 200 },
-    { from_marker_id: 'M2', to_marker_id: 'M3', estimated_length_mm: 200 },
-    { from_marker_id: 'M3', to_marker_id: 'M4', estimated_length_mm: 200 },
-    { from_marker_id: 'M4', to_marker_id: 'M1', estimated_length_mm: 200 },
-  ],
-  junctions: [],
-};
-
 test.describe
   .serial('Broker error feedback — visualiser', () => {
     let harness: UiHarness;
 
     test.beforeAll(async () => {
-      harness = await startUiHarness({ layout: SIMPLE_LOOP, wsPort: 9001 });
+      harness = await startUiHarness({ discovery: true, wsPort: 9001 });
     });
 
     test.afterAll(async () => {
@@ -42,7 +24,7 @@ test.describe
     });
 
     test('bad URL shows error alert; reconnecting to good URL clears it', async ({ browser }) => {
-      const page = await openVisualiser(browser);
+      const page = await openVisualiser(browser, { brokerUrl: harness.brokerWsUrl });
 
       // Sanity-check: visualiser starts connected to the harness.
       await expect(page.getByRole('status')).toHaveText(/connected/i, { timeout: 10_000 });
@@ -59,7 +41,7 @@ test.describe
       await expect(errorAlert).toContainText(/broker/i);
 
       // Operator corrects the URL back to the working harness.
-      await urlInput.fill('ws://127.0.0.1:9001');
+      await urlInput.fill(harness.brokerWsUrl);
       await page.getByRole('button', { name: /connect/i }).click();
 
       // The alert disappears and the status badge returns to connected.
@@ -78,7 +60,7 @@ test.describe
     let harness: UiHarness;
 
     test.beforeAll(async () => {
-      harness = await startUiHarness({ layout: SIMPLE_LOOP, wsPort: SIM_UI_BROKER_PORT });
+      harness = await startUiHarness({ discovery: true, wsPort: SIM_UI_BROKER_PORT });
     });
 
     test.afterAll(async () => {
@@ -88,7 +70,6 @@ test.describe
     test('bad URL shows error alert; reconnecting to good URL clears it', async ({ browser }) => {
       const page = await openSimulatorUi(browser, {
         brokerUrl: `ws://127.0.0.1:${SIM_UI_BROKER_PORT}`,
-        preset: 'simple-loop',
       });
 
       // Sanity-check: sim-ui starts connected to the harness.

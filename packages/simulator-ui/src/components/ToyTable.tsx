@@ -5,6 +5,7 @@ import { useBroker } from '../broker/broker-context.js';
 import type { BrokerClient } from '../broker/client.js';
 import { encodeDeviceEvent } from '../broker/encode-event.js';
 import { useToyHardware } from '../sim/use-toy-hardware.js';
+import { computeTrainTrails } from '../track/coupling.js';
 import { SNAP_DISTANCE } from '../track/layout-from-pieces.js';
 import {
   type RotationDeg,
@@ -13,6 +14,7 @@ import {
   getEndpoints,
   getPieceShape,
   isDevicePiece,
+  isWireDevice,
   pieceMarkerKind,
 } from '../track/pieces.js';
 import { ConnectionStatus } from './ConnectionStatus.js';
@@ -46,7 +48,7 @@ const TRACK_PIECE_TYPES = [
   'terminus',
   'crossing',
 ] as const;
-const DEVICE_PIECE_TYPES = ['train', 'gate'] as const;
+const DEVICE_PIECE_TYPES = ['train', 'gate', 'carriage'] as const;
 
 const PIECE_LABELS: Record<TrackPieceType, string> = {
   straight: 'Straight',
@@ -57,6 +59,7 @@ const PIECE_LABELS: Record<TrackPieceType, string> = {
   crossing: 'Crossing',
   train: 'Train',
   gate: 'Gate',
+  carriage: 'Carriage',
 };
 
 const PIECE_FILL: Record<TrackPieceType, string> = {
@@ -68,6 +71,7 @@ const PIECE_FILL: Record<TrackPieceType, string> = {
   crossing: '#7bac8a',
   train: '#1f6feb',
   gate: '#d97706',
+  carriage: '#6b7fa8',
 };
 
 const POWER_DOT_RADIUS = 6;
@@ -83,15 +87,15 @@ function nextRotation(r: RotationDeg): RotationDeg {
   return next as RotationDeg;
 }
 
-/** Device id for a piece's *own* device announcement. Track pieces don't have
- * their own device; their tag is published by the garage, so this is only
- * meaningful for device pieces (train / gate). */
+/** Device id for a piece's *own* device announcement. Only meaningful for
+ * wire-visible devices (train / gate). Callers must guard on `isWireDevice`
+ * before calling — carriages are device pieces but have no MQTT identity. */
 function deviceIdForDevicePiece(piece: TrackPiece): string {
   if (piece.type === 'train') return `T-${piece.id}`;
   if (piece.type === 'gate') return `GATE-${piece.id}`;
-  // Unreachable: callers gate on isDevicePiece. Keeping the throw makes the
+  // Unreachable: callers gate on isWireDevice. Keeping the throw makes the
   // contract explicit for future maintainers.
-  throw new Error(`deviceIdForDevicePiece called on non-device piece ${piece.type}`);
+  throw new Error(`deviceIdForDevicePiece called on non-wire-device piece ${piece.type}`);
 }
 
 interface PowerOnAction {
@@ -225,6 +229,10 @@ export function ToyTable() {
   /** Pieces the operator has placed into the scan box. Keyed by piece id. */
   const piecesRef = useRef(pieces);
   piecesRef.current = pieces;
+  /** Ref kept in sync with `liveIds` so the pagehide handler can read the
+   * latest set without capturing a stale closure. */
+  const liveIdsRef = useRef(liveIds);
+  liveIdsRef.current = liveIds;
 
   /** Whether the synthetic GARAGE has announced itself on the bus this
    * session. A ref (not state) so two scans in the same render cycle still
@@ -256,6 +264,29 @@ export function ToyTable() {
       window.trainframeSim = undefined;
     };
   }, []);
+
+  // pagehide: publish `device_disconnected` for every wire-visible live
+  // device before the WebSocket tears down. Playwright's `page.close()`
+  // and real browser tab-close both fire `pagehide` synchronously before
+  // the page is destroyed, so the publish goes out while the socket is
+  // still open. Without this, closing the tab leaves trains visible in the
+  // visualiser indefinitely because no disconnect events are published.
+  useEffect(() => {
+    function handlePageHide() {
+      const currentPieces = piecesRef.current;
+      const currentLiveIds = liveIdsRef.current;
+      for (const pieceId of currentLiveIds) {
+        const piece = currentPieces.find((p) => p.id === pieceId);
+        if (piece === undefined) continue;
+        if (!isWireDevice(piece.type)) continue;
+        const device_id = deviceIdForDevicePiece(piece);
+        const { topic, payload } = encodeDeviceEvent('device_disconnected', device_id, {});
+        client.publish(topic, payload);
+      }
+    }
+    window.addEventListener('pagehide', handlePageHide);
+    return () => window.removeEventListener('pagehide', handlePageHide);
+  }, [client]);
 
   const armPieceType = useCallback((type: TrackPieceType) => {
     setArmedType((prev) => (prev === type ? null : type));
@@ -325,8 +356,21 @@ export function ToyTable() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [selectedId, rotateSelected, deleteSelected]);
 
-  // Scan handler — fired when a piece is dropped into the scan box.
-  const handleScan = useCallback(
+  // Describe a piece for the ScanBox's confirmation panel. Called on drop;
+  // no broker events are fired here — only on Bind.
+  const describePiece = useCallback(
+    (pieceId: string): { typeLabel: string; bindingId: string } | undefined => {
+      const piece = piecesRef.current.find((p) => p.id === pieceId);
+      if (piece === undefined) return undefined;
+      const typeLabel = PIECE_LABELS[piece.type];
+      const bindingId = isWireDevice(piece.type) ? deviceIdForDevicePiece(piece) : `M-${piece.id}`;
+      return { typeLabel, bindingId };
+    },
+    [],
+  );
+
+  // Confirm handler — fired only when the operator clicks Bind in the ScanBox.
+  const handleScanConfirm = useCallback(
     (pieceId: string) => {
       const piece = piecesRef.current.find((p) => p.id === pieceId);
       if (piece === undefined) return;
@@ -350,10 +394,11 @@ export function ToyTable() {
         setSelectedId(pieceId);
         return;
       }
-      // Powering a device off
+      // Powering a device off — only wire-visible devices (train / gate) can
+      // be powered off. Carriages are wire-invisible so this is a no-op for them.
       const piece = piecesRef.current.find((p) => p.id === pieceId);
       if (piece === undefined) return;
-      if (!isDevicePiece(piece.type)) return;
+      if (!isWireDevice(piece.type)) return;
       const device_id = deviceIdForDevicePiece(piece);
       const { topic, payload } = encodeDeviceEvent('device_disconnected', device_id, {});
       client.publish(topic, payload);
@@ -378,7 +423,7 @@ export function ToyTable() {
       <div className="tf-toytable__body">
         <aside className="tf-toytable__sidebar">
           <Toybox armedType={armedType} onArm={armPieceType} />
-          <ScanBox onDrop={handleScan} />
+          <ScanBox describePiece={describePiece} onConfirm={handleScanConfirm} />
         </aside>
         <main className="tf-toytable__main">
           <ActionBar
@@ -535,6 +580,18 @@ function Table({
   onPieceAction,
 }: TableProps) {
   const svgRef = useRef<SVGSVGElement>(null);
+
+  // Coupling: derive which carriages are coupled to which live train each render.
+  // Carriages within COUPLING_DISTANCE_MM of a live train (or another already-
+  // coupled carriage) are pulled into that train's trail. See coupling.ts.
+  const trainTrails = computeTrainTrails(pieces, liveIds);
+  // Build reverse map: carriageId → trainPieceId
+  const carriageCoupledTo = new Map<string, string>();
+  for (const [trainId, carriageIds] of trainTrails) {
+    for (const carriageId of carriageIds) {
+      carriageCoupledTo.set(carriageId, trainId);
+    }
+  }
   const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, zoom: 1 });
 
   /** The piece type currently being dragged from the toybox. Stored in state
@@ -749,6 +806,8 @@ function Table({
           piece={p}
           selected={p.id === selectedId}
           live={liveIds.has(p.id)}
+          armedType={armedType}
+          coupledToTrainId={carriageCoupledTo.get(p.id)}
           onAction={(action) => onPieceAction(p.id, action)}
           onToyboxDragStart={setDraggingToyboxType}
         />
@@ -792,21 +851,44 @@ interface PieceRendererProps {
   readonly piece: TrackPiece;
   readonly selected: boolean;
   readonly live: boolean;
+  readonly armedType: TrackPieceType | null;
+  /**
+   * For carriage pieces: the id of the live train this carriage is currently
+   * coupled to (within COUPLING_DISTANCE_MM), or undefined if uncoupled.
+   * Undefined for all non-carriage piece types.
+   */
+  readonly coupledToTrainId: string | undefined;
   readonly onAction: (action: 'select' | PowerOnAction) => void;
   /** Notifies Table of the type being dragged from the toybox area, so snap
    * highlighting can work during dragover (dataTransfer not readable then). */
   readonly onToyboxDragStart: (type: TrackPieceType | null) => void;
 }
 
-function PieceRenderer({ piece, selected, live, onAction, onToyboxDragStart }: PieceRendererProps) {
+function PieceRenderer({
+  piece,
+  selected,
+  live,
+  armedType,
+  coupledToTrainId,
+  onAction,
+  onToyboxDragStart,
+}: PieceRendererProps) {
   const shape = getPieceShape(piece);
   const fill = PIECE_FILL[piece.type];
   const isDevice = isDevicePiece(piece.type);
+  // Wire devices (train / gate) can be powered off by clicking when live.
+  // Carriages are wire-invisible — clicking a live carriage just selects it.
+  const isWire = isWireDevice(piece.type);
 
   function handleClick(e: React.MouseEvent) {
+    // When the operator has a piece type armed, clicks anywhere on the canvas
+    // (including on top of existing pieces) place a fresh piece. The piece's
+    // own select / power-off handling only applies when nothing is armed.
+    // Without this, you can't drop a train onto a straight you just placed,
+    // because the click hits the straight and selects it instead.
+    if (armedType !== null) return;
     e.stopPropagation();
-    // A live device that gets clicked is powered off; everything else just selects.
-    if (live && isDevice) {
+    if (live && isWire) {
       onAction({ type: 'power-on', pieceId: piece.id });
       return;
     }
@@ -838,10 +920,11 @@ function PieceRenderer({ piece, selected, live, onAction, onToyboxDragStart }: P
       onClick={handleClick}
       onDragStart={handleDragStart}
       {...draggableProps}
-      style={{ cursor: live && isDevice ? 'pointer' : 'grab' }}
+      style={{ cursor: live && isWire ? 'pointer' : 'grab' }}
       data-testid={`piece-${piece.id}`}
       data-piece-id={piece.id}
       data-live={live ? 'true' : 'false'}
+      data-coupled-to={coupledToTrainId}
       aria-label={`${piece.type} piece${live ? ' (powered on)' : ''}`}
     >
       {selected && (
@@ -854,8 +937,9 @@ function PieceRenderer({ piece, selected, live, onAction, onToyboxDragStart }: P
         strokeWidth={1.5}
         fillOpacity={isDevice && !live ? 0.4 : 1}
       />
-      {/* Power dot for devices: green when live, grey when inert. */}
-      {isDevice && (
+      {/* Power dot for wire-visible devices only (train / gate): green when
+          live, grey when inert. Carriages have no wire identity — no dot. */}
+      {isWire && (
         <circle
           cx={shape.width / 2 - POWER_DOT_RADIUS}
           cy={-shape.height / 2 + POWER_DOT_RADIUS}
@@ -879,14 +963,20 @@ function PieceRenderer({ piece, selected, live, onAction, onToyboxDragStart }: P
  *
  * - Track pieces: ensure the GARAGE is registered (once per session), then
  *   emit a `tag_assignment` from GARAGE binding `M-{piece.id}` to the marker
- *   of the appropriate kind.
+ *   of the appropriate kind. Junction pieces additionally emit a
+ *   `device_registered` for the switch motor (`M-{piece.id}` with
+ *   `core.controls_switch`) so LearnMode can send `set_switch_position`.
  * - Train pieces: emit a `device_registered` from the train itself.
  * - Gate pieces: emit a `device_registered` from the gate itself.
+ * - Carriage pieces: wire-invisible; emit nothing.
  *
  * Returns `true` when this call announced the GARAGE (so the caller can flip
  * its once-only flag). All other calls return `false`.
  */
 function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: boolean): boolean {
+  // Carriages are wire-invisible: they carry no RFID tag and announce nothing
+  // on the bus. Mark as live locally in the caller; emit nothing here.
+  if (piece.type === 'carriage') return false;
   if (piece.type === 'train') {
     const device_id = deviceIdForDevicePiece(piece);
     const reg = encodeDeviceEvent('device_registered', device_id, {
@@ -920,5 +1010,18 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
     marker_kind: pieceMarkerKind(piece.type),
   });
   client.publish(assignment.topic, assignment.payload);
+
+  // Junction pieces also need a switch-motor device so LearnMode can send
+  // `set_switch_position` commands to the junction. The motor's device_id
+  // matches the junction marker id — this is the id LearnMode targets when
+  // it sends `set_switch_position` commands (it uses the marker id, not a
+  // separate "SWITCH-" identifier).
+  if (piece.type === 'junction') {
+    const switchReg = encodeDeviceEvent('device_registered', markerId, {
+      capabilities: ['core.controls_switch'],
+    });
+    client.publish(switchReg.topic, switchReg.payload);
+  }
+
   return announced;
 }

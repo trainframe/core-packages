@@ -2,9 +2,8 @@ import { expect, test } from '@playwright/test';
 import type { Layout } from '@trainframe/protocol';
 import {
   assignSchedule,
-  openSimulatorUi,
   openVisualiser,
-  spawnTrain,
+  waitForVisualiserConnected,
 } from '../src/playwright-helpers.js';
 import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
@@ -16,8 +15,10 @@ import { type UiHarness, startUiHarness } from '../src/test-harness.js';
  * (cleared edges must be pruned as a train traverses, otherwise following
  * trains sit at M1 forever).
  *
- * Per ADR-013: spawning is on the sim-ui (physical action); schedule
- * assignment is on the visualiser's ScheduleAssigner (operator system intent).
+ * Trains are spawned via the Node-bridged Simulation (device-only mode) which
+ * routes `device_registered` + `tag_observed` events to the harness server's
+ * scheduler. Schedule assignment is on the visualiser's ScheduleAssigner
+ * (operator system intent, per ADR-013).
  */
 
 const SIMPLE_LOOP: Layout = {
@@ -50,16 +51,17 @@ test.describe
     });
 
     test('three trains spawned in succession all advance past the start', async ({ browser }) => {
-      const visualiser = await openVisualiser(browser);
-      const sim = await openSimulatorUi(browser, { layout: SIMPLE_LOOP });
+      const visualiser = await openVisualiser(browser, { brokerUrl: harness.brokerWsUrl });
 
       await expect(visualiser.locator('[data-marker-id="M1"]')).toBeVisible();
+      await waitForVisualiserConnected(visualiser);
 
-      // Operator places trains on the track via the sim-ui (physical action).
-      // The spawn-position auto-selects M1; Train ID is filled explicitly for
-      // determinism. Each Spawn auto-starts and auto-resumes the sim.
+      // Spawn three trains via the bridged simulation. Each spawn emits
+      // device_registered to the harness server's scheduler.
       for (const id of ['T1', 'T2', 'T3']) {
-        await spawnTrain(sim, { trainId: id, startMarker: 'M1' });
+        harness.simulation.spawnTrain(id, {
+          startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+        });
       }
 
       // Assign a schedule to each train via the visualiser's ScheduleAssigner
@@ -73,7 +75,15 @@ test.describe
       // All three trains must appear on the visualiser canvas once they
       // start moving (driven by marker_traversed / train_status events).
       for (const id of ['T1', 'T2', 'T3']) {
-        await expect(visualiser.locator(`[data-train-id="${id}"]`)).toBeVisible({ timeout: 8_000 });
+        await expect
+          .poll(
+            async () => {
+              harness.advance(200);
+              return await visualiser.locator(`[data-train-id="${id}"]`).count();
+            },
+            { timeout: 15_000, message: `expected ${id} to surface on the visualiser canvas` },
+          )
+          .toBeGreaterThan(0);
       }
 
       // Block-exclusivity regression: every train must eventually leave the
@@ -83,6 +93,7 @@ test.describe
       await expect
         .poll(
           async () => {
+            harness.advance(200);
             const positions = await visualiser
               .locator('[data-train-id]')
               .evaluateAll((els) =>
@@ -93,7 +104,10 @@ test.describe
             return positions.length === 3 && positions.every((p) => p !== null && p !== 'M1->M2');
           },
           {
-            timeout: 15_000,
+            // Three trains queueing through the same single-track block takes
+            // longer than a one-train run; 30s gives each train time to clear
+            // M1→M2 once the preceding train has freed it.
+            timeout: 30_000,
             message: 'expected every train to leave the first edge (M1→M2)',
           },
         )

@@ -17,18 +17,35 @@ export type TrackPieceType =
   | 'terminus'
   | 'crossing'
   | 'train'
-  | 'gate';
+  | 'gate'
+  | 'carriage';
 
 /**
- * Piece types that represent devices (trains, gates) rather than track
- * topology. They sit *on* the table but contribute no endpoints or edges to
- * the compiled `Layout` — they're scanned onto the bus via `ScanBox`, not
+ * Piece types that represent devices (trains, gates, carriages) rather than
+ * track topology. They sit *on* the table but contribute no endpoints or edges
+ * to the compiled `Layout` — they're scanned onto the bus via `ScanBox`, not
  * compiled into the world's shape.
+ *
+ * Note: carriages are device pieces (no topology) but NOT wire devices — they
+ * carry no RFID tag and emit nothing on the MQTT bus. Use `isWireDevice` to
+ * distinguish the two.
  */
-export const DEVICE_PIECE_TYPES = ['train', 'gate'] as const;
+export const DEVICE_PIECE_TYPES = ['train', 'gate', 'carriage'] as const;
 export type DevicePieceType = (typeof DEVICE_PIECE_TYPES)[number];
 
 export function isDevicePiece(type: TrackPieceType): type is DevicePieceType {
+  return type === 'train' || type === 'gate' || type === 'carriage';
+}
+
+/**
+ * Wire-visible device types. These are the subset of device pieces that
+ * announce themselves on the MQTT bus (`device_registered`) and emit events.
+ * Carriages are intentionally excluded — they are physical wagons with no
+ * RFID tag; the system has no awareness of them on the wire.
+ */
+export type WireDeviceType = 'train' | 'gate';
+
+export function isWireDevice(type: TrackPieceType): type is WireDeviceType {
   return type === 'train' || type === 'gate';
 }
 
@@ -162,6 +179,7 @@ function localEndpoints(
       ];
     case 'train':
     case 'gate':
+    case 'carriage':
       // Devices have no track endpoints — they sit on the table but contribute
       // no topology. compileLayout() ignores them via the empty-array path.
       return [];
@@ -220,6 +238,8 @@ export function getPieceShape(piece: TrackPiece): PieceShape {
       return trainShape();
     case 'gate':
       return gateShape();
+    case 'carriage':
+      return carriageShape();
   }
 }
 
@@ -323,4 +343,22 @@ function gateShape(): PieceShape {
     'M -40 -6 H -32 V 11 H -40 Z M -32 -1 H 40 V 5 H -32 Z M -18 -1 L -10 5 M -2 -1 L 6 5 M 14 -1 L 22 5';
 
   return { svgPath: d, width: 80, height: 22 };
+}
+
+function carriageShape(): PieceShape {
+  // Passenger carriage: 60 mm long, 24 mm wide. Smaller and boxier than the
+  // loco (which is 80×24 with a pointed nose). Rounded corners via arc
+  // segments; no nose — both ends are flat so multiple carriages chain cleanly.
+  const w = 60;
+  const h = 24;
+  const hw = w / 2; // 30
+  const hh = h / 2; // 12
+  const r = 4; // corner radius
+  // Rounded rectangle in SVG path notation.
+  const d =
+    `M ${-hw + r} ${-hh} H ${hw - r} A ${r} ${r} 0 0 1 ${hw} ${-hh + r} ` +
+    `V ${hh - r} A ${r} ${r} 0 0 1 ${hw - r} ${hh} H ${-hw + r} ` +
+    `A ${r} ${r} 0 0 1 ${-hw} ${hh - r} V ${-hh + r} A ${r} ${r} 0 0 1 ${-hw + r} ${-hh} Z`;
+
+  return { svgPath: d, width: w, height: h };
 }

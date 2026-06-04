@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { type RotationDeg, type TrackPiece, getEndpoints, getPieceShape } from './pieces.js';
+import {
+  type RotationDeg,
+  type TrackPiece,
+  getEndpoints,
+  getPieceShape,
+  isDevicePiece,
+  isWireDevice,
+  pieceMarkerKind,
+} from './pieces.js';
 
 function makePiece(type: TrackPiece['type'], rotationDeg: RotationDeg = 0): TrackPiece {
   return { id: 'test', type, position: { x: 0, y: 0 }, rotationDeg, tagged: false };
@@ -172,6 +180,54 @@ describe('getEndpoints — crossing', () => {
     expect(must(eps[1]).outgoingAngleDeg).toBe(315);
     expect(must(eps[2]).outgoingAngleDeg).toBe(225);
     expect(must(eps[3]).outgoingAngleDeg).toBe(135);
+  });
+});
+
+describe('getEndpoints — carriage', () => {
+  it('returns 0 endpoints (no track topology)', () => {
+    expect(getEndpoints(makePiece('carriage'))).toHaveLength(0);
+  });
+});
+
+describe('getPieceShape — carriage', () => {
+  it('returns a non-empty svgPath', () => {
+    const shape = getPieceShape(makePiece('carriage'));
+    expect(shape.svgPath.length).toBeGreaterThan(0);
+  });
+
+  it('is smaller than the train (60mm vs 80mm wide)', () => {
+    const carriageShape = getPieceShape(makePiece('carriage'));
+    const trainShape = getPieceShape(makePiece('train'));
+    expect(carriageShape.width).toBe(60);
+    expect(carriageShape.width).toBeLessThan(trainShape.width);
+  });
+
+  it('has the same height as the train (24mm — fits on the rail band)', () => {
+    const carriageShape = getPieceShape(makePiece('carriage'));
+    const trainShape = getPieceShape(makePiece('train'));
+    expect(carriageShape.height).toBe(trainShape.height);
+  });
+});
+
+describe('isDevicePiece and isWireDevice — carriage', () => {
+  it('isDevicePiece returns true for carriage', () => {
+    expect(isDevicePiece('carriage')).toBe(true);
+  });
+
+  it('isWireDevice returns false for carriage', () => {
+    expect(isWireDevice('carriage')).toBe(false);
+  });
+
+  it('isWireDevice returns true for train', () => {
+    expect(isWireDevice('train')).toBe(true);
+  });
+
+  it('isWireDevice returns true for gate', () => {
+    expect(isWireDevice('gate')).toBe(true);
+  });
+
+  it('pieceMarkerKind returns block_boundary for carriage (defensive/total)', () => {
+    expect(pieceMarkerKind('carriage')).toBe('block_boundary');
   });
 });
 

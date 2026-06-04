@@ -1,10 +1,15 @@
 import { mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
-import type { Layout } from '@trainframe/protocol';
 import { AdminHttpServer } from '@trainframe/server';
 import mqtt from 'mqtt';
-import { SIM_URL, VISUALISER_URL } from '../playwright.config.js';
+import { VISUALISER_URL } from '../playwright.config.js';
+import {
+  openSimulatorUi,
+  placePieceOnToyTable,
+  scanPiece,
+  waitForVisualiserConnected,
+} from '../src/playwright-helpers.js';
 import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
 /**
@@ -17,30 +22,6 @@ const SCREENSHOT_DIR = resolve(import.meta.dirname, '..', 'screenshots');
 
 mkdirSync(SCREENSHOT_DIR, { recursive: true });
 
-const SIMPLE_LOOP: Layout = {
-  name: 'showcase-loop',
-  markers: [
-    { id: 'M1', kind: 'block_boundary' },
-    { id: 'M2', kind: 'block_boundary' },
-    { id: 'M3', kind: 'station_stop' },
-    { id: 'M4', kind: 'block_boundary' },
-  ],
-  edges: [
-    { from_marker_id: 'M1', to_marker_id: 'M2', estimated_length_mm: 200 },
-    { from_marker_id: 'M2', to_marker_id: 'M3', estimated_length_mm: 200 },
-    { from_marker_id: 'M3', to_marker_id: 'M4', estimated_length_mm: 200 },
-    { from_marker_id: 'M4', to_marker_id: 'M1', estimated_length_mm: 200 },
-  ],
-  junctions: [],
-};
-
-const DISCOVERY_SEED: Layout = {
-  name: 'showcase-discovery',
-  markers: [{ id: 'M1', kind: 'block_boundary' }],
-  edges: [],
-  junctions: [],
-};
-
 const settle = (page: import('@playwright/test').Page) => page.waitForTimeout(400);
 
 test.describe
@@ -50,7 +31,26 @@ test.describe
     let adminPort: number;
 
     test.beforeAll(async () => {
-      harness = await startUiHarness({ layout: SIMPLE_LOOP, wsPort: 9001 });
+      // Start with a simple loop layout for the visualiser screenshots.
+      harness = await startUiHarness({
+        layout: {
+          name: 'showcase-loop',
+          markers: [
+            { id: 'M1', kind: 'block_boundary' },
+            { id: 'M2', kind: 'block_boundary' },
+            { id: 'M3', kind: 'station_stop' },
+            { id: 'M4', kind: 'block_boundary' },
+          ],
+          edges: [
+            { from_marker_id: 'M1', to_marker_id: 'M2', estimated_length_mm: 200 },
+            { from_marker_id: 'M2', to_marker_id: 'M3', estimated_length_mm: 200 },
+            { from_marker_id: 'M3', to_marker_id: 'M4', estimated_length_mm: 200 },
+            { from_marker_id: 'M4', to_marker_id: 'M1', estimated_length_mm: 200 },
+          ],
+          junctions: [],
+        },
+        wsPort: 9001,
+      });
       admin = new AdminHttpServer({ server: harness.server });
       adminPort = await admin.listen(0);
     });
@@ -173,17 +173,19 @@ test.describe
     });
 
     test('visualiser: discovery — new marker materialises live', async ({ page }) => {
-      // Reset to the discovery-seed layout for this scenario.
+      // Reset to a discovery layout for this scenario.
       await admin.close();
       await harness.shutdown();
-      harness = await startUiHarness({ layout: DISCOVERY_SEED, wsPort: 9001 });
+      harness = await startUiHarness({ discovery: true, wsPort: 9001 });
       admin = new AdminHttpServer({ server: harness.server });
       adminPort = await admin.listen(0);
 
       await seedVisualiser(page);
       await page.goto(VISUALISER_URL);
-      await expect(page.locator('[data-marker-id="M1"]')).toBeVisible();
-      await settle(page);
+      await page.waitForFunction(() => {
+        const status = document.querySelector('output[data-status]');
+        return status?.getAttribute('data-status') === 'connected';
+      });
 
       harness.server.injectEvent('device_registered', 'GARAGE', {
         capabilities: ['core.assigns_tags'],
@@ -205,7 +207,10 @@ test.describe
     test('visualiser: inferred edge after a train traverses both markers', async ({ page }) => {
       await seedVisualiser(page);
       await page.goto(VISUALISER_URL);
-      await expect(page.locator('[data-marker-id="M1"]')).toBeVisible();
+      await page.waitForFunction(() => {
+        const status = document.querySelector('output[data-status]');
+        return status?.getAttribute('data-status') === 'connected';
+      });
       await expect(page.locator('[data-marker-id="M-DISCOVERED"]')).toBeVisible();
       await settle(page);
 
@@ -233,19 +238,15 @@ test.describe
       });
     });
 
-    test('simulator-ui: lifecycle controls after spawn', async ({ page }) => {
-      await page.addInitScript(() => {
-        localStorage.setItem('trainframe.simulator-ui.brokerUrl', 'ws://127.0.0.1:9001');
-      });
-      await page.goto(SIM_URL);
-      await expect(page.getByRole('heading', { name: /Trainframe Simulator/i })).toBeVisible();
-      // The spawn-position auto-selects the first valid marker; Spawn is
-      // ready immediately. Schedules are assigned from the visualiser per
-      // ADR-013 — this screenshot captures the sim-ui's physical-twin surface.
-      await page.getByRole('button', { name: /Spawn train/i }).click();
-      await settle(page);
-      await page.screenshot({
-        path: resolve(SCREENSHOT_DIR, '07-simulator-ui.png'),
+    test('simulator-ui: toy table with pieces placed', async ({ browser }) => {
+      const sim = await openSimulatorUi(browser, { brokerUrl: 'ws://127.0.0.1:9001' });
+      await waitForVisualiserConnected(sim);
+
+      // Place a straight piece to show the toybox-to-canvas workflow.
+      await placePieceOnToyTable(sim, { type: 'straight', xMm: 450, yMm: 300 });
+      await settle(sim);
+      await sim.screenshot({
+        path: resolve(SCREENSHOT_DIR, '07-simulator-ui-toy-table.png'),
         fullPage: true,
       });
     });

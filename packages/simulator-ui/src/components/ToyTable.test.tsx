@@ -88,9 +88,12 @@ function filterScanFlowAssignments(client: InMemoryBrokerClient): ScanFlowAssign
   return result;
 }
 
-/** Fire a drag-and-drop drop synthetically — jsdom doesn't simulate the full
- *  HTML5 DnD pipeline so we feed a stub `dataTransfer` directly. */
-function dropPieceOnScanBox(scanBox: HTMLElement, pieceId: string): void {
+/**
+ * Drop a piece onto the scan box without clicking Bind — the confirmation
+ * panel appears but no bus events are fired yet. Use this when a test needs
+ * to assert on the confirmation-panel UI rather than the wire shape.
+ */
+function dropOnScanBoxOnly(scanBox: HTMLElement, pieceId: string): void {
   const dataTransfer = {
     getData: (mime: string) => (mime === SCANBOX_DATA_MIME ? pieceId : ''),
     setData: () => {},
@@ -98,6 +101,22 @@ function dropPieceOnScanBox(scanBox: HTMLElement, pieceId: string): void {
     effectAllowed: 'move',
   };
   fireEvent.drop(scanBox, { dataTransfer });
+}
+
+/**
+ * Drop a piece onto the scan box AND click Bind to complete the two-step
+ * commissioning flow. After this call the bus events have been emitted,
+ * mirroring the pre-confirmation-step behaviour. Updated to include the
+ * Bind click so tests focused on wire shape don't need to know about the
+ * intermediate confirmation panel.
+ *
+ * See the e2e `scanPiece` helper for the parallel change in
+ * `playwright-helpers.ts`.
+ */
+function dropPieceOnScanBox(scanBox: HTMLElement, pieceId: string): void {
+  dropOnScanBoxOnly(scanBox, pieceId);
+  const bindBtn = screen.getByTestId('scan-box-bind');
+  fireEvent.click(bindBtn);
 }
 
 // Canvas dimensions (must match the ToyTable constants).
@@ -416,6 +435,7 @@ describe('ToyTable — scan and power', () => {
   });
 
   it('clicking a live train powers it off and publishes device_disconnected', async () => {
+    const user = userEvent.setup();
     const { client } = renderToyTable();
     const pieceId = await placeArmedPiece('train');
 
@@ -425,7 +445,11 @@ describe('ToyTable — scan and power', () => {
     dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
     expect(placed.getAttribute('data-live')).toBe('true');
 
-    // Clicking the piece (now live) emits device_disconnected.
+    // After placeArmedPiece the operator is still "holding" a train type
+    // (so they could drop more without re-arming). Clicks on existing pieces
+    // are place actions while armed — disarm first by clicking the toybox
+    // button again so subsequent clicks reach the piece's own handler.
+    await user.click(screen.getByTestId('toybox-train'));
     fireEvent.click(placed);
 
     const disconnects = client.published.filter((m) =>
@@ -456,6 +480,126 @@ describe('ToyTable — scan and power', () => {
     const envelope = decodeEnvelope(reg.payload);
     const payload = envelope.payload as { capabilities: string[] };
     expect(payload.capabilities).toEqual(['core.gates_clearance']);
+  });
+});
+
+describe('ToyTable — scan confirmation two-step flow', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('dropping a piece onto the scan-box shows the confirmation panel without firing bus events', async () => {
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('straight');
+    const before = client.published.length;
+
+    dropOnScanBoxOnly(screen.getByTestId('scan-box'), pieceId);
+
+    // Confirmation panel must be visible.
+    expect(screen.getByTestId('scan-box-bind')).toBeInTheDocument();
+    expect(screen.getByTestId('scan-box-cancel')).toBeInTheDocument();
+
+    // No new bus events until Bind is clicked.
+    const scanAssigns = filterScanFlowAssignments(client);
+    expect(scanAssigns).toHaveLength(0);
+    // No extra traffic of any kind from the scan drop itself.
+    expect(client.published.length).toBe(before);
+  });
+
+  it('clicking Bind after a drop fires the bus events and makes the piece live', async () => {
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('straight');
+
+    dropOnScanBoxOnly(screen.getByTestId('scan-box'), pieceId);
+    fireEvent.click(screen.getByTestId('scan-box-bind'));
+
+    const scanAssigns = filterScanFlowAssignments(client);
+    expect(scanAssigns.length).toBe(1);
+    expect(scanAssigns[0]?.payload.target_id).toBe(`M-${pieceId}`);
+
+    // The piece is now live.
+    const pieceEl = document.querySelector(`[data-piece-id="${pieceId}"]`);
+    expect(pieceEl?.getAttribute('data-live')).toBe('true');
+  });
+
+  it('clicking Cancel after a drop fires no bus events and the piece stays inert', async () => {
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('straight');
+    const before = client.published.length;
+
+    dropOnScanBoxOnly(screen.getByTestId('scan-box'), pieceId);
+    fireEvent.click(screen.getByTestId('scan-box-cancel'));
+
+    // No new bus events.
+    expect(filterScanFlowAssignments(client)).toHaveLength(0);
+    expect(client.published.length).toBe(before);
+
+    // Piece stays inert.
+    const pieceEl = document.querySelector(`[data-piece-id="${pieceId}"]`);
+    expect(pieceEl?.getAttribute('data-live')).toBe('false');
+
+    // Scan box returns to idle.
+    expect(screen.queryByTestId('scan-box-bind')).toBeNull();
+  });
+
+  it('confirmation panel shows the correct type label and binding id', async () => {
+    renderToyTable();
+    const trainId = await placeArmedPiece('train');
+    dropOnScanBoxOnly(screen.getByTestId('scan-box'), trainId);
+    const box = screen.getByTestId('scan-box');
+    expect(box).toHaveTextContent(/Train/);
+    expect(box).toHaveTextContent(`T-${trainId}`);
+  });
+});
+
+describe('ToyTable — junction switch device', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('scanning a junction emits device_registered for core.controls_switch with marker id', async () => {
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('junction');
+
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+
+    const markerId = `M-${pieceId}`;
+    const switchRegs = client.published.filter(
+      (m) => m.topic === `railway/events/device_registered/${markerId}`,
+    );
+    expect(switchRegs.length).toBeGreaterThanOrEqual(1);
+    const reg = switchRegs[0];
+    if (!reg) throw new Error('unreachable');
+    const envelope = decodeEnvelope(reg.payload);
+    const payload = envelope.payload as { capabilities: string[] };
+    expect(payload.capabilities).toEqual(['core.controls_switch']);
+  });
+
+  it('scanning a non-junction track piece does NOT emit a switch device_registered', async () => {
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('straight');
+
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+
+    const markerId = `M-${pieceId}`;
+    // The device_registered for M-straight-* should not appear at all from
+    // the scan flow (only GARAGE and any sim-bridge events, never a switch reg).
+    const switchRegs = client.published.filter(
+      (m) => m.topic === `railway/events/device_registered/${markerId}`,
+    );
+    expect(switchRegs).toHaveLength(0);
+  });
+
+  it('scanning a junction also emits the tag_assignment as usual', async () => {
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('junction');
+
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+
+    const scanAssigns = filterScanFlowAssignments(client);
+    expect(scanAssigns.length).toBeGreaterThanOrEqual(1);
+    const junctionAssign = scanAssigns.find((a) => a.payload.target_id === `M-${pieceId}`);
+    expect(junctionAssign?.payload.marker_kind).toBe('junction');
   });
 });
 
@@ -779,5 +923,157 @@ describe('ToyTable — zoom', () => {
     const viewBoxWidth = parts[2];
     expect(viewBoxWidth).toBeDefined();
     expect(viewBoxWidth).toBeLessThanOrEqual(9000 + 0.01); // CANVAS_W_MM / MIN_ZOOM
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Carriage piece tests
+// ---------------------------------------------------------------------------
+
+describe('ToyTable — carriage placement and wire silence', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('carriage appears in the toybox under Devices', () => {
+    renderToyTable();
+    expect(screen.getByTestId('toybox-carriage')).toBeInTheDocument();
+  });
+
+  it('placing a carriage without scanning emits no broker events', async () => {
+    const user = userEvent.setup();
+    const { client } = renderToyTable();
+
+    await user.click(screen.getByTestId('toybox-carriage'));
+    await user.click(screen.getByTestId('toy-table-canvas'));
+
+    const placed = document.querySelectorAll('[data-testid^="piece-carriage-"]');
+    expect(placed.length).toBe(1);
+
+    // No wire events for carriages — they are wire-invisible.
+    const carriageEvents = client.published.filter((m) => m.topic.includes('carriage'));
+    expect(carriageEvents).toHaveLength(0);
+  });
+
+  it('scanning a carriage emits no broker events (wire-invisible)', async () => {
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('carriage');
+
+    const countBefore = client.published.length;
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+    const countAfter = client.published.length;
+
+    // Scanning a carriage must not publish anything — no tag_assignment,
+    // no device_registered, no GARAGE announcement from the scan flow.
+    expect(countAfter).toBe(countBefore);
+  });
+
+  it('a scanned carriage becomes live but emits no tag_assignment', async () => {
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('carriage');
+
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+
+    // The piece should be marked live (data-live="true").
+    const placed = document.querySelector(`[data-piece-id="${pieceId}"]`);
+    expect(placed?.getAttribute('data-live')).toBe('true');
+
+    // No scan-flow tag_assignment should have been emitted for the carriage.
+    expect(filterScanFlowAssignments(client)).toHaveLength(0);
+  });
+
+  it('carriage has no power dot (wire-invisible devices have no broker identity)', async () => {
+    renderToyTable();
+    const pieceId = await placeArmedPiece('carriage');
+
+    // Power dot is rendered only for wire devices (train/gate).
+    const powerDot = document.querySelector(`[data-testid="power-${pieceId}"]`);
+    expect(powerDot).toBeNull();
+  });
+});
+
+describe('ToyTable — carriage coupling', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('a carriage placed near a live train gets data-coupled-to set to the train piece id', async () => {
+    const restore = mockCanvasRect();
+    try {
+      const { client } = renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+
+      // Place and scan a train near canvas centre (450, 300).
+      const trainButton = screen.getByTestId('toybox-train');
+      dispatchToyboxDragStart(trainButton, 'train');
+      // 900px wide = 900mm. Drop at 900, 600 px → 450mm, 300mm.
+      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'train', 900, 600);
+
+      const trainPieceEl = canvas.querySelector(
+        '[data-testid^="piece-train-"]',
+      ) as HTMLElement | null;
+      if (!trainPieceEl) throw new Error('no train placed');
+      const trainPieceId = trainPieceEl.getAttribute('data-piece-id');
+      if (!trainPieceId) throw new Error('train missing data-piece-id');
+
+      // Scan the train so it's live.
+      dropPieceOnScanBox(screen.getByTestId('scan-box'), trainPieceId);
+      expect(trainPieceEl.getAttribute('data-live')).toBe('true');
+
+      // Place a carriage 80mm east of the train (well within coupling distance of 100mm).
+      // 450mm + 80mm = 530mm. 530/900 * 1800px = 1060px.
+      const carriageButton = screen.getByTestId('toybox-carriage');
+      dispatchToyboxDragStart(carriageButton, 'carriage');
+      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'carriage', 1060, 600);
+
+      const carriagePieceEl = canvas.querySelector(
+        '[data-testid^="piece-carriage-"]',
+      ) as HTMLElement | null;
+      if (!carriagePieceEl) throw new Error('no carriage placed');
+
+      // Carriage should be coupled to the train.
+      expect(carriagePieceEl.getAttribute('data-coupled-to')).toBe(trainPieceId);
+
+      // Confirm the client variable is used (avoids unused variable lint error).
+      expect(client).toBeDefined();
+    } finally {
+      restore();
+    }
+  });
+
+  it('a carriage placed far from any live train has no data-coupled-to', async () => {
+    const restore = mockCanvasRect();
+    try {
+      renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+
+      // Place and scan a train at canvas centre.
+      const trainButton = screen.getByTestId('toybox-train');
+      dispatchToyboxDragStart(trainButton, 'train');
+      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'train', 900, 600);
+
+      const trainPieceEl = canvas.querySelector(
+        '[data-testid^="piece-train-"]',
+      ) as HTMLElement | null;
+      if (!trainPieceEl) throw new Error('no train placed');
+      const trainPieceId = trainPieceEl.getAttribute('data-piece-id');
+      if (!trainPieceId) throw new Error('train missing data-piece-id');
+      dropPieceOnScanBox(screen.getByTestId('scan-box'), trainPieceId);
+
+      // Place a carriage far away: 300mm east = 750mm, i.e. 750/900 * 1800 = 1500px.
+      const carriageButton = screen.getByTestId('toybox-carriage');
+      dispatchToyboxDragStart(carriageButton, 'carriage');
+      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'carriage', 1500, 600);
+
+      const carriagePieceEl = canvas.querySelector(
+        '[data-testid^="piece-carriage-"]',
+      ) as HTMLElement | null;
+      if (!carriagePieceEl) throw new Error('no carriage placed');
+
+      // 750mm from 450mm = 300mm > 100mm coupling threshold: not coupled.
+      expect(carriagePieceEl.getAttribute('data-coupled-to')).toBeNull();
+    } finally {
+      restore();
+    }
   });
 });

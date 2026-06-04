@@ -162,11 +162,26 @@ export class ToyHardware {
       this.simulation.spawnGate(deviceIdForDevicePiece(piece));
       return;
     }
+    if (piece.type === 'carriage') {
+      // Carriages are wire-invisible physical wagons. The simulation has no
+      // virtual carriage device — coupling detection lives in the UI layer
+      // (`computeTrainTrails` in coupling.ts). Nothing to do here.
+      return;
+    }
     // Track pieces: ToyTable.scanPiece already published the tag_assignment
     // for `M-{piece.id}` via the GARAGE device. Mirror the binding into the
     // in-browser Simulation's markerToTag map silently so virtual trains
     // emit `tag_observed` when they cross this marker.
-    this.simulation.bindIdentityTag(`M-${piece.id}`);
+    const markerId = `M-${piece.id}`;
+    this.simulation.bindIdentityTag(markerId);
+
+    // Junction pieces also need a virtual switch motor so LearnMode's
+    // `set_switch_position` commands (sent to the junction marker id) are
+    // handled. The motor id matches the marker id, matching LearnMode's
+    // command routing.
+    if (piece.type === 'junction') {
+      this.simulation.spawnSwitch(markerId, markerId);
+    }
   }
 
   private despawnPiece(piece: TrackPiece): void {
@@ -176,6 +191,14 @@ export class ToyHardware {
     }
     if (piece.type === 'gate') {
       this.simulation.despawnGate(deviceIdForDevicePiece(piece));
+      return;
+    }
+    if (piece.type === 'carriage') {
+      // Carriages have no simulation counterpart. Nothing to despawn.
+      return;
+    }
+    if (piece.type === 'junction') {
+      this.simulation.despawnSwitch(`M-${piece.id}`);
     }
   }
 

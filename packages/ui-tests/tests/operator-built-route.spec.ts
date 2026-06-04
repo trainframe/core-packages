@@ -2,16 +2,15 @@ import { expect, test } from '@playwright/test';
 import type { Layout } from '@trainframe/protocol';
 import {
   assignSchedule,
-  openSimulatorUi,
   openVisualiser,
-  spawnTrain,
+  waitForVisualiserConnected,
 } from '../src/playwright-helpers.js';
 import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
 /**
- * Operator journey for the schedule builder. Per ADR-013, spawning a train
- * (physical action) happens on the simulator-ui; assigning the stops the
- * train will cycle through (operator system intent) happens on the
+ * Operator journey for the schedule builder. Spawning a train (physical
+ * action) is performed via the Node-bridged Simulation; assigning the stops
+ * the train will cycle through (operator system intent) happens on the
  * visualiser's ScheduleAssigner. The planner computes the per-leg transit
  * through the layout graph on demand (ADR-010). We assert the train visits
  * the branch the operator selected by watching the visualiser as edges advance.
@@ -56,16 +55,17 @@ test.describe
     test('the train takes the branch the operator picked, not a hardcoded slice', async ({
       browser,
     }) => {
-      const visualiser = await openVisualiser(browser);
-      const sim = await openSimulatorUi(browser, { layout: BRANCHED });
+      const visualiser = await openVisualiser(browser, { brokerUrl: harness.brokerWsUrl });
 
       await expect(visualiser.locator('[data-marker-id="M1"]')).toBeVisible();
+      await waitForVisualiserConnected(visualiser);
 
-      // Operator places the train at M1 (its starting position) and spawns.
-      // The spawn-position select auto-selects M1 (first marker with an
-      // outgoing edge), so Spawn is enabled immediately.
-      await expect(sim.getByRole('button', { name: /spawn train/i })).toBeEnabled();
-      await spawnTrain(sim, { trainId: 'T1', startMarker: 'M1' });
+      // Spawn the train via the bridged Node simulation (physical action
+      // equivalent). The bridge emits device_registered + tag_observed events
+      // that reach the harness server's scheduler.
+      harness.simulation.spawnTrain('T1', {
+        startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+      });
 
       // Operator assigns a schedule via the visualiser's ScheduleAssigner.
       // assignSchedule waits for the panel to appear — it becomes visible
@@ -79,7 +79,15 @@ test.describe
 
       // Now that the train has a schedule it starts moving. Wait for its
       // icon to appear (driven by marker_traversed / train_status events).
-      await expect(visualiser.locator('[data-train-id="T1"]')).toBeVisible({ timeout: 8_000 });
+      await expect
+        .poll(
+          async () => {
+            harness.advance(200);
+            return await visualiser.locator('[data-train-id="T1"]').count();
+          },
+          { timeout: 15_000, message: 'expected T1 to surface on the visualiser canvas' },
+        )
+        .toBeGreaterThan(0);
 
       // The branch from M2 has M5 as its destination — the train must reach
       // an edge or marker exclusive to that branch within the test window.
@@ -87,6 +95,7 @@ test.describe
       await expect
         .poll(
           async () => {
+            harness.advance(200);
             const el = visualiser.locator('[data-train-id="T1"]');
             const onEdge = await el.getAttribute('data-on-edge');
             const atMarker = await el.getAttribute('data-at-marker');

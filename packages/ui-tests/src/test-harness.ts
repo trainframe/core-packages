@@ -32,12 +32,30 @@ export interface UiHarness {
 }
 
 export interface UiHarnessOptions {
-  readonly layout: Layout;
+  /**
+   * Layout the server reasons against. Either `layout` or `discovery: true`
+   * must be set. When `discovery` is true the server starts with an empty
+   * layout and learns markers/edges from device events.
+   */
+  readonly layout?: Layout;
+  /**
+   * Boot the server in discovery mode: empty initial layout so markers and
+   * edges are inferred from `tag_assignment` and `tag_observed` events.
+   * Mutually exclusive with `layout` (if both are set, `layout` wins).
+   */
+  readonly discovery?: boolean;
   /** WebSocket port for the broker. Defaults to 9001 (matches the UI's default). */
   readonly wsPort?: number;
   /** Seed for the bridged simulation. Defaults to `1`. */
   readonly seed?: number;
 }
+
+const DISCOVERY_LAYOUT: Layout = {
+  name: 'discovery',
+  markers: [],
+  edges: [],
+  junctions: [],
+};
 
 /**
  * Boots an aedes broker over WebSockets, runs a real @trainframe/server
@@ -53,28 +71,34 @@ export interface UiHarnessOptions {
  * The sim doesn't auto-tick — tests call `harness.advance(ms)` to drive it.
  */
 export async function startUiHarness(opts: UiHarnessOptions): Promise<UiHarness> {
+  const layout = opts.layout ?? (opts.discovery === true ? DISCOVERY_LAYOUT : undefined);
+  if (layout === undefined) {
+    throw new Error('startUiHarness: provide either `layout` or `discovery: true`');
+  }
+
   const broker = await Aedes.createBroker();
   const { httpServer, wsPort } = await listenWebSocketBroker(broker, opts.wsPort ?? 9001);
   const brokerWsUrl = `ws://127.0.0.1:${wsPort}`;
 
   const serverClient = new MqttBrokerClient();
   await serverClient.connect(brokerWsUrl);
-  const server = new TrainframeServer({ layout: opts.layout, client: serverClient });
+  const server = new TrainframeServer({ layout, client: serverClient });
   server.start();
 
   const simClient = new MqttBrokerClient();
   await simClient.connect(brokerWsUrl);
   const simulation = new Simulation({
-    layout: opts.layout,
+    layout,
     seed: opts.seed ?? 1,
   });
   const bridge = new BrokerBridge(simulation, simClient, { newId: defaultNewId });
   bridge.start();
-  // Seed identity tags AFTER the bridge has subscribed so the synthetic-
-  // garage events flow sim → bridge → broker → server. Seeding before
-  // `bridge.start()` would silently lose them because they're appended to
-  // `sim.events` but no subscriber is attached.
-  simulation.seedIdentityTags(opts.layout);
+  // Seed identity tags only when the layout has markers. In discovery mode the
+  // layout is empty so seedIdentityTags would be a no-op anyway, but being
+  // explicit avoids surprises if the implementation changes.
+  if (layout.markers.length > 0) {
+    simulation.seedIdentityTags(layout);
+  }
 
   return {
     brokerWsUrl,

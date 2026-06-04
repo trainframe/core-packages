@@ -123,3 +123,57 @@
   border-color: var(--tf-color-accent, #f59e0b);
   color: var(--tf-color-fg, #1c1c1c);
 }
+
+.tf-scanbox--confirming {
+  border-style: solid;
+  border-color: var(--tf-color-accent, #f59e0b);
+  background: var(--tf-color-accent-soft, #fef3c7);
+  color: var(--tf-color-fg, #1c1c1c);
+}
+
+.tf-scanbox__confirm-label {
+  margin: 0;
+  font-size: 0.9em;
+}
+
+.tf-scanbox__confirm-id {
+  margin: 0;
+  font-size: 0.8em;
+  color: var(--tf-color-fg-muted, #555);
+  font-family: monospace;
+}
+
+.tf-scanbox__confirm-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: center;
+  margin-top: 0.3rem;
+}
+
+.tf-scanbox__bind {
+  background: var(--tf-color-positive, #16a34a);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 0.3em 0.8em;
+  font-size: 0.9em;
+  cursor: pointer;
+}
+
+.tf-scanbox__bind:hover {
+  background: var(--tf-color-positive-hover, #15803d);
+}
+
+.tf-scanbox__cancel {
+  background: transparent;
+  color: var(--tf-color-fg-muted, #555);
+  border: 1px solid var(--tf-color-border, #999);
+  border-radius: 4px;
+  padding: 0.3em 0.8em;
+  font-size: 0.9em;
+  cursor: pointer;
+}
+
+.tf-scanbox__cancel:hover {
+  background: var(--tf-color-surface-hover, #e5e5e5);
+}
