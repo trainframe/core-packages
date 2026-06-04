@@ -74,43 +74,45 @@ test.describe
 
       // All three trains must appear on the visualiser canvas once they
       // start moving (driven by marker_traversed / train_status events).
-      for (const id of ['T1', 'T2', 'T3']) {
+      // Each `expect.poll` browser round-trip takes ~hundreds of ms, so the
+      // sim has to advance independently of the poll cadence — otherwise
+      // 200 ms of sim time per real second isn't enough to clear three trains
+      // through one block in the test budget.
+      const pumpHandle = setInterval(() => harness.advance(50), 20);
+      try {
+        for (const id of ['T1', 'T2', 'T3']) {
+          await expect
+            .poll(async () => visualiser.locator(`[data-train-id="${id}"]`).count(), {
+              timeout: 15_000,
+              message: `expected ${id} to surface on the visualiser canvas`,
+            })
+            .toBeGreaterThan(0);
+        }
+
+        // Block-exclusivity regression: every train must eventually leave the
+        // first edge (M1→M2). In the buggy world T1 advances and T2/T3 sit on
+        // M1→M2 forever because T1 never releases the block. In the fixed world
+        // T2 and T3 queue behind T1 and all three end up on later edges.
         await expect
           .poll(
             async () => {
-              harness.advance(200);
-              return await visualiser.locator(`[data-train-id="${id}"]`).count();
+              const positions = await visualiser
+                .locator('[data-train-id]')
+                .evaluateAll((els) =>
+                  els.map(
+                    (el) => el.getAttribute('data-at-marker') ?? el.getAttribute('data-on-edge'),
+                  ),
+                );
+              return positions.length === 3 && positions.every((p) => p !== null && p !== 'M1->M2');
             },
-            { timeout: 15_000, message: `expected ${id} to surface on the visualiser canvas` },
+            {
+              timeout: 15_000,
+              message: 'expected every train to leave the first edge (M1→M2)',
+            },
           )
-          .toBeGreaterThan(0);
+          .toBe(true);
+      } finally {
+        clearInterval(pumpHandle);
       }
-
-      // Block-exclusivity regression: every train must eventually leave the
-      // first edge (M1→M2). In the buggy world T1 advances and T2/T3 sit on
-      // M1→M2 forever because T1 never releases the block. In the fixed world
-      // T2 and T3 queue behind T1 and all three end up on later edges.
-      await expect
-        .poll(
-          async () => {
-            harness.advance(200);
-            const positions = await visualiser
-              .locator('[data-train-id]')
-              .evaluateAll((els) =>
-                els.map(
-                  (el) => el.getAttribute('data-at-marker') ?? el.getAttribute('data-on-edge'),
-                ),
-              );
-            return positions.length === 3 && positions.every((p) => p !== null && p !== 'M1->M2');
-          },
-          {
-            // Three trains queueing through the same single-track block takes
-            // longer than a one-train run; 30s gives each train time to clear
-            // M1→M2 once the preceding train has freed it.
-            timeout: 30_000,
-            message: 'expected every train to leave the first edge (M1→M2)',
-          },
-        )
-        .toBe(true);
     });
   });
