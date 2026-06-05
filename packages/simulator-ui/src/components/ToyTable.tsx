@@ -1,6 +1,5 @@
 import { Panel } from '@trainframe/ui-kit';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { SVGAttributes } from 'react';
 import { useBroker } from '../broker/broker-context.js';
 import type { BrokerClient } from '../broker/client.js';
 import { encodeDeviceEvent } from '../broker/encode-event.js';
@@ -23,6 +22,7 @@ import {
   isWireDevice,
   pieceMarkerKind,
 } from '../track/pieces.js';
+import { computePlacement } from '../track/placement.js';
 import { ConnectionStatus } from './ConnectionStatus.js';
 import { ScanBox } from './ScanBox.js';
 import { Settings } from './Settings.js';
@@ -163,45 +163,78 @@ function resolveEdgeEndpoints(
  *
  * @pure — reads from sim and pieces only; returns a new Map each call.
  */
+/**
+ * Place one live train (and any coupled carriages) at its simulated edge
+ * position, writing into `result`. No-op when the train has no resolvable sim
+ * edge (deferred — scanned but no track under it yet).
+ */
+type ToySimulation = ReturnType<ToyHardware['getSimulation']>;
+
+function placeLiveTrain(
+  piece: TrackPiece,
+  sim: ToySimulation,
+  piecesById: ReadonlyMap<string, TrackPiece>,
+  trainTrails: ReadonlyMap<string, ReadonlyArray<string>>,
+  result: Map<string, WorldPosition>,
+): void {
+  const simTrain = sim.getTrain(`T-${piece.id}`);
+  if (simTrain === undefined) return;
+
+  const endpoints = resolveEdgeEndpoints(simTrain, piecesById);
+  if (endpoints === undefined) return;
+
+  const { fromPos, toPos, fromMarkerId, toMarkerId } = endpoints;
+  // Edge length from sim's LayoutState (matches what VirtualTrain uses).
+  const edgeLengthMm = sim.layout.findEdge(fromMarkerId, toMarkerId)?.estimated_length_mm ?? 200;
+  const trainDist = simTrain.getDistanceIntoEdge();
+
+  result.set(piece.id, carriageWorldPos(fromPos, toPos, edgeLengthMm, trainDist));
+
+  // Coupled carriages trail behind — clamp to 0 (v1: no multi-edge trailing).
+  const carriageIds = trainTrails.get(piece.id) ?? [];
+  for (let i = 0; i < carriageIds.length; i++) {
+    const carriageId = carriageIds[i];
+    if (carriageId === undefined) continue;
+    const carriageDist = Math.max(0, trainDist - (i + 1) * CARRIAGE_SPACING_MM);
+    result.set(carriageId, carriageWorldPos(fromPos, toPos, edgeLengthMm, carriageDist));
+  }
+}
+
+/** True when at least one live train is currently under power in the sim. */
+function anyLiveTrainMoving(
+  hardware: ToyHardware,
+  pieces: ReadonlyArray<TrackPiece>,
+  liveIds: ReadonlySet<string>,
+): boolean {
+  const sim = hardware.getSimulation();
+  for (const p of pieces) {
+    if (p.type !== 'train' || !liveIds.has(p.id)) continue;
+    const simTrain = sim.getTrain(`T-${p.id}`);
+    if (simTrain !== undefined && simTrain.getVelocity() > 0) return true;
+  }
+  return false;
+}
+
 function computeRenderPositions(
   pieces: ReadonlyArray<TrackPiece>,
+  liveIds: ReadonlySet<string>,
   trainTrails: ReadonlyMap<string, ReadonlyArray<string>>,
   hardware: ToyHardware,
 ): Map<string, WorldPosition> {
   const result = new Map<string, WorldPosition>();
-
-  // Build a quick lookup: pieceId → TrackPiece
   const piecesById = new Map<string, TrackPiece>();
   for (const p of pieces) piecesById.set(p.id, p);
 
   const sim = hardware.getSimulation();
-
-  for (const [trainPieceId, carriageIds] of trainTrails) {
-    const simTrain = sim.getTrain(`T-${trainPieceId}`);
-    if (simTrain === undefined) continue;
-
-    const endpoints = resolveEdgeEndpoints(simTrain, piecesById);
-    if (endpoints === undefined) continue;
-
-    const { fromPos, toPos, fromMarkerId, toMarkerId } = endpoints;
-
-    // Edge length from sim's LayoutState (matches what VirtualTrain uses).
-    const edgeLengthMm = sim.layout.findEdge(fromMarkerId, toMarkerId)?.estimated_length_mm ?? 200;
-
-    const trainDist = simTrain.getDistanceIntoEdge();
-
-    // Train sprite position
-    result.set(trainPieceId, carriageWorldPos(fromPos, toPos, edgeLengthMm, trainDist));
-
-    // Carriage positions — clamp to 0 (v1: no multi-edge trailing)
-    for (let i = 0; i < carriageIds.length; i++) {
-      const carriageId = carriageIds[i];
-      if (carriageId === undefined) continue;
-      const carriageDist = Math.max(0, trainDist - (i + 1) * CARRIAGE_SPACING_MM);
-      result.set(carriageId, carriageWorldPos(fromPos, toPos, edgeLengthMm, carriageDist));
+  // Every *live* train rides its simulated edge position — not just trains that
+  // happen to have carriages coupled. Without this a lone train renders at its
+  // static placement coordinate (e.g. a curve's marker, ~24 mm off the rail),
+  // so it looks parked beside the track instead of running on it.
+  for (const piece of pieces) {
+    if (piece.type === 'train' && liveIds.has(piece.id)) {
+      placeLiveTrain(piece, sim, piecesById, trainTrails, result);
     }
   }
-
   return result;
 }
 
@@ -352,6 +385,17 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
    * it's component-scoped rather than a module-level singleton. */
   const garageRegisteredRef = useRef(false);
 
+  /** ScanBox hands us a function to begin a scan; the canvas calls it when a
+   * piece is pointer-dragged onto the scan box (placed pieces are SVG and can't
+   * start native DnD, so the HTML5 drop path never fires for them). */
+  const scanTriggerRef = useRef<((pieceId: string) => void) | null>(null);
+  const handleScanBoxReady = useCallback((beginScan: (pieceId: string) => void) => {
+    scanTriggerRef.current = beginScan;
+  }, []);
+  const requestScan = useCallback((pieceId: string) => {
+    scanTriggerRef.current?.(pieceId);
+  }, []);
+
   // Tick counter — bumped after each RAF frame when at least one coupled train
   // is moving, so React re-renders with fresh sim positions. We keep the bump
   // cheap: only increment when `trainTrails` is non-empty (carriage coupling
@@ -370,9 +414,12 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     liveIds,
     client,
     onTick: () => {
-      // Only bump the tick counter when there are coupled carriages — avoids
-      // churn on tables with no carriages or no live trains.
-      if (trainTrailsRef.current.size > 0) {
+      // Re-render with fresh sim positions while something is actually moving:
+      // a live train under power, or any coupled-carriage trail. Idle tables
+      // (nothing scanned, or a parked train) don't churn.
+      const hw = hardwareRef.current;
+      const moving = hw !== null && anyLiveTrainMoving(hw, piecesRef.current, liveIdsRef.current);
+      if (moving || trainTrailsRef.current.size > 0) {
         setTickCount((n) => n + 1);
       }
     },
@@ -443,6 +490,24 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     },
     [armedType],
   );
+
+  // Reposition an already-placed piece (dragged across the canvas). Snaps +
+  // orients onto a neighbour's open end when one is in reach; otherwise drops
+  // it where released, keeping its current rotation so a free move doesn't
+  // surprise-rotate it back to 0°.
+  const movePiece = useCallback((pieceId: string, xMm: number, yMm: number) => {
+    setPieces((prev) => {
+      const moving = prev.find((p) => p.id === pieceId);
+      if (moving === undefined) return prev;
+      const others = prev.filter((p) => p.id !== pieceId);
+      const placement = computePlacement(xMm, yMm, moving.type, others);
+      const rotationDeg = placement.connected ? placement.rotationDeg : moving.rotationDeg;
+      return prev.map((p) =>
+        p.id === pieceId ? { ...p, position: { x: placement.x, y: placement.y }, rotationDeg } : p,
+      );
+    });
+    setSelectedId(pieceId);
+  }, []);
 
   const rotateSelected = useCallback(() => {
     if (selectedId === null) return;
@@ -551,9 +616,10 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   // Compute render positions from the live simulation. Only non-empty when
   // there are coupled carriages and the train has a resolved sim edge.
   const hardware = hardwareRef.current;
+  const hasLiveTrain = pieces.some((p) => p.type === 'train' && liveIds.has(p.id));
   const renderPositions =
-    hardware !== null && trainTrails.size > 0
-      ? computeRenderPositions(pieces, trainTrails, hardware)
+    hardware !== null && hasLiveTrain
+      ? computeRenderPositions(pieces, liveIds, trainTrails, hardware)
       : new Map<string, WorldPosition>();
 
   return (
@@ -566,7 +632,11 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       <div className="tf-toytable__body">
         <aside className="tf-toytable__sidebar">
           <Toybox armedType={armedType} onArm={armPieceType} />
-          <ScanBox describePiece={describePiece} onConfirm={handleScanConfirm} />
+          <ScanBox
+            describePiece={describePiece}
+            onConfirm={handleScanConfirm}
+            onReady={handleScanBoxReady}
+          />
         </aside>
         <main className="tf-toytable__main">
           <ActionBar
@@ -583,6 +653,8 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
             trainTrails={trainTrails}
             renderPositions={renderPositions}
             onCanvasClick={placePiece}
+            onMovePiece={movePiece}
+            onScanPiece={requestScan}
             onPieceAction={handlePiecePointerAction}
           />
         </main>
@@ -725,6 +797,10 @@ interface TableProps {
     type?: TrackPieceType,
     rotation?: RotationDeg,
   ) => void;
+  /** Reposition an already-placed piece (pointer-dragged across the canvas). */
+  readonly onMovePiece: (pieceId: string, xMm: number, yMm: number) => void;
+  /** Begin scanning a piece (pointer-dragged onto the scan box). */
+  readonly onScanPiece: (pieceId: string) => void;
   readonly onPieceAction: (pieceId: string, action: 'select' | PowerOnAction) => void;
 }
 
@@ -736,9 +812,18 @@ function Table({
   trainTrails,
   renderPositions,
   onCanvasClick,
+  onMovePiece,
+  onScanPiece,
   onPieceAction,
 }: TableProps) {
   const svgRef = useRef<SVGSVGElement>(null);
+
+  /** Live world position of the piece currently being pointer-dragged. */
+  const [pieceDragPreview, setPieceDragPreview] = useState<{
+    id: string;
+    x: number;
+    y: number;
+  } | null>(null);
 
   // Build reverse map: carriageId → trainPieceId (for data-coupled-to attr)
   const carriageCoupledTo = new Map<string, string>();
@@ -871,7 +956,15 @@ function Table({
     }
     const rect = getRect();
     const { x: xMm, y: yMm } = clientToMm(rect, e.clientX, e.clientY, viewport);
-    onCanvasClick(xMm, yMm);
+    // With nothing armed, a click just clears the selection.
+    if (armedType === null) {
+      onCanvasClick(xMm, yMm);
+      return;
+    }
+    // Armed: snap + orient the new piece to continue from a nearby open
+    // endpoint so curved loops can be built by clicking, not pixel-nudging.
+    const placement = computePlacement(xMm, yMm, armedType, pieces);
+    onCanvasClick(placement.x, placement.y, armedType, placement.rotationDeg);
   }
 
   // The canvas behaves as a placement surface, not an interactive control —
@@ -890,7 +983,9 @@ function Table({
   // ---------------------------------------------------------------------------
 
   function handleDragOver(e: React.DragEvent<SVGSVGElement>) {
-    // Only accept toybox-type drags; reject piece-to-scan-box drags.
+    // Only toybox drags use HTML5 DnD onto the canvas (the toybox entries are
+    // HTML buttons). Placed pieces are SVG and are repositioned with pointer
+    // events instead (see PieceRenderer), not dropped here.
     if (!e.dataTransfer.types.includes(TOYBOX_DRAG_MIME)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
@@ -898,8 +993,6 @@ function Table({
     if (draggingToyboxType === null) return;
     const rect = getRect();
     const { x: xMm, y: yMm } = clientToMm(rect, e.clientX, e.clientY, viewport);
-
-    // Compute snap highlight during drag.
     const snap = findSnapOffset(xMm, yMm, 0, draggingToyboxType, pieces);
     setSnapHighlight(snap !== null ? snap.snapTarget : null);
   }
@@ -913,18 +1006,41 @@ function Table({
     setSnapHighlight(null);
     setDraggingToyboxType(null);
 
-    const pieceType = e.dataTransfer.getData(TOYBOX_DRAG_MIME) as TrackPieceType | '';
-    if (pieceType === '') return;
-
     const rect = getRect();
     const { x: xMm, y: yMm } = clientToMm(rect, e.clientX, e.clientY, viewport);
 
-    // Apply snap offset if applicable.
+    // A new piece dragged in from the toybox.
+    const pieceType = e.dataTransfer.getData(TOYBOX_DRAG_MIME) as TrackPieceType | '';
+    if (pieceType === '') return;
     const snap = findSnapOffset(xMm, yMm, 0, pieceType, pieces);
     const finalX = snap !== null ? xMm + snap.offsetX : xMm;
     const finalY = snap !== null ? yMm + snap.offsetY : yMm;
-
     onCanvasClick(finalX, finalY, pieceType, 0);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Pointer-drag of a placed piece (move across canvas, or scan onto the bus)
+  // ---------------------------------------------------------------------------
+
+  function handlePieceDragMove(_pieceId: string, clientX: number, clientY: number) {
+    const { x, y } = clientToMm(getRect(), clientX, clientY, viewport);
+    setPieceDragPreview({ id: _pieceId, x, y });
+  }
+
+  function handlePieceDragEnd(pieceId: string, clientX: number, clientY: number) {
+    setPieceDragPreview(null);
+    // Released over the scan box → scan it (same confirm flow as an HTML5 drop).
+    const target =
+      typeof document.elementFromPoint === 'function'
+        ? document.elementFromPoint(clientX, clientY)
+        : null;
+    if (target?.closest('[data-testid="scan-box"]') != null) {
+      onScanPiece(pieceId);
+      return;
+    }
+    // Otherwise reposition it where it was released.
+    const { x, y } = clientToMm(getRect(), clientX, clientY, viewport);
+    onMovePiece(pieceId, x, y);
   }
 
   // Cursor logic: crosshair when armed, grabbing while panning, default otherwise.
@@ -965,7 +1081,13 @@ function Table({
           coupledToTrainId={carriageCoupledTo.get(p.id)}
           renderPosition={renderPositions.get(p.id)}
           onAction={(action) => onPieceAction(p.id, action)}
-          onToyboxDragStart={setDraggingToyboxType}
+          dragOverride={
+            pieceDragPreview?.id === p.id
+              ? { x: pieceDragPreview.x, y: pieceDragPreview.y }
+              : undefined
+          }
+          onDragMove={handlePieceDragMove}
+          onDragEnd={handlePieceDragEnd}
         />
       ))}
       {/* Endpoint dots for track pieces only. Devices have no endpoints. */}
@@ -1022,9 +1144,17 @@ interface PieceRendererProps {
    */
   readonly renderPosition: WorldPosition | undefined;
   readonly onAction: (action: 'select' | PowerOnAction) => void;
-  /** Notifies Table of the type being dragged from the toybox area, so snap
-   * highlighting can work during dragover (dataTransfer not readable then). */
-  readonly onToyboxDragStart: (type: TrackPieceType | null) => void;
+  /**
+   * While a pointer-drag of this piece is in progress, the live world position
+   * (mm) to render it at — it follows the cursor. Placed pieces are SVG and
+   * can't use HTML5 DnD, so repositioning is done with pointer events.
+   */
+  readonly dragOverride: { x: number; y: number } | undefined;
+  /** Pointer moved while dragging this piece (client coords). */
+  readonly onDragMove: (pieceId: string, clientX: number, clientY: number) => void;
+  /** Drag released (client coords) — reposition the piece, or scan it if let
+   * go over the scan box. */
+  readonly onDragEnd: (pieceId: string, clientX: number, clientY: number) => void;
 }
 
 function PieceRenderer({
@@ -1035,7 +1165,9 @@ function PieceRenderer({
   coupledToTrainId,
   renderPosition,
   onAction,
-  onToyboxDragStart,
+  dragOverride,
+  onDragMove,
+  onDragEnd,
 }: PieceRendererProps) {
   const shape = getPieceShape(piece);
   const fill = PIECE_FILL[piece.type];
@@ -1044,50 +1176,98 @@ function PieceRenderer({
   // Carriages are wire-invisible — clicking a live carriage just selects it.
   const isWire = isWireDevice(piece.type);
 
-  function handleClick(e: React.MouseEvent) {
-    // When the operator has a piece type armed, clicks anywhere on the canvas
-    // (including on top of existing pieces) place a fresh piece. The piece's
-    // own select / power-off handling only applies when nothing is armed.
-    // Without this, you can't drop a train onto a straight you just placed,
-    // because the click hits the straight and selects it instead.
-    if (armedType !== null) return;
-    e.stopPropagation();
-    if (live && isWire) {
-      onAction({ type: 'power-on', pieceId: piece.id });
-      return;
+  // Pointer-drag state. Placed pieces are SVG <g> elements; Chrome does not
+  // honour the HTML5 `draggable` attribute on SVG, so native DnD never starts.
+  // We drag with pointer events instead (which also gives live feedback and is
+  // automatable). A press that doesn't move past the threshold is a click.
+  const dragRef = useRef<{ clientX: number; clientY: number; moved: boolean } | null>(null);
+  // Set when a drag actually moved the piece, so the click that fires right
+  // after pointer-up doesn't also select it.
+  const suppressClickRef = useRef(false);
+
+  function handlePointerDown(e: React.PointerEvent<SVGGElement>) {
+    // When a piece type is armed the operator is placing, not moving — let the
+    // event bubble so the canvas places a fresh piece here. Only the primary
+    // button starts a drag.
+    if (armedType !== null || e.button > 0) return;
+    e.stopPropagation(); // don't start a canvas pan
+    dragRef.current = { clientX: e.clientX, clientY: e.clientY, moved: false };
+    if (typeof e.currentTarget.setPointerCapture === 'function') {
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // jsdom / no active pointer — dragging still works without capture.
+      }
     }
+  }
+
+  function handlePointerMove(e: React.PointerEvent<SVGGElement>) {
+    const start = dragRef.current;
+    if (start === null) return;
+    if (!start.moved && Math.hypot(e.clientX - start.clientX, e.clientY - start.clientY) > 4) {
+      start.moved = true;
+    }
+    if (start.moved) onDragMove(piece.id, e.clientX, e.clientY);
+  }
+
+  function handlePointerUp(e: React.PointerEvent<SVGGElement>) {
+    const start = dragRef.current;
+    if (start === null) return;
+    dragRef.current = null;
+    if (typeof e.currentTarget.releasePointerCapture === 'function') {
+      try {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      } catch {
+        // jsdom may throw if the pointer was never captured.
+      }
+    }
+    if (start.moved) {
+      suppressClickRef.current = true;
+      onDragEnd(piece.id, e.clientX, e.clientY);
+    }
+  }
+
+  function handleClick(e: React.MouseEvent) {
+    // When armed, let the click bubble so the canvas places a fresh piece.
+    if (armedType !== null) return;
+    // Otherwise this piece owns the click: keep it off the canvas (which would
+    // deselect / place).
+    e.stopPropagation();
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return; // the click that closes a drag — not a select.
+    }
+    if (live && isWire) onAction({ type: 'power-on', pieceId: piece.id });
+    else onAction('select');
+  }
+
+  // Keyboard equivalent of the click: Enter/Space selects the piece (rotate and
+  // delete then work via the global R / Delete shortcuts).
+  function handleKeyDown(e: React.KeyboardEvent) {
+    if (armedType !== null || (e.key !== 'Enter' && e.key !== ' ')) return;
+    e.preventDefault();
+    e.stopPropagation();
     onAction('select');
   }
 
-  function handleDragStart(e: React.DragEvent) {
-    // Piece-to-scan-box drag: use the scan-box MIME type.
-    e.dataTransfer.setData('application/x-trainframe-piece', piece.id);
-    e.dataTransfer.effectAllowed = 'move';
-    // Ensure dragging a placed piece doesn't bleed into the snap-highlight
-    // logic (which is only for toybox drags).
-    onToyboxDragStart(null);
-  }
-
-  // Use the simulated world position when available; fall back to the piece's
-  // static placement position for uncoupled / deferred pieces.
-  const x = renderPosition?.x ?? piece.position.x;
-  const y = renderPosition?.y ?? piece.position.y;
+  // While dragging, follow the cursor (dragOverride). Otherwise use the
+  // simulated world position when available, falling back to placement.
+  const x = dragOverride?.x ?? renderPosition?.x ?? piece.position.x;
+  const y = dragOverride?.y ?? renderPosition?.y ?? piece.position.y;
   const rotationDeg = renderPosition?.rotationDeg ?? piece.rotationDeg;
-
-  // `draggable` is an HTML attribute that also works on SVG nodes but isn't in
-  // React's `SVGProps` type. Pass it through a typed extra-props object rather
-  // than reach for `any`.
-  const draggableProps: SVGAttributes<SVGGElement> & { draggable: boolean } = {
-    draggable: true,
-  };
 
   return (
     <g
       transform={`translate(${x}, ${y}) rotate(${rotationDeg})`}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
       onClick={handleClick}
-      onDragStart={handleDragStart}
-      {...draggableProps}
-      style={{ cursor: live && isWire ? 'pointer' : 'grab' }}
+      onKeyDown={handleKeyDown}
+      style={{
+        cursor: armedType !== null ? 'crosshair' : live && isWire ? 'pointer' : 'grab',
+        touchAction: 'none',
+      }}
       data-testid={`piece-${piece.id}`}
       data-piece-id={piece.id}
       data-live={live ? 'true' : 'false'}

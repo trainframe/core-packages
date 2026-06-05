@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 const DATA_MIME = 'application/x-trainframe-piece';
 
@@ -15,6 +15,12 @@ export interface ScanBoxProps {
    * alone does not fire any bus events.
    */
   readonly onConfirm: (pieceId: string) => void;
+  /**
+   * Hands the parent a function to begin a scan for a piece id, so a
+   * pointer-drag released over the scan box can drive the same confirmation
+   * flow as an HTML5 drop (placed pieces are SVG and can't start native DnD).
+   */
+  readonly onReady?: (beginScan: (pieceId: string) => void) => void;
 }
 
 interface PendingScan {
@@ -33,7 +39,7 @@ interface PendingScan {
  *
  * Keyboard: Enter confirms Bind, Escape cancels.
  */
-export function ScanBox({ describePiece, onConfirm }: ScanBoxProps) {
+export function ScanBox({ describePiece, onConfirm, onReady }: ScanBoxProps) {
   const [highlight, setHighlight] = useState(false);
   const [pending, setPending] = useState<PendingScan | null>(null);
   const bindButtonRef = useRef<HTMLButtonElement>(null);
@@ -45,6 +51,21 @@ export function ScanBox({ describePiece, onConfirm }: ScanBoxProps) {
       bindButtonRef.current?.focus();
     }
   }, [pending]);
+
+  // Show the confirmation panel for a piece. Shared by the HTML5 drop and the
+  // pointer-drag path (ToyTable releases a dragged piece over the scan box).
+  const beginScan = useCallback(
+    (pieceId: string) => {
+      const description = describePiece(pieceId);
+      if (description === undefined) return;
+      setPending({ pieceId, ...description });
+    },
+    [describePiece],
+  );
+
+  useEffect(() => {
+    onReady?.(beginScan);
+  }, [onReady, beginScan]);
 
   function handleDragOver(e: React.DragEvent) {
     e.preventDefault();
@@ -61,9 +82,7 @@ export function ScanBox({ describePiece, onConfirm }: ScanBoxProps) {
     setHighlight(false);
     const pieceId = e.dataTransfer.getData(DATA_MIME);
     if (pieceId === '') return;
-    const description = describePiece(pieceId);
-    if (description === undefined) return;
-    setPending({ pieceId, ...description });
+    beginScan(pieceId);
   }
 
   function handleBind() {

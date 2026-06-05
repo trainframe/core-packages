@@ -99,8 +99,46 @@ export interface PieceShape {
 // Geometry helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Centreline turn radius of a curve piece, in mm. A curve is a 45° arc; eight
+ * of them tile a full circle (8 × 45° = 360°). The endpoint geometry and the
+ * rendered arc are both derived from this single constant so they can never
+ * drift apart.
+ */
+const CURVE_RADIUS_MM = 200;
+
+/** Half-width of a rendered rail band, in mm (band is 16 mm across). */
+const RAIL_HALF_WIDTH = 8;
+
 function toRad(deg: number): number {
   return (deg * Math.PI) / 180;
+}
+
+// ---------------------------------------------------------------------------
+// Curve geometry (shared by endpoints and shape)
+// ---------------------------------------------------------------------------
+//
+// The arc sweeps 45° about a centre, from `CURVE_ENTRY_ANGLE` to
+// `CURVE_EXIT_ANGLE`. Crucially the piece *origin* is the arc midpoint, so the
+// marker a curve contributes sits ON the rail — a train (or carriage) rendered
+// at the marker rides the track instead of floating ~24 mm inside the bend.
+const CURVE_ARC_CENTRE = { x: -100, y: CURVE_RADIUS_MM };
+const CURVE_ENTRY_ANGLE = -90;
+const CURVE_EXIT_ANGLE = -45;
+const CURVE_MID_ANGLE = (CURVE_ENTRY_ANGLE + CURVE_EXIT_ANGLE) / 2;
+/** Offset that moves the arc midpoint to the piece origin (0, 0). */
+const CURVE_ORIGIN = {
+  x: CURVE_ARC_CENTRE.x + CURVE_RADIUS_MM * Math.cos(toRad(CURVE_MID_ANGLE)),
+  y: CURVE_ARC_CENTRE.y + CURVE_RADIUS_MM * Math.sin(toRad(CURVE_MID_ANGLE)),
+};
+
+/** A point on the curve's arc (at `radius` from the centre), in origin-relative
+ * piece-local coordinates. */
+function curvePoint(radius: number, angleDeg: number): { x: number; y: number } {
+  return {
+    x: CURVE_ARC_CENTRE.x + radius * Math.cos(toRad(angleDeg)) - CURVE_ORIGIN.x,
+    y: CURVE_ARC_CENTRE.y + radius * Math.sin(toRad(angleDeg)) - CURVE_ORIGIN.y,
+  };
 }
 
 /**
@@ -146,13 +184,19 @@ function localEndpoints(
         { lx: -100, ly: 0, localAngle: 180 },
         { lx: 100, ly: 0, localAngle: 0 },
       ];
-    case 'curve':
-      // 45° arc. Entry at west (180°), exit at north-east (45°).
-      // Chord approximation: entry at (-100, 0), exit rotated 45° from east.
+    case 'curve': {
+      // A true 45° circular arc, entry tangent pointing west (180°) and exit
+      // tangent at 45°, both lying on one consistent arc — so eight curves
+      // snapped end-to-end close into a circle (the old chord-approximation
+      // endpoints did not). Origin is the arc midpoint, so the marker is on the
+      // rail.
+      const entry = curvePoint(CURVE_RADIUS_MM, CURVE_ENTRY_ANGLE);
+      const exit = curvePoint(CURVE_RADIUS_MM, CURVE_EXIT_ANGLE);
       return [
-        { lx: -100, ly: 0, localAngle: 180 },
-        { lx: 100 * Math.cos(toRad(45)), ly: -100 * Math.sin(toRad(45)), localAngle: 45 },
+        { lx: entry.x, ly: entry.y, localAngle: 180 },
+        { lx: exit.x, ly: exit.y, localAngle: 45 },
       ];
+    }
     case 'junction':
       // 3 endpoints: trunk (west, index 0), through (east, index 1), branch (northeast, index 2).
       return [
@@ -266,25 +310,28 @@ function straightShape(): PieceShape {
 }
 
 function curveShape(): PieceShape {
-  // Arc from west to 45° northeast, radius ~141 mm (chord 100 mm at 45°).
-  // Use SVG arc command. The rail band is 16 mm wide.
-  // Origin at centre of bounding box.
-  const R = 150; // outer radius of arc band
-  const r = R - 16; // inner radius
-  // Arc starts at (-R, 0) relative to arc centre, ends at 45° above east.
-  // Arc centre is at (0, R) to produce a curve going right+up.
-  // We'll draw in a coordinate system where entry is at (-100, 0).
-  // Arc centre is placed at (-100 + R*cos(90), 0 + R*sin(90)) = (-100 + 0, R) = (-100, R).
-  const cx = -100;
-  const cy = R;
-  const ex = cx + R * Math.cos(toRad(-45)); // end at 45° from centre
-  const ey = cy + R * Math.sin(toRad(-45));
-  const irx = cx + r * Math.cos(toRad(-45));
-  const iry = cy + r * Math.sin(toRad(-45));
+  // The rail band of the 45° arc, drawn on exactly the same geometry (and
+  // origin) the endpoints use, so the band connects its own endpoint dots
+  // instead of floating away from them.
+  const outer = CURVE_RADIUS_MM + RAIL_HALF_WIDTH;
+  const inner = CURVE_RADIUS_MM - RAIL_HALF_WIDTH;
+  const at = (radius: number, deg: number): string => {
+    const p = curvePoint(radius, deg);
+    return `${p.x.toFixed(2)} ${p.y.toFixed(2)}`;
+  };
 
-  const d = `M ${-100} ${-8} A ${R} ${R} 0 0 1 ${ex.toFixed(1)} ${(ey - 8).toFixed(1)} L ${irx.toFixed(1)} ${(iry + 8).toFixed(1)} A ${r} ${r} 0 0 0 ${-100} ${8} Z`;
+  // Outer arc entry→exit (sweep-flag 1 = the minor arc on screen), straight
+  // across the band, inner arc back (sweep-flag 0), close.
+  let d =
+    `M ${at(outer, CURVE_ENTRY_ANGLE)} A ${outer} ${outer} 0 0 1 ${at(outer, CURVE_EXIT_ANGLE)} ` +
+    `L ${at(inner, CURVE_EXIT_ANGLE)} A ${inner} ${inner} 0 0 0 ${at(inner, CURVE_ENTRY_ANGLE)} Z`;
 
-  return { svgPath: d, width: 210, height: 160 };
+  // Three sleeper ticks spread evenly across the 45° span.
+  for (const deg of [-78.75, -67.5, -56.25]) {
+    d += ` M ${at(inner, deg)} L ${at(outer, deg)}`;
+  }
+
+  return { svgPath: d, width: 160, height: 80 };
 }
 
 function junctionShape(): PieceShape {

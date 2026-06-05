@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { PROTOCOL_VERSION } from '@trainframe/protocol';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
 import { InMemoryBrokerClient } from '../broker/in-memory-client.js';
@@ -422,7 +423,7 @@ describe('ToyTable — scan and power', () => {
     if (!reg) throw new Error('unreachable');
     const envelope = decodeEnvelope(reg.payload);
     expect(envelope.event_type).toBe('device_registered');
-    expect(envelope.protocol_version).toBe('0.2.0');
+    expect(envelope.protocol_version).toBe(PROTOCOL_VERSION);
     const payload = envelope.payload as { capabilities: string[] };
     expect(payload.capabilities).toEqual(['core.controls_motion', 'core.accepts_route']);
 
@@ -770,6 +771,101 @@ describe('ToyTable — snap-to-connect', () => {
       const transform2 = piece2?.getAttribute('transform') ?? '';
       expect(transform2).toContain('translate(100,');
     } finally {
+      restore();
+    }
+  });
+});
+
+const TOYBOX_MIME = 'application/x-trainframe-toybox-type';
+
+/** Place a straight via a toybox drag-drop at the given client px, return its id. */
+function placeStraightAt(canvas: Element, clientX: number, clientY: number): string {
+  dispatchToyboxDragStart(screen.getByTestId('toybox-straight'), 'straight');
+  dispatchDragWithCoords(canvas, TOYBOX_MIME, 'straight', clientX, clientY);
+  const pieces = canvas.querySelectorAll('[data-piece-id]');
+  const last = pieces[pieces.length - 1];
+  return last?.getAttribute('data-piece-id') ?? '';
+}
+
+/** Pointer-drag a placed piece element from its current spot to a client point.
+ *  Dispatches MouseEvents typed as pointer events so jsdom carries clientX/Y
+ *  through to React's handlers (fireEvent.pointer* drops the coordinates). */
+function pointerDragPiece(piece: Element, from: [number, number], to: [number, number]): void {
+  const ev = (type: string, x: number, y: number, button = 0) =>
+    new MouseEvent(type, { bubbles: true, cancelable: true, button, clientX: x, clientY: y });
+  act(() => {
+    piece.dispatchEvent(ev('pointerdown', from[0], from[1]));
+    piece.dispatchEvent(ev('pointermove', to[0], to[1]));
+    piece.dispatchEvent(ev('pointerup', to[0], to[1]));
+  });
+}
+
+describe('ToyTable — moving a placed piece (pointer drag)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('drags an already-placed piece across the canvas to a new position', () => {
+    const restore = mockCanvasRect();
+    try {
+      renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+
+      // Place a straight at the canvas centre (450mm, 300mm) → client (900, 600).
+      const pieceId = placeStraightAt(canvas, 900, 600);
+      const piece = canvas.querySelector(`[data-piece-id="${pieceId}"]`) as SVGGElement;
+      expect(piece.getAttribute('transform')).toContain('translate(450, 300)');
+
+      // Pointer-drag it to (200mm, 200mm) → client (400, 400). Only piece, so
+      // it lands free at the drop point.
+      pointerDragPiece(piece, [900, 600], [400, 400]);
+
+      expect(piece.getAttribute('transform')).toContain('translate(200, 200)');
+    } finally {
+      restore();
+    }
+  });
+
+  it('snaps + orients a placed piece onto a neighbour when released next to its open end', () => {
+    const restore = mockCanvasRect();
+    try {
+      renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+
+      // Anchor straight at centre — east end at 550mm. A second straight far away.
+      placeStraightAt(canvas, 900, 600);
+      const moverId = placeStraightAt(canvas, 200, 200);
+      expect(canvas.querySelectorAll('[data-piece-id]').length).toBe(2);
+      const mover = canvas.querySelector(`[data-piece-id="${moverId}"]`) as SVGGElement;
+
+      // Drag it right up to the anchor's east endpoint (~555mm) → client 1110, 600.
+      pointerDragPiece(mover, [200, 200], [1110, 600]);
+
+      // Its west end snaps onto 550 ⇒ centre at 650mm.
+      expect(mover.getAttribute('transform')).toContain('translate(650, 300)');
+    } finally {
+      restore();
+    }
+  });
+
+  it('scans a placed piece when it is pointer-dragged onto the scan box', () => {
+    const restore = mockCanvasRect();
+    // jsdom has no layout, so stub the hit-test to report the scan box.
+    const originalFromPoint = document.elementFromPoint;
+    try {
+      renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+      const pieceId = placeStraightAt(canvas, 900, 600);
+      const piece = canvas.querySelector(`[data-piece-id="${pieceId}"]`) as SVGGElement;
+      const scanBox = screen.getByTestId('scan-box');
+      document.elementFromPoint = () => scanBox;
+
+      // Releasing over the scan box triggers the scan-confirm flow — Bind appears.
+      pointerDragPiece(piece, [900, 600], [50, 50]);
+
+      expect(screen.getByTestId('scan-box-bind')).toBeInTheDocument();
+    } finally {
+      document.elementFromPoint = originalFromPoint;
       restore();
     }
   });
