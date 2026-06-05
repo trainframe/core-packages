@@ -97,6 +97,10 @@ export class VirtualTrain {
   private ms_since_status = 0;
   private route_id: string | null = null;
   private route_progress_edge_index = 0;
+  // Exploration mode (ADR-015): when true the train drives forward across
+  // markers indefinitely, choosing the next edge from its own layout (the
+  // physical rails) rather than a route, until released by revoke/emergency.
+  private exploring = false;
 
   constructor(
     private readonly device_id: string,
@@ -123,8 +127,21 @@ export class VirtualTrain {
   /** Apply commands sent by the scheduler. */
   acceptCommand(command_type: string, payload: unknown): void {
     switch (command_type) {
+      case 'begin_exploration': {
+        // Open-ended clearance: drive forward and keep reporting markers until
+        // released. The train follows its own layout at each marker; no route
+        // or limit is set.
+        this.exploring = true;
+        this.route = [];
+        this.route_id = null;
+        this.clearance_limit_marker_id = null;
+        this.target_velocity_mm_s = this.config.max_velocity_mm_s;
+        break;
+      }
       case 'assign_route': {
         const { edges, route_id } = payload as { edges: RouteEdge[]; route_id?: string };
+        // A concrete route supersedes exploration.
+        this.exploring = false;
         this.route = edges;
         this.route_index = 0;
         this.route_id = route_id ?? null;
@@ -165,11 +182,14 @@ export class VirtualTrain {
         break;
       }
       case 'revoke_clearance': {
+        // Releases an exploration grant as well as a bounded clearance.
+        this.exploring = false;
         this.clearance_limit_marker_id = null;
         this.target_velocity_mm_s = 0;
         break;
       }
       case 'emergency_stop':
+        this.exploring = false;
         this.velocity_mm_s = 0;
         this.target_velocity_mm_s = 0;
         break;
@@ -199,6 +219,7 @@ export class VirtualTrain {
     const edge_length_mm = this.currentEdgeLength();
 
     this.maybeBrakeForClearanceLimit(edge_length_mm);
+    this.maybeSnapToClearanceLimit(edge_length_mm);
     this.maybeCrossEdgeEnd(edge_length_mm);
 
     this.maybeEmitStatus(dt_ms);
@@ -284,6 +305,27 @@ export class VirtualTrain {
     this.target_velocity_mm_s = 0;
   }
 
+  /**
+   * When the train has braked to a full stop *because* it was cleared exactly
+   * to this edge's end marker, kinematic discretisation can leave it a hair
+   * short of the edge length — so `maybeCrossEdgeEnd` never fires and the train
+   * stalls a millimetre short forever, never reporting that it reached its
+   * clearance limit. Snap it onto the marker so the crossing is registered and
+   * the scheduler can extend clearance.
+   *
+   * Guards keep this from firing on a fresh spawn (target still accelerating),
+   * on a revoke (clearance limit cleared), or on a mid-edge stop (only snaps
+   * when already close to the end).
+   */
+  private maybeSnapToClearanceLimit(edge_length_mm: number): void {
+    if (!this.current_edge) return;
+    if (this.clearance_limit_marker_id !== this.current_edge.to_marker_id) return;
+    if (this.velocity_mm_s !== 0 || this.target_velocity_mm_s !== 0) return;
+    const remaining_mm = edge_length_mm - this.distance_into_edge_mm;
+    if (remaining_mm <= 0 || remaining_mm > edge_length_mm * 0.1) return;
+    this.distance_into_edge_mm = edge_length_mm;
+  }
+
   private maybeCrossEdgeEnd(edge_length_mm: number): void {
     if (!this.current_edge) return;
     if (this.distance_into_edge_mm < edge_length_mm) return;
@@ -292,6 +334,13 @@ export class VirtualTrain {
     const marker_id = this.current_edge.to_marker_id;
     this.emitMarkerObservation(marker_id);
     this.emitted_current_edge_end = true;
+
+    // Exploration: keep rolling onto the next physical edge from the layout
+    // rather than parking. The rails (and the switch at a junction) decide.
+    if (this.exploring) {
+      this.continueExploring(marker_id);
+      return;
+    }
 
     if (this.clearance_limit_marker_id === marker_id) {
       if (this.overshoot_engaged_this_edge) {
@@ -305,6 +354,49 @@ export class VirtualTrain {
     }
 
     this.transitionToNextEdge(marker_id);
+  }
+
+  /**
+   * Continue exploring from `at_marker_id`: pick the next physical edge from the
+   * layout and roll onto it. If there is none (a dead end, or the points are set
+   * against every onward branch) the train stops here — LearnMode will see it
+   * parked at the marker and decide what to do (terminus pause / switch flip).
+   */
+  private continueExploring(at_marker_id: string): void {
+    const next = this.pickExploreEdge(at_marker_id);
+    if (next === undefined) {
+      this.velocity_mm_s = 0;
+      this.target_velocity_mm_s = 0;
+      return;
+    }
+    this.current_edge = next;
+    this.distance_into_edge_mm = 0;
+    this.emitted_current_edge_end = false;
+    this.overshoot_engaged_this_edge = false;
+  }
+
+  /**
+   * The edge an exploring train takes out of `marker_id`: a physically-connected
+   * outgoing edge, preferring not to immediately reverse, and — at a junction —
+   * the branch matching the current switch position. Returns undefined at a dead
+   * end or when the points are set against every onward branch.
+   */
+  private pickExploreEdge(marker_id: string): RouteEdge | undefined {
+    const outgoing = this.layout.edgesFrom(marker_id);
+    if (outgoing.length === 0) return undefined;
+
+    const cameFrom = this.current_edge?.from_marker_id;
+    const onward = outgoing.filter((e) => e.to_marker_id !== cameFrom);
+    const candidates = onward.length > 0 ? onward : outgoing;
+
+    // Honour the switch position at a junction; otherwise take the first onward
+    // edge (a plain marker has exactly one).
+    const position = this.layout.getSwitchPosition(marker_id);
+    const switched = candidates.find((e) => e.requires_switch_state === position);
+    const chosen = switched ?? candidates.find((e) => e.requires_switch_state === undefined);
+    const edge = chosen ?? candidates[0];
+    if (edge === undefined) return undefined;
+    return { from_marker_id: edge.from_marker_id, to_marker_id: edge.to_marker_id };
   }
 
   private transitionToNextEdge(at_marker_id: string): void {

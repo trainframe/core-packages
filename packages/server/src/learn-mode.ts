@@ -62,8 +62,8 @@ interface ActiveSession {
   readonly visitedEdges: Set<string>;
   /** Markers (by id) the train has visited this session. */
   readonly visitedMarkers: Set<string>;
-  /** Monotonic counter so each route id is unique. */
-  routeIdCounter: number;
+  /** Whether the open-ended exploration clearance has been issued this session. */
+  exploring: boolean;
   /** Current operator-visible state. */
   status: LearnModeStateName;
 }
@@ -150,7 +150,7 @@ export class LearnMode {
       this.session.status = 'driving';
     }
     if (deviceId !== this.session.trainId) return;
-    this.driveOneStep();
+    this.reviewProgress();
   }
 
   // -------------------- internals --------------------
@@ -167,7 +167,7 @@ export class LearnMode {
         lastMarkerId: undefined,
         visitedEdges: new Set(),
         visitedMarkers: new Set(),
-        routeIdCounter: 0,
+        exploring: false,
         status: 'waiting_for_train',
       };
       this.publishCurrentState();
@@ -184,11 +184,11 @@ export class LearnMode {
       lastMarkerId: undefined,
       visitedEdges: new Set(),
       visitedMarkers: new Set(),
-      routeIdCounter: 0,
+      exploring: false,
       status: seen !== undefined ? 'driving' : 'waiting_for_train',
     };
     if (seen !== undefined) {
-      this.driveOneStep();
+      this.reviewProgress();
     } else {
       this.publishCurrentState();
     }
@@ -201,97 +201,86 @@ export class LearnMode {
   }
 
   /**
-   * Decide the next move and emit commands for it. Called after the scheduler
-   * has processed a fresh `tag_observed` for our train.
+   * Observe the train's progress after each `tag_observed` and decide whether
+   * to keep exploring or to stop. LearnMode does NOT route the train edge by
+   * edge (ADR-015): it issues one open-ended `begin_exploration` and the train
+   * drives itself, following the rails. The scheduler learns the edges from the
+   * resulting traversals; here we just track progress and recognise when to
+   * release the train (terminus reached, or the reachable loop fully mapped).
    */
-  private driveOneStep(): void {
+  private reviewProgress(): void {
     if (!this.session) return;
 
     const markerId = this.ports.trainLastMarker(this.session.trainId);
     if (markerId === undefined) return;
 
-    // Record the marker as visited.
     this.session.visitedMarkers.add(markerId);
     if (this.session.startMarkerId === undefined) {
       this.session.startMarkerId = markerId;
     }
-    // Record the edge we just traversed (if any) so we don't reselect it.
     if (this.session.lastMarkerId !== undefined && this.session.lastMarkerId !== markerId) {
       this.session.visitedEdges.add(edgeKey(this.session.lastMarkerId, markerId));
     }
     this.session.lastMarkerId = markerId;
 
-    // Terminus: pause. Operator picks up the train and rescans elsewhere.
-    const marker = this.ports.layoutState.getMarker(markerId);
-    if (marker?.kind === 'terminus') {
+    // Terminus: a dead end. The exploring train stops there of its own accord;
+    // release it and pause for an operator lift-and-rescan elsewhere.
+    if (this.ports.layoutState.getMarker(markerId)?.kind === 'terminus') {
+      this.releaseTrain();
       this.session.status = 'paused_terminus';
       this.publishCurrentState();
       return;
     }
 
-    // Completion: all outgoing edges from here are visited AND we are back
-    // at the start marker.
-    const outgoing = this.ports.layoutState.edgesFrom(markerId);
-    const unvisited = outgoing.filter(
-      (e) => !this.session?.visitedEdges.has(edgeKey(e.from_marker_id, e.to_marker_id)),
-    );
-    const atStart = markerId === this.session.startMarkerId;
-    if (outgoing.length > 0 && unvisited.length === 0 && atStart) {
+    // Completion: back at the start marker with every outgoing edge from every
+    // visited marker already traversed — the reachable loop is fully mapped.
+    if (this.reachableGraphFullyTraversed(markerId)) {
+      this.releaseTrain();
       this.session.status = 'complete';
       this.publishCurrentState();
       return;
     }
 
-    // Pick the next edge: prefer an unvisited one, otherwise fall back to
-    // the first outgoing edge so the train keeps moving. If there are no
-    // outgoing edges at all, we publish current state and wait — a future
-    // tag_assignment for a neighbour will create one.
-    const nextEdge = unvisited[0] ?? outgoing[0];
-    if (nextEdge === undefined) {
-      this.publishCurrentState();
-      return;
-    }
-
-    // If the marker is a junction with a known unexplored position, set the
-    // switch first. Extracted to keep driveOneStep within complexity budget.
-    this.maybeFlipSwitch(markerId, nextEdge.requires_switch_state);
-
-    this.session.routeIdCounter += 1;
-    const routeId = `learn-${this.session.routeIdCounter}`;
-    const edgeRef = {
-      from_marker_id: nextEdge.from_marker_id,
-      to_marker_id: nextEdge.to_marker_id,
-    };
-    this.ports.sendCommand(this.session.trainId, 'assign_route', {
-      route_id: routeId,
-      edges: [edgeRef],
-    });
-    this.ports.sendCommand(this.session.trainId, 'grant_clearance', {
-      limit_marker_id: nextEdge.to_marker_id,
-      reason: 'track-learn',
-      edges_newly_cleared: [edgeRef],
-    });
-
+    // Otherwise keep exploring. The train drives itself; we only have to make
+    // sure the open clearance has been granted (idempotent).
+    this.ensureExploring();
     this.publishCurrentState();
   }
 
-  /**
-   * If the marker is a junction whose required switch state differs from the
-   * current position, send `set_switch_position` to the paired switch device.
-   * The device id is resolved via `LayoutState.switchDeviceForMarker`; if no
-   * pairing has been recorded yet, the command is silently skipped — the
-   * clearance gate will keep the train stopped until the position confirms.
-   */
-  private maybeFlipSwitch(markerId: string, requiredState: string | undefined): void {
-    if (requiredState === undefined) return;
-    const current = this.ports.layoutState.getSwitchPosition(markerId);
-    if (current === requiredState) return;
-    const switchDeviceId = this.ports.layoutState.switchDeviceForMarker(markerId);
-    if (switchDeviceId === undefined) return;
-    this.ports.sendCommand(switchDeviceId, 'set_switch_position', {
-      junction_marker_id: markerId,
-      position: requiredState,
+  /** Issue the open-ended exploration clearance once per session. */
+  private ensureExploring(): void {
+    if (!this.session || this.session.exploring) return;
+    this.session.exploring = true;
+    this.ports.sendCommand(this.session.trainId, 'begin_exploration', { reason: 'track-learn' });
+  }
+
+  /** Release the train: revoke its exploration clearance so it stops. */
+  private releaseTrain(): void {
+    if (!this.session) return;
+    this.session.exploring = false;
+    this.ports.sendCommand(this.session.trainId, 'revoke_clearance', {
+      reason: 'track-learn',
+      immediate: false,
     });
+  }
+
+  /**
+   * True once the train is back at its start marker and every outgoing edge
+   * from every marker it has visited has been traversed — i.e. a full lap that
+   * discovered nothing new. Guarded so it can't fire before the train has moved.
+   */
+  private reachableGraphFullyTraversed(markerId: string): boolean {
+    if (!this.session) return false;
+    if (markerId !== this.session.startMarkerId) return false;
+    if (this.session.visitedEdges.size === 0) return false;
+    for (const visited of this.session.visitedMarkers) {
+      for (const edge of this.ports.layoutState.edgesFrom(visited)) {
+        if (!this.session.visitedEdges.has(edgeKey(edge.from_marker_id, edge.to_marker_id))) {
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   private publishCurrentState(): void {

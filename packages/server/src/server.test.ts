@@ -1,4 +1,4 @@
-import type { Layout } from '@trainframe/protocol';
+import { type Layout, PROTOCOL_VERSION } from '@trainframe/protocol';
 import { describe, expect, it } from 'vitest';
 import { InMemoryBrokerClient } from './broker/in-memory-client.js';
 import { Server } from './server.js';
@@ -40,7 +40,7 @@ function publishWireEvent(
     device_id,
     timestamp_device: '2026-05-06T12:00:00Z',
     event_type,
-    protocol_version: '0.2.0',
+    protocol_version: PROTOCOL_VERSION,
     payload,
   };
   client.publish(

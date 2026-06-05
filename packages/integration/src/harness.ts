@@ -175,6 +175,18 @@ export class TestClient {
     });
   }
 
+  /** Publish an operator command the way the visualiser would. */
+  async publishOperator(command_type: string, payload: unknown): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      this.client.publish(
+        `railway/operator/${command_type}`,
+        JSON.stringify(payload),
+        { qos: 1 },
+        (err) => (err ? reject(err) : resolve()),
+      );
+    });
+  }
+
   /**
    * Wait until a retained state message has landed on the given topic. Useful
    * after publishing a `device_registered` event to confirm the server has

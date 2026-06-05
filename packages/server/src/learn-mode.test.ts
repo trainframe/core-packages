@@ -1,4 +1,4 @@
-import type { Layout } from '@trainframe/protocol';
+import { type Layout, PROTOCOL_VERSION } from '@trainframe/protocol';
 import { describe, expect, it } from 'vitest';
 import { InMemoryBrokerClient } from './broker/in-memory-client.js';
 import { Server } from './server.js';
@@ -76,7 +76,7 @@ function publishWireEvent(
     device_id,
     timestamp_device: '2026-05-06T12:00:00Z',
     event_type,
-    protocol_version: '0.2.0',
+    protocol_version: PROTOCOL_VERSION,
     payload,
   };
   client.publish(
@@ -156,7 +156,7 @@ describe('LearnMode — learn_track_start with no registered train', () => {
 });
 
 describe('LearnMode — drives a registered train', () => {
-  it('once the train reports its first marker, issues set_switch (if needed) then assign_route + grant_clearance', () => {
+  it('once the train reports its first marker, issues an open exploration clearance (not a per-edge route)', () => {
     const { client } = makeServer(SIMPLE_LOOP);
     publishWireEvent(client, 'device_registered', 'T1', {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
@@ -178,26 +178,52 @@ describe('LearnMode — drives a registered train', () => {
     expect(latestLearnState(client)?.state).toBe('waiting_for_train');
     expect(latestLearnState(client)?.train_id).toBe('T1');
 
-    // The train scans M1: scheduler updates last_marker; LearnMode then
-    // transitions to driving and chooses M1's only outgoing edge (M1→M2).
+    // The train scans M1: LearnMode transitions to driving and grants one
+    // open-ended exploration clearance. The train drives itself from there.
     publishWireEvent(client, 'tag_observed', 'T1', { tag_id: 'M1' });
 
-    const routes = commandsFor(client, 'T1', 'assign_route');
-    expect(routes.length).toBeGreaterThanOrEqual(1);
-    const first = routes[0];
-    if (!first) throw new Error('expected at least one assign_route');
-    expect(first.payload.edges).toEqual([{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
-
-    const grants = commandsFor(client, 'T1', 'grant_clearance');
-    const lastGrant = grants[grants.length - 1];
-    if (!lastGrant) throw new Error('expected a grant_clearance');
-    expect(lastGrant.payload.limit_marker_id).toBe('M2');
+    expect(commandsFor(client, 'T1', 'begin_exploration')).toHaveLength(1);
+    expect(latestLearnState(client)?.state).toBe('driving');
     expect(latestLearnState(client)?.markers_visited).toBe(1);
+    // It does NOT micro-route the train edge by edge.
+    expect(commandsFor(client, 'T1', 'assign_route')).toHaveLength(0);
+    expect(commandsFor(client, 'T1', 'grant_clearance')).toHaveLength(0);
   });
 });
 
-describe('LearnMode — traversals advance to the next edge', () => {
-  it('emits a new assign_route on each marker the train hits', () => {
+describe('LearnMode — bootstraps discovery from an empty graph', () => {
+  it('issues exploration on the first marker even though the layout has zero edges', () => {
+    // The exact deadlock ADR-014 named and 015 fixes: a freshly-scanned layout
+    // has markers but no edges. The old edge-by-edge driver had no edge to route
+    // and emitted nothing. Exploration needs none.
+    const EMPTY_GRAPH: Layout = {
+      name: 'fresh-loop',
+      markers: [{ id: 'M1', kind: 'block_boundary' }],
+      edges: [],
+      junctions: [],
+    };
+    const { client } = makeServer(EMPTY_GRAPH);
+    publishWireEvent(client, 'device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    publishWireEvent(client, 'device_registered', 'GARAGE', {
+      capabilities: ['core.assigns_tags'],
+    });
+    publishWireEvent(client, 'tag_assignment', 'GARAGE', {
+      tag_id: 'M1',
+      assigned_kind: 'marker',
+      target_id: 'M1',
+    });
+    publishOperatorCommand(client, 'learn_track_start', {});
+    publishWireEvent(client, 'tag_observed', 'T1', { tag_id: 'M1' });
+
+    expect(commandsFor(client, 'T1', 'begin_exploration')).toHaveLength(1);
+    expect(latestLearnState(client)?.state).toBe('driving');
+  });
+});
+
+describe('LearnMode — explores without re-issuing commands per marker', () => {
+  it('grants exploration once and learns edges from the reported traversals', () => {
     const { client } = makeServer(SIMPLE_LOOP);
     publishWireEvent(client, 'device_registered', 'T1', {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
@@ -216,16 +242,13 @@ describe('LearnMode — traversals advance to the next edge', () => {
     publishWireEvent(client, 'tag_observed', 'T1', { tag_id: 'M1' });
     publishWireEvent(client, 'tag_observed', 'T1', { tag_id: 'M2' });
 
-    const routes = commandsFor(client, 'T1', 'assign_route');
-    // Two assign_route commands at least: M1→M2, then M2→M3.
-    expect(routes.length).toBeGreaterThanOrEqual(2);
-    const second = routes[1];
-    if (!second) throw new Error('expected a second assign_route');
-    expect(second.payload.edges).toEqual([{ from_marker_id: 'M2', to_marker_id: 'M3' }]);
+    // Still just one exploration clearance — no per-marker command churn.
+    expect(commandsFor(client, 'T1', 'begin_exploration')).toHaveLength(1);
+    expect(commandsFor(client, 'T1', 'assign_route')).toHaveLength(0);
 
     const state = latestLearnState(client);
     expect(state?.markers_visited).toBe(2);
-    expect(state?.edges_learned).toBe(1); // we traversed M1→M2
+    expect(state?.edges_learned).toBe(1); // M1→M2 traversed and learned
   });
 });
 
@@ -250,6 +273,8 @@ describe('LearnMode — completes after a full loop', () => {
       publishWireEvent(client, 'tag_observed', 'T1', { tag_id: m });
     }
     expect(latestLearnState(client)?.state).toBe('complete');
+    // On completion the train is released (its exploration clearance revoked).
+    expect(commandsFor(client, 'T1', 'revoke_clearance').length).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -275,13 +300,16 @@ describe('LearnMode — hits a terminus and pauses', () => {
     publishWireEvent(client, 'tag_observed', 'T1', { tag_id: 'M3' });
 
     expect(latestLearnState(client)?.state).toBe('paused_terminus');
+    // The train was driven by one exploration clearance and released on arrival
+    // at the terminus.
+    expect(commandsFor(client, 'T1', 'begin_exploration')).toHaveLength(1);
+    expect(commandsFor(client, 'T1', 'assign_route')).toHaveLength(0);
+    expect(commandsFor(client, 'T1', 'revoke_clearance').length).toBeGreaterThanOrEqual(1);
 
-    // No further assign_route should be issued after pause (i.e. count is
-    // exactly the two we expected: M1→M2, M2→M3).
-    const routesBefore = commandsFor(client, 'T1', 'assign_route').length;
+    // No fresh exploration clearance is issued after the pause.
+    const exploreBefore = commandsFor(client, 'T1', 'begin_exploration').length;
     publishWireEvent(client, 'tag_observed', 'T1', { tag_id: 'M3' });
-    const routesAfter = commandsFor(client, 'T1', 'assign_route').length;
-    expect(routesAfter).toBe(routesBefore);
+    expect(commandsFor(client, 'T1', 'begin_exploration').length).toBe(exploreBefore);
   });
 });
 
@@ -297,8 +325,8 @@ describe('LearnMode — learn_track_stop returns to idle', () => {
   });
 });
 
-describe('LearnMode — junction routing', () => {
-  it('issues set_switch_position to the switch device (not the marker) before assign_route', () => {
+describe('LearnMode — junctions under exploration', () => {
+  it('drives via exploration and leaves branch selection to the physical switch (v1)', () => {
     const { client } = makeServer(JUNCTION_LAYOUT);
     publishWireEvent(client, 'device_registered', 'T1', {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
@@ -313,8 +341,6 @@ describe('LearnMode — junction routing', () => {
         target_id: m,
       });
     }
-    // Register the switch motor for the junction with controls_marker_id so
-    // the server records the pairing and LearnMode can resolve JCT → SWITCH-JCT.
     publishWireEvent(client, 'device_registered', 'SWITCH-JCT', {
       capabilities: ['core.controls_switch'],
       controls_marker_id: 'JCT',
@@ -323,29 +349,15 @@ describe('LearnMode — junction routing', () => {
     publishWireEvent(client, 'tag_observed', 'T1', { tag_id: 'M1' });
     publishWireEvent(client, 'tag_observed', 'T1', { tag_id: 'JCT' });
 
-    // After reaching JCT, LearnMode chose one of the outgoing edges
-    // ({main, divert}). Whatever it chose, if the switch wasn't already at
-    // that position it should emit set_switch_position to SWITCH-JCT (the
-    // device), not to JCT (the marker).
-    const routes = commandsFor(client, 'T1', 'assign_route');
-    const lastRoute = routes[routes.length - 1];
-    if (!lastRoute) throw new Error('expected a route from JCT');
-    const edges = lastRoute.payload.edges as ReadonlyArray<{ to_marker_id: string }>;
-    const chosenTo = edges[0]?.to_marker_id;
-    expect(chosenTo === 'MAIN' || chosenTo === 'DIV').toBe(true);
-
-    if (chosenTo === 'DIV') {
-      // The initial switch state is 'main' — LearnMode must have asked
-      // SWITCH-JCT (the device) to flip to 'divert' first.
-      const switches = commandsFor(client, 'SWITCH-JCT', 'set_switch_position');
-      expect(switches.length).toBeGreaterThanOrEqual(1);
-      const last = switches[switches.length - 1];
-      expect(last?.payload.position).toBe('divert');
-    }
-
-    // Confirm no commands were addressed to the marker id directly.
-    const wrongTarget = commandsFor(client, 'JCT', 'set_switch_position');
-    expect(wrongTarget).toHaveLength(0);
+    // Per ADR-015, discovery drives via one open exploration clearance; the
+    // train follows the rails (and the physical switch) itself. LearnMode does
+    // NOT route it edge-by-edge, and in v1 does NOT flip switches to chase
+    // branches — automatic multi-branch exploration is a documented follow-up.
+    expect(commandsFor(client, 'T1', 'begin_exploration')).toHaveLength(1);
+    expect(commandsFor(client, 'T1', 'assign_route')).toHaveLength(0);
+    expect(commandsFor(client, 'SWITCH-JCT', 'set_switch_position')).toHaveLength(0);
+    // And nothing is ever addressed to the marker id directly.
+    expect(commandsFor(client, 'JCT', 'set_switch_position')).toHaveLength(0);
   });
 });
 

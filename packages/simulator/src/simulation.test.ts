@@ -164,6 +164,131 @@ describe('physical mishaps — overshoot', () => {
   });
 });
 
+describe('clearance to the current edge end (brake-short snap)', () => {
+  // Regression: a train cleared to exactly the end marker of its current edge
+  // used to brake and park ~1mm short on odd-length edges (e.g. the 171mm edges
+  // a curved circle compiles to), never registering the crossing — so the
+  // scheduler could not extend clearance and edge-by-edge driving stalled.
+  const RING_171: Layout = {
+    name: 'ring-171',
+    markers: [
+      { id: 'M1', kind: 'block_boundary' },
+      { id: 'M2', kind: 'block_boundary' },
+      { id: 'M3', kind: 'block_boundary' },
+    ],
+    edges: [
+      { from_marker_id: 'M1', to_marker_id: 'M2', estimated_length_mm: 171 },
+      { from_marker_id: 'M2', to_marker_id: 'M3', estimated_length_mm: 171 },
+    ],
+    junctions: [],
+  };
+
+  for (const seed of [1, 2, 3, 42]) {
+    it(`reaches the edge-end marker instead of stalling short (seed ${seed})`, () => {
+      const sim = new Simulation({ layout: RING_171, seed });
+      sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+      sim.handleCommand('T1', 'assign_route', {
+        route_id: 'r1',
+        edges: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
+      });
+      sim.handleCommand('T1', 'grant_clearance', { limit_marker_id: 'M2' });
+      sim.advance(20_000);
+
+      const train = sim.getTrain('T1');
+      // It reached its clearance limit (the edge end) and parked there.
+      expect(train?.getDistanceIntoEdge()).toBeGreaterThanOrEqual(171);
+      expect(train?.getVelocity()).toBe(0);
+    });
+  }
+});
+
+describe('exploration clearance (ADR-015)', () => {
+  // Forward-only ring; no pre-known reverse edges, mirroring a freshly-built
+  // loop the server is about to discover.
+  const RING: Layout = {
+    name: 'explore-ring',
+    markers: [
+      { id: 'M1', kind: 'block_boundary' },
+      { id: 'M2', kind: 'block_boundary' },
+      { id: 'M3', kind: 'block_boundary' },
+    ],
+    edges: [
+      { from_marker_id: 'M1', to_marker_id: 'M2', estimated_length_mm: 171 },
+      { from_marker_id: 'M2', to_marker_id: 'M3', estimated_length_mm: 171 },
+      { from_marker_id: 'M3', to_marker_id: 'M1', estimated_length_mm: 171 },
+    ],
+    junctions: [],
+  };
+
+  /** Markers reported, with consecutive duplicates collapsed. */
+  function markersCrossed(sim: Simulation): string[] {
+    const tags = sim
+      .getEventsOfType('tag_observed')
+      .map((e) => (e.payload as { tag_id: string }).tag_id);
+    return tags.filter((t, i) => i === 0 || t !== tags[i - 1]);
+  }
+
+  it('drives the train forward around the loop, reporting markers, with no route or known edges', () => {
+    const sim = new Simulation({ layout: RING, seed: 1 });
+    sim.seedIdentityTags(RING);
+    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+
+    sim.handleCommand('T1', 'begin_exploration', { reason: 'discovery' });
+    sim.advance(30_000);
+
+    const seq = markersCrossed(sim);
+    // It visited every marker, repeatedly (a loop never ends on its own).
+    expect(new Set(seq)).toEqual(new Set(['M1', 'M2', 'M3']));
+    expect(seq.length).toBeGreaterThan(6);
+    // Every consecutive crossing is a real forward edge — it followed the rails.
+    for (let i = 1; i < seq.length; i++) {
+      const from = seq[i - 1];
+      const to = seq[i];
+      const isEdge = RING.edges.some((e) => e.from_marker_id === from && e.to_marker_id === to);
+      expect(isEdge, `${from}->${to} is a forward edge`).toBe(true);
+    }
+  });
+
+  it('stops when its exploration clearance is revoked', () => {
+    const sim = new Simulation({ layout: RING, seed: 1 });
+    sim.seedIdentityTags(RING);
+    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+
+    sim.handleCommand('T1', 'begin_exploration', {});
+    sim.advance(5_000);
+    sim.handleCommand('T1', 'revoke_clearance', { reason: 'operator stop', immediate: false });
+    sim.advance(2_000); // let it brake to a halt
+    const countAfterRevoke = markersCrossed(sim).length;
+    sim.advance(20_000);
+
+    expect(sim.getTrain('T1')?.getVelocity()).toBe(0);
+    // No further markers crossed once stopped.
+    expect(markersCrossed(sim).length).toBe(countAfterRevoke);
+  });
+
+  it('stops at a dead end (no onward edge) instead of running off the rails', () => {
+    const STUB: Layout = {
+      name: 'stub',
+      markers: [
+        { id: 'A', kind: 'block_boundary' },
+        { id: 'B', kind: 'terminus' },
+      ],
+      edges: [{ from_marker_id: 'A', to_marker_id: 'B', estimated_length_mm: 171 }],
+      junctions: [],
+    };
+    const sim = new Simulation({ layout: STUB, seed: 1 });
+    sim.seedIdentityTags(STUB);
+    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'A', to_marker_id: 'B' } });
+
+    sim.handleCommand('T1', 'begin_exploration', {});
+    sim.advance(20_000);
+
+    // Reached the dead end and parked there.
+    expect(markersCrossed(sim)).toContain('B');
+    expect(sim.getTrain('T1')?.getVelocity()).toBe(0);
+  });
+});
+
 describe('event listener hook', () => {
   it('streams every broker-observed event to subscribers in order', () => {
     const env = startTestEnvironment({ layout: SIMPLE_LOOP, seed: 7, faults: 'pristine' });
