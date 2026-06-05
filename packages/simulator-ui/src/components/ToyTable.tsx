@@ -22,7 +22,7 @@ import {
   isWireDevice,
   pieceMarkerKind,
 } from '../track/pieces.js';
-import { computePlacement } from '../track/placement.js';
+import { computePlacement, nearestConnectablePoint } from '../track/placement.js';
 import { ConnectionStatus } from './ConnectionStatus.js';
 import { ScanBox } from './ScanBox.js';
 import { Settings } from './Settings.js';
@@ -291,57 +291,6 @@ function clientToMm(
 }
 
 /**
- * Find the snap offset for a candidate piece placement.
- *
- * Given a candidate (x, y, rotationDeg) and the existing placed pieces, if
- * any endpoint of the candidate is within SNAP_DISTANCE_MM of any existing
- * piece's endpoint, return a position offset so the nearest pair of endpoints
- * coincide exactly.  Returns null when no snap candidate is within range.
- */
-function findSnapOffset(
-  candidateX: number,
-  candidateY: number,
-  candidateRotation: RotationDeg,
-  type: TrackPieceType,
-  existingPieces: ReadonlyArray<TrackPiece>,
-): { offsetX: number; offsetY: number; snapTarget: SnapTarget } | null {
-  // Build a temporary piece to compute its endpoints in world space.
-  const candidate: TrackPiece = {
-    id: '__snap_candidate__',
-    type,
-    position: { x: candidateX, y: candidateY },
-    rotationDeg: candidateRotation,
-    tagged: false,
-  };
-  const candidateEndpoints = getEndpoints(candidate);
-  if (candidateEndpoints.length === 0) return null;
-
-  let bestDist = SNAP_DISTANCE;
-  let bestOffset: { offsetX: number; offsetY: number; snapTarget: SnapTarget } | null = null;
-
-  for (const existing of existingPieces) {
-    const existingEndpoints = getEndpoints(existing);
-    for (const existingEp of existingEndpoints) {
-      for (const candidateEp of candidateEndpoints) {
-        const dx = existingEp.x - candidateEp.x;
-        const dy = existingEp.y - candidateEp.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < bestDist) {
-          bestDist = dist;
-          bestOffset = {
-            offsetX: dx,
-            offsetY: dy,
-            snapTarget: { x: existingEp.x, y: existingEp.y },
-          };
-        }
-      }
-    }
-  }
-
-  return bestOffset;
-}
-
-/**
  * The toy table — v1 of the operator's "Brio table" view of the virtual
  * hardware. Pick a piece from the toybox, click on the table to place it,
  * or drag a toybox entry onto the canvas to drop it at a specific position.
@@ -500,7 +449,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       const moving = prev.find((p) => p.id === pieceId);
       if (moving === undefined) return prev;
       const others = prev.filter((p) => p.id !== pieceId);
-      const placement = computePlacement(xMm, yMm, moving.type, others);
+      const placement = computePlacement(xMm, yMm, moving.type, others, moving.flipped);
       const rotationDeg = placement.connected ? placement.rotationDeg : moving.rotationDeg;
       return prev.map((p) =>
         p.id === pieceId ? { ...p, position: { x: placement.x, y: placement.y }, rotationDeg } : p,
@@ -518,6 +467,36 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     );
   }, [selectedId]);
 
+  // Flip (mirror) the selected piece — a right-hand curve becomes left-hand. If
+  // the piece is connected to a neighbour, re-snap it onto that joint so it
+  // stays joined, just bending the other way; a free piece mirrors in place.
+  const flipSelected = useCallback(() => {
+    if (selectedId === null) return;
+    setPieces((prev) => {
+      const target = prev.find((p) => p.id === selectedId);
+      if (target === undefined) return prev;
+      const flipped = !(target.flipped === true);
+      const others = prev.filter((p) => p.id !== selectedId);
+      const entry = getEndpoints(target)[0];
+      const placement =
+        entry !== undefined
+          ? computePlacement(entry.x, entry.y, target.type, others, flipped)
+          : undefined;
+      return prev.map((p) => {
+        if (p.id !== selectedId) return p;
+        if (placement?.connected === true) {
+          return {
+            ...p,
+            flipped,
+            position: { x: placement.x, y: placement.y },
+            rotationDeg: placement.rotationDeg,
+          };
+        }
+        return { ...p, flipped };
+      });
+    });
+  }, [selectedId]);
+
   const deleteSelected = useCallback(() => {
     if (selectedId === null) return;
     setPieces((prev) => prev.filter((p) => p.id !== selectedId));
@@ -530,11 +509,13 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     setSelectedId(null);
   }, [selectedId]);
 
-  // Keyboard: R rotates, Delete/Backspace deletes, Escape clears selection.
+  // Keyboard: R rotates, F flips, Delete/Backspace deletes, Escape clears.
   useEffect(() => {
     const handlers: Record<string, () => void> = {
       r: rotateSelected,
       R: rotateSelected,
+      f: flipSelected,
+      F: flipSelected,
       Delete: deleteSelected,
       Backspace: deleteSelected,
       Escape: () => setSelectedId(null),
@@ -549,7 +530,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [selectedId, rotateSelected, deleteSelected]);
+  }, [selectedId, rotateSelected, flipSelected, deleteSelected]);
 
   // Describe a piece for the ScanBox's confirmation panel. Called on drop;
   // no broker events are fired here — only on Bind.
@@ -641,7 +622,9 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
         <main className="tf-toytable__main">
           <ActionBar
             selectedPiece={selectedPiece}
+            selectedLive={selectedPiece !== null && liveIds.has(selectedPiece.id)}
             onRotate={rotateSelected}
+            onFlip={flipSelected}
             onDelete={deleteSelected}
             armedType={armedType}
           />
@@ -745,26 +728,59 @@ function ToyboxButton({ type, armed, onArm }: ToyboxButtonProps) {
 
 interface ActionBarProps {
   readonly selectedPiece: TrackPiece | null;
+  /** Whether the selected piece is currently live on the bus (scanned). */
+  readonly selectedLive: boolean;
   readonly onRotate: () => void;
+  readonly onFlip: () => void;
   readonly onDelete: () => void;
   readonly armedType: TrackPieceType | null;
 }
 
-function ActionBar({ selectedPiece, onRotate, onDelete, armedType }: ActionBarProps) {
+/** The action-bar status line — guides the operator on what to do next. */
+function actionBarStatus(
+  selectedPiece: TrackPiece | null,
+  selectedLive: boolean,
+  armedType: TrackPieceType | null,
+): string {
+  if (armedType !== null) {
+    return `Armed: ${PIECE_LABELS[armedType]} — click or drag to place`;
+  }
+  if (selectedPiece === null) {
+    return 'Pick a piece from the toybox';
+  }
+  const flip = selectedPiece.flipped === true ? ' · flipped' : '';
+  const base = `Selected: ${PIECE_LABELS[selectedPiece.type]} · ${selectedPiece.rotationDeg}°${flip}`;
+  // A wire device (train / gate) does nothing until it's scanned onto the bus.
+  if (isWireDevice(selectedPiece.type) && !selectedLive) {
+    return `${base} — drag it onto the scan box to put it on the bus`;
+  }
+  if (selectedPiece.type === 'train' && selectedLive) {
+    return `${base} · on the bus — drive it from the visualiser (Learn track or a schedule)`;
+  }
+  return base;
+}
+
+function ActionBar({
+  selectedPiece,
+  selectedLive,
+  onRotate,
+  onFlip,
+  onDelete,
+  armedType,
+}: ActionBarProps) {
   return (
     <div className="tf-toytable__actions">
       <button type="button" onClick={onRotate} disabled={selectedPiece === null}>
         Rotate (R)
       </button>
+      <button type="button" onClick={onFlip} disabled={selectedPiece === null}>
+        Flip (F)
+      </button>
       <button type="button" onClick={onDelete} disabled={selectedPiece === null}>
         Delete (Del)
       </button>
       <span className="tf-toytable__status">
-        {armedType !== null
-          ? `Armed: ${PIECE_LABELS[armedType]} — click or drag to place`
-          : selectedPiece !== null
-            ? `Selected: ${PIECE_LABELS[selectedPiece.type]} · ${selectedPiece.rotationDeg}°`
-            : 'Pick a piece from the toybox'}
+        {actionBarStatus(selectedPiece, selectedLive, armedType)}
       </span>
     </div>
   );
@@ -834,12 +850,8 @@ function Table({
   }
   const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, zoom: 1 });
 
-  /** The piece type currently being dragged from the toybox. Stored in state
-   * so the dragover handler can compute snap candidates without being able to
-   * read dataTransfer (forbidden by HTML5 security during dragover). */
-  const [draggingToyboxType, setDraggingToyboxType] = useState<TrackPieceType | null>(null);
-
-  /** The snap highlight target while a toybox piece is being dragged. */
+  /** The open endpoint a dragged toybox piece will snap onto, highlighted
+   * during dragover. */
   const [snapHighlight, setSnapHighlight] = useState<SnapTarget | null>(null);
 
   // Pan state stored in refs — no render needed while panning in progress.
@@ -990,11 +1002,11 @@ function Table({
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
 
-    if (draggingToyboxType === null) return;
-    const rect = getRect();
-    const { x: xMm, y: yMm } = clientToMm(rect, e.clientX, e.clientY, viewport);
-    const snap = findSnapOffset(xMm, yMm, 0, draggingToyboxType, pieces);
-    setSnapHighlight(snap !== null ? snap.snapTarget : null);
+    // Preview where the dragged piece will snap. The dragged type isn't
+    // readable mid-drag, so highlight the nearest open endpoint (the join a
+    // track piece would orient onto); harmless for device drags.
+    const { x: xMm, y: yMm } = clientToMm(getRect(), e.clientX, e.clientY, viewport);
+    setSnapHighlight(nearestConnectablePoint(xMm, yMm, pieces));
   }
 
   function handleDragLeave() {
@@ -1004,18 +1016,17 @@ function Table({
   function handleDrop(e: React.DragEvent<SVGSVGElement>) {
     e.preventDefault();
     setSnapHighlight(null);
-    setDraggingToyboxType(null);
 
     const rect = getRect();
     const { x: xMm, y: yMm } = clientToMm(rect, e.clientX, e.clientY, viewport);
 
-    // A new piece dragged in from the toybox.
+    // A new piece dragged in from the toybox. Snap + auto-orient it onto a
+    // nearby open end exactly like the click and move paths do, so dragging a
+    // piece in connects it instead of dropping it loose.
     const pieceType = e.dataTransfer.getData(TOYBOX_DRAG_MIME) as TrackPieceType | '';
     if (pieceType === '') return;
-    const snap = findSnapOffset(xMm, yMm, 0, pieceType, pieces);
-    const finalX = snap !== null ? xMm + snap.offsetX : xMm;
-    const finalY = snap !== null ? yMm + snap.offsetY : yMm;
-    onCanvasClick(finalX, finalY, pieceType, 0);
+    const placement = computePlacement(xMm, yMm, pieceType, pieces);
+    onCanvasClick(placement.x, placement.y, pieceType, placement.rotationDeg);
   }
 
   // ---------------------------------------------------------------------------
@@ -1258,7 +1269,7 @@ function PieceRenderer({
 
   return (
     <g
-      transform={`translate(${x}, ${y}) rotate(${rotationDeg})`}
+      transform={`translate(${x}, ${y}) rotate(${rotationDeg}) scale(1, ${piece.flipped === true ? -1 : 1})`}
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}

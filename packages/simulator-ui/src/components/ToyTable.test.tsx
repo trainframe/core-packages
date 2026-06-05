@@ -726,19 +726,17 @@ describe('ToyTable — snap-to-connect', () => {
       dispatchToyboxDragStart(straightButton, 'straight');
       dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 900, 600);
 
-      // Drop second straight near the east endpoint so snap triggers.
-      // East endpoint of piece 1: x=550mm. For snap: the new piece's west endpoint
-      // (piece.x - 100) must be within SNAP_DISTANCE(30mm) of 550mm.
-      // Drop at x=660mm: candidate.x=660, candidate.west=560, distance to ep=10mm < 30mm.
-      // After snap: offsetX = 550-560 = -10 → finalX = 660+(-10) = 650mm.
-      // 660mm → 660/900*1800 = 1320px.
+      // Drop the second straight within the connect radius of the east endpoint
+      // (550mm). Dropping the *click point* within CONNECT_CAPTURE_MM (60mm) of
+      // an open endpoint snaps + orients the new piece onto it. Drop at 580mm
+      // (30mm away) → 580/900*1800 = 1160px.
       dispatchToyboxDragStart(straightButton, 'straight');
-      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 1320, 600);
+      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 1160, 600);
 
       const pieces = canvas.querySelectorAll('[data-testid^="piece-"]');
       expect(pieces.length).toBe(2);
 
-      // The second piece should have snapped: its translate-x should be 650.
+      // The new straight's west end snaps onto 550 ⇒ its centre lands at 650mm.
       const piece2 = pieces[1] as SVGGElement | undefined;
       const transform2 = piece2?.getAttribute('transform') ?? '';
       expect(transform2).toContain('translate(650,');
@@ -868,6 +866,41 @@ describe('ToyTable — moving a placed piece (pointer drag)', () => {
       document.elementFromPoint = originalFromPoint;
       restore();
     }
+  });
+});
+
+describe('ToyTable — flip (mirror)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('mirrors the selected piece via the Flip button and the F key', async () => {
+    renderToyTable();
+    const pieceId = await placeArmedPiece('curve'); // placed at centre, selected
+    const piece = document.querySelector(`[data-piece-id="${pieceId}"]`) as SVGGElement | null;
+    if (piece === null) throw new Error('no curve placed');
+    expect(piece.getAttribute('transform')).toContain('scale(1, 1)');
+
+    fireEvent.click(screen.getByRole('button', { name: /flip/i }));
+    expect(piece.getAttribute('transform')).toContain('scale(1, -1)');
+
+    // F toggles it back.
+    fireEvent.keyDown(window, { key: 'f' });
+    expect(piece.getAttribute('transform')).toContain('scale(1, 1)');
+  });
+});
+
+describe('ToyTable — run-flow guidance', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('prompts to scan an unscanned train so it does not look inert', async () => {
+    const user = userEvent.setup();
+    renderToyTable();
+    await placeArmedPiece('train'); // placed + selected, but armed
+    await user.click(screen.getByTestId('toybox-train')); // disarm → selection guidance shows
+    expect(screen.getByText(/drag it onto the scan box/i)).toBeInTheDocument();
   });
 });
 
