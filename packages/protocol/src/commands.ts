@@ -40,6 +40,24 @@ const RevokeClearancePayload = Type.Object({
 export const RevokeClearance = commandEnvelope('revoke_clearance', RevokeClearancePayload);
 export type RevokeClearance = Static<typeof RevokeClearance>;
 
+// ---------- begin_exploration ----------
+
+/**
+ * Open-ended discovery clearance (ADR-015). Authorises the train to drive
+ * forward across markers indefinitely — following the physical rails, taking
+ * the switched branch at junctions — reporting each marker it crosses, until
+ * released by `revoke_clearance`. Unlike `assign_route` / `grant_clearance` it
+ * names no edges and no limit: it is the primitive that bootstraps discovery on
+ * a layout whose edges aren't known yet. The train still starts stopped and only
+ * moves once this grant arrives — "clearance, not commands" holds.
+ */
+const BeginExplorationPayload = Type.Object({
+  reason: Type.Optional(Type.String()),
+});
+
+export const BeginExploration = commandEnvelope('begin_exploration', BeginExplorationPayload);
+export type BeginExploration = Static<typeof BeginExploration>;
+
 // ---------- set_target_speed ----------
 
 const SetTargetSpeedPayload = Type.Object({
@@ -117,6 +135,7 @@ export const CoreCommand = Type.Union([
   AssignRoute,
   GrantClearance,
   RevokeClearance,
+  BeginExploration,
   SetTargetSpeed,
   EmergencyStop,
   SetSwitchPosition,
@@ -131,6 +150,7 @@ export const CORE_COMMAND_SCHEMAS = {
   assign_route: AssignRoute,
   grant_clearance: GrantClearance,
   revoke_clearance: RevokeClearance,
+  begin_exploration: BeginExploration,
   set_target_speed: SetTargetSpeed,
   emergency_stop: EmergencyStop,
   set_switch_position: SetSwitchPosition,

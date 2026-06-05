@@ -174,6 +174,8 @@ Commands flow from server to devices via `railway/commands/{device_id}`. Same en
 
 `grant_clearance` / `revoke_clearance`: to a `controls_motion` device. Payload: limit marker, reason.
 
+`begin_exploration` *(added 0.3.0; [ADR-015](../adr/015-exploration-clearance.md))*: to a `controls_motion` device. Optional `reason`. An **open-ended** clearance — the train drives forward across markers indefinitely, following the physical rails (taking the switched branch at junctions), reporting each marker, until released by `revoke_clearance`. It names no edges and no limit. This is the primitive that bootstraps discovery on a layout whose edges aren't yet known; "clearance, not commands" still holds (the train stays stopped until this grant arrives).
+
 `set_target_speed`: to a `controls_motion` device. Payload: speed (0.0–1.0 normalised; the device decides physical mapping).
 
 `emergency_stop`: to a `controls_motion` device. No payload. Stop as fast as physically possible.
@@ -217,6 +219,8 @@ A `tag_observed` event with an unknown tag generates an `anomaly`; the user assi
 A train traversing markers in an order the server has not seen before adds inferred edges to the graph. Each new edge is flagged `inferred` until traversed N times (configurable; default 3).
 
 In territory the server doesn't fully understand, the server issues short clearances (one edge at a time) and uses each `marker_traversed` to extend the graph. This is "discovery mode": slow, cautious, no explicit calibration step required.
+
+**Cold-start bootstrap (0.3.0):** one-edge-at-a-time clearance presumes the server already knows the first edge, which on a freshly-built layout it does not — a deadlock (no route → no movement → no traversals → no edges). The `begin_exploration` command breaks it: an open-ended clearance under which the train drives itself forward and reports markers, letting the graph be learned from the resulting traversals with no edge known in advance. See [ADR-015](../adr/015-exploration-clearance.md).
 
 Edge length is learned: first traversal at known speed measures the time, server records `learned_traversal_time_ms_at_speed`. Subsequent traversals refine the estimate. Length in mm is derived if a reference length is known anywhere in the layout, otherwise time-based reasoning is sufficient for braking distance calculation.
 
