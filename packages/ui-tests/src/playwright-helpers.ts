@@ -2,6 +2,88 @@ import type { Browser, Page } from '@playwright/test';
 import { SIM_URL, VISUALISER_URL } from '../playwright.config.js';
 
 /**
+ * A CDP `Input.*` method invoked by name. Playwright fully types `CDPSession`,
+ * but the experimental drag methods take/return CDP's `DragData`, a type
+ * Playwright does not export. We drive those methods by name with parameters
+ * that follow the CDP spec, treating `DragData` as an opaque value we only ever
+ * relay from `Input.dragIntercepted` back into `Input.dispatchDragEvent`. This
+ * is the single, well-contained loosening — everything else stays typed.
+ */
+type RawCdpSend = (method: string, params?: Record<string, unknown>) => Promise<unknown>;
+
+/**
+ * Perform a *genuine* native HTML5 drag-and-drop — real `dragstart` /
+ * `dragover` / `drop` events with a populated `dataTransfer` — from a toybox
+ * button onto the toy-table canvas, via CDP's drag-intercept. This is the only
+ * way to drive native DnD in Playwright 1.60+: `dragTo` fires plain mouse
+ * events and never produces a `DragEvent`. Chromium-only. Drops at the canvas
+ * centre, or `targetPosition` (relative to the canvas) when given.
+ */
+export async function nativeDragToybox(
+  page: Page,
+  type: string,
+  targetPosition?: { x: number; y: number },
+): Promise<void> {
+  const cdp = await page.context().newCDPSession(page);
+  const send = cdp.send.bind(cdp) as RawCdpSend;
+
+  const sourceBox = await page.getByTestId(`toybox-${type}`).boundingBox();
+  const canvasBox = await page.getByTestId('toy-table-canvas').boundingBox();
+  if (sourceBox === null || canvasBox === null) {
+    throw new Error('toybox button or canvas not visible');
+  }
+  const sx = sourceBox.x + sourceBox.width / 2;
+  const sy = sourceBox.y + sourceBox.height / 2;
+  const tx = canvasBox.x + (targetPosition?.x ?? canvasBox.width / 2);
+  const ty = canvasBox.y + (targetPosition?.y ?? canvasBox.height / 2);
+
+  await send('Input.setInterceptDrags', { enabled: true });
+
+  // The browser begins a real drag when the mouse presses on a draggable
+  // element and then moves away (here, straight to the target — the move that
+  // crosses the drag threshold is what fires `Input.dragIntercepted`, handing
+  // back the genuine DragData carrying the MIME the toybox set in dragstart).
+  const dragData = new Promise<unknown>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error('Input.dragIntercepted never fired — native drag did not start')),
+      8000,
+    );
+    cdp.on('Input.dragIntercepted', (payload) => {
+      clearTimeout(timer);
+      resolve(payload.data);
+    });
+  });
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: sx, y: sy });
+  await send('Input.dispatchMouseEvent', {
+    type: 'mousePressed',
+    x: sx,
+    y: sy,
+    button: 'left',
+    buttons: 1,
+    clickCount: 1,
+  });
+  await send('Input.dispatchMouseEvent', {
+    type: 'mouseMoved',
+    x: tx,
+    y: ty,
+    button: 'left',
+    buttons: 1,
+  });
+  const data = await dragData;
+
+  await send('Input.dispatchDragEvent', { type: 'dragEnter', x: tx, y: ty, data });
+  await send('Input.dispatchDragEvent', { type: 'dragOver', x: tx, y: ty, data });
+  await send('Input.dispatchDragEvent', { type: 'drop', x: tx, y: ty, data });
+  await send('Input.dispatchMouseEvent', {
+    type: 'mouseReleased',
+    x: tx,
+    y: ty,
+    button: 'left',
+    buttons: 0,
+  });
+}
+
+/**
  * Shared Playwright helpers for opening the visualiser and simulator-ui
  * in fresh browser contexts. Each helper seeds localStorage with the
  * broker (and, for the visualiser, admin API) URL the test harness expects.
