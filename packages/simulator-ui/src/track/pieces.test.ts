@@ -89,6 +89,18 @@ describe('getEndpoints — curve', () => {
     expect(must(eps[0]).outgoingAngleDeg).toBe(270);
     expect(must(eps[1]).outgoingAngleDeg).toBe(135);
   });
+
+  it('mirrors the bend when flipped (exit 45° → 315°, y negated)', () => {
+    const normal = getEndpoints(makePiece('curve'));
+    const flipped = getEndpoints({ ...makePiece('curve'), flipped: true });
+    // Entry still faces west; exit bends the other way.
+    expect(must(flipped[0]).outgoingAngleDeg).toBe(180);
+    expect(must(flipped[1]).outgoingAngleDeg).toBe(315);
+    // Each endpoint is reflected across the x-axis (y negated).
+    expect(approx(must(flipped[0]).y, -must(normal[0]).y)).toBe(true);
+    expect(approx(must(flipped[1]).y, -must(normal[1]).y)).toBe(true);
+    expect(approx(must(flipped[1]).x, must(normal[1]).x)).toBe(true);
+  });
 });
 
 describe('getEndpoints — junction', () => {

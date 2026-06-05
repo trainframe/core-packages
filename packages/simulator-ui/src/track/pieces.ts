@@ -80,6 +80,13 @@ export interface TrackPiece {
   readonly rotationDeg: RotationDeg;
   /** When true, the piece carries an RFID tag (renders a badge icon). */
   readonly tagged: boolean;
+  /**
+   * When true, the piece is mirrored across its local x-axis — a right-hand
+   * curve becomes a left-hand curve, a junction's branch diverts the other way.
+   * Applied before rotation. Omitted/undefined means not flipped. Symmetric
+   * pieces (straight, station, crossing) are visually unaffected.
+   */
+  readonly flipped?: boolean;
 }
 
 export interface TrackEndpoint {
@@ -198,11 +205,16 @@ function localEndpoints(
       ];
     }
     case 'junction':
-      // 3 endpoints: trunk (west, index 0), through (east, index 1), branch (northeast, index 2).
+      // 3 endpoints: trunk (west, index 0), through (east, index 1), branch
+      // (index 2). The branch diverges at 45° with its position and outgoing
+      // tangent consistent (both down-right) and matching the curve's chirality,
+      // so a curve continues it without a kink; Flip mirrors it to divert the
+      // other way. (A fully-arced turnout — a branch radius matching the curve
+      // piece — is a future refinement; the spur is a straight 45° for now.)
       return [
         { lx: -100, ly: 0, localAngle: 180 }, // trunk
         { lx: 100, ly: 0, localAngle: 0 }, // through (main)
-        { lx: 100 * Math.cos(toRad(45)), ly: -100 * Math.sin(toRad(45)), localAngle: 45 }, // branch (divert)
+        { lx: 100 * Math.cos(toRad(45)), ly: 100 * Math.sin(toRad(45)), localAngle: 45 }, // branch (divert)
       ];
     case 'station':
       // 220 mm straight with platform — same endpoint logic as straight.
@@ -241,12 +253,17 @@ function localEndpoints(
  */
 export function getEndpoints(piece: TrackPiece): ReadonlyArray<TrackEndpoint> {
   const locals = localEndpoints(piece.type);
+  const flip = piece.flipped === true;
   return locals.map(({ lx, ly, localAngle }) => {
-    const world = transformPoint(lx, ly, piece.rotationDeg, piece.position.x, piece.position.y);
+    // Mirror across the local x-axis first (y and angle negate), then rotate +
+    // translate — matching the SVG `scale(1,-1)` the renderer applies.
+    const ly2 = flip ? -ly : ly;
+    const localAngle2 = flip ? -localAngle : localAngle;
+    const world = transformPoint(lx, ly2, piece.rotationDeg, piece.position.x, piece.position.y);
     return {
       x: world.x,
       y: world.y,
-      outgoingAngleDeg: normaliseAngle(localAngle + piece.rotationDeg),
+      outgoingAngleDeg: normaliseAngle(localAngle2 + piece.rotationDeg),
     };
   });
 }
@@ -335,12 +352,11 @@ function curveShape(): PieceShape {
 }
 
 function junctionShape(): PieceShape {
-  // Y-shape: trunk on left, straight through on right, branch northeast.
-  // Main rail band 16 mm wide.
-  // Trunk-through rail (full straight) + branch rail to northeast 45°
+  // Y-shape: trunk on left, straight through on right, branch diverging at 45°
+  // down-right (matching the branch endpoint). Main rail band 16 mm wide.
   const bx = (100 * Math.cos(toRad(45))).toFixed(1);
-  const by1 = (-100 * Math.sin(toRad(45)) - 8).toFixed(1);
-  const by2 = (-100 * Math.sin(toRad(45)) + 8).toFixed(1);
+  const by1 = (100 * Math.sin(toRad(45)) - 8).toFixed(1);
+  const by2 = (100 * Math.sin(toRad(45)) + 8).toFixed(1);
   const d = `M -100 -8 H 100 V 8 H -100 Z M 0 -8 L ${bx} ${by1} L ${bx} ${by2} L 0 8 Z`;
 
   return { svgPath: d, width: 200, height: 80 };

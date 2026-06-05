@@ -18,7 +18,8 @@ function deviceIdForDevicePiece(piece: TrackPiece): string {
  * affects device placement) doesn't tear down and rebuild the simulation.
  */
 function pieceTopologyKey(p: TrackPiece): string {
-  return `${p.id}|${p.type}|${Math.round(p.position.x)}|${Math.round(p.position.y)}|${p.rotationDeg}`;
+  const flip = p.flipped === true ? 'F' : '';
+  return `${p.id}|${p.type}|${Math.round(p.position.x)}|${Math.round(p.position.y)}|${p.rotationDeg}|${flip}`;
 }
 
 function topologySignature(pieces: ReadonlyArray<TrackPiece>): string {

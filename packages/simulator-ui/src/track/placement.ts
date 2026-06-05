@@ -102,6 +102,21 @@ function nearestOpenEndpoint(
 }
 
 /**
+ * The open endpoint a piece dropped at `(clickX, clickY)` would snap onto, or
+ * `null` if nothing is in reach. Type-independent (it's the nearest open
+ * endpoint within the capture radius) — used to highlight the join during a
+ * drag, before the dragged piece type is known.
+ */
+export function nearestConnectablePoint(
+  clickX: number,
+  clickY: number,
+  pieces: ReadonlyArray<TrackPiece>,
+): { x: number; y: number } | null {
+  const ep = nearestOpenEndpoint(clickX, clickY, pieces);
+  return ep === undefined ? null : { x: ep.x, y: ep.y };
+}
+
+/**
  * Where a newly-placed piece of `type` should land for a click at
  * `(clickX, clickY)` given the already-placed `pieces`.
  *
@@ -120,16 +135,18 @@ export function computePlacement(
   clickY: number,
   type: TrackPieceType,
   pieces: ReadonlyArray<TrackPiece>,
+  flipped = false,
 ): Placement {
-  // Local endpoints of the candidate: a piece at the origin, unrotated, gives
-  // its endpoints in piece-local coordinates with `outgoingAngleDeg` equal to
-  // each endpoint's local angle.
+  // Local endpoints of the candidate: a piece at the origin, unrotated (but
+  // mirrored if flipped), gives its endpoints in piece-local coordinates with
+  // `outgoingAngleDeg` equal to each endpoint's local angle.
   const localEndpoints = getEndpoints({
     id: '__placement_candidate__',
     type,
     position: { x: 0, y: 0 },
     rotationDeg: 0,
     tagged: false,
+    flipped,
   });
   const entry = localEndpoints[0];
   // No endpoints → device piece (train/gate/carriage): drop where clicked.
