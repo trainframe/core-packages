@@ -6,6 +6,7 @@ import type {
   PublishOptions,
   StatusListener,
 } from './client.js';
+import { matchesTopic } from './topic-match.js';
 
 /**
  * Production `BrokerClient` backed by `mqtt` over WebSockets.
@@ -62,10 +63,15 @@ export class MqttBrokerClient implements BrokerClient {
       this.setStatus('error', error);
     });
     client.on('message', (topic, payload) => {
-      const bucket = this.subs.get(topic);
-      if (!bucket) return;
+      // Dispatch by MQTT topic-filter match, not exact string: a single
+      // wildcard subscription (e.g. the simulator bridge's `railway/commands/#`)
+      // must receive every concrete topic beneath it. Mirrors the in-memory
+      // client's `deliver` so both clients agree on delivery.
       const message = { topic, payload: new Uint8Array(payload) };
-      for (const handler of bucket) handler(message);
+      for (const [pattern, bucket] of this.subs) {
+        if (!matchesTopic(pattern, topic)) continue;
+        for (const handler of bucket) handler(message);
+      }
     });
   }
 

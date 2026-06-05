@@ -6,6 +6,7 @@ import type {
   PublishOptions,
   StatusListener,
 } from './client.js';
+import { matchesTopic } from './topic-match.js';
 
 /**
  * Synchronous in-memory `BrokerClient` for tests. Drives the same observable
@@ -91,18 +92,4 @@ export class InMemoryBrokerClient implements BrokerClient {
     this.currentStatus = next;
     for (const listener of this.statusListeners) listener(next);
   }
-}
-
-function matchesTopic(pattern: string, topic: string): boolean {
-  if (pattern === topic) return true;
-  if (!pattern.includes('+') && !pattern.includes('#')) return false;
-  const patternParts = pattern.split('/');
-  const topicParts = topic.split('/');
-  for (let i = 0; i < patternParts.length; i++) {
-    const p = patternParts[i];
-    if (p === '#') return true;
-    if (i >= topicParts.length) return false;
-    if (p !== '+' && p !== topicParts[i]) return false;
-  }
-  return patternParts.length === topicParts.length;
 }

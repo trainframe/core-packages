@@ -1,3 +1,4 @@
+import { PROTOCOL_VERSION } from '@trainframe/protocol';
 import { describe, expect, it } from 'vitest';
 import { encodeDeviceEvent } from './encode-event.js';
 
@@ -16,7 +17,7 @@ describe('encodeDeviceEvent', () => {
       device_id: 'T-1',
       timestamp_device: '2026-01-01T00:00:00.000Z',
       event_type: 'device_registered',
-      protocol_version: '0.2.0',
+      protocol_version: PROTOCOL_VERSION,
       payload: { capabilities: ['core.controls_motion'] },
     });
   });
