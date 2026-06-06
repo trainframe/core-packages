@@ -21,6 +21,7 @@ import {
   type TrackPieceType,
   getEndpoints,
   isDevicePiece,
+  layerOf,
 } from './pieces.js';
 
 /**
@@ -53,6 +54,10 @@ interface WorldEndpoint {
   readonly x: number;
   readonly y: number;
   readonly outgoingAngleDeg: number;
+  /** Height layer of this endpoint (from `TrackEndpoint.layer`). All snap tests
+   * gate on layer equality so a piece on one deck never connects to a joint on
+   * another beneath it. */
+  readonly layer: number;
 }
 
 function distance(ax: number, ay: number, bx: number, by: number): number {
@@ -73,16 +78,21 @@ function allEndpoints(pieces: ReadonlyArray<TrackPiece>): WorldEndpoint[] {
   const all: WorldEndpoint[] = [];
   for (const piece of pieces) {
     for (const ep of getEndpoints(piece)) {
-      all.push({ x: ep.x, y: ep.y, outgoingAngleDeg: ep.outgoingAngleDeg });
+      all.push({ x: ep.x, y: ep.y, outgoingAngleDeg: ep.outgoingAngleDeg, layer: ep.layer });
     }
   }
   return all;
 }
 
-/** True when `ep` coincides (within `SNAP_DISTANCE`) with some other endpoint. */
+/** True when `ep` coincides (within `SNAP_DISTANCE`, on the SAME layer) with
+ * some other endpoint. The layer-equality test is a precondition of the
+ * distance test so two stacked endpoints (0 mm apart in plan, different layers)
+ * are NOT treated as coincident — a bridge deck endpoint above a ground joint
+ * stays open. */
 function isCoincidentWithAnother(ep: WorldEndpoint, all: ReadonlyArray<WorldEndpoint>): boolean {
   for (const other of all) {
     if (other === ep) continue;
+    if (other.layer !== ep.layer) continue;
     if (distance(ep.x, ep.y, other.x, other.y) <= SNAP_DISTANCE) return true;
   }
   return false;
@@ -120,15 +130,23 @@ function snapToAnchor(
   return { x: anchor.x - rotatedX, y: anchor.y - rotatedY, rotationDeg, connected: true };
 }
 
-/** The open endpoint nearest the click, or `undefined` if none is in range. */
+/**
+ * The open endpoint nearest the click, or `undefined` if none is in range.
+ * When `activeLayer` is given, only joints on that layer are eligible — so a
+ * piece being placed on the upper deck ignores the ground joints beneath it
+ * (and vice versa). Omit it (the mid-drag highlight, before the piece's layer
+ * is known) to consider all layers.
+ */
 function nearestOpenEndpoint(
   clickX: number,
   clickY: number,
   pieces: ReadonlyArray<TrackPiece>,
+  activeLayer?: number,
 ): WorldEndpoint | undefined {
   let best: WorldEndpoint | undefined;
   let bestDist = CONNECT_CAPTURE_MM;
   for (const ep of openEndpoints(pieces)) {
+    if (activeLayer !== undefined && ep.layer !== activeLayer) continue;
     const d = distance(clickX, clickY, ep.x, ep.y);
     if (d <= bestDist) {
       bestDist = d;
@@ -150,11 +168,15 @@ function nearestMarkerCentre(
   x: number,
   y: number,
   pieces: ReadonlyArray<TrackPiece>,
+  activeLayer: number,
 ): { x: number; y: number } | undefined {
   let best: { x: number; y: number } | undefined;
   let bestDist = DEVICE_SNAP_CAPTURE_MM;
   for (const p of pieces) {
     if (isDevicePiece(p.type)) continue;
+    // Gate on layer so a train dropped on the upper deck snaps to an upper
+    // marker, not the ground marker directly beneath it.
+    if (layerOf(p) !== activeLayer) continue;
     const d = distance(x, y, p.position.x, p.position.y);
     if (d <= bestDist) {
       bestDist = d;
@@ -178,8 +200,9 @@ function placeDevicePiece(
   y: number,
   rotationDeg: RotationDeg,
   pieces: ReadonlyArray<TrackPiece>,
+  activeLayer: number,
 ): Placement {
-  const marker = nearestMarkerCentre(x, y, pieces);
+  const marker = nearestMarkerCentre(x, y, pieces, activeLayer);
   if (marker === undefined) {
     return { x, y, rotationDeg, connected: false };
   }
@@ -221,27 +244,36 @@ export function computePlacement(
   type: TrackPieceType,
   pieces: ReadonlyArray<TrackPiece>,
   flipped = false,
+  activeLayer = 0,
 ): Placement {
   // Local endpoints of the candidate: a piece at the origin, unrotated (but
   // mirrored if flipped), gives its endpoints in piece-local coordinates with
-  // `outgoingAngleDeg` equal to each endpoint's local angle.
-  const localEndpoints = getEndpoints({
+  // `outgoingAngleDeg` equal to each endpoint's local angle. The candidate
+  // carries `activeLayer` so its own endpoints sit on the active deck and the
+  // snap filter is gated correctly — without this an upper-deck piece would
+  // default to layer 0 and wrongly snap to ground joints beneath it.
+  const candidate: TrackPiece = {
     id: '__placement_candidate__',
     type,
     position: { x: 0, y: 0 },
     rotationDeg: 0,
     tagged: false,
     flipped,
-  });
+    ...(activeLayer !== 0 ? { layer: activeLayer } : {}),
+  };
+  const localEndpoints = getEndpoints(candidate);
   const entry = localEndpoints[0];
   // No endpoints → device piece (train/gate/carriage): snap onto the nearest
   // track marker within reach so it lands on the rail (== the sim spawn point),
   // else drop where clicked.
   if (entry === undefined) {
-    return placeDevicePiece(clickX, clickY, 0, pieces);
+    return placeDevicePiece(clickX, clickY, 0, pieces, activeLayer);
   }
 
-  const anchor = nearestOpenEndpoint(clickX, clickY, pieces);
+  // Anchor only onto joints on the candidate's entry layer. For a non-ramp
+  // piece every endpoint shares the active layer; for a ramp the entry is on
+  // the active layer (its raised exit snaps later, from the upper deck).
+  const anchor = nearestOpenEndpoint(clickX, clickY, pieces, entry.layer);
   if (anchor === undefined) {
     return { x: clickX, y: clickY, rotationDeg: 0, connected: false };
   }
@@ -266,6 +298,10 @@ function bestEndpointPair(
     const pe = pieceEndpoints[i];
     if (pe === undefined) continue;
     for (const anchor of openEnds) {
+      // Only pair endpoints on the same layer — a dragged upper-deck end never
+      // clicks onto a ground joint beneath it (and a ramp's raised exit only
+      // pairs with upper joints).
+      if (anchor.layer !== pe.layer) continue;
       const d = distance(pe.x, pe.y, anchor.x, anchor.y);
       if (d <= bestDist) {
         bestDist = d;
@@ -309,7 +345,7 @@ export function computeMovePlacement(
   // nearest track marker (rail) within reach instead of dropping free.
   const localEndpoints = getEndpoints({ ...piece, position: { x: 0, y: 0 }, rotationDeg: 0 });
   if (localEndpoints.length === 0) {
-    return placeDevicePiece(cursorXMm, cursorYMm, piece.rotationDeg, others);
+    return placeDevicePiece(cursorXMm, cursorYMm, piece.rotationDeg, others, layerOf(piece));
   }
 
   // The same endpoints in world space at the piece's current cursor pose, used

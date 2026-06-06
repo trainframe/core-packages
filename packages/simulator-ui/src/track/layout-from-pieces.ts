@@ -14,6 +14,10 @@ interface EndpointRef {
   readonly endpointIdx: number;
   readonly x: number;
   readonly y: number;
+  /** The endpoint's height layer (from `TrackEndpoint.layer`). Two endpoints at
+   * the same (x, y) on different layers must NOT cluster — that disjoint
+   * connectivity is exactly what distinguishes a bridge from a crossing. */
+  readonly layer: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -29,7 +33,7 @@ function collectEndpoints(pieces: ReadonlyArray<TrackPiece>): EndpointRef[] {
     for (let ei = 0; ei < eps.length; ei++) {
       const ep = eps[ei];
       if (ep === undefined) continue;
-      refs.push({ pieceIdx: pi, endpointIdx: ei, x: ep.x, y: ep.y });
+      refs.push({ pieceIdx: pi, endpointIdx: ei, x: ep.x, y: ep.y, layer: ep.layer });
     }
   }
   return refs;
@@ -39,7 +43,18 @@ function collectEndpoints(pieces: ReadonlyArray<TrackPiece>): EndpointRef[] {
 // Step 2 — greedy clustering (used only to detect adjacency)
 // ---------------------------------------------------------------------------
 
-/** Find the index of the first cluster whose representative endpoint is within snap distance. */
+/**
+ * Find the index of the first cluster whose representative endpoint is within
+ * snap distance AND on the same layer. The layer-equality test is a
+ * *precondition* of the distance test (continue on mismatch, never
+ * short-circuit to -1): two stacked bridge endpoints are 0 mm apart in plan and
+ * would otherwise merge into one marker — the exact thing a bridge must avoid.
+ *
+ * Invariant: every cluster member therefore shares the representative's layer,
+ * so a cluster is layer-homogeneous by construction and compiles to exactly one
+ * marker on exactly one layer. That homogeneity is what makes comparing against
+ * the representative alone sound.
+ */
 function findNearbyCluster(
   ep: EndpointRef,
   clusters: ReadonlyArray<readonly number[]>,
@@ -50,6 +65,7 @@ function findNearbyCluster(
     if (rep === undefined) continue;
     const repEp = allEndpoints[rep];
     if (repEp === undefined) continue;
+    if (ep.layer !== repEp.layer) continue;
     const dx = ep.x - repEp.x;
     const dy = ep.y - repEp.y;
     if (Math.sqrt(dx * dx + dy * dy) <= SNAP_DISTANCE_MM) return c;

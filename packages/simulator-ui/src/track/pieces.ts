@@ -16,6 +16,7 @@ export type TrackPieceType =
   | 'station'
   | 'terminus'
   | 'crossing'
+  | 'ramp'
   | 'train'
   | 'gate'
   | 'carriage';
@@ -67,6 +68,11 @@ export function pieceMarkerKind(type: TrackPieceType): TrackMarkerKind {
   if (type === 'station') return 'station_stop';
   if (type === 'junction') return 'junction';
   if (type === 'terminus') return 'terminus';
+  // A ramp is just a length of track whose two ends sit on different layers —
+  // logically an ordinary block boundary. We deliberately do NOT invent a new
+  // TrackMarkerKind: the scan-box → server mapping and this compiler must stay
+  // in lockstep, and the layer transition is editor-only metadata, never on the
+  // wire (see docs/research/bridges-and-height-layers.md, Option A).
   return 'block_boundary';
 }
 
@@ -87,6 +93,21 @@ export interface TrackPiece {
    * pieces (straight, station, crossing) are visually unaffected.
    */
   readonly flipped?: boolean;
+  /**
+   * Discrete editor height layer (0 = ground). Optional and presentational:
+   * it never crosses the wire and the scheduler never sees it (see
+   * docs/research/bridges-and-height-layers.md, Option A). It exists so the
+   * editor can author stacked decks and so two pieces sharing a 2D footprint on
+   * different layers do NOT auto-connect — that disjoint connectivity is what
+   * makes a bridge a bridge. Mirrors the `flipped?` idiom: absent ⇒ ground;
+   * never written as `layer: undefined` (exactOptionalPropertyTypes).
+   */
+  readonly layer?: number;
+}
+
+/** The single place the ground-layer default lives. Absent ⇒ layer 0. */
+export function layerOf(piece: TrackPiece): number {
+  return piece.layer ?? 0;
 }
 
 export interface TrackEndpoint {
@@ -94,6 +115,14 @@ export interface TrackEndpoint {
   readonly y: number;
   /** Angle (degrees, clockwise from east) at which a train exits this endpoint. */
   readonly outgoingAngleDeg: number;
+  /**
+   * The discrete height layer this endpoint sits on. Equals the owning piece's
+   * layer for every piece EXCEPT the ramp, whose exit endpoint is one layer
+   * higher (its `layerDelta` is 1). Required, computed once in `getEndpoints` —
+   * the sole producer of TrackEndpoint literals — so clustering and snapping can
+   * gate on it. Readers that ignore it are unaffected.
+   */
+  readonly layer: number;
 }
 
 export interface PieceShape {
@@ -183,13 +212,24 @@ function normaliseAngle(deg: number): number {
  */
 function localEndpoints(
   type: TrackPieceType,
-): ReadonlyArray<{ lx: number; ly: number; localAngle: number }> {
+): ReadonlyArray<{ lx: number; ly: number; localAngle: number; layerDelta?: number }> {
   switch (type) {
     case 'straight':
       // Two endpoints 200 mm apart, centred on origin.
       return [
         { lx: -100, ly: 0, localAngle: 180 },
         { lx: 100, ly: 0, localAngle: 0 },
+      ];
+    case 'ramp':
+      // Reuses the straight's 200 mm footprint so snap spacing stays uniform,
+      // but its exit endpoint (index 1) is one layer higher: this single
+      // `layerDelta` IS the entire ramp/layer mechanism. Up vs down is pure
+      // orientation — edges are bidirectional, so a "down ramp" is just a ramp
+      // rotated 180°. Index-keyed delta is automatically flip/rotation-aware
+      // (transforms never reorder endpoints).
+      return [
+        { lx: -100, ly: 0, localAngle: 180 }, // entry, on piece.layer
+        { lx: 100, ly: 0, localAngle: 0, layerDelta: 1 }, // exit, on piece.layer + 1
       ];
     case 'curve': {
       // A true 45° circular arc, entry tangent pointing west (180°) and exit
@@ -254,7 +294,8 @@ function localEndpoints(
 export function getEndpoints(piece: TrackPiece): ReadonlyArray<TrackEndpoint> {
   const locals = localEndpoints(piece.type);
   const flip = piece.flipped === true;
-  return locals.map(({ lx, ly, localAngle }) => {
+  const baseLayer = layerOf(piece);
+  return locals.map(({ lx, ly, localAngle, layerDelta }) => {
     // Mirror across the local x-axis first (y and angle negate), then rotate +
     // translate — matching the SVG `scale(1,-1)` the renderer applies.
     const ly2 = flip ? -ly : ly;
@@ -264,6 +305,10 @@ export function getEndpoints(piece: TrackPiece): ReadonlyArray<TrackEndpoint> {
       x: world.x,
       y: world.y,
       outgoingAngleDeg: normaliseAngle(localAngle2 + piece.rotationDeg),
+      // A ramp's exit endpoint carries a +1 layerDelta; every other endpoint
+      // sits on the piece's own layer. This is the only place a single piece
+      // spans two layers.
+      layer: baseLayer + (layerDelta ?? 0),
     };
   });
 }
@@ -394,6 +439,27 @@ export function getCentreLinePath(
 }
 
 /**
+ * A height cue for a layer group: a drop-shadow offset + blur (and optional
+ * opacity) the renderer turns into an SVG `filter`. Pure data, total over the
+ * small layer range a Brio table uses; lives next to the piece model so the
+ * visual height ramp is defined with the geometry, not buried in JSX.
+ *
+ * Layer 0 is the ground/baseline (no shadow). Each higher layer floats further
+ * "above" the table with a larger, softer offset shadow. Layers beyond 2 clamp
+ * to the layer-2 cue (a Brio table rarely stacks deeper).
+ */
+export function layerStyle(layer: number): {
+  readonly dx: number;
+  readonly dy: number;
+  readonly blur: number;
+  readonly opacity?: number;
+} {
+  if (layer <= 0) return { dx: 0, dy: 0, blur: 0 };
+  if (layer === 1) return { dx: 0, dy: 6, blur: 4, opacity: 0.35 };
+  return { dx: 0, dy: 12, blur: 8, opacity: 0.45 };
+}
+
+/**
  * SVG path string (and bounding box) for a piece, in piece-local coordinates.
  * The consumer is expected to apply an SVG `transform="translate(x,y) rotate(r)"`
  * around the piece origin.
@@ -420,6 +486,8 @@ export function getPieceShape(piece: TrackPiece): PieceShape {
       return terminusShape();
     case 'crossing':
       return crossingShape();
+    case 'ramp':
+      return rampShape();
     case 'train':
       return trainShape();
     case 'gate':
@@ -514,6 +582,23 @@ function crossingShape(): PieceShape {
   const d = `M ${-half} ${-hw} H ${half} V ${hw} H ${-half} Z M ${-hw} ${-half} V ${half} H ${hw} V ${-half} Z`;
 
   return { svgPath: d, width: 200, height: 200 };
+}
+
+function rampShape(): PieceShape {
+  // Same 200×16 rail band as a straight, plus three uphill chevrons pointing
+  // toward the exit (east, the higher end) so the operator can read which way
+  // the deck rises. The band is identical to the straight so the two snap and
+  // tile interchangeably.
+  const w = 200;
+  const h = 16;
+  const half = w / 2;
+  const halfH = h / 2;
+  let d = `M ${-half} ${-halfH} H ${half} V ${halfH} H ${-half} Z`;
+  // Three chevrons (V opening downhill, apex uphill/east) spaced along the band.
+  for (const cx of [-50, 0, 50]) {
+    d += ` M ${cx - 14} ${-halfH} L ${cx} 0 L ${cx - 14} ${halfH}`;
+  }
+  return { svgPath: d, width: w, height: h };
 }
 
 function trainShape(): PieceShape {

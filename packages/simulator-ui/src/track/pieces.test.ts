@@ -7,6 +7,8 @@ import {
   getPieceShape,
   isDevicePiece,
   isWireDevice,
+  layerOf,
+  layerStyle,
   pieceMarkerKind,
 } from './pieces.js';
 
@@ -388,5 +390,90 @@ describe('getCentreLinePath — flip and rotation', () => {
     expect(approx(r.x, -b.y)).toBe(true);
     expect(approx(r.y, b.x)).toBe(true);
     expect(angleDelta(r.headingDeg, b.headingDeg + 90)).toBeLessThan(0.5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Layers — the editor-only height field, the ramp's cross-layer endpoint, and
+// the layerStyle height cue.
+// ---------------------------------------------------------------------------
+
+describe('layerOf — the single ground-default', () => {
+  it('absent layer defaults to ground (0)', () => {
+    expect(layerOf(makePiece('straight'))).toBe(0);
+  });
+
+  it('reads an explicit layer', () => {
+    const p: TrackPiece = { ...makePiece('straight'), layer: 2 };
+    expect(layerOf(p)).toBe(2);
+  });
+});
+
+describe('getEndpoints — layer', () => {
+  it('a ground straight has both endpoints on layer 0', () => {
+    const eps = getEndpoints(makePiece('straight'));
+    expect(eps.map((e) => e.layer)).toEqual([0, 0]);
+  });
+
+  it('an upper-layer straight carries that layer on both endpoints', () => {
+    const p: TrackPiece = { ...makePiece('straight'), layer: 1 };
+    const eps = getEndpoints(p);
+    expect(eps.map((e) => e.layer)).toEqual([1, 1]);
+  });
+
+  it('a ramp entry stays on piece.layer; exit is one layer higher', () => {
+    const eps = getEndpoints(makePiece('ramp'));
+    expect(eps).toHaveLength(2);
+    expect(eps[0]?.layer).toBe(0); // entry
+    expect(eps[1]?.layer).toBe(1); // exit (layerDelta 1)
+  });
+
+  it('a ramp authored on layer 1 spans layers 1 → 2', () => {
+    const p: TrackPiece = { ...makePiece('ramp'), layer: 1 };
+    const eps = getEndpoints(p);
+    expect(eps[0]?.layer).toBe(1);
+    expect(eps[1]?.layer).toBe(2);
+  });
+
+  it('the ramp reuses the straight 200 mm footprint (entry/exit at ±100)', () => {
+    const eps = getEndpoints(makePiece('ramp'));
+    expect(approx(must(eps[0]).x, -100)).toBe(true);
+    expect(approx(must(eps[1]).x, 100)).toBe(true);
+  });
+});
+
+describe('pieceMarkerKind — ramp', () => {
+  it('a ramp is an ordinary block_boundary (no new marker kind)', () => {
+    expect(pieceMarkerKind('ramp')).toBe('block_boundary');
+  });
+});
+
+describe('getPieceShape — ramp', () => {
+  it('returns a 200×16 band matching the straight footprint', () => {
+    const shape = getPieceShape(makePiece('ramp'));
+    expect(shape.width).toBe(200);
+    expect(shape.height).toBe(16);
+    expect(shape.svgPath.length).toBeGreaterThan(0);
+  });
+});
+
+describe('layerStyle — height cue', () => {
+  it('ground (0) has no shadow', () => {
+    expect(layerStyle(0)).toEqual({ dx: 0, dy: 0, blur: 0 });
+  });
+
+  it('negative/zero layers clamp to no shadow', () => {
+    expect(layerStyle(-1)).toEqual({ dx: 0, dy: 0, blur: 0 });
+  });
+
+  it('layer 1 floats with a soft offset shadow', () => {
+    const s = layerStyle(1);
+    expect(s.dy).toBeGreaterThan(0);
+    expect(s.blur).toBeGreaterThan(0);
+  });
+
+  it('higher layers cast a larger shadow than layer 1', () => {
+    expect(layerStyle(2).dy).toBeGreaterThan(layerStyle(1).dy);
+    expect(layerStyle(5).dy).toBe(layerStyle(2).dy); // clamps at the deepest cue
   });
 });

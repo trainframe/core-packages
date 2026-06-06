@@ -192,3 +192,62 @@ describe('computePlacement — eight curves close into a circle', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Layer-gated snapping — a piece authored on one deck must not connect to a
+// joint on another beneath it. The ramp is the sole legitimate cross-layer link.
+// ---------------------------------------------------------------------------
+
+describe('computePlacement — layer gating', () => {
+  it('connects to a same-layer joint (ground straight, ground placement)', () => {
+    // A ground straight at (0,0) has an open end at (100,0). Placing another
+    // ground straight whose click lands near (100,0) snaps onto it.
+    const ground = piece('g1', 'straight', 0, 0, 0);
+    const p = computePlacement(100, 0, 'straight', [ground], false, 0);
+    expect(p.connected).toBe(true);
+  });
+
+  it('does NOT connect to a ground joint when authoring on layer 1', () => {
+    // Same ground joint at (100,0), but the new piece is on the UPPER deck.
+    // The layer gate keeps it free — an upper-deck piece ignores ground joints
+    // directly beneath it (the bridge requirement).
+    const ground = piece('g1', 'straight', 0, 0, 0);
+    const p = computePlacement(100, 0, 'straight', [ground], false, 1);
+    expect(p.connected).toBe(false);
+  });
+
+  it('connects to an upper joint when authoring on layer 1', () => {
+    // An upper straight at (0,0) on layer 1 has an open end at (100,0). Placing
+    // another layer-1 straight near it connects.
+    const upper: TrackPiece = {
+      id: 'u1',
+      type: 'straight',
+      position: { x: 0, y: 0 },
+      rotationDeg: 0,
+      tagged: false,
+      layer: 1,
+    };
+    const p = computePlacement(100, 0, 'straight', [upper], false, 1);
+    expect(p.connected).toBe(true);
+  });
+
+  it('a device dropped on the upper deck snaps to the upper marker, not the ground marker beneath it', () => {
+    // Ground straight and upper straight share the SAME centre (300,300). A
+    // train dropped there on layer 1 must snap to the upper marker's centre
+    // (same coords here, but the gate proves it ignored the ground piece).
+    const ground = piece('g1', 'straight', 300, 300, 0);
+    const upper: TrackPiece = {
+      id: 'u1',
+      type: 'straight',
+      position: { x: 300, y: 300 },
+      rotationDeg: 0,
+      tagged: false,
+      layer: 1,
+    };
+    const onUpper = computePlacement(300, 300, 'train', [ground, upper], false, 1);
+    expect(onUpper.connected).toBe(true);
+    // With only a ground piece present, an upper-layer train finds no marker.
+    const noUpper = computePlacement(300, 300, 'train', [ground], false, 1);
+    expect(noUpper.connected).toBe(false);
+  });
+});

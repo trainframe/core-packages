@@ -2,7 +2,7 @@ import type { Layout } from '@trainframe/protocol';
 import { BrokerBridge, Simulation } from '@trainframe/simulator';
 import type { BrokerClient } from '../broker/client.js';
 import { compileLayout } from '../track/layout-from-pieces.js';
-import { type TrackPiece, isDevicePiece } from '../track/pieces.js';
+import { type TrackPiece, isDevicePiece, layerOf } from '../track/pieces.js';
 import { nearestStartEdge } from './nearest-edge.js';
 
 /** Device id for a piece's own broker identity. Must match `ToyTable`. */
@@ -19,7 +19,12 @@ function deviceIdForDevicePiece(piece: TrackPiece): string {
  */
 function pieceTopologyKey(p: TrackPiece): string {
   const flip = p.flipped === true ? 'F' : '';
-  return `${p.id}|${p.type}|${Math.round(p.position.x)}|${Math.round(p.position.y)}|${p.rotationDeg}|${flip}`;
+  // Layer is part of the topology signature: two layouts identical in 2D but
+  // differing in layer are a bridge vs a crossing (disjoint markers vs one
+  // shared marker) — genuinely different topology. Without it, raising a piece
+  // onto a deck would not rebuild the sim and the bridge would silently render
+  // as a 2D crossing/merge.
+  return `${p.id}|${p.type}|${Math.round(p.position.x)}|${Math.round(p.position.y)}|${p.rotationDeg}|${flip}|L${layerOf(p)}`;
 }
 
 function topologySignature(pieces: ReadonlyArray<TrackPiece>): string {

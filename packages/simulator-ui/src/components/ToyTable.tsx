@@ -17,6 +17,8 @@ import {
   getPieceShape,
   isDevicePiece,
   isWireDevice,
+  layerOf,
+  layerStyle,
   pieceMarkerKind,
 } from '../track/pieces.js';
 import {
@@ -55,6 +57,7 @@ const TRACK_PIECE_TYPES = [
   'station',
   'terminus',
   'crossing',
+  'ramp',
 ] as const;
 const DEVICE_PIECE_TYPES = ['train', 'gate', 'carriage'] as const;
 
@@ -65,6 +68,7 @@ const PIECE_LABELS: Record<TrackPieceType, string> = {
   station: 'Station',
   terminus: 'Terminus',
   crossing: 'Crossing',
+  ramp: 'Ramp',
   train: 'Train',
   gate: 'Gate',
   carriage: 'Carriage',
@@ -77,6 +81,7 @@ const PIECE_FILL: Record<TrackPieceType, string> = {
   station: '#ac9b7b',
   terminus: '#ac7b7b',
   crossing: '#7bac8a',
+  ramp: '#ac8a7b',
   train: '#1f6feb',
   gate: '#d97706',
   carriage: '#6b7fa8',
@@ -298,6 +303,69 @@ function computeRenderPositions(
   return result;
 }
 
+/**
+ * The height layer a piece should be DRAWN on this frame — which determines its
+ * draw order (occlusion) and its drop-shadow group. This is render-only; it
+ * never affects the compiled layout or the sampled rail.
+ *
+ * - Static track / device pieces draw on their own `layerOf`.
+ * - A LIVE train draws on `max(layerOf(fromPiece), layerOf(toPiece))` of its
+ *   current edge: as soon as it crosses onto the ramp→upper edge mid-ramp it
+ *   reads "up" and stays up across the deck, coming back down on the return.
+ *   Keying on the train piece's own static layer would draw it UNDER the bridge
+ *   it is crossing — the headline failure this guards against.
+ * - A carriage draws on its coupled train's effective layer (so a consist rides
+ *   the deck together); an uncoupled carriage falls back to its static layer.
+ *   A carriage whose coupling drops mid-bridge falls back to its static layer
+ *   for a frame — acceptable for the demo.
+ *
+ * @pure — reads sim + maps only.
+ */
+/** The minimal structural seam `effectiveLayer` needs from the simulation: look
+ * up a train by id and read its current edge. The real `Simulation` satisfies
+ * it structurally (so does a plain test stub), so the helper is unit-testable
+ * through its real seam without an `any` cast. */
+export interface TrainLayerSource {
+  getTrain(
+    id: string,
+  ): { getCurrentEdge(): { from_marker_id: string; to_marker_id: string } | null } | undefined;
+}
+
+export function effectiveLayer(
+  piece: TrackPiece,
+  sim: TrainLayerSource,
+  carriageCoupledTo: ReadonlyMap<string, string>,
+  piecesById: ReadonlyMap<string, TrackPiece>,
+): number {
+  if (piece.type === 'train') {
+    const simTrain = sim.getTrain(`T-${piece.id}`);
+    if (simTrain === undefined) return layerOf(piece);
+    const endpoints = resolveEdgeEndpoints(simTrain, piecesById);
+    if (endpoints === undefined) return layerOf(piece);
+    return Math.max(layerOf(endpoints.fromPiece), layerOf(endpoints.toPiece));
+  }
+  if (piece.type === 'carriage') {
+    const trainPieceId = carriageCoupledTo.get(piece.id);
+    if (trainPieceId !== undefined) {
+      const trainPiece = piecesById.get(trainPieceId);
+      if (trainPiece !== undefined) {
+        return effectiveLayer(trainPiece, sim, carriageCoupledTo, piecesById);
+      }
+    }
+    return layerOf(piece);
+  }
+  return layerOf(piece);
+}
+
+/** Build an SVG `filter` string from a layer's height cue, or `undefined` for
+ * the ground layer (no shadow). Pure. */
+function layerFilter(layer: number): string | undefined {
+  const s = layerStyle(layer);
+  if (s.dx === 0 && s.dy === 0 && s.blur === 0) return undefined;
+  const opacity = s.opacity ?? 0.4;
+  return `drop-shadow(${s.dx}px ${s.dy}px ${s.blur}px rgba(0,0,0,${opacity}))`;
+}
+
 interface PowerOnAction {
   readonly type: 'power-on';
   readonly pieceId: string;
@@ -378,6 +446,10 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /** Which piece type the operator has "armed" from the toybox, if any. */
   const [armedType, setArmedType] = useState<TrackPieceType | null>(null);
+  /** The deck the operator is currently authoring on (0 = ground). New pieces
+   * land on this layer and snapping is gated to it, so an upper-deck loop can be
+   * built directly over the ground loop without the two merging. */
+  const [activeLayer, setActiveLayer] = useState(0);
   /** Set of piece IDs whose device is currently live on the broker. */
   const [liveIds, setLiveIds] = useState<ReadonlySet<string>>(() => new Set());
   /** Pieces the operator has placed into the scan box. Keyed by piece id. */
@@ -498,13 +570,16 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
         position: { x: xMm, y: yMm },
         rotationDeg: orient ?? rotation ?? 0,
         tagged: false,
+        // Only stamp a layer when authoring above ground. exactOptionalPropertyTypes
+        // forbids writing `layer: undefined`, and absent ⇒ ground anyway.
+        ...(activeLayer !== 0 ? { layer: activeLayer } : {}),
       };
       setPieces((prev) => [...prev, piece]);
       setSelectedId(piece.id);
       // Stay armed so the operator can drop multiple of the same type without
       // re-clicking the toybox.
     },
-    [armedType],
+    [armedType, activeLayer],
   );
 
   // Reposition an already-placed piece (dragged across the canvas). Snaps +
@@ -557,7 +632,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       const entry = getEndpoints(target)[0];
       const placement =
         entry !== undefined
-          ? computePlacement(entry.x, entry.y, target.type, others, flipped)
+          ? computePlacement(entry.x, entry.y, target.type, others, flipped, layerOf(target))
           : undefined;
       return prev.map((p) => {
         if (p.id !== selectedId) return p;
@@ -704,14 +779,18 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
             onFlip={flipSelected}
             onDelete={deleteSelected}
             armedType={armedType}
+            activeLayer={activeLayer}
+            onActiveLayerChange={setActiveLayer}
           />
           <Table
             pieces={pieces}
             liveIds={liveIds}
             selectedId={selectedId}
             armedType={armedType}
+            activeLayer={activeLayer}
             trainTrails={trainTrails}
             renderPositions={renderPositions}
+            hardware={hardware}
             onCanvasClick={placePiece}
             onMovePiece={movePiece}
             onScanPiece={requestScan}
@@ -811,7 +890,17 @@ interface ActionBarProps {
   readonly onFlip: () => void;
   readonly onDelete: () => void;
   readonly armedType: TrackPieceType | null;
+  /** The deck new pieces land on (0 = ground). */
+  readonly activeLayer: number;
+  readonly onActiveLayerChange: (layer: number) => void;
 }
+
+/** The decks the layer selector offers. Ground + one upper deck cover the
+ * bridge demo; extend if deeper stacks are ever authored by hand. */
+const SELECTABLE_LAYERS: ReadonlyArray<{ readonly layer: number; readonly label: string }> = [
+  { layer: 0, label: 'Ground' },
+  { layer: 1, label: 'Upper' },
+];
 
 /** The action-bar status line — guides the operator on what to do next. */
 function actionBarStatus(
@@ -844,6 +933,8 @@ function ActionBar({
   onFlip,
   onDelete,
   armedType,
+  activeLayer,
+  onActiveLayerChange,
 }: ActionBarProps) {
   return (
     <div className="tf-toytable__actions">
@@ -856,6 +947,20 @@ function ActionBar({
       <button type="button" onClick={onDelete} disabled={selectedPiece === null}>
         Delete (Del)
       </button>
+      <span className="tf-toytable__layer-selector" aria-label="Active layer">
+        {SELECTABLE_LAYERS.map(({ layer, label }) => (
+          <button
+            key={layer}
+            type="button"
+            onClick={() => onActiveLayerChange(layer)}
+            aria-pressed={activeLayer === layer}
+            className={`tf-toytable__layer-button${activeLayer === layer ? ' tf-toytable__layer-button--active' : ''}`}
+            data-testid={`active-layer-${layer}`}
+          >
+            {label}
+          </button>
+        ))}
+      </span>
       <span className="tf-toytable__status">
         {actionBarStatus(selectedPiece, selectedLive, armedType)}
       </span>
@@ -872,6 +977,12 @@ interface TableProps {
   readonly liveIds: ReadonlySet<string>;
   readonly selectedId: string | null;
   readonly armedType: TrackPieceType | null;
+  /** The deck new pieces land on / snapping is gated to (0 = ground). */
+  readonly activeLayer: number;
+  /** The live hardware, used to read each live train's current edge so it draws
+   * on the higher of its edge's two layers while crossing a bridge. Null until
+   * the in-browser sim is up. */
+  readonly hardware: ToyHardware | null;
   /**
    * Pre-computed train→carriages coupling map (from `computeTrainTrails`).
    * Passed from the parent so coupling and render-position logic share one
@@ -902,6 +1013,8 @@ function Table({
   liveIds,
   selectedId,
   armedType,
+  activeLayer,
+  hardware,
   trainTrails,
   renderPositions,
   onCanvasClick,
@@ -1055,7 +1168,8 @@ function Table({
     }
     // Armed: snap + orient the new piece to continue from a nearby open
     // endpoint so curved loops can be built by clicking, not pixel-nudging.
-    const placement = computePlacement(xMm, yMm, armedType, pieces);
+    // Gated to the active layer so an upper-deck piece ignores ground joints.
+    const placement = computePlacement(xMm, yMm, armedType, pieces, false, activeLayer);
     onCanvasClick(placement.x, placement.y, armedType, placement.rotationDeg);
   }
 
@@ -1105,7 +1219,7 @@ function Table({
     // piece in connects it instead of dropping it loose.
     const pieceType = e.dataTransfer.getData(TOYBOX_DRAG_MIME) as TrackPieceType | '';
     if (pieceType === '') return;
-    const placement = computePlacement(xMm, yMm, pieceType, pieces);
+    const placement = computePlacement(xMm, yMm, pieceType, pieces, false, activeLayer);
     onCanvasClick(placement.x, placement.y, pieceType, placement.rotationDeg);
   }
 
@@ -1154,6 +1268,25 @@ function Table({
 
   const viewBox = `${viewport.x} ${viewport.y} ${CANVAS_W_MM / viewport.zoom} ${CANVAS_H_MM / viewport.zoom}`;
 
+  // Bucket pieces by their *effective* layer so lower decks paint first and the
+  // upper deck (and any train crossing it) paints last — giving free occlusion
+  // of the ground loop under a bridge with opaque fills. A live train reads the
+  // higher of its current edge's two layers so it draws ON TOP of the ground
+  // loop it crosses mid-bridge, not under it.
+  const sim = hardware?.getSimulation();
+  const piecesById = new Map<string, TrackPiece>();
+  for (const p of pieces) piecesById.set(p.id, p);
+  const layerOfPiece = (p: TrackPiece): number =>
+    sim !== undefined ? effectiveLayer(p, sim, carriageCoupledTo, piecesById) : layerOf(p);
+  const byLayer = new Map<number, TrackPiece[]>();
+  for (const p of pieces) {
+    const layer = layerOfPiece(p);
+    const bucket = byLayer.get(layer);
+    if (bucket === undefined) byLayer.set(layer, [p]);
+    else bucket.push(p);
+  }
+  const orderedLayers = [...byLayer.keys()].sort((a, b) => a - b);
+
   return (
     <svg
       ref={svgRef}
@@ -1177,46 +1310,58 @@ function Table({
       data-viewport-x={viewport.x}
       data-viewport-y={viewport.y}
     >
-      {pieces.map((p) => (
-        <PieceRenderer
-          key={p.id}
-          piece={p}
-          selected={p.id === selectedId}
-          live={liveIds.has(p.id)}
-          armedType={armedType}
-          coupledToTrainId={carriageCoupledTo.get(p.id)}
-          renderPosition={renderPositions.get(p.id)}
-          onAction={(action) => onPieceAction(p.id, action)}
-          dragOverride={
-            pieceDragPreview?.id === p.id
-              ? {
-                  x: pieceDragPreview.x,
-                  y: pieceDragPreview.y,
-                  rotationDeg: pieceDragPreview.rotationDeg,
+      {/* One group per layer, lowest first, so higher decks paint last and a
+          bridge reads as over/under. The drop-shadow height cue is attached to
+          this UN-rotated group (never the per-piece rotated/flipped <g>, where a
+          shadow would shear and point a different way per piece). Endpoint dots
+          ride in their own layer's group so upper dots sit on the deck and
+          ground dots beneath a bridge are occluded. */}
+      {orderedLayers.map((layer) => {
+        const layerPieces = byLayer.get(layer) ?? [];
+        const filter = layerFilter(layer);
+        return (
+          <g key={`layer-${layer}`} data-layer={layer} style={filter ? { filter } : undefined}>
+            {layerPieces.map((p) => (
+              <PieceRenderer
+                key={p.id}
+                piece={p}
+                selected={p.id === selectedId}
+                live={liveIds.has(p.id)}
+                armedType={armedType}
+                coupledToTrainId={carriageCoupledTo.get(p.id)}
+                renderPosition={renderPositions.get(p.id)}
+                onAction={(action) => onPieceAction(p.id, action)}
+                dragOverride={
+                  pieceDragPreview?.id === p.id
+                    ? {
+                        x: pieceDragPreview.x,
+                        y: pieceDragPreview.y,
+                        rotationDeg: pieceDragPreview.rotationDeg,
+                      }
+                    : undefined
                 }
-              : undefined
-          }
-          onDragMove={handlePieceDragMove}
-          onDragEnd={handlePieceDragEnd}
-        />
-      ))}
-      {/* Endpoint dots for track pieces only. Devices have no endpoints. */}
-      <g>
-        {pieces.flatMap((p) =>
-          getEndpoints(p).map((ep, ei) => (
-            <circle
-              key={`${p.id}-ep${ei}`}
-              cx={ep.x}
-              cy={ep.y}
-              r={4}
-              fill={p.id === selectedId ? '#2563eb' : '#e11d48'}
-              stroke="#fff"
-              strokeWidth={1.5}
-              style={{ pointerEvents: 'none' }}
-            />
-          )),
-        )}
-      </g>
+                onDragMove={handlePieceDragMove}
+                onDragEnd={handlePieceDragEnd}
+              />
+            ))}
+            {/* Endpoint dots for track pieces only. Devices have no endpoints. */}
+            {layerPieces.flatMap((p) =>
+              getEndpoints(p).map((ep, ei) => (
+                <circle
+                  key={`${p.id}-ep${ei}`}
+                  cx={ep.x}
+                  cy={ep.y}
+                  r={4}
+                  fill={p.id === selectedId ? '#2563eb' : '#e11d48'}
+                  stroke="#fff"
+                  strokeWidth={1.5}
+                  style={{ pointerEvents: 'none' }}
+                />
+              )),
+            )}
+          </g>
+        );
+      })}
       {/* Snap highlight — a faint ring drawn over the would-snap-to endpoint. */}
       {snapHighlight !== null && (
         <circle

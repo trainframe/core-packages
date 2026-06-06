@@ -17,6 +17,28 @@ function piece(
   return { id: pid(), type, position: { x, y }, rotationDeg, tagged };
 }
 
+/** A piece on a specific layer with an explicit id (so tests can assert on
+ * `M-{id}` edges deterministically). */
+function layeredPiece(
+  id: string,
+  type: TrackPiece['type'],
+  x: number,
+  y: number,
+  layer: number,
+  rotationDeg: RotationDeg = 0,
+): TrackPiece {
+  return layer === 0
+    ? { id, type, position: { x, y }, rotationDeg, tagged: false }
+    : { id, type, position: { x, y }, rotationDeg, tagged: false, layer };
+}
+
+/** True when the compiled layout has a directed edge from→to. */
+function hasEdge(layout: ReturnType<typeof compileLayout>, fromId: string, toId: string): boolean {
+  return layout.edges.some(
+    (e) => e.from_marker_id === `M-${fromId}` && e.to_marker_id === `M-${toId}`,
+  );
+}
+
 beforeEach(() => {
   nextId = 0;
 });
@@ -277,5 +299,51 @@ describe('compileLayout — crossings', () => {
     expect(layout.markers).toHaveLength(2);
     expect(layout.edges).toHaveLength(2);
     expect(layout.markers.find((m) => m.id === `M-${c.id}`)?.kind).toBe('block_boundary');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Layers & bridges — the load-bearing layer gate. These drive compileLayout and
+// observe outcomes (no mocks): two pieces sharing a 2D footprint on different
+// layers must NOT merge (bridge); a ramp connects across layers (the only
+// cross-layer link); placement is gated by the active layer.
+// ---------------------------------------------------------------------------
+
+describe('compileLayout — layers and bridges', () => {
+  it('BRIDGE: two fully-coincident straights on different layers stay disjoint', () => {
+    // Straight A (ground) and straight B (upper) at the EXACT same position and
+    // rotation: every endpoint is 0 mm apart in plan. The layer gate must keep
+    // them as two separate markers with NO edge between them — a bridge, not a
+    // crossing.
+    const a = layeredPiece('A', 'straight', 0, 0, 0);
+    const b = layeredPiece('B', 'straight', 0, 0, 1);
+    const layout = compileLayout([a, b], 'bridge');
+    expect(layout.markers).toHaveLength(2);
+    expect(layout.markers.map((m) => m.id).sort()).toEqual(['M-A', 'M-B']);
+    // No edge in either direction between the decks.
+    expect(hasEdge(layout, 'A', 'B')).toBe(false);
+    expect(hasEdge(layout, 'B', 'A')).toBe(false);
+    expect(layout.edges).toHaveLength(0);
+  });
+
+  it('RAMP: a ramp marker joins ground and upper, with no direct ground↔upper edge', () => {
+    // Ground straight at x=-200 meets the ramp entry (layer 0, west end at
+    // x=-100). The ramp spans x∈[-100,100] with its exit (layer 1, east end at
+    // x=100) meeting an upper straight at x=200 (layer 1). The shared ramp
+    // marker IS the bridge between the decks; there is no ground↔upper edge.
+    const ground = layeredPiece('G', 'straight', -200, 0, 0);
+    const ramp = layeredPiece('R', 'ramp', 0, 0, 0);
+    const upper = layeredPiece('U', 'straight', 200, 0, 1);
+    const layout = compileLayout([ground, ramp, upper], 'ramp');
+    expect(layout.markers).toHaveLength(3);
+    // Ground ↔ ramp (entry, layer 0) connected.
+    expect(hasEdge(layout, 'G', 'R')).toBe(true);
+    expect(hasEdge(layout, 'R', 'G')).toBe(true);
+    // Ramp ↔ upper (exit, layer 1) connected.
+    expect(hasEdge(layout, 'R', 'U')).toBe(true);
+    expect(hasEdge(layout, 'U', 'R')).toBe(true);
+    // But NO direct ground ↔ upper edge — the ramp marker is the only link.
+    expect(hasEdge(layout, 'G', 'U')).toBe(false);
+    expect(hasEdge(layout, 'U', 'G')).toBe(false);
   });
 });

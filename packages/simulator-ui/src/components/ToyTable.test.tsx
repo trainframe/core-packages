@@ -4,8 +4,9 @@ import { PROTOCOL_VERSION } from '@trainframe/protocol';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
 import { InMemoryBrokerClient } from '../broker/in-memory-client.js';
+import type { TrackPiece } from '../track/pieces.js';
 import { SCANBOX_DATA_MIME } from './ScanBox.js';
-import { ToyTable } from './ToyTable.js';
+import { ToyTable, type TrainLayerSource, effectiveLayer } from './ToyTable.js';
 
 interface RenderResult {
   readonly client: InMemoryBrokerClient;
@@ -1331,5 +1332,92 @@ describe('ToyTable — carriage render positions follow sim physics', () => {
     } finally {
       restore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// effectiveLayer — the render-layer of a live train as it crosses a bridge.
+// This is the headline behaviour: a train must draw on the HIGHER of its
+// current edge's two layers so it appears ON TOP of the ground loop it crosses,
+// not under it. Driven through the helper's real structural seam (no mocking of
+// the scheduler/registry — `TrainLayerSource` is exactly what the renderer reads
+// from the live sim).
+// ---------------------------------------------------------------------------
+
+describe('effectiveLayer — live-train draw layer across a bridge', () => {
+  const groundPiece: TrackPiece = {
+    id: 'ramp1',
+    type: 'ramp',
+    position: { x: 0, y: 0 },
+    rotationDeg: 0,
+    tagged: false,
+  };
+  const upperPiece: TrackPiece = {
+    id: 'up1',
+    type: 'straight',
+    position: { x: 200, y: 0 },
+    rotationDeg: 0,
+    tagged: false,
+    layer: 1,
+  };
+  const trainPiece: TrackPiece = {
+    id: 'loco',
+    type: 'train',
+    position: { x: 0, y: 0 },
+    rotationDeg: 0,
+    tagged: false,
+  };
+  const carriagePiece: TrackPiece = {
+    id: 'wagon',
+    type: 'carriage',
+    position: { x: 0, y: 0 },
+    rotationDeg: 0,
+    tagged: false,
+  };
+
+  const piecesById = new Map<string, TrackPiece>([
+    [groundPiece.id, groundPiece],
+    [upperPiece.id, upperPiece],
+    [trainPiece.id, trainPiece],
+    [carriagePiece.id, carriagePiece],
+  ]);
+
+  /** A structural sim stub: the loco T-loco is on the ramp→upper edge. */
+  function simOnRampToUpper(): TrainLayerSource {
+    return {
+      getTrain(id) {
+        if (id !== 'T-loco') return undefined;
+        return {
+          getCurrentEdge: () => ({ from_marker_id: 'M-ramp1', to_marker_id: 'M-up1' }),
+        };
+      },
+    };
+  }
+
+  it('draws a live train on the HIGHER of its edge layers (ramp 0 → upper 1 ⇒ 1)', () => {
+    const layer = effectiveLayer(trainPiece, simOnRampToUpper(), new Map(), piecesById);
+    expect(layer).toBe(1);
+  });
+
+  it('falls back to the train piece static layer when the sim has no such train', () => {
+    const emptySim: TrainLayerSource = { getTrain: () => undefined };
+    // Train piece is ground (layer 0).
+    expect(effectiveLayer(trainPiece, emptySim, new Map(), piecesById)).toBe(0);
+  });
+
+  it('a coupled carriage inherits its train’s effective (crossing) layer', () => {
+    const coupled = new Map<string, string>([[carriagePiece.id, trainPiece.id]]);
+    const layer = effectiveLayer(carriagePiece, simOnRampToUpper(), coupled, piecesById);
+    expect(layer).toBe(1);
+  });
+
+  it('an uncoupled carriage falls back to its own static layer', () => {
+    const layer = effectiveLayer(carriagePiece, simOnRampToUpper(), new Map(), piecesById);
+    expect(layer).toBe(0);
+  });
+
+  it('a static track piece draws on its own layer', () => {
+    expect(effectiveLayer(upperPiece, simOnRampToUpper(), new Map(), piecesById)).toBe(1);
+    expect(effectiveLayer(groundPiece, simOnRampToUpper(), new Map(), piecesById)).toBe(0);
   });
 });
