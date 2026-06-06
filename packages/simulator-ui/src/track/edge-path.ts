@@ -46,7 +46,10 @@ function normaliseAngle(deg: number): number {
 }
 
 /** The (indexA, indexB) endpoints of A and B that coincide at the shared joint,
- * or `undefined` when no endpoint pair is within `SNAP_DISTANCE`. */
+ * or `undefined` when no endpoint pair is within `SNAP_DISTANCE`. Only ever
+ * called on the two pieces of an already-compiled edge (same layer except a
+ * ramp, whose two ends are 200mm apart and so never both within SNAP_DISTANCE
+ * of the neighbour), so it needs no layer gate. */
 function findJoint(
   a: TrackPiece,
   b: TrackPiece,
@@ -61,7 +64,7 @@ function findJoint(
     for (let j = 0; j < epsB.length; j++) {
       const eb = epsB[j];
       if (eb === undefined) continue;
-      const d = Math.hypot(ea.x - eb.x, eb.y - ea.y);
+      const d = Math.hypot(ea.x - eb.x, ea.y - eb.y);
       if (d <= bestDist) {
         bestDist = d;
         best = { indexA: i, indexB: j };

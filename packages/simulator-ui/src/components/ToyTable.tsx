@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useBroker } from '../broker/broker-context.js';
 import type { BrokerClient } from '../broker/client.js';
 import { encodeDeviceEvent } from '../broker/encode-event.js';
+import { buildBridgeDemo } from '../demo/bridge-demo.js';
 import { nearestStartEdge } from '../sim/nearest-edge.js';
 import type { ToyHardware } from '../sim/toy-hardware.js';
 import { useToyHardware } from '../sim/use-toy-hardware.js';
@@ -381,6 +382,9 @@ interface TrainframeSimHandle {
 declare global {
   interface Window {
     trainframeSim?: TrainframeSimHandle | undefined;
+    /** DEV-only seed hook: stages the two-train bridge demo on the table.
+     * Registered behind `import.meta.env.DEV`; absent in production builds. */
+    __tfLoadBridgeDemo?: (() => void) | undefined;
   }
 }
 
@@ -520,6 +524,24 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     return () => {
       // exactOptionalPropertyTypes forbids `delete`; assign undefined.
       window.trainframeSim = undefined;
+    };
+  }, []);
+
+  // DEV-only: a console/orchestrator hook that stages the two-train bridge demo
+  // — two independent closed loops, one ramping onto a deck that bridges over
+  // the other — and marks every piece (track + both trains) live so the sim
+  // binds identity tags and the trains spawn. The orchestrator then publishes
+  // `begin_exploration` to each train to set them circulating. Behind
+  // `import.meta.env.DEV` so it never ships to production; cleared on unmount.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    window.__tfLoadBridgeDemo = () => {
+      const demo = buildBridgeDemo();
+      setPieces(demo.pieces);
+      setLiveIds(new Set(demo.liveIds));
+    };
+    return () => {
+      window.__tfLoadBridgeDemo = undefined;
     };
   }, []);
 
