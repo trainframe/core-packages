@@ -836,10 +836,13 @@ describe('ToyTable — moving a placed piece (pointer drag)', () => {
       expect(canvas.querySelectorAll('[data-piece-id]').length).toBe(2);
       const mover = canvas.querySelector(`[data-piece-id="${moverId}"]`) as SVGGElement;
 
-      // Drag it right up to the anchor's east endpoint (~555mm) → client 1110, 600.
-      pointerDragPiece(mover, [200, 200], [1110, 600]);
+      // Drag so the mover's CENTRE lands at 650mm (client 1300, 600) — which
+      // puts its west END right on the anchor's east endpoint (550mm). The
+      // centre is 100mm from the joint, well beyond the capture radius, so this
+      // only snaps because matching is end-based, not centre-based.
+      pointerDragPiece(mover, [200, 200], [1300, 600]);
 
-      // Its west end snaps onto 550 ⇒ centre at 650mm.
+      // West end snaps onto 550 ⇒ centre stays at 650mm, oriented to continue.
       expect(mover.getAttribute('transform')).toContain('translate(650, 300)');
     } finally {
       restore();

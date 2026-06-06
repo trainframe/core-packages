@@ -83,6 +83,27 @@ function openEndpoints(pieces: ReadonlyArray<TrackPiece>): WorldEndpoint[] {
   return all.filter((ep) => !isCoincidentWithAnother(ep, all));
 }
 
+/**
+ * Place a candidate so its local endpoint `localEp` (in piece-local
+ * coordinates, piece at origin, unrotated) lands exactly on `anchor` with its
+ * rail anti-parallel — i.e. the track continues rather than doubling back.
+ * Shared by both placement paths so the snap maths lives in one place.
+ */
+function snapToAnchor(
+  localEp: { readonly x: number; readonly y: number; readonly outgoingAngleDeg: number },
+  anchor: WorldEndpoint,
+): Placement {
+  const rotationDeg = toRotationDeg(anchor.outgoingAngleDeg + 180 - localEp.outgoingAngleDeg);
+  const rad = (rotationDeg * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  // The endpoint after rotation about the piece origin.
+  const rotatedX = localEp.x * cos - localEp.y * sin;
+  const rotatedY = localEp.x * sin + localEp.y * cos;
+  // Offset the origin so the rotated endpoint lands exactly on the anchor.
+  return { x: anchor.x - rotatedX, y: anchor.y - rotatedY, rotationDeg, connected: true };
+}
+
 /** The open endpoint nearest the click, or `undefined` if none is in range. */
 function nearestOpenEndpoint(
   clickX: number,
@@ -159,20 +180,77 @@ export function computePlacement(
     return { x: clickX, y: clickY, rotationDeg: 0, connected: false };
   }
 
-  // Rotate the piece so its entry rail is anti-parallel to the anchor's
-  // outgoing rail (the joint continues rather than doubling back).
-  const rotationDeg = toRotationDeg(anchor.outgoingAngleDeg + 180 - entry.outgoingAngleDeg);
-  const rad = (rotationDeg * Math.PI) / 180;
-  const cos = Math.cos(rad);
-  const sin = Math.sin(rad);
-  // The entry endpoint after rotation about the piece origin.
-  const rotatedEntryX = entry.x * cos - entry.y * sin;
-  const rotatedEntryY = entry.x * sin + entry.y * cos;
-  // Offset the origin so the rotated entry endpoint lands exactly on the anchor.
-  return {
-    x: anchor.x - rotatedEntryX,
-    y: anchor.y - rotatedEntryY,
-    rotationDeg,
-    connected: true,
+  // Snap the candidate's entry endpoint onto the anchor, oriented to continue.
+  return snapToAnchor(entry, anchor);
+}
+
+/**
+ * The best (piece-endpoint, neighbour-open-endpoint) pair to snap together: the
+ * closest pair within `CONNECT_CAPTURE_MM`, or `undefined` if none is in reach.
+ * `pieceEndpoints` are the dragged piece's endpoints in *world* space at its
+ * current cursor pose; `openEnds` are the neighbours' open endpoints.
+ */
+function bestEndpointPair(
+  pieceEndpoints: ReadonlyArray<WorldEndpoint>,
+  openEnds: ReadonlyArray<WorldEndpoint>,
+): { readonly pieceEndpointIndex: number; readonly anchor: WorldEndpoint } | undefined {
+  let best: { pieceEndpointIndex: number; anchor: WorldEndpoint } | undefined;
+  let bestDist = CONNECT_CAPTURE_MM;
+  for (let i = 0; i < pieceEndpoints.length; i++) {
+    const pe = pieceEndpoints[i];
+    if (pe === undefined) continue;
+    for (const anchor of openEnds) {
+      const d = distance(pe.x, pe.y, anchor.x, anchor.y);
+      if (d <= bestDist) {
+        bestDist = d;
+        best = { pieceEndpointIndex: i, anchor };
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * Where an already-placed `piece` being dragged to cursor `(cursorXMm,
+ * cursorYMm)` should land, given the other placed `others`.
+ *
+ * Unlike {@link computePlacement} (which keys off the *cursor* falling near a
+ * joint — right for click/drop-to-place), this keys off the dragged piece's own
+ * *endpoints*: when any of the piece's ends comes within `CONNECT_CAPTURE_MM` of
+ * a neighbour's open end, the piece snaps so those two ends meet and the rails
+ * continue. That's the intuitive "bring two pieces' ends together and they
+ * click" behaviour — the piece's centre may be far from the joint.
+ *
+ * When nothing is in reach the piece is dropped free at the cursor, keeping its
+ * current rotation so a free move doesn't surprise-rotate it.
+ *
+ * @pure
+ */
+export function computeMovePlacement(
+  piece: TrackPiece,
+  cursorXMm: number,
+  cursorYMm: number,
+  others: ReadonlyArray<TrackPiece>,
+): Placement {
+  const free: Placement = {
+    x: cursorXMm,
+    y: cursorYMm,
+    rotationDeg: piece.rotationDeg,
+    connected: false,
   };
+  // Local endpoints (origin, unrotated, current flip) — the candidate's own
+  // ends in piece-local coordinates. Device pieces have none → never snap.
+  const localEndpoints = getEndpoints({ ...piece, position: { x: 0, y: 0 }, rotationDeg: 0 });
+  if (localEndpoints.length === 0) return free;
+
+  // The same endpoints in world space at the piece's current cursor pose, used
+  // only to decide which end is nearest a neighbour's open end. Index i here
+  // corresponds to index i in `localEndpoints` (rotation/translation reorder
+  // nothing).
+  const atCursor = getEndpoints({ ...piece, position: { x: cursorXMm, y: cursorYMm } });
+  const best = bestEndpointPair(atCursor, openEndpoints(others));
+  if (best === undefined) return free;
+  const localEp = localEndpoints[best.pieceEndpointIndex];
+  if (localEp === undefined) return free;
+  return snapToAnchor(localEp, best.anchor);
 }

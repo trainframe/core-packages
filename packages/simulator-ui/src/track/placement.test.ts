@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { compileLayout } from './layout-from-pieces.js';
 import { type RotationDeg, type TrackPiece, getEndpoints } from './pieces.js';
-import { CONNECT_CAPTURE_MM, computePlacement } from './placement.js';
+import { CONNECT_CAPTURE_MM, computeMovePlacement, computePlacement } from './placement.js';
 
 function piece(
   id: string,
@@ -64,6 +64,42 @@ describe('computePlacement — snap + orient', () => {
     expect(dist(entry, { x: 550, y: 300 })).toBeLessThan(0.5);
     // Curve entry local angle is 180; straight outgoing is 0 ⇒ no rotation.
     expect(p.rotationDeg).toBe(0);
+  });
+});
+
+describe('computeMovePlacement — snaps on endpoint proximity, not centre', () => {
+  it('snaps a dragged straight when its END reaches a joint though its CENTRE is out of capture', () => {
+    const anchor = piece('a1', 'straight', 450, 300, 0); // east end at (550, 300)
+    const moving = piece('m1', 'straight', 0, 0, 0);
+    // Cursor so the moving straight's west end sits on (550, 300): centre at 650.
+    const cursorX = 650;
+    const cursorY = 300;
+    // The centre is 100 mm from the joint — beyond capture — so the cursor-keyed
+    // placement would NOT connect. This is exactly the case that failed before.
+    expect(computePlacement(cursorX, cursorY, 'straight', [anchor]).connected).toBe(false);
+    // But the move placement snaps because the piece's END is right on the joint.
+    const p = computeMovePlacement(moving, cursorX, cursorY, [anchor]);
+    expect(p.connected).toBe(true);
+    const placed = piece('m1', 'straight', p.x, p.y, p.rotationDeg);
+    const [entry] = getEndpoints(placed);
+    if (entry === undefined) throw new Error('unreachable');
+    expect(dist(entry, { x: 550, y: 300 })).toBeLessThan(0.5);
+  });
+
+  it('drops free and keeps current rotation when no end is near a joint', () => {
+    const anchor = piece('a1', 'straight', 450, 300, 0);
+    const moving = piece('m1', 'curve', 0, 0, 90);
+    const p = computeMovePlacement(moving, 200, 100, [anchor]);
+    expect(p.connected).toBe(false);
+    expect(p).toMatchObject({ x: 200, y: 100, rotationDeg: 90 });
+  });
+
+  it('never snaps a device piece — a train has no endpoints', () => {
+    const anchor = piece('a1', 'straight', 450, 300, 0);
+    const train = piece('t1', 'train', 0, 0, 0);
+    // Cursor right on the joint; a train still drops free (no track topology).
+    const p = computeMovePlacement(train, 550, 300, [anchor]);
+    expect(p.connected).toBe(false);
   });
 });
 

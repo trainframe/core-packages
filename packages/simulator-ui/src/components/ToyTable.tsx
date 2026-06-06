@@ -22,7 +22,11 @@ import {
   isWireDevice,
   pieceMarkerKind,
 } from '../track/pieces.js';
-import { computePlacement, nearestConnectablePoint } from '../track/placement.js';
+import {
+  computeMovePlacement,
+  computePlacement,
+  nearestConnectablePoint,
+} from '../track/placement.js';
 import { ConnectionStatus } from './ConnectionStatus.js';
 import { ScanBox } from './ScanBox.js';
 import { Settings } from './Settings.js';
@@ -449,10 +453,15 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       const moving = prev.find((p) => p.id === pieceId);
       if (moving === undefined) return prev;
       const others = prev.filter((p) => p.id !== pieceId);
-      const placement = computePlacement(xMm, yMm, moving.type, others, moving.flipped);
-      const rotationDeg = placement.connected ? placement.rotationDeg : moving.rotationDeg;
+      const placement = computeMovePlacement(moving, xMm, yMm, others);
       return prev.map((p) =>
-        p.id === pieceId ? { ...p, position: { x: placement.x, y: placement.y }, rotationDeg } : p,
+        p.id === pieceId
+          ? {
+              ...p,
+              position: { x: placement.x, y: placement.y },
+              rotationDeg: placement.rotationDeg,
+            }
+          : p,
       );
     });
     setSelectedId(pieceId);
@@ -834,11 +843,14 @@ function Table({
 }: TableProps) {
   const svgRef = useRef<SVGSVGElement>(null);
 
-  /** Live world position of the piece currently being pointer-dragged. */
+  /** Live world *pose* of the piece currently being pointer-dragged. Carries
+   * rotation as well as position so the preview shows the snapped pose the
+   * release will commit — what-you-see-is-what-you-get, no jump on release. */
   const [pieceDragPreview, setPieceDragPreview] = useState<{
     id: string;
     x: number;
     y: number;
+    rotationDeg: RotationDeg;
   } | null>(null);
 
   // Build reverse map: carriageId → trainPieceId (for data-coupled-to attr)
@@ -1033,9 +1045,24 @@ function Table({
   // Pointer-drag of a placed piece (move across canvas, or scan onto the bus)
   // ---------------------------------------------------------------------------
 
-  function handlePieceDragMove(_pieceId: string, clientX: number, clientY: number) {
+  function handlePieceDragMove(pieceId: string, clientX: number, clientY: number) {
     const { x, y } = clientToMm(getRect(), clientX, clientY, viewport);
-    setPieceDragPreview({ id: _pieceId, x, y });
+    const moving = pieces.find((p) => p.id === pieceId);
+    if (moving === undefined) {
+      setPieceDragPreview({ id: pieceId, x, y, rotationDeg: 0 });
+      return;
+    }
+    // Preview the *snapped* pose: bring the piece's end near a neighbour's open
+    // end and it visibly clicks into the joint, oriented to continue. Release
+    // commits exactly this (movePiece runs the same placement on the same mm).
+    const others = pieces.filter((p) => p.id !== pieceId);
+    const placement = computeMovePlacement(moving, x, y, others);
+    setPieceDragPreview({
+      id: pieceId,
+      x: placement.x,
+      y: placement.y,
+      rotationDeg: placement.rotationDeg,
+    });
   }
 
   function handlePieceDragEnd(pieceId: string, clientX: number, clientY: number) {
@@ -1094,7 +1121,11 @@ function Table({
           onAction={(action) => onPieceAction(p.id, action)}
           dragOverride={
             pieceDragPreview?.id === p.id
-              ? { x: pieceDragPreview.x, y: pieceDragPreview.y }
+              ? {
+                  x: pieceDragPreview.x,
+                  y: pieceDragPreview.y,
+                  rotationDeg: pieceDragPreview.rotationDeg,
+                }
               : undefined
           }
           onDragMove={handlePieceDragMove}
@@ -1160,7 +1191,7 @@ interface PieceRendererProps {
    * (mm) to render it at — it follows the cursor. Placed pieces are SVG and
    * can't use HTML5 DnD, so repositioning is done with pointer events.
    */
-  readonly dragOverride: { x: number; y: number } | undefined;
+  readonly dragOverride: { x: number; y: number; rotationDeg: number } | undefined;
   /** Pointer moved while dragging this piece (client coords). */
   readonly onDragMove: (pieceId: string, clientX: number, clientY: number) => void;
   /** Drag released (client coords) — reposition the piece, or scan it if let
@@ -1265,7 +1296,9 @@ function PieceRenderer({
   // simulated world position when available, falling back to placement.
   const x = dragOverride?.x ?? renderPosition?.x ?? piece.position.x;
   const y = dragOverride?.y ?? renderPosition?.y ?? piece.position.y;
-  const rotationDeg = renderPosition?.rotationDeg ?? piece.rotationDeg;
+  // While dragging, the preview carries the snapped rotation so what's shown is
+  // exactly what release commits; otherwise follow the sim, then placement.
+  const rotationDeg = dragOverride?.rotationDeg ?? renderPosition?.rotationDeg ?? piece.rotationDeg;
 
   return (
     <g
