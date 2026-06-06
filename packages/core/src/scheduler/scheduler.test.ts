@@ -4,7 +4,7 @@ import { BUILTIN_CAPABILITIES } from '../builtins/index.js';
 import { CapabilityRegistry } from '../registry.js';
 import type { SchedulerEffect } from './effects.js';
 import { LayoutState } from './layout-state.js';
-import { Scheduler } from './scheduler.js';
+import { STATION_DWELL_MS, Scheduler } from './scheduler.js';
 
 /**
  * Test fixtures. The simple loop:
@@ -1592,5 +1592,266 @@ describe('Scheduler — switch device pairing', () => {
     });
     // No switch capability → pairing must not be recorded.
     expect(scheduler.getLayout().switchDeviceForMarker('M1')).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scheduler throws the switch for a scheduled route (the actuation keystone).
+//
+// A diverge junction J fed from two approaches A1, A2 with two branches:
+//   J -> X requires 'main', J -> Y requires 'diverge'.
+// T1 routes A1 -> J -> X (needs J on 'main'); T2 routes A2 -> J -> Y (needs J
+// on 'diverge'). The crossing is the FINAL leg of each schedule, so the
+// station dwell fires harmlessly at the terminus and never blocks completion.
+// ---------------------------------------------------------------------------
+
+const DIVERGE: Layout = {
+  name: 'diverge',
+  markers: [
+    { id: 'A1', kind: 'block_boundary' },
+    { id: 'A2', kind: 'block_boundary' },
+    { id: 'J', kind: 'junction' },
+    { id: 'PM', kind: 'block_boundary' },
+    { id: 'PD', kind: 'block_boundary' },
+    { id: 'X', kind: 'station_stop' },
+    { id: 'Y', kind: 'station_stop' },
+  ],
+  edges: [
+    { from_marker_id: 'A1', to_marker_id: 'J', estimated_length_mm: 200 },
+    { from_marker_id: 'A2', to_marker_id: 'J', estimated_length_mm: 200 },
+    // Junction branches. PM is past the junction on 'main'; PD on 'diverge'.
+    // A separate marker past J lets the junction-incident edge release once a
+    // train's tail clears it, freeing J while the train continues to its stop.
+    {
+      from_marker_id: 'J',
+      to_marker_id: 'PM',
+      estimated_length_mm: 200,
+      requires_switch_state: 'main',
+    },
+    {
+      from_marker_id: 'J',
+      to_marker_id: 'PD',
+      estimated_length_mm: 200,
+      requires_switch_state: 'diverge',
+    },
+    { from_marker_id: 'PM', to_marker_id: 'X', estimated_length_mm: 200 },
+    { from_marker_id: 'PD', to_marker_id: 'Y', estimated_length_mm: 200 },
+  ],
+  junctions: [{ marker_id: 'J' }],
+};
+
+const setupDiverge = () => {
+  const registry = new CapabilityRegistry();
+  registry.registerAll(BUILTIN_CAPABILITIES);
+  registry.freeze();
+  const layout = new LayoutState(DIVERGE);
+  const scheduler = new Scheduler(registry, layout);
+  seedIdentityTags(scheduler, ['A1', 'A2', 'J', 'PM', 'PD', 'X', 'Y']);
+  // The switch device that controls junction J. The `controls_marker_id`
+  // pairing is what makes the scheduler actuate rather than merely withhold.
+  scheduler.handleEvent({
+    event_type: 'device_registered',
+    device_id: 'SW-J',
+    payload: { capabilities: ['core.controls_switch'], controls_marker_id: 'J' },
+  });
+  return { scheduler, registry };
+};
+
+const observe = (scheduler: Scheduler, trainId: string, markerId: string) =>
+  scheduler.handleEvent({
+    event_type: 'tag_observed',
+    device_id: trainId,
+    payload: { tag_id: markerId },
+  });
+
+const confirmSwitch = (scheduler: Scheduler, junction: string, position: string) =>
+  scheduler.handleEvent({
+    event_type: 'switch_state_changed',
+    device_id: 'SW-J',
+    payload: { junction_marker_id: junction, position, confirmed: true },
+  });
+
+const findSetSwitch = (effects: ReadonlyArray<SchedulerEffect>) =>
+  effects.filter(
+    (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+      e.kind === 'send_command' && e.command_type === 'set_switch_position',
+  );
+
+describe('Scheduler — switch actuation for scheduled routes', () => {
+  it('throws the switch to the required position and then grants (single train)', () => {
+    const { scheduler } = setupDiverge();
+    registerTrain(scheduler, 'T1');
+
+    // T1: A1 -> J -> PM -> X. The junction edge J->PM needs 'main'; junction
+    // position is initially unknown, so the crossing attempt must actuate.
+    scheduler.assignSchedule('T1', 'route-1', ['A1', 'X']);
+    observe(scheduler, 'T1', 'A1');
+    const atJ = observe(scheduler, 'T1', 'J');
+
+    // Reaching J (the clearance limit) attempts to extend across J->PM. The
+    // switch is not on 'main', so a single set_switch_position is emitted and
+    // clearance is WITHHELD.
+    const sets = findSetSwitch(atJ);
+    expect(sets).toHaveLength(1);
+    expect(sets[0]?.device_id).toBe('SW-J');
+    expect(sets[0]?.payload).toEqual({ junction_marker_id: 'J', position: 'main' });
+    expect(findGrant(atJ)).toBeUndefined();
+    expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('J');
+
+    // The switch confirms 'main' — the existing confirm path retries and grants.
+    const afterConfirm = confirmSwitch(scheduler, 'J', 'main');
+    const grant = findGrant(afterConfirm);
+    expect(grant).toBeDefined();
+    expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('PM');
+  });
+
+  it('serializes two trains over one junction needing conflicting positions, flipping once per handover', () => {
+    const { scheduler } = setupDiverge();
+    // Length-aware trains (length_mm > 0) are REQUIRED for switched-junction
+    // serialization, and this test pins down why. A length-aware train keeps
+    // holding the section behind its head until the tail clears (reported via
+    // train_status), so T1 keeps holding its approach edge — and therefore the
+    // junction marker J, under ADR-011 — continuously across the switch
+    // handover. A POINT train would release its approach edge the instant its
+    // head reached J (before `maybeActuateSwitch` has secured the onward edge —
+    // it has only *requested* the switch), leaving J unprotected for one
+    // retry pass; the peer would then grab the conflicting branch and the two
+    // would oscillate the switch into deadlock. Edges are 200mm; length 100mm
+    // < edge, satisfying the phase-2 single-edge-tail constraint.
+    registerLongTrain(scheduler, 'T1', 100);
+    registerLongTrain(scheduler, 'T2', 100);
+
+    const allSets: Array<Extract<SchedulerEffect, { kind: 'send_command' }>> = [];
+    const record = (effs: ReadonlyArray<SchedulerEffect>) => allSets.push(...findSetSwitch(effs));
+
+    // T1 wants J on 'main' (A1->J->PM->X); T2 on 'diverge' (A2->J->PD->Y).
+    record(scheduler.assignSchedule('T1', 'r1', ['A1', 'X']));
+    record(scheduler.assignSchedule('T2', 'r2', ['A2', 'Y']));
+
+    // Both trains advance to their junction approach. T1 grabs A1->J first;
+    // that edge locks J (ADR-011), so T2's A2->J — which shares J — is denied.
+    record(observe(scheduler, 'T1', 'A1'));
+    record(observe(scheduler, 'T2', 'A2'));
+
+    // T1 reaches J. Its tail still occupies A1->J (length-aware), so that hold
+    // — and thus the lock on J — persists. The onward edge J->PM needs 'main';
+    // the switch is actuated and clearance withheld pending confirmation.
+    record(observe(scheduler, 'T1', 'J'));
+    record(confirmSwitch(scheduler, 'J', 'main'));
+
+    // The load-bearing serialization assertion: while T1 holds the junction,
+    // T2 must NOT have been granted any edge across J. A scheduler that let
+    // both cross — or flipped the switch out from under T1 — would fail here.
+    const t2held = scheduler.getTrainState('T2');
+    expect(t2held?.cleared_edges).toEqual([]);
+    expect(t2held?.clearance_limit_marker_id).toBe('A2');
+    // T1 is cleared onward across the now-correct switch.
+    expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('PM');
+
+    // T1's head moves along J->PM. While the head is only 50mm in, the tail
+    // still occupies A1->J, so A1->J is not released and J stays locked.
+    record(sendTrainStatus(scheduler, 'T1', { from_marker_id: 'J', to_marker_id: 'PM' }, 50));
+    expect(scheduler.getTrainState('T2')?.cleared_edges).toEqual([]);
+    // Head 150mm into J->PM: the tail has cleared A1->J, which releases. But
+    // the head itself still occupies J->PM (incident to J), so J stays locked
+    // and T2 remains blocked.
+    record(sendTrainStatus(scheduler, 'T1', { from_marker_id: 'J', to_marker_id: 'PM' }, 150));
+    expect(scheduler.getTrainState('T2')?.cleared_edges).toEqual([]);
+    // T1 crosses onto PM and its tail then clears J->PM (head 150mm into
+    // PM->X), finally freeing J for T2.
+    record(observe(scheduler, 'T1', 'PM'));
+    record(sendTrainStatus(scheduler, 'T1', { from_marker_id: 'PM', to_marker_id: 'X' }, 150));
+    record(observe(scheduler, 'T1', 'X'));
+
+    // J is now free. T2 proceeds: grabs A2->J, reaches J, switch flips to
+    // 'diverge' for the handover, and T2 completes its transit to Y.
+    record(observe(scheduler, 'T2', 'J'));
+    record(confirmSwitch(scheduler, 'J', 'diverge'));
+    record(observe(scheduler, 'T2', 'PD'));
+    record(sendTrainStatus(scheduler, 'T2', { from_marker_id: 'PD', to_marker_id: 'Y' }, 150));
+    record(observe(scheduler, 'T2', 'Y'));
+
+    // Both trains completed their transit (each at its terminus stop).
+    expect(scheduler.getTrainState('T1')?.last_marker_id).toBe('X');
+    expect(scheduler.getTrainState('T2')?.last_marker_id).toBe('Y');
+
+    // Idempotency: across the WHOLE run the switch flipped exactly twice — once
+    // to 'main' for T1, once to 'diverge' for T2 — proving the command is NOT
+    // reissued on every retry while the switch is mid-move.
+    expect(allSets).toHaveLength(2);
+    expect(allSets[0]?.payload).toEqual({ junction_marker_id: 'J', position: 'main' });
+    expect(allSets[1]?.payload).toEqual({ junction_marker_id: 'J', position: 'diverge' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Deterministic dwell at scheduled stops. A train arriving at a scheduled stop
+// is held (no onward grant, no pointer advance) until STATION_DWELL_MS elapses
+// on the INJECTED clock; the expiry is observed on a later train_status.
+// ---------------------------------------------------------------------------
+
+const findAssignRoute = (effects: ReadonlyArray<SchedulerEffect>) =>
+  effects.find(
+    (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+      e.kind === 'send_command' && e.command_type === 'assign_route',
+  );
+
+describe('Scheduler — deterministic station dwell', () => {
+  it('holds at a scheduled stop until the dwell elapses, then cycles onward', () => {
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const layout = new LayoutState(SIMPLE_LOOP);
+    let clock = 0;
+    const scheduler = new Scheduler(registry, layout, { now: () => clock });
+    seedIdentityTags(scheduler, SIMPLE_LOOP_MARKERS);
+    registerTrain(scheduler, 'T1');
+
+    // Three-stop loop: M1 -> M2 (stop) -> M4 (stop) -> back to M1. The train
+    // starts at M1, heads to M2 first.
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M2', 'M4']);
+
+    // Drive to the first scheduled stop M2 (M1->M2 is the leg).
+    observe(scheduler, 'T1', 'M1');
+    const atM2 = observe(scheduler, 'T1', 'M2');
+
+    // Arriving at the stop must NOT replan onward immediately: no assign_route,
+    // and the pointer still targets M2 (index 1), not M4.
+    expect(findAssignRoute(atM2)).toBeUndefined();
+    expect(scheduler.getTrainState('T1')?.schedule?.current_stop_index).toBe(1);
+
+    // A status before the dwell elapses keeps the train held.
+    clock = STATION_DWELL_MS - 1;
+    const early = scheduler.handleEvent({
+      event_type: 'train_status',
+      device_id: 'T1',
+      payload: { train_id: 'T1', speed_normalised: 0 },
+    });
+    expect(findAssignRoute(early)).toBeUndefined();
+    expect(scheduler.getTrainState('T1')?.schedule?.current_stop_index).toBe(1);
+
+    // Advance the injected clock past the dwell. The next train_status observes
+    // the expiry and replans the onward leg (M2 -> M3 -> M4) — pointer cycles.
+    clock = STATION_DWELL_MS + 1;
+    const late = scheduler.handleEvent({
+      event_type: 'train_status',
+      device_id: 'T1',
+      payload: { train_id: 'T1', speed_normalised: 0 },
+    });
+    expect(findAssignRoute(late)).toBeDefined();
+    expect(scheduler.getTrainState('T1')?.schedule?.current_stop_index).toBe(2);
+
+    // Run a full further leg to prove the pointer cycles (M4 -> back to M1).
+    observe(scheduler, 'T1', 'M3');
+    observe(scheduler, 'T1', 'M4');
+    expect(scheduler.getTrainState('T1')?.schedule?.current_stop_index).toBe(2);
+    clock += STATION_DWELL_MS + 1;
+    scheduler.handleEvent({
+      event_type: 'train_status',
+      device_id: 'T1',
+      payload: { train_id: 'T1', speed_normalised: 0 },
+    });
+    // Pointer wrapped back to the first stop (index 0).
+    expect(scheduler.getTrainState('T1')?.schedule?.current_stop_index).toBe(0);
   });
 });

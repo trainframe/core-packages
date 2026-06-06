@@ -8,6 +8,23 @@ import { type TrainState, initialTrainState } from './train-state.js';
 import { type EdgeRef, edgesEqual } from './types.js';
 
 /**
+ * Deterministic dwell at a scheduled stop, in milliseconds. When a train
+ * arrives at its scheduled stop the scheduler holds it (no onward clearance,
+ * no pointer advance) until this much injected-clock time has elapsed, so
+ * trains visibly pause at stations. A named constant, not a magic number.
+ */
+export const STATION_DWELL_MS = 2500;
+
+export interface SchedulerOptions {
+  /**
+   * Monotonic clock callback in ms, used to time the station dwell. Defaults
+   * to `Date.now`. Inject a virtual clock in tests and the simulator for
+   * determinism — mirrors the seam `LayoutState` already exposes.
+   */
+  readonly now?: () => number;
+}
+
+/**
  * Information about a connected device, tracked by the scheduler.
  */
 interface DeviceRecord {
@@ -32,11 +49,24 @@ export class Scheduler {
    * actually changes — not on every event.
    */
   private currentDeadlock: ReadonlyArray<string> = [];
+  /**
+   * Per-junction switch position we have most recently *requested* via a
+   * `set_switch_position` command (junction marker id → requested position).
+   * Used for actuation idempotency: `retryBlockedClearances` fires on many
+   * events, so we must issue the command only when the required position
+   * differs from what we've already asked for — never once per retry while
+   * the switch is mid-move. Synced to reality on confirmed `switch_state_changed`.
+   */
+  private readonly requestedSwitchPositions = new Map<string, string>();
+  private readonly now: () => number;
 
   constructor(
     private readonly registry: CapabilityRegistry,
     private readonly layout: LayoutState,
-  ) {}
+    options: SchedulerOptions = {},
+  ) {
+    this.now = options.now ?? Date.now;
+  }
 
   /** Read-only view of the tag registry, exposed for the visualiser/tests. */
   getTagRegistry(): TagRegistry {
@@ -311,6 +341,19 @@ export class Scheduler {
     // estimated_distance_from_edge_start_mm >= length_mm (phase-2 limitation:
     // train must be shorter than the shortest edge it traverses; no multi-edge
     // tail spanning is implemented).
+    //
+    // SWITCHED-JUNCTION SAFETY: continuous junction protection across a switch
+    // handover relies on this tail-occupancy deferral. When a train must cross
+    // a junction it doesn't yet have the right points for, `maybeActuateSwitch`
+    // only *requests* the switch and withholds clearance — the train does not
+    // yet hold the onward edge. For a length-aware train the approach edge stays
+    // held (its tail still occupies it), so the junction marker remains locked
+    // under block exclusivity and no peer can grab a conflicting branch. A POINT
+    // train (length_mm 0/undefined) releases its approach edge the instant its
+    // head reaches the junction — opening a window where the junction is
+    // unprotected, into which a peer can be granted, leading to switch
+    // oscillation and deadlock. Switched-junction serialization therefore
+    // currently requires length-aware trains; see the keystone test.
     let edgesReleased = false;
     if (!train.length_mm || train.length_mm === 0) {
       const before = train.cleared_edges.length;
@@ -386,10 +429,14 @@ export class Scheduler {
     // against the same transit.
     if (newIndex < train.transit.edges.length) return [];
 
-    // Transit complete. If we've landed on the scheduled stop, advance the
-    // schedule's stop pointer and plan the next leg.
+    // Transit complete. If we've landed on the scheduled stop, begin the
+    // deterministic dwell rather than replanning immediately: hold the train
+    // here (no pointer advance, no onward grant) until the dwell elapses. The
+    // expiry is observed on a later `train_status` (the parked train keeps
+    // emitting status), which triggers `advanceScheduleAndReplan`.
     if (train.schedule && train.schedule.stops[train.schedule.current_stop_index] === markerId) {
-      return this.advanceScheduleAndReplan(train);
+      train.dwell_until = this.now() + STATION_DWELL_MS;
+      return [];
     }
 
     return [];
@@ -460,10 +507,52 @@ export class Scheduler {
    * and gives one-block separation on a straight loop — all from one rule.
    */
   private tryGrantClearance(train: TrainState, nextEdge: EdgeRef): ReadonlyArray<SchedulerEffect> {
+    // Conflict check FIRST (ADR-011 block exclusivity). This ordering is the
+    // invariant that prevents two trains fighting over one switch: a train
+    // only reaches the actuation branch once it has exclusive claim to the
+    // junction's section, so it cannot flip the points out from under a peer
+    // that already holds the junction.
     if (this.edgeConflictsWithAnotherTrain(train.train_id, nextEdge)) return [];
-    if (this.edgeRequiresMismatchedSwitch(nextEdge)) return [];
+    if (this.edgeRequiresMismatchedSwitch(nextEdge)) return this.maybeActuateSwitch(nextEdge);
     if (this.anyCapabilityDeniesClearance(train, nextEdge)) return [];
     return this.grantClearance(train, nextEdge);
+  }
+
+  /**
+   * The edge needs the junction in a position it isn't confirmed to be in.
+   * If a switch device is paired to the junction, throw it — emit a single
+   * `set_switch_position` command toward the edge's required position — and
+   * still WITHHOLD clearance (return only the command, no grant). When the
+   * switch confirms, `handleSwitchStateChanged` → `setSwitchPosition` →
+   * `retryBlockedClearances` re-runs `tryGrantClearance`, the position now
+   * matches, and clearance is granted.
+   *
+   * Idempotency: we send only when the required position differs from the one
+   * we've already requested for this junction (`requestedSwitchPositions`).
+   * `retryBlockedClearances` fires on many events; without this guard the
+   * command would re-issue on every retry while the switch is mid-move.
+   *
+   * If no switch device is paired, withhold as before (empty list) — the
+   * junction's position must be changed by some other agent (operator, learn
+   * mode) before the train can proceed.
+   */
+  private maybeActuateSwitch(edge: EdgeRef): ReadonlyArray<SchedulerEffect> {
+    const layoutEdge = this.layout.findEdge(edge.from_marker_id, edge.to_marker_id);
+    const required = layoutEdge?.requires_switch_state;
+    if (!required) return [];
+
+    const switchDeviceId = this.layout.switchDeviceForMarker(edge.from_marker_id);
+    if (switchDeviceId === undefined) return [];
+
+    if (this.requestedSwitchPositions.get(edge.from_marker_id) === required) return [];
+
+    this.requestedSwitchPositions.set(edge.from_marker_id, required);
+    return [
+      effects.sendCommand(switchDeviceId, 'set_switch_position', {
+        junction_marker_id: edge.from_marker_id,
+        position: required,
+      }),
+    ];
   }
 
   /**
@@ -568,6 +657,11 @@ export class Scheduler {
     ];
     if (confirmed) {
       this.layout.setSwitchPosition(junction_marker_id, position);
+      // Sync our requested-position view to reality. If the switch landed on a
+      // position we didn't request, the next retry is free to re-actuate; if it
+      // landed on the one we requested, this is a no-op that keeps the
+      // idempotency guard accurate.
+      this.requestedSwitchPositions.set(junction_marker_id, position);
       out.push(...this.retryBlockedClearances());
     }
     return out;
@@ -603,6 +697,16 @@ export class Scheduler {
 
     const train = this.trains.get(train_id);
     if (!train) return [];
+
+    // Deterministic station dwell. Checked before the length gate because the
+    // dwell applies to point trains too. When the dwell has elapsed, clear it
+    // and replan onward (advance the schedule pointer, plan the next leg, emit
+    // the route + grant). The parked train keeps emitting `train_status`, so a
+    // later status reliably observes the expiry.
+    if (train.dwell_until !== undefined && this.now() >= train.dwell_until) {
+      train.dwell_until = undefined;
+      return this.advanceScheduleAndReplan(train);
+    }
 
     // Only apply tail-deferral logic to trains with a registered length.
     if (!train.length_mm || train.length_mm === 0) return [];

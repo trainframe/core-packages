@@ -63,6 +63,15 @@ export interface TrainState {
    * the block behind the head. Populated from `device_registered.train_length_mm`.
    */
   length_mm?: number | undefined;
+
+  /**
+   * Injected-clock timestamp in ms before which the train must remain held at
+   * its current scheduled stop (the dwell). Set on arrival at a scheduled
+   * stop; the schedule pointer is not advanced and no onward clearance is
+   * granted until an event observes `now() >= dwell_until`. `undefined` when
+   * the train is not dwelling.
+   */
+  dwell_until?: number | undefined;
 }
 
 export const initialTrainState = (trainId: string): TrainState => ({
