@@ -3,15 +3,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useBroker } from '../broker/broker-context.js';
 import type { BrokerClient } from '../broker/client.js';
 import { encodeDeviceEvent } from '../broker/encode-event.js';
+import { nearestStartEdge } from '../sim/nearest-edge.js';
 import type { ToyHardware } from '../sim/toy-hardware.js';
 import { useToyHardware } from '../sim/use-toy-hardware.js';
-import {
-  CARRIAGE_SPACING_MM,
-  type WorldPosition,
-  carriageWorldPos,
-  computeTrainTrails,
-} from '../track/coupling.js';
-import { SNAP_DISTANCE } from '../track/layout-from-pieces.js';
+import { CARRIAGE_SPACING_MM, type WorldPosition, computeTrainTrails } from '../track/coupling.js';
+import { type EdgePath, composeEdgePath } from '../track/edge-path.js';
+import { SNAP_DISTANCE, compileLayout } from '../track/layout-from-pieces.js';
 import {
   type RotationDeg,
   type TrackPiece,
@@ -127,8 +124,8 @@ function resolveEdgeEndpoints(
   piecesById: ReadonlyMap<string, TrackPiece>,
 ):
   | {
-      fromPos: { readonly x: number; readonly y: number };
-      toPos: { readonly x: number; readonly y: number };
+      fromPiece: TrackPiece;
+      toPiece: TrackPiece;
       fromMarkerId: string;
       toMarkerId: string;
     }
@@ -142,11 +139,58 @@ function resolveEdgeEndpoints(
   const toPiece = piecesById.get(toPieceId);
   if (fromPiece === undefined || toPiece === undefined) return undefined;
   return {
-    fromPos: fromPiece.position,
-    toPos: toPiece.position,
+    fromPiece,
+    toPiece,
     fromMarkerId: edge.from_marker_id,
     toMarkerId: edge.to_marker_id,
   };
+}
+
+/** Round a heading (deg, clockwise from east) to the nearest `RotationDeg`. */
+function toRotationDeg(deg: number): RotationDeg {
+  return ((((Math.round(deg / 45) * 45) % 360) + 360) % 360) as RotationDeg;
+}
+
+/**
+ * The static orientation for a TRAIN snapped onto `position`, so the parked
+ * sprite already faces the way it will travel when powered on — removing the
+ * one-time heading "pop" at go-live.
+ *
+ * Uses the SAME selector the simulator uses to spawn (`nearestStartEdge` over
+ * `compileLayout`), so there is no parallel selector to drift: the spawn edge's
+ * d=0 heading from the true composite rail path is rounded to the nearest 45°.
+ * Returns `undefined` (caller keeps current rotation) when no edge originates
+ * near the position — exactly when the simulator would defer the spawn.
+ *
+ * The 45° quantisation means a curve's ~22.5° d=0 tangent still leaves a small,
+ * acceptable rotation on power-on (the live path is sampled exactly then).
+ */
+function spawnOrientationDeg(
+  position: { readonly x: number; readonly y: number },
+  pieces: ReadonlyArray<TrackPiece>,
+): RotationDeg | undefined {
+  const layout = compileLayout(pieces, 'orient');
+  const startEdge = nearestStartEdge(layout, position);
+  if (startEdge === undefined) return undefined;
+  const fromId = startEdge.from_marker_id.startsWith('M-')
+    ? startEdge.from_marker_id.slice(2)
+    : undefined;
+  const toId = startEdge.to_marker_id.startsWith('M-')
+    ? startEdge.to_marker_id.slice(2)
+    : undefined;
+  if (fromId === undefined || toId === undefined) return undefined;
+  const fromPiece = pieces.find((p) => p.id === fromId);
+  const toPiece = pieces.find((p) => p.id === toId);
+  if (fromPiece === undefined || toPiece === undefined) return undefined;
+  return toRotationDeg(composeEdgePath(fromPiece, toPiece).at(0).headingDeg);
+}
+
+/** Sample a composite edge path at distance `d`, returning a `WorldPosition`
+ * (the path's heading is already in the SVG clockwise-from-east convention). */
+function poseAt(path: EdgePath, d: number): WorldPosition {
+  const clamped = Math.max(0, Math.min(d, path.length));
+  const pose = path.at(clamped);
+  return { x: pose.x, y: pose.y, rotationDeg: pose.headingDeg };
 }
 
 /**
@@ -187,20 +231,32 @@ function placeLiveTrain(
   const endpoints = resolveEdgeEndpoints(simTrain, piecesById);
   if (endpoints === undefined) return;
 
-  const { fromPos, toPos, fromMarkerId, toMarkerId } = endpoints;
-  // Edge length from sim's LayoutState (matches what VirtualTrain uses).
-  const edgeLengthMm = sim.layout.findEdge(fromMarkerId, toMarkerId)?.estimated_length_mm ?? 200;
-  const trainDist = simTrain.getDistanceIntoEdge();
+  const { fromPiece, toPiece, fromMarkerId, toMarkerId } = endpoints;
 
-  result.set(piece.id, carriageWorldPos(fromPos, toPos, edgeLengthMm, trainDist));
+  // The TRUE rail the train rides: the composite centre-line path from the
+  // current edge's two markers, following the real arc/junction-leg geometry
+  // rather than the chord between the two piece centres.
+  const path = composeEdgePath(fromPiece, toPiece);
 
-  // Coupled carriages trail behind — clamp to 0 (v1: no multi-edge trailing).
+  // Map the sim's logical progress onto the true rail length. The sim measures
+  // progress against `estimated_length_mm`; `t` (0..1) is that fraction, and we
+  // sample the composite path at `t * L` so the train lands exactly on
+  // `toPiece`'s centre at t=1 regardless of how the estimate differs from L.
+  const estimatedLengthMm =
+    sim.layout.findEdge(fromMarkerId, toMarkerId)?.estimated_length_mm ?? 200;
+  const t = estimatedLengthMm > 0 ? simTrain.getDistanceIntoEdge() / estimatedLengthMm : 0;
+  const trainDist = t * path.length;
+
+  result.set(piece.id, poseAt(path, trainDist));
+
+  // Coupled carriages trail behind by arc-distance along the SAME composite
+  // path — clamp to 0 (v1: no multi-edge trailing).
   const carriageIds = trainTrails.get(piece.id) ?? [];
   for (let i = 0; i < carriageIds.length; i++) {
     const carriageId = carriageIds[i];
     if (carriageId === undefined) continue;
-    const carriageDist = Math.max(0, trainDist - (i + 1) * CARRIAGE_SPACING_MM);
-    result.set(carriageId, carriageWorldPos(fromPos, toPos, edgeLengthMm, carriageDist));
+    const carriageDist = trainDist - (i + 1) * CARRIAGE_SPACING_MM;
+    result.set(carriageId, poseAt(path, carriageDist));
   }
 }
 
@@ -429,11 +485,18 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
         setSelectedId(null);
         return;
       }
+      // A train snapped onto a marker faces the way it will travel at power-on
+      // (no heading pop); other pieces keep their placement rotation. Computed
+      // from the current pieces (the snap/orient is over track already placed).
+      const orient =
+        pieceType === 'train'
+          ? spawnOrientationDeg({ x: xMm, y: yMm }, piecesRef.current)
+          : undefined;
       const piece: TrackPiece = {
         id: nextPieceId(pieceType),
         type: pieceType,
         position: { x: xMm, y: yMm },
-        rotationDeg: rotation ?? 0,
+        rotationDeg: orient ?? rotation ?? 0,
         tagged: false,
       };
       setPieces((prev) => [...prev, piece]);
@@ -454,12 +517,17 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       if (moving === undefined) return prev;
       const others = prev.filter((p) => p.id !== pieceId);
       const placement = computeMovePlacement(moving, xMm, yMm, others);
+      // A moved train re-orients to its (new) spawn edge so it stays pop-free.
+      const orient =
+        moving.type === 'train'
+          ? spawnOrientationDeg({ x: placement.x, y: placement.y }, others)
+          : undefined;
       return prev.map((p) =>
         p.id === pieceId
           ? {
               ...p,
               position: { x: placement.x, y: placement.y },
-              rotationDeg: placement.rotationDeg,
+              rotationDeg: orient ?? placement.rotationDeg,
             }
           : p,
       );

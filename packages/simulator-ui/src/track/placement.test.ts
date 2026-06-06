@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { nearestStartEdge } from '../sim/nearest-edge.js';
 import { compileLayout } from './layout-from-pieces.js';
 import { type RotationDeg, type TrackPiece, getEndpoints } from './pieces.js';
 import { CONNECT_CAPTURE_MM, computeMovePlacement, computePlacement } from './placement.js';
@@ -23,11 +24,21 @@ describe('computePlacement — free placement', () => {
     expect(p).toEqual({ x: 300, y: 200, rotationDeg: 0, connected: false });
   });
 
-  it('drops a device piece (train) at the click point even near an endpoint', () => {
+  it('snaps a device piece (train) onto a nearby track marker (the rail)', () => {
     const straight = piece('s1', 'straight', 450, 300, 0);
-    // Click right on the straight's east endpoint (550, 300).
-    const p = computePlacement(550, 300, 'train', [straight]);
-    expect(p).toEqual({ x: 550, y: 300, rotationDeg: 0, connected: false });
+    // Click near the straight's centre/marker (450, 300) — within the device
+    // snap capture radius. The train snaps onto the marker so it rides the rail.
+    const p = computePlacement(500, 300, 'train', [straight]);
+    expect(p.connected).toBe(true);
+    expect(p.x).toBe(450);
+    expect(p.y).toBe(300);
+  });
+
+  it('drops a device piece (train) free when no marker is within snap range', () => {
+    const straight = piece('s1', 'straight', 450, 300, 0);
+    // Far from the only marker (450, 300): drops where clicked, unrotated.
+    const p = computePlacement(900, 300, 'train', [straight]);
+    expect(p).toEqual({ x: 900, y: 300, rotationDeg: 0, connected: false });
   });
 
   it('drops free when the click is beyond the capture radius of any endpoint', () => {
@@ -94,12 +105,54 @@ describe('computeMovePlacement — snaps on endpoint proximity, not centre', () 
     expect(p).toMatchObject({ x: 200, y: 100, rotationDeg: 90 });
   });
 
-  it('never snaps a device piece — a train has no endpoints', () => {
-    const anchor = piece('a1', 'straight', 450, 300, 0);
+  it('snaps a moved device piece (train) onto the nearest track marker', () => {
+    const anchor = piece('a1', 'straight', 450, 300, 0); // marker/centre at (450, 300)
     const train = piece('t1', 'train', 0, 0, 0);
-    // Cursor right on the joint; a train still drops free (no track topology).
-    const p = computeMovePlacement(train, 550, 300, [anchor]);
+    // Drag the train near the straight's centre (the marker) — it snaps onto it.
+    const p = computeMovePlacement(train, 480, 300, [anchor]);
+    expect(p.connected).toBe(true);
+    expect(p.x).toBe(450);
+    expect(p.y).toBe(300);
+  });
+
+  it('drops a moved device piece free, keeping rotation, when no marker is near', () => {
+    const anchor = piece('a1', 'straight', 450, 300, 0);
+    const train = piece('t1', 'train', 0, 0, 90);
+    const p = computeMovePlacement(train, 900, 300, [anchor]);
     expect(p.connected).toBe(false);
+    expect(p).toMatchObject({ x: 900, y: 300, rotationDeg: 90 });
+  });
+});
+
+describe('device snap invariant — placement point == spawn point (no pop)', () => {
+  it('a snapped train placement is the exact marker the simulator spawns it on', () => {
+    // Two adjacent straights so the layout has a marker WITH an outgoing edge.
+    const a = piece('a', 'straight', 300, 300, 0); // exit at (400,300)
+    const b = piece('b', 'straight', 500, 300, 0); // entry at (400,300) — adjacent
+    const track = [a, b];
+
+    // Drop a train near piece A's centre/marker.
+    const placement = computePlacement(330, 300, 'train', track);
+    expect(placement.connected).toBe(true);
+    // It snapped onto A's centre exactly.
+    expect(placement.x).toBe(300);
+    expect(placement.y).toBe(300);
+
+    // Drive the REAL spawn selector at the snapped position: it must resolve to
+    // marker M-a (the marker the train was snapped onto) — proving the on-canvas
+    // placement point equals the simulator's spawn point.
+    const layout = compileLayout(track, 'inv');
+    const startEdge = nearestStartEdge(layout, { x: placement.x, y: placement.y });
+    expect(startEdge).toBeDefined();
+    expect(startEdge?.from_marker_id).toBe('M-a');
+  });
+
+  it('a train dropped far from any track stays free (no snap, deferred spawn)', () => {
+    const a = piece('a', 'straight', 300, 300, 0);
+    const placement = computePlacement(800, 100, 'train', [a]);
+    expect(placement.connected).toBe(false);
+    expect(placement.x).toBe(800);
+    expect(placement.y).toBe(100);
   });
 });
 

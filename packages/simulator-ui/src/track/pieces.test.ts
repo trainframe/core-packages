@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   type RotationDeg,
   type TrackPiece,
+  getCentreLinePath,
   getEndpoints,
   getPieceShape,
   isDevicePiece,
@@ -272,5 +273,120 @@ describe('getPieceShape', () => {
 
   it('terminus shape has width 60', () => {
     expect(getPieceShape(makePiece('terminus')).width).toBe(60);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getCentreLinePath — rail geometry from the piece centre (marker) to an end.
+// ---------------------------------------------------------------------------
+
+const CURVE_HALF_LEN = 200 * (Math.PI / 8); // R · 22.5° in rad ≈ 78.54mm
+
+/** Normalised absolute angular difference in degrees, in [0, 180]. */
+function angleDelta(a: number, b: number): number {
+  const d = Math.abs(((a - b) % 360) + 360) % 360;
+  return d > 180 ? 360 - d : d;
+}
+
+describe('getCentreLinePath — half lengths', () => {
+  it('straight half-length is 100mm (200mm piece, centre to end)', () => {
+    const path = must(getCentreLinePath(makePiece('straight'), 0));
+    expect(path.length).toBeCloseTo(100, 3);
+  });
+
+  it('station half-length is 110mm', () => {
+    const path = must(getCentreLinePath(makePiece('station'), 0));
+    expect(path.length).toBeCloseTo(110, 3);
+  });
+
+  it('junction trunk/through halves are 100mm, branch half is 100mm', () => {
+    const j = makePiece('junction');
+    expect(must(getCentreLinePath(j, 0)).length).toBeCloseTo(100, 3);
+    expect(must(getCentreLinePath(j, 1)).length).toBeCloseTo(100, 3);
+    expect(must(getCentreLinePath(j, 2)).length).toBeCloseTo(100, 3);
+  });
+
+  it('terminus half-length is 30mm', () => {
+    expect(must(getCentreLinePath(makePiece('terminus'), 0)).length).toBeCloseTo(30, 3);
+  });
+
+  it('curve half-length is the ARC length R·(π/8) ≈ 78.54mm (not the chord)', () => {
+    const path = must(getCentreLinePath(makePiece('curve'), 0));
+    expect(path.length).toBeCloseTo(CURVE_HALF_LEN, 2);
+    expect(path.length).toBeGreaterThan(CURVE_HALF_LEN - 0.01);
+  });
+
+  it('returns undefined for a device piece (no endpoints)', () => {
+    expect(getCentreLinePath(makePiece('train'), 0)).toBeUndefined();
+    expect(getCentreLinePath(makePiece('curve'), 5)).toBeUndefined();
+  });
+});
+
+describe('getCentreLinePath — sampling reproduces getEndpoints at the far end', () => {
+  it('straight: sampling at length matches endpoint position and outgoing angle', () => {
+    const piece = makePiece('straight', 90);
+    const eps = getEndpoints(piece);
+    for (const i of [0, 1]) {
+      const path = must(getCentreLinePath(piece, i));
+      const end = path.at(path.length);
+      expect(approx(end.x, must(eps[i]).x)).toBe(true);
+      expect(approx(end.y, must(eps[i]).y)).toBe(true);
+      expect(angleDelta(end.headingDeg, must(eps[i]).outgoingAngleDeg)).toBeLessThan(0.5);
+    }
+  });
+
+  it('curve: sampling at length matches endpoint position and arc-tangent angle', () => {
+    const piece = makePiece('curve');
+    const eps = getEndpoints(piece);
+    for (const i of [0, 1]) {
+      const path = must(getCentreLinePath(piece, i));
+      const end = path.at(path.length);
+      expect(approx(end.x, must(eps[i]).x)).toBe(true);
+      expect(approx(end.y, must(eps[i]).y)).toBe(true);
+      expect(angleDelta(end.headingDeg, must(eps[i]).outgoingAngleDeg)).toBeLessThan(0.5);
+    }
+    // At the centre (d=0) the curve sits at the origin (the marker).
+    const start = must(getCentreLinePath(piece, 0)).at(0);
+    expect(approx(start.x, 0)).toBe(true);
+    expect(approx(start.y, 0)).toBe(true);
+  });
+
+  it('junction: each leg reproduces its endpoint position and angle', () => {
+    const piece = makePiece('junction', 45);
+    const eps = getEndpoints(piece);
+    for (const i of [0, 1, 2]) {
+      const path = must(getCentreLinePath(piece, i));
+      const end = path.at(path.length);
+      expect(approx(end.x, must(eps[i]).x)).toBe(true);
+      expect(approx(end.y, must(eps[i]).y)).toBe(true);
+      expect(angleDelta(end.headingDeg, must(eps[i]).outgoingAngleDeg)).toBeLessThan(0.5);
+    }
+  });
+});
+
+describe('getCentreLinePath — flip and rotation', () => {
+  it('a FLIPPED curve mirrors position AND heading across the x-axis', () => {
+    const normalPath = must(getCentreLinePath(makePiece('curve'), 1));
+    const flippedPath = must(getCentreLinePath({ ...makePiece('curve'), flipped: true }, 1));
+    const dMid = normalPath.length / 2;
+    const n = normalPath.at(dMid);
+    const f = flippedPath.at(dMid);
+    // x preserved, y mirrored.
+    expect(approx(f.x, n.x)).toBe(true);
+    expect(approx(f.y, -n.y)).toBe(true);
+    // Heading reflected across the x-axis (negated).
+    expect(angleDelta(f.headingDeg, -n.headingDeg)).toBeLessThan(0.5);
+  });
+
+  it('a ROTATED (90°) curve rotates position AND heading by 90°', () => {
+    const base = must(getCentreLinePath(makePiece('curve'), 1));
+    const rot = must(getCentreLinePath(makePiece('curve', 90), 1));
+    const dMid = base.length / 2;
+    const b = base.at(dMid);
+    const r = rot.at(dMid);
+    // Rotating (x,y) by +90° clockwise (SVG): (x,y) → (-y, x) about origin.
+    expect(approx(r.x, -b.y)).toBe(true);
+    expect(approx(r.y, b.x)).toBe(true);
+    expect(angleDelta(r.headingDeg, b.headingDeg + 90)).toBeLessThan(0.5);
   });
 });

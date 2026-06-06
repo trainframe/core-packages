@@ -268,6 +268,131 @@ export function getEndpoints(piece: TrackPiece): ReadonlyArray<TrackEndpoint> {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Centre-line sampling — the rail geometry from a piece's centre (its marker)
+// out to one of its endpoints.
+// ---------------------------------------------------------------------------
+//
+// `getEndpoints` answers "where are the rail ends?"; the renderer needs the
+// path *between* the marker (piece centre = origin) and an end so a train can
+// be drawn riding the true rail rather than the straight chord between two
+// piece centres. A `CentreLinePath` samples that geometry by real arc-length.
+
+/** A point on a rail with the train's heading there. */
+export interface RailPose {
+  readonly x: number;
+  readonly y: number;
+  /** Heading (degrees clockwise from east) of travel along the rail here. */
+  readonly headingDeg: number;
+}
+
+/**
+ * A sampleable rail segment from a piece's centre out to one endpoint.
+ * `length` is the true rail length in mm (arc length for curves, Euclidean for
+ * straights). `at(dist)` samples `dist` mm from the centre toward the endpoint;
+ * heading points in the centre→endpoint travel direction.
+ */
+export interface CentreLinePath {
+  readonly length: number;
+  at(distFromCentre: number): RailPose;
+}
+
+/** Euclidean length of a vector. */
+function hypot(x: number, y: number): number {
+  return Math.sqrt(x * x + y * y);
+}
+
+/**
+ * A straight (linear) centre-line from the origin (0,0) out to `(ex, ey)` in
+ * piece-local coordinates. Heading is the constant direction origin→endpoint.
+ */
+function linearHalfPath(ex: number, ey: number): CentreLinePath {
+  const length = hypot(ex, ey);
+  const headingDeg = length === 0 ? 0 : (Math.atan2(ey, ex) * 180) / Math.PI;
+  const ux = length === 0 ? 0 : ex / length;
+  const uy = length === 0 ? 0 : ey / length;
+  return {
+    length,
+    at(distFromCentre: number): RailPose {
+      return { x: ux * distFromCentre, y: uy * distFromCentre, headingDeg };
+    },
+  };
+}
+
+/**
+ * The curve's centre-line from its origin (the arc midpoint) out to the
+ * endpoint at arc angle `endAngleDeg`, sampled by real arc length. The piece
+ * origin sits at `CURVE_MID_ANGLE`; travelling toward an endpoint sweeps the
+ * arc angle toward `endAngleDeg`, and the heading is the arc tangent in that
+ * travel direction (`arcAngle + 90` when sweeping positive, `- 90` otherwise).
+ */
+function curveHalfPath(endAngleDeg: number): CentreLinePath {
+  const sweepSign = endAngleDeg >= CURVE_MID_ANGLE ? 1 : -1;
+  const length = CURVE_RADIUS_MM * toRad(Math.abs(endAngleDeg - CURVE_MID_ANGLE));
+  return {
+    length,
+    at(distFromCentre: number): RailPose {
+      const arcAngle =
+        CURVE_MID_ANGLE + (sweepSign * ((distFromCentre / CURVE_RADIUS_MM) * 180)) / Math.PI;
+      const p = curvePoint(CURVE_RADIUS_MM, arcAngle);
+      return { x: p.x, y: p.y, headingDeg: arcAngle + sweepSign * 90 };
+    },
+  };
+}
+
+/** The piece-local centre-line half-path for endpoint `index`, or undefined
+ * when the index is out of range (e.g. a device piece with no endpoints). */
+function localHalfPath(type: TrackPieceType, index: number): CentreLinePath | undefined {
+  if (type === 'curve') {
+    const endAngle = index === 0 ? CURVE_ENTRY_ANGLE : CURVE_EXIT_ANGLE;
+    if (index !== 0 && index !== 1) return undefined;
+    return curveHalfPath(endAngle);
+  }
+  const local = localEndpoints(type)[index];
+  if (local === undefined) return undefined;
+  return linearHalfPath(local.lx, local.ly);
+}
+
+/**
+ * Wrap a piece-local `CentreLinePath` so its samples come out in world space,
+ * applying the same mirror→rotate→translate the renderer (and `getEndpoints`)
+ * use. `flip` mirrors across the local x-axis (y and heading negate) first.
+ */
+function worldHalfPath(piece: TrackPiece, local: CentreLinePath): CentreLinePath {
+  const flip = piece.flipped === true;
+  return {
+    length: local.length,
+    at(distFromCentre: number): RailPose {
+      const pose = local.at(distFromCentre);
+      const ly = flip ? -pose.y : pose.y;
+      const heading = flip ? -pose.headingDeg : pose.headingDeg;
+      const world = transformPoint(
+        pose.x,
+        ly,
+        piece.rotationDeg,
+        piece.position.x,
+        piece.position.y,
+      );
+      return { x: world.x, y: world.y, headingDeg: normaliseAngle(heading + piece.rotationDeg) };
+    },
+  };
+}
+
+/**
+ * World-space centre-line half-path for a placed `piece`, from its centre
+ * (marker) out to endpoint `endpointIndex`. Returns `undefined` for an
+ * out-of-range index (device pieces have none). Sampling at `length` reproduces
+ * `getEndpoints(piece)[endpointIndex]`'s position and `outgoingAngleDeg`.
+ */
+export function getCentreLinePath(
+  piece: TrackPiece,
+  endpointIndex: number,
+): CentreLinePath | undefined {
+  const local = localHalfPath(piece.type, endpointIndex);
+  if (local === undefined) return undefined;
+  return worldHalfPath(piece, local);
+}
+
 /**
  * SVG path string (and bounding box) for a piece, in piece-local coordinates.
  * The consumer is expected to apply an SVG `transform="translate(x,y) rotate(r)"`

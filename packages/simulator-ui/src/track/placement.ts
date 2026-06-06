@@ -15,7 +15,13 @@
  */
 
 import { SNAP_DISTANCE } from './layout-from-pieces.js';
-import { type RotationDeg, type TrackPiece, type TrackPieceType, getEndpoints } from './pieces.js';
+import {
+  type RotationDeg,
+  type TrackPiece,
+  type TrackPieceType,
+  getEndpoints,
+  isDevicePiece,
+} from './pieces.js';
 
 /**
  * How near a click must fall to an open endpoint for the new piece to connect
@@ -23,6 +29,16 @@ import { type RotationDeg, type TrackPiece, type TrackPieceType, getEndpoints } 
  * pieces so clicking in open space still drops a free-standing piece.
  */
 export const CONNECT_CAPTURE_MM = 60;
+
+/**
+ * How near a dropped/moved device piece (train/gate/carriage) must fall to a
+ * track marker (a non-device piece's centre) to snap onto it (mm). Generous —
+ * pieces are ~200 mm long, so half a piece-length lets an operator drop a train
+ * roughly on a piece and have it land cleanly on that piece's marker. This is
+ * what makes "placement point == spawn point": the snapped centre is the marker
+ * the simulator spawns the train onto (`nearestStartEdge`, distance 0).
+ */
+export const DEVICE_SNAP_CAPTURE_MM = 120;
 
 export interface Placement {
   readonly x: number;
@@ -123,6 +139,54 @@ function nearestOpenEndpoint(
 }
 
 /**
+ * The nearest track marker (a non-device piece's centre) to `(x, y)` within
+ * `DEVICE_SNAP_CAPTURE_MM`, or `undefined` if none is in reach. Device pieces
+ * (train/gate/carriage) are NOT markers — `emitMarkers` skips them and so does
+ * the simulator's spawn selector — so they are excluded as snap candidates.
+ * Snapping a device piece onto this centre makes its on-canvas position equal
+ * the marker the simulator spawns it onto (`nearestStartEdge`, distance 0).
+ */
+function nearestMarkerCentre(
+  x: number,
+  y: number,
+  pieces: ReadonlyArray<TrackPiece>,
+): { x: number; y: number } | undefined {
+  let best: { x: number; y: number } | undefined;
+  let bestDist = DEVICE_SNAP_CAPTURE_MM;
+  for (const p of pieces) {
+    if (isDevicePiece(p.type)) continue;
+    const d = distance(x, y, p.position.x, p.position.y);
+    if (d <= bestDist) {
+      bestDist = d;
+      best = { x: p.position.x, y: p.position.y };
+    }
+  }
+  return best;
+}
+
+/**
+ * Placement for a device piece (train/gate/carriage) dropped/moved to
+ * `(x, y)`: snap onto the nearest track marker within `DEVICE_SNAP_CAPTURE_MM`
+ * so it rides the rail and its position equals the simulator's spawn point;
+ * otherwise drop it free at `(x, y)` keeping `rotationDeg`. Orientation along
+ * the spawn edge is applied separately by the composition layer (it needs the
+ * compiled layout / spawn-edge selector, which this pure module must not import
+ * to avoid a sim→track cycle).
+ */
+function placeDevicePiece(
+  x: number,
+  y: number,
+  rotationDeg: RotationDeg,
+  pieces: ReadonlyArray<TrackPiece>,
+): Placement {
+  const marker = nearestMarkerCentre(x, y, pieces);
+  if (marker === undefined) {
+    return { x, y, rotationDeg, connected: false };
+  }
+  return { x: marker.x, y: marker.y, rotationDeg, connected: true };
+}
+
+/**
  * The open endpoint a piece dropped at `(clickX, clickY)` would snap onto, or
  * `null` if nothing is in reach. Type-independent (it's the nearest open
  * endpoint within the capture radius) — used to highlight the join during a
@@ -170,9 +234,11 @@ export function computePlacement(
     flipped,
   });
   const entry = localEndpoints[0];
-  // No endpoints → device piece (train/gate/carriage): drop where clicked.
+  // No endpoints → device piece (train/gate/carriage): snap onto the nearest
+  // track marker within reach so it lands on the rail (== the sim spawn point),
+  // else drop where clicked.
   if (entry === undefined) {
-    return { x: clickX, y: clickY, rotationDeg: 0, connected: false };
+    return placeDevicePiece(clickX, clickY, 0, pieces);
   }
 
   const anchor = nearestOpenEndpoint(clickX, clickY, pieces);
@@ -239,9 +305,12 @@ export function computeMovePlacement(
     connected: false,
   };
   // Local endpoints (origin, unrotated, current flip) — the candidate's own
-  // ends in piece-local coordinates. Device pieces have none → never snap.
+  // ends in piece-local coordinates. Device pieces have none → snap onto the
+  // nearest track marker (rail) within reach instead of dropping free.
   const localEndpoints = getEndpoints({ ...piece, position: { x: 0, y: 0 }, rotationDeg: 0 });
-  if (localEndpoints.length === 0) return free;
+  if (localEndpoints.length === 0) {
+    return placeDevicePiece(cursorXMm, cursorYMm, piece.rotationDeg, others);
+  }
 
   // The same endpoints in world space at the piece's current cursor pose, used
   // only to decide which end is nearest a neighbour's open end. Index i here
