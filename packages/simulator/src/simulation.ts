@@ -169,6 +169,22 @@ export class Simulation {
     return train;
   }
 
+  /**
+   * Toggle a train's power WITHOUT despawning it. A powered-off train stays
+   * in `this.trains` (so `getTrain` still returns it for the renderer to place
+   * at its frozen position), becomes inert (stops moving, ignores commands),
+   * and goes silent — crucially it emits NO `device_disconnected`. A server on
+   * the bus therefore keeps its last state and holds its block reserved.
+   * Power-on resumes driving from exactly where it stopped. No-op for an
+   * unknown train id.
+   *
+   * This is distinct from `despawnTrain` (genuine removal, emits
+   * `device_disconnected`) — power is not lifecycle.
+   */
+  setTrainPowered(train_id: string, powered: boolean): void {
+    this.trains.get(train_id)?.setPowered(powered);
+  }
+
   spawnGate(device_id: string): VirtualGate {
     const gate = new VirtualGate(device_id, (e) =>
       this.captureEvent({ at_ms: this.clock.now(), ...e }),

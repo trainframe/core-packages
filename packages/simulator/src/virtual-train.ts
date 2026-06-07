@@ -101,6 +101,14 @@ export class VirtualTrain {
   // markers indefinitely, choosing the next edge from its own layout (the
   // physical rails) rather than a route, until released by revoke/emergency.
   private exploring = false;
+  // Power state. A powered-off train is INERT (does not move; ignores
+  // commands) and SILENT (emits nothing, including any already-scheduled
+  // detection-latency callbacks). It stays physically on the track — its
+  // edge, distance, route, and clearance limit are all retained, frozen — so
+  // power-on resumes exactly where it stopped. This is distinct from despawn:
+  // a powered-off train remains in the simulation and never emits
+  // `device_disconnected`, so a server on the bus keeps its block reserved.
+  private powered = true;
 
   constructor(
     private readonly device_id: string,
@@ -126,6 +134,10 @@ export class VirtualTrain {
 
   /** Apply commands sent by the scheduler. */
   acceptCommand(command_type: string, payload: unknown): void {
+    // A powered-off train ignores all commands — it is electrically dead. The
+    // server keeps its last-known clearance; commands are not buffered because
+    // a silent train elicits no new commands from an event-driven scheduler.
+    if (!this.powered) return;
     switch (command_type) {
       case 'begin_exploration': {
         // Open-ended clearance: drive forward and keep reporting markers until
@@ -197,6 +209,10 @@ export class VirtualTrain {
   }
 
   tick(dt_ms: number): void {
+    // A powered-off train is inert and silent: it does not advance and emits
+    // nothing. Its position, edge, route, and clearance limit stay frozen so
+    // power-on resumes from exactly here.
+    if (!this.powered) return;
     const dt_s = dt_ms / 1000;
 
     // Spurious reads happen regardless of whether the train is on an edge.
@@ -205,7 +221,7 @@ export class VirtualTrain {
       this.random.bernoulli(this.config.spurious_read_rate)
     ) {
       const tag_id = `spurious-${Math.floor(this.random.range(0, 1_000_000))}`;
-      this.emit({
+      this.emitEvent({
         event_type: 'tag_observed',
         device_id: this.device_id,
         payload: { tag_id, direction: 'forward' },
@@ -257,7 +273,7 @@ export class VirtualTrain {
       payload.route_id = this.route_id;
       payload.route_progress_edge_index = this.route_index;
     }
-    this.emit({
+    this.emitEvent({
       event_type: 'train_status',
       device_id: this.device_id,
       payload,
@@ -416,7 +432,7 @@ export class VirtualTrain {
   }
 
   private emitOvershootAnomaly(marker_id: string, overshoot_mm: number): void {
-    this.emit({
+    this.emitEvent({
       event_type: 'anomaly',
       device_id: this.device_id,
       payload: {
@@ -439,7 +455,7 @@ export class VirtualTrain {
       ),
     );
     this.clock.schedule(latency_ms, () => {
-      this.emit({
+      this.emitEvent({
         event_type: 'tag_observed',
         device_id: this.device_id,
         payload: { tag_id, direction: 'forward' },
@@ -450,13 +466,47 @@ export class VirtualTrain {
     if (this.config.double_read_rate > 0 && this.random.bernoulli(this.config.double_read_rate)) {
       const extra_ms = Math.max(0, this.random.normal(10, 5));
       this.clock.schedule(latency_ms + extra_ms, () => {
-        this.emit({
+        this.emitEvent({
           event_type: 'tag_observed',
           device_id: this.device_id,
           payload: { tag_id, direction: 'forward' },
         });
       });
     }
+  }
+
+  /**
+   * The single chokepoint every event flows through. When the train is
+   * powered off it is silent: nothing reaches the injected sink — not status,
+   * not marker reads, not spurious reads, not anomalies, and not detection-
+   * latency callbacks that were scheduled *before* the power-off and would
+   * otherwise fire during the off period.
+   */
+  private emitEvent(e: TrainEvent): void {
+    if (!this.powered) return;
+    this.emit(e);
+  }
+
+  /**
+   * Set the train's power state. Power OFF freezes it inert-in-place: motion
+   * stops immediately (velocity 0) but its edge, distance, retained target
+   * velocity, route, and clearance limit are kept so power ON resumes exactly
+   * where it stopped — `adjustVelocity` pulls back up to the retained target
+   * on the next tick, with no need for the server to re-issue clearance. Idempotent.
+   */
+  setPowered(powered: boolean): void {
+    if (this.powered === powered) return;
+    this.powered = powered;
+    if (!powered) {
+      // Stop dead. The target is retained, so power-on re-accelerates toward
+      // whatever clearance the train still held.
+      this.velocity_mm_s = 0;
+    }
+  }
+
+  /** Whether the train is currently powered (driven) vs inert-in-place. */
+  isPowered(): boolean {
+    return this.powered;
   }
 
   // Observers for tests

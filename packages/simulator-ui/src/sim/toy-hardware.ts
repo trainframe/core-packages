@@ -70,13 +70,27 @@ export interface ToyHardwareOptions {
  *    topology — adding, removing, moving, or rotating a track piece);
  *  - the broker bridge that transports its events to MQTT;
  *  - the set of device-piece ids the operator has scanned live, so spawn /
- *    despawn calls only fire on actual transitions.
+ *    despawn calls only fire on actual transitions;
+ *  - the subset of those that are currently powered OFF in place.
+ *
+ * Three distinct lifecycle operations, kept separate:
+ *  1. SCAN / UNSCAN (live set) — a train entering the live set is spawned and
+ *     announced on the bus; leaving it is a genuine despawn that publishes
+ *     `device_disconnected`. This is the delete / unscan path.
+ *  2. POWER off / on (powered subset) — toggles a live train between driven and
+ *     inert-in-place. It stays spawned in the sim and on the bus; it is NOT
+ *     despawned and emits NO `device_disconnected`. A silent train leaves the
+ *     server holding its block. Handled in `syncPower`, never `syncLive`.
+ *  3. MOVE (drag) — relocation, handled entirely in the UI piece coordinates;
+ *     it never routes through this class's power or live reconciliation.
  *
  * The contract with `ToyTable.tsx`:
  *  - `syncLayout(pieces)` is called on every render; it short-circuits when
  *    the non-device topology hasn't changed.
  *  - `syncLive(pieces, liveIds)` is called on every render with the latest
  *    placed pieces and the operator's live set; spawn / despawn happen here.
+ *  - `syncPower(pieces, poweredOffIds)` toggles power-in-place for live trains;
+ *    no spawn / despawn / disconnect ever happens here.
  *  - `tick(realElapsedMs)` is called from a `requestAnimationFrame` loop in
  *    the hook.
  *
@@ -95,6 +109,11 @@ export class ToyHardware {
   private layout: Layout;
   private topology: string;
   private lastLive: ReadonlySet<string> = new Set();
+  // The subset of on-track (live) trains the operator has powered OFF in place.
+  // Distinct from `lastLive`: a powered-off train stays spawned in the sim (it
+  // is still on the track) but is inert and silent. Power is not lifecycle —
+  // it never spawns, despawns, or publishes `device_disconnected`.
+  private lastPoweredOff: ReadonlySet<string> = new Set();
 
   constructor(options: ToyHardwareOptions) {
     this.client = options.client;
@@ -130,6 +149,34 @@ export class ToyHardware {
     this.bridge = this.createBridge(this.simulation);
     this.bridge.start();
     this.lastLive = new Set();
+    this.lastPoweredOff = new Set();
+  }
+
+  /**
+   * Reconcile which live trains are powered OFF in place. A train newly in
+   * `poweredOffIds` is set inert (frozen at its current sim position, silent on
+   * the bus — no `device_disconnected`); one newly absent is powered back on
+   * and resumes driving from where it stopped. Only affects trains already
+   * spawned in the sim; ids not in the live set or not yet spawned are ignored.
+   * Never spawns, despawns, or publishes anything.
+   */
+  syncPower(pieces: ReadonlyArray<TrackPiece>, poweredOffIds: ReadonlySet<string>): void {
+    const piecesById = new Map<string, TrackPiece>();
+    for (const p of pieces) piecesById.set(p.id, p);
+
+    const apply = (pieceId: string, powered: boolean): void => {
+      const piece = piecesById.get(pieceId);
+      if (piece === undefined || piece.type !== 'train') return;
+      this.simulation.setTrainPowered(deviceIdForDevicePiece(piece), powered);
+    };
+
+    for (const pieceId of poweredOffIds) {
+      if (!this.lastPoweredOff.has(pieceId)) apply(pieceId, false);
+    }
+    for (const pieceId of this.lastPoweredOff) {
+      if (!poweredOffIds.has(pieceId)) apply(pieceId, true);
+    }
+    this.lastPoweredOff = new Set(poweredOffIds);
   }
 
   /**

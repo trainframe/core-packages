@@ -501,7 +501,7 @@ describe('ToyTable — scan and power', () => {
     expect(screen.getByTestId('action-power-off')).toBeTruthy();
   });
 
-  it('clicking a live train`s power dot powers it off and publishes device_disconnected', async () => {
+  it('clicking a live train`s power dot powers it OFF IN PLACE — inert, no device_disconnected, stays on the bus', async () => {
     const user = userEvent.setup();
     const { client } = renderToyTable();
     const pieceId = await placeArmedPiece('train');
@@ -511,18 +511,34 @@ describe('ToyTable — scan and power', () => {
 
     dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
     expect(placed.getAttribute('data-live')).toBe('true');
+    expect(placed.getAttribute('data-powered')).toBe('true');
 
     await user.click(screen.getByTestId('toybox-train')); // disarm
     fireEvent.click(screen.getByTestId(`power-${pieceId}`));
 
+    // Power-off is NOT a disconnect: a dead train doesn't announce its
+    // departure, it just stops talking. The server keeps its block reserved.
     const disconnects = client.published.filter((m) =>
       m.topic.startsWith('railway/events/device_disconnected/T-'),
     );
-    expect(disconnects.length).toBe(1);
-    expect(placed.getAttribute('data-live')).toBe('false');
+    expect(disconnects.length).toBe(0);
+    // It stays on the bus (live), but is now inert (not powered) — rendered
+    // dark at its frozen sim position rather than despawned/teleported.
+    expect(placed.getAttribute('data-live')).toBe('true');
+    expect(placed.getAttribute('data-powered')).toBe('false');
+    // The piece is still in the sim (not despawned).
+    expect(screen.getByTestId(`piece-${pieceId}`)).toBeTruthy();
+
+    // Power it back ON via the dot — it returns to driven.
+    fireEvent.click(screen.getByTestId(`power-${pieceId}`));
+    expect(placed.getAttribute('data-powered')).toBe('true');
+    expect(
+      client.published.filter((m) => m.topic.startsWith('railway/events/device_disconnected/T-'))
+        .length,
+    ).toBe(0);
   });
 
-  it('the ActionBar Power off button powers a selected live train off', async () => {
+  it('the ActionBar Power off/on button toggles a selected live train in place (no disconnect)', async () => {
     const user = userEvent.setup();
     const { client } = renderToyTable();
     const pieceId = await placeArmedPiece('train');
@@ -534,13 +550,18 @@ describe('ToyTable — scan and power', () => {
     await user.click(screen.getByTestId('toybox-train')); // disarm
     fireEvent.click(placed); // select the live train
 
+    // A powered train shows "Power off".
     fireEvent.click(screen.getByTestId('action-power-off'));
+    expect(placed.getAttribute('data-live')).toBe('true');
+    expect(placed.getAttribute('data-powered')).toBe('false');
+    expect(
+      client.published.filter((m) => m.topic.startsWith('railway/events/device_disconnected/T-'))
+        .length,
+    ).toBe(0);
 
-    const disconnects = client.published.filter((m) =>
-      m.topic.startsWith('railway/events/device_disconnected/T-'),
-    );
-    expect(disconnects.length).toBe(1);
-    expect(placed.getAttribute('data-live')).toBe('false');
+    // Now the button reads "Power on" and resumes the train.
+    fireEvent.click(screen.getByTestId('action-power-on'));
+    expect(placed.getAttribute('data-powered')).toBe('true');
   });
 
   it('dropping a gate publishes device_registered with the gating capability', async () => {
@@ -564,6 +585,32 @@ describe('ToyTable — scan and power', () => {
     const envelope = decodeEnvelope(reg.payload);
     const payload = envelope.payload as { capabilities: string[] };
     expect(payload.capabilities).toEqual(['core.gates_clearance']);
+  });
+
+  it('a live gate`s power dot is a status-only cue — not an interactive button', async () => {
+    const user = userEvent.setup();
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('gate');
+
+    const placed = document.querySelector(`[data-piece-id="${pieceId}"]`) as HTMLElement | null;
+    if (!placed) throw new Error('unreachable');
+
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+    expect(placed.getAttribute('data-live')).toBe('true');
+
+    // Power-in-place is a TRAIN concept; a gate has no inert state. Its dot
+    // shows live/inert colour but must NOT pose as a button (which would be a
+    // dead affordance: clicking it does nothing). Clicking it is a harmless
+    // no-op — no despawn, no device_disconnected.
+    await user.click(screen.getByTestId('toybox-gate')); // disarm
+    const dot = screen.getByTestId(`power-${pieceId}`);
+    expect(dot.getAttribute('role')).toBeNull();
+    fireEvent.click(dot);
+    const disconnects = client.published.filter((m) =>
+      m.topic.startsWith('railway/events/device_disconnected/GATE-'),
+    );
+    expect(disconnects.length).toBe(0);
+    expect(placed.getAttribute('data-live')).toBe('true');
   });
 });
 

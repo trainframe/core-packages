@@ -52,7 +52,7 @@ describe('ToyHardware', () => {
     }
   });
 
-  it('despawns the train when the operator powers it back off', () => {
+  it('despawns the train when the operator UNSCANS it (drops it from the live set)', () => {
     const client = new InMemoryBrokerClient();
     client.connect('inmem://');
     const hardware = new ToyHardware({ client, newId });
@@ -60,9 +60,45 @@ describe('ToyHardware', () => {
       const { pieces, train } = twoStraightsAndATrain();
       hardware.syncLayout(pieces);
       hardware.syncLive(pieces, new Set([train.id]));
+      // Leaving the live set is a genuine despawn (unscan / delete path): the
+      // train is removed from the sim and `device_disconnected` is published.
       hardware.syncLive(pieces, new Set());
       const sim = hardware.getSimulation();
       expect(sim.getTrain(`T-${train.id}`)).toBeUndefined();
+      const offTopic = `railway/events/device_disconnected/T-${train.id}`;
+      expect(client.published.find((m) => m.topic === offTopic)).toBeDefined();
+    } finally {
+      hardware.dispose();
+    }
+  });
+
+  it('powering a train OFF in place keeps it spawned, inert, and silent (no device_disconnected)', () => {
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId });
+    try {
+      const { pieces, train } = twoStraightsAndATrain();
+      hardware.syncLayout(pieces);
+      hardware.syncLive(pieces, new Set([train.id]));
+      const sim = hardware.getSimulation();
+      const simTrain = sim.getTrain(`T-${train.id}`);
+      expect(simTrain).toBeDefined();
+      if (simTrain === undefined) throw new Error('unreachable');
+
+      // Power it off WITHOUT removing it from the live set — it stays on the
+      // track, frozen at its position.
+      hardware.syncPower(pieces, new Set([train.id]));
+
+      // Still in the sim (NOT despawned).
+      expect(sim.getTrain(`T-${train.id}`)).toBe(simTrain);
+      expect(simTrain.isPowered()).toBe(false);
+      // No disconnect was published — a powered-off train just goes silent.
+      const offTopic = `railway/events/device_disconnected/T-${train.id}`;
+      expect(client.published.find((m) => m.topic === offTopic)).toBeUndefined();
+
+      // Power back on resumes it.
+      hardware.syncPower(pieces, new Set());
+      expect(simTrain.isPowered()).toBe(true);
     } finally {
       hardware.dispose();
     }

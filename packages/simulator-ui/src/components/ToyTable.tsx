@@ -372,12 +372,14 @@ function layerFilter(layer: number): string | undefined {
   return `drop-shadow(${s.dx}px ${s.dy}px ${s.blur}px rgba(0,0,0,${opacity}))`;
 }
 
-/** An explicit request to power a live wire device OFF (emit
- * `device_disconnected`). Raised by clicking the device's power dot or the
- * ActionBar "Power off" button — NOT by clicking the device body, which only
- * selects it. */
-interface PowerOffAction {
-  readonly type: 'power-off';
+/** An explicit request to TOGGLE a live wire device's power in place (off↔on).
+ * Power OFF makes a train inert-in-place — it stays on the track at its current
+ * position and goes silent; it is NOT despawned and emits NO
+ * `device_disconnected`. Power ON resumes it. Raised by clicking the device's
+ * power dot or the ActionBar power button — NOT by clicking the device body,
+ * which only selects it. */
+interface PowerToggleAction {
+  readonly type: 'power-toggle';
   readonly pieceId: string;
 }
 
@@ -465,6 +467,11 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   const [activeLayer, setActiveLayer] = useState(0);
   /** Set of piece IDs whose device is currently live on the broker. */
   const [liveIds, setLiveIds] = useState<ReadonlySet<string>>(() => new Set());
+  /** Subset of live train piece IDs the operator has powered OFF in place.
+   * A powered-off train stays on the track (still in `liveIds`, still spawned
+   * and rendered at its frozen sim position) but is inert and silent — it is
+   * NOT despawned and emits NO `device_disconnected`. `powered === live && !off`. */
+  const [poweredOffIds, setPoweredOffIds] = useState<ReadonlySet<string>>(() => new Set());
   /** Pieces the operator has placed into the scan box. Keyed by piece id. */
   const piecesRef = useRef(pieces);
   piecesRef.current = pieces;
@@ -506,6 +513,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   const { hardwareRef } = useToyHardware({
     pieces,
     liveIds,
+    poweredOffIds,
     client,
     onTick: () => {
       // Re-render with fresh sim positions while something is actually moving:
@@ -700,6 +708,14 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       next.delete(selectedId);
       return next;
     });
+    // Delete is a genuine despawn: drop any power-off bookkeeping too so a
+    // re-placed piece with a recycled id never resurrects as inert.
+    setPoweredOffIds((prev) => {
+      if (!prev.has(selectedId)) return prev;
+      const next = new Set(prev);
+      next.delete(selectedId);
+      return next;
+    });
     setSelectedId(null);
   }, [selectedId]);
 
@@ -755,42 +771,39 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     [client],
   );
 
-  // Power a live wire device OFF — emit `device_disconnected` and drop it from
-  // the live set. Only wire-visible devices (train / gate) can be powered off;
-  // carriages are wire-invisible so this is a no-op for them. This is the SOLE
-  // power-off path: it's reached by an EXPLICIT affordance (the device's power
-  // dot, or the ActionBar "Power off" button), never by clicking the device
-  // body — clicking the body merely selects it (see `PieceRenderer.handleClick`).
-  const powerOffPiece = useCallback(
-    (pieceId: string) => {
-      const piece = piecesRef.current.find((p) => p.id === pieceId);
-      if (piece === undefined) return;
-      if (!isWireDevice(piece.type)) return;
-      const device_id = deviceIdForDevicePiece(piece);
-      const { topic, payload } = encodeDeviceEvent('device_disconnected', device_id, {});
-      client.publish(topic, payload);
-      setLiveIds((prev) => {
-        if (!prev.has(piece.id)) return prev;
-        const next = new Set(prev);
-        next.delete(piece.id);
-        return next;
-      });
-    },
-    [client],
-  );
+  // Toggle a live train's power IN PLACE (off↔on). Power OFF makes it inert at
+  // its current position and silent on the bus — it stays in `liveIds` (so it
+  // keeps rendering at its frozen sim position) and emits NO
+  // `device_disconnected`. The server, hearing silence (not a disconnect),
+  // keeps the train's last state and holds its block reserved. Power ON resumes
+  // driving. Only train pieces are powered (gates have no motion); a gate or
+  // carriage toggle is a no-op. This is the SOLE power path: reached by an
+  // EXPLICIT affordance (the device's power dot, or the ActionBar power
+  // button), never by clicking the device body — that merely selects.
+  const togglePower = useCallback((pieceId: string) => {
+    const piece = piecesRef.current.find((p) => p.id === pieceId);
+    if (piece === undefined || piece.type !== 'train') return;
+    if (!liveIdsRef.current.has(piece.id)) return; // not on the bus — nothing to power
+    setPoweredOffIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(piece.id)) next.delete(piece.id);
+      else next.add(piece.id);
+      return next;
+    });
+  }, []);
 
   // Route a piece's pointer action: a body click selects; the power dot raises
-  // an explicit `power-off`. Selecting a live train does NOT power it off and
+  // an explicit `power-toggle`. Selecting a live train does NOT power it off and
   // does NOT teleport it — it keeps rendering at its simulated edge position.
   const handlePiecePointerAction = useCallback(
-    (pieceId: string, action: 'select' | PowerOffAction) => {
+    (pieceId: string, action: 'select' | PowerToggleAction) => {
       if (action === 'select') {
         setSelectedId(pieceId);
         return;
       }
-      powerOffPiece(pieceId);
+      togglePower(pieceId);
     },
-    [powerOffPiece],
+    [togglePower],
   );
 
   const selectedPiece = pieces.find((p) => p.id === selectedId) ?? null;
@@ -828,11 +841,12 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
           <ActionBar
             selectedPiece={selectedPiece}
             selectedLive={selectedPiece !== null && liveIds.has(selectedPiece.id)}
+            selectedPoweredOff={selectedPiece !== null && poweredOffIds.has(selectedPiece.id)}
             onRotate={rotateSelected}
             onFlip={flipSelected}
             onDelete={deleteSelected}
-            onPowerOff={() => {
-              if (selectedPiece !== null) powerOffPiece(selectedPiece.id);
+            onTogglePower={() => {
+              if (selectedPiece !== null) togglePower(selectedPiece.id);
             }}
             armedType={armedType}
             activeLayer={activeLayer}
@@ -841,6 +855,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
           <Table
             pieces={pieces}
             liveIds={liveIds}
+            poweredOffIds={poweredOffIds}
             selectedId={selectedId}
             armedType={armedType}
             activeLayer={activeLayer}
@@ -942,12 +957,14 @@ interface ActionBarProps {
   readonly selectedPiece: TrackPiece | null;
   /** Whether the selected piece is currently live on the bus (scanned). */
   readonly selectedLive: boolean;
+  /** Whether the selected (live) train is powered OFF in place. */
+  readonly selectedPoweredOff: boolean;
   readonly onRotate: () => void;
   readonly onFlip: () => void;
   readonly onDelete: () => void;
-  /** Power the selected piece off the bus (explicit; only shown for a live
-   * wire device). */
-  readonly onPowerOff: () => void;
+  /** Toggle the selected train's power in place (off↔on). Shown only for a
+   * live train; never despawns or disconnects it. */
+  readonly onTogglePower: () => void;
   readonly armedType: TrackPieceType | null;
   /** The deck new pieces land on (0 = ground). */
   readonly activeLayer: number;
@@ -965,6 +982,7 @@ const SELECTABLE_LAYERS: ReadonlyArray<{ readonly layer: number; readonly label:
 function actionBarStatus(
   selectedPiece: TrackPiece | null,
   selectedLive: boolean,
+  selectedPoweredOff: boolean,
   armedType: TrackPieceType | null,
 ): string {
   if (armedType !== null) {
@@ -980,6 +998,9 @@ function actionBarStatus(
     return `${base} — drag it onto the scan box to put it on the bus`;
   }
   if (selectedPiece.type === 'train' && selectedLive) {
+    if (selectedPoweredOff) {
+      return `${base} · powered off — inert on the track (block held); Power on to resume`;
+    }
     return `${base} · on the bus — drive it from the visualiser (Learn track or a schedule)`;
   }
   return base;
@@ -988,18 +1009,20 @@ function actionBarStatus(
 function ActionBar({
   selectedPiece,
   selectedLive,
+  selectedPoweredOff,
   onRotate,
   onFlip,
   onDelete,
-  onPowerOff,
+  onTogglePower,
   armedType,
   activeLayer,
   onActiveLayerChange,
 }: ActionBarProps) {
-  // The explicit power-off affordance: shown only when the selected piece is a
-  // live wire device (train / gate). Clicking a live train's body selects it
-  // (not power off), so this button is how the operator takes it off the bus.
-  const canPowerOff = selectedPiece !== null && selectedLive && isWireDevice(selectedPiece.type);
+  // The explicit power affordance: shown only when the selected piece is a live
+  // train. Clicking a live train's body selects it (not power off), so this
+  // button is how the operator toggles its power. It toggles in place — never
+  // despawns the train or publishes `device_disconnected`.
+  const canTogglePower = selectedPiece !== null && selectedLive && selectedPiece.type === 'train';
   return (
     <div className="tf-toytable__actions">
       <button type="button" onClick={onRotate} disabled={selectedPiece === null}>
@@ -1011,9 +1034,13 @@ function ActionBar({
       <button type="button" onClick={onDelete} disabled={selectedPiece === null}>
         Delete (Del)
       </button>
-      {canPowerOff && (
-        <button type="button" onClick={onPowerOff} data-testid="action-power-off">
-          Power off
+      {canTogglePower && (
+        <button
+          type="button"
+          onClick={onTogglePower}
+          data-testid={selectedPoweredOff ? 'action-power-on' : 'action-power-off'}
+        >
+          {selectedPoweredOff ? 'Power on' : 'Power off'}
         </button>
       )}
       <span className="tf-toytable__layer-selector" aria-label="Active layer">
@@ -1031,7 +1058,7 @@ function ActionBar({
         ))}
       </span>
       <span className="tf-toytable__status">
-        {actionBarStatus(selectedPiece, selectedLive, armedType)}
+        {actionBarStatus(selectedPiece, selectedLive, selectedPoweredOff, armedType)}
       </span>
     </div>
   );
@@ -1044,6 +1071,8 @@ function ActionBar({
 interface TableProps {
   readonly pieces: ReadonlyArray<TrackPiece>;
   readonly liveIds: ReadonlySet<string>;
+  /** Subset of live train ids powered OFF in place (rendered dark / inert). */
+  readonly poweredOffIds: ReadonlySet<string>;
   readonly selectedId: string | null;
   readonly armedType: TrackPieceType | null;
   /** The deck new pieces land on / snapping is gated to (0 = ground). */
@@ -1074,12 +1103,13 @@ interface TableProps {
   readonly onMovePiece: (pieceId: string, xMm: number, yMm: number) => void;
   /** Begin scanning a piece (pointer-dragged onto the scan box). */
   readonly onScanPiece: (pieceId: string) => void;
-  readonly onPieceAction: (pieceId: string, action: 'select' | PowerOffAction) => void;
+  readonly onPieceAction: (pieceId: string, action: 'select' | PowerToggleAction) => void;
 }
 
 function Table({
   pieces,
   liveIds,
+  poweredOffIds,
   selectedId,
   armedType,
   activeLayer,
@@ -1416,6 +1446,7 @@ function Table({
               piece={p}
               selected={p.id === selectedId}
               live={liveIds.has(p.id)}
+              poweredOff={poweredOffIds.has(p.id)}
               armedType={armedType}
               invalidOverlap={overlapIds.has(p.id)}
               coupledToTrainId={carriageCoupledTo.get(p.id)}
@@ -1498,7 +1529,12 @@ function MarkerDot({ piece, selected }: { piece: TrackPiece; selected: boolean }
 interface PieceRendererProps {
   readonly piece: TrackPiece;
   readonly selected: boolean;
+  /** On the bus / scanned (spawned in the sim). For a train this stays true
+   * while powered off — power is not lifecycle. */
   readonly live: boolean;
+  /** A live train the operator has powered OFF in place: inert and silent,
+   * rendered dark at its frozen sim position. */
+  readonly poweredOff: boolean;
   readonly armedType: TrackPieceType | null;
   /** When true, this piece is part of an invalid same-layer track-on-track
    * overlap and is drawn with a red error outline. */
@@ -1516,7 +1552,7 @@ interface PieceRendererProps {
    * (uncoupled or deferred pieces sit at their placement coordinates).
    */
   readonly renderPosition: WorldPosition | undefined;
-  readonly onAction: (action: 'select' | PowerOffAction) => void;
+  readonly onAction: (action: 'select' | PowerToggleAction) => void;
   /**
    * While a pointer-drag of this piece is in progress, the live world position
    * (mm) to render it at — it follows the cursor. Placed pieces are SVG and
@@ -1538,6 +1574,14 @@ function pieceCursor(armed: boolean): string {
   return 'grab';
 }
 
+/** The a11y label suffix describing a piece's power state. Empty for a piece
+ * not on the bus; otherwise "powered on" (driven) or "powered off" (inert in
+ * place). Extracted so `PieceRenderer` stays under the complexity budget. Pure. */
+function powerLabelSuffix(live: boolean, powered: boolean): string {
+  if (!live) return '';
+  return powered ? ' (powered on)' : ' (powered off)';
+}
+
 /** The outline overlay drawn behind a piece body, or null for none. An invalid
  * same-layer overlap (red error) wins over selection (blue). Pure. */
 function pieceOutline(
@@ -1553,6 +1597,7 @@ function PieceRenderer({
   piece,
   selected,
   live,
+  poweredOff,
   armedType,
   invalidOverlap,
   coupledToTrainId,
@@ -1568,6 +1613,10 @@ function PieceRenderer({
   // Wire devices (train / gate) can be powered off by clicking when live.
   // Carriages are wire-invisible — clicking a live carriage just selects it.
   const isWire = isWireDevice(piece.type);
+  // A train that is on the bus AND not powered off is under power (driven). A
+  // powered-off train stays live (on the track, rendered at its frozen sim
+  // position) but reads as dark/inert. Gates have no power-off concept.
+  const powered = live && !poweredOff;
 
   // Pointer-drag state. Placed pieces are SVG <g> elements; Chrome does not
   // honour the HTML5 `draggable` attribute on SVG, so native DnD never starts.
@@ -1630,16 +1679,18 @@ function PieceRenderer({
       suppressClickRef.current = false;
       return; // the click that closes a drag — not a select.
     }
-    // A body click ALWAYS selects — including a live train. It must never power
-    // the device off (that despawns it and teleports it back to its placement
-    // marker). Power-off is an explicit affordance: the power dot or the
+    // A body click ALWAYS selects — including a live train. It must never
+    // toggle the device's power: powering off no longer despawns or teleports
+    // the train (it goes inert in place), but the body click still must not
+    // trigger it. Power is an explicit affordance: the power dot or the
     // ActionBar button.
     onAction('select');
   }
 
-  // Click the power dot of a LIVE wire device → power it off. Stops propagation
-  // so the body click (which selects) doesn't also fire. On an inert device the
-  // dot is inert too — the device goes live by being scanned, not by clicking.
+  // Click the power dot of an on-track train → toggle its power in place. Stops
+  // propagation so the body click (which selects) doesn't also fire. On an
+  // un-scanned device the dot is inert — the device goes on the bus by being
+  // scanned, not by clicking.
 
   // Keyboard equivalent of the click: Enter/Space selects the piece (rotate and
   // delete then work via the global R / Delete shortcuts).
@@ -1663,7 +1714,10 @@ function PieceRenderer({
   // so the JSX stays flat.
   const outline = pieceOutline(invalidOverlap, selected);
   const cursorStyle = pieceCursor(armedType !== null);
-  const ariaLabel = `${piece.type} piece${live ? ' (powered on)' : ''}${invalidOverlap ? ' (invalid overlap)' : ''}`;
+  // A powered-off train is on the bus but inert: label it distinctly so the
+  // a11y tree and screenshots can tell "powered off in place" from "off the
+  // bus" and from "driven".
+  const ariaLabel = `${piece.type} piece${powerLabelSuffix(live, powered)}${invalidOverlap ? ' (invalid overlap)' : ''}`;
 
   return (
     <g
@@ -1677,6 +1731,7 @@ function PieceRenderer({
       data-testid={`piece-${piece.id}`}
       data-piece-id={piece.id}
       data-live={live ? 'true' : 'false'}
+      data-powered={powered ? 'true' : 'false'}
       data-coupled-to={coupledToTrainId}
       data-invalid-overlap={invalidOverlap ? 'true' : undefined}
       aria-label={ariaLabel}
@@ -1695,20 +1750,24 @@ function PieceRenderer({
         fill={fill}
         stroke="#333"
         strokeWidth={1.5}
-        fillOpacity={isDevice && !live ? 0.4 : 1}
+        // A device dims when it is not under power: either off the bus
+        // (unscanned) or a train powered off in place. A powered-off train
+        // therefore reads dark/inert at its frozen sim position.
+        fillOpacity={isDevice && !powered ? 0.4 : 1}
       />
       {/* Power dot for wire-visible devices only (train / gate): green when
-          live, grey when inert. Carriages have no wire identity — no dot.
-          Clicking the dot of a LIVE device powers it off (the explicit
-          power-off affordance); the device body click only selects. */}
+          powered, grey when inert/off-bus. Carriages have no wire identity —
+          no dot. Clicking the dot of an on-track train toggles its power in
+          place; the device body click only selects. */}
       {isWire && (
         <PowerDot
           piece={piece}
           live={live}
+          powered={powered}
           armed={armedType !== null}
           cx={shape.width / 2 - POWER_DOT_RADIUS}
           cy={-shape.height / 2 + POWER_DOT_RADIUS}
-          onPowerOff={() => onAction({ type: 'power-off', pieceId: piece.id })}
+          onTogglePower={() => onAction({ type: 'power-toggle', pieceId: piece.id })}
         />
       )}
     </g>
@@ -1716,38 +1775,50 @@ function PieceRenderer({
 }
 
 /**
- * The small power dot on a wire device. Green = live, grey = inert. Clicking (or
- * Enter/Space on) the dot of a LIVE device powers it off — the explicit
- * power-off affordance, distinct from the device body click which only selects.
- * Extracted from PieceRenderer so the power-off interaction (click + keyboard +
- * a11y wiring) lives in one place and doesn't bloat the renderer's complexity.
+ * The small power dot on a wire device. Green = under power, grey = inert
+ * (powered off in place, or not yet on the bus). Clicking (or Enter/Space on)
+ * the dot of an ON-BUS device TOGGLES its power in place (off↔on) — the
+ * explicit power affordance, distinct from the device body click which only
+ * selects. The toggle never despawns the device or publishes
+ * `device_disconnected`. Extracted from PieceRenderer so the power interaction
+ * (click + keyboard + a11y wiring) lives in one place and doesn't bloat the
+ * renderer's complexity.
  */
 function PowerDot({
   piece,
   live,
+  powered,
   armed,
   cx,
   cy,
-  onPowerOff,
+  onTogglePower,
 }: {
   readonly piece: TrackPiece;
   readonly live: boolean;
+  readonly powered: boolean;
   readonly armed: boolean;
   readonly cx: number;
   readonly cy: number;
-  readonly onPowerOff: () => void;
+  readonly onTogglePower: () => void;
 }) {
+  // Interactive only for an on-bus TRAIN — clicking it toggles power in place
+  // (off↔on). A gate's dot is a status-only cue (green = live): power-in-place
+  // is a train concept (VirtualGate has no inert state) and `togglePower`
+  // no-ops for non-trains, so making the gate dot a button would be a lying
+  // affordance. An un-scanned device's dot is inert too.
+  const interactive = live && !armed && piece.type === 'train';
   const fire = (e: React.SyntheticEvent) => {
-    if (armed || !live) return;
+    if (!interactive) return;
     e.stopPropagation();
-    onPowerOff();
+    onTogglePower();
   };
+  const actionLabel = powered ? `Power off ${piece.type}` : `Power on ${piece.type}`;
   return (
     <circle
       cx={cx}
       cy={cy}
       r={POWER_DOT_RADIUS}
-      fill={live ? '#16a34a' : '#888'}
+      fill={powered ? '#16a34a' : '#888'}
       stroke="#1c1c1c"
       strokeWidth={1}
       data-testid={`power-${piece.id}`}
@@ -1758,10 +1829,10 @@ function PowerDot({
           fire(e);
         }
       }}
-      role={live ? 'button' : undefined}
-      tabIndex={live ? 0 : undefined}
-      aria-label={live ? `Power off ${piece.type}` : undefined}
-      style={{ cursor: live ? 'pointer' : 'default' }}
+      role={interactive ? 'button' : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      aria-label={interactive ? actionLabel : undefined}
+      style={{ cursor: interactive ? 'pointer' : 'default' }}
     />
   );
 }

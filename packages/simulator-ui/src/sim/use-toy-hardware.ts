@@ -6,6 +6,8 @@ import { ToyHardware } from './toy-hardware.js';
 interface UseToyHardwareArgs {
   readonly pieces: ReadonlyArray<TrackPiece>;
   readonly liveIds: ReadonlySet<string>;
+  /** The subset of live trains the operator has powered OFF in place. */
+  readonly poweredOffIds: ReadonlySet<string>;
   readonly client: BrokerClient;
   /**
    * Optional callback invoked after each RAF tick so callers can react to
@@ -34,6 +36,7 @@ export interface UseToyHardwareResult {
 export function useToyHardware({
   pieces,
   liveIds,
+  poweredOffIds,
   client,
   onTick,
 }: UseToyHardwareArgs): UseToyHardwareResult {
@@ -60,7 +63,11 @@ export function useToyHardware({
     if (hardware === null) return;
     hardware.syncLayout(pieces);
     hardware.syncLive(pieces, liveIds);
-  }, [pieces, liveIds]);
+    // Power reconciliation runs AFTER syncLive so a newly-spawned train exists
+    // before we (possibly) set it inert. syncLive never touches power; this is
+    // the sole power path.
+    hardware.syncPower(pieces, poweredOffIds);
+  }, [pieces, liveIds, poweredOffIds]);
 
   // RAF loop — advance the sim by real elapsed time, capped inside
   // `ToyHardware.tick` so background tabs can't fast-forward minutes.

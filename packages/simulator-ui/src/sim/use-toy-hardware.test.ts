@@ -25,6 +25,7 @@ describe('useToyHardware', () => {
     const startProps = {
       pieces: [s1, s2, train] as ReadonlyArray<TrackPiece>,
       liveIds: new Set<string>(),
+      poweredOffIds: new Set<string>(),
       client,
     };
     const { rerender, unmount } = renderHook((props: typeof startProps) => useToyHardware(props), {
