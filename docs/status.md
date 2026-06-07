@@ -15,13 +15,14 @@ Source: [`docs/spec/protocol-v0.2.md`](spec/protocol-v0.2.md)
 | Common event envelope                      | shipped | `eventEnvelope(...)`, `commandEnvelope(...)` factories. JSON over MQTT.                        |
 | Topic builders + parser (`topics.ts`)      | shipped | All topic shapes from the spec, plus `parseEventTopic` round-trip.                             |
 | Core event schemas (12 types)              | shipped | `device_registered`, `tag_observed`, `marker_traversed`, `train_status`, clearance \*, `gate_state_changed`, `switch_state_changed`, `aspect_changed`, `tag_assignment`, `anomaly`. |
-| Core command schemas (8 types)             | shipped | `assign_route`, `grant_clearance`, `revoke_clearance`, `set_target_speed`, `emergency_stop`, `set_switch_position`, `set_aspect`, `assign_tag`. |
+| Core command schemas (9 types)             | shipped | `assign_route`, `grant_clearance`, `revoke_clearance`, `begin_exploration`, `set_target_speed`, `emergency_stop`, `set_switch_position`, `set_aspect`, `assign_tag`. |
 | Capability identifiers                     | shipped | `BUILTIN_CAPABILITIES` enum + `CapabilityId` regex.                                            |
 | `DeviceManifest` schema                    | shipped | Used by examples; not yet enforced by anything that loads manifests.                           |
 | Layout schema                              | shipped | Markers, edges, junctions. Optional spatial fields.                                            |
-| `protocol_version` literal                 | shipped | `0.2.0` exported as `PROTOCOL_VERSION`.                                                        |
+| `protocol_version` literal                 | shipped | `0.3.0` exported as `PROTOCOL_VERSION` (bumped for `begin_exploration`, ADR-015).              |
 | `hold_gate` / `release_gate` commands      | shipped | Server-side override of local gate logic. `VirtualGate.acceptCommand` honours them and publishes the matching `gate_state_changed`. |
 | `vehicle_identified` event schema          | shipped | `{ vehicle_id, context_device_id }`. The scheduler already derives these from vehicle-tag observations.                                |
+| `begin_exploration` command                | shipped | ADR-015. Open-ended discovery clearance: authorises a train to drive forward across markers indefinitely (following the rails, taking the switched branch at junctions) until `revoke_clearance`. Names no edges — the primitive that bootstraps discovery on an unknown layout. |
 
 Coverage: 100% lines, 100% branches.
 
@@ -44,6 +45,9 @@ Source: spec §"Capability model", §"Clearance model"; [`ADR-001`](adr/001-capa
 | Scheduler: gate-release re-grant          | shipped | After capability state changes, retries blocked clearances.                                    |
 | Scheduler: clearance revocation           | shipped | `Scheduler.revokeClearance(trainId)` drops the train's cleared edges, snaps the limit back to its current marker, emits a `revoke_clearance` command, and retries blocked peers (skipping the revoked train so it can't re-grab the block). |
 | Scheduler: switch-state edge filtering    | shipped | Refuses to clear an edge whose `requires_switch_state` doesn't match the junction's confirmed position. Retries blocked clearances when a switch confirms. |
+| Scheduler: proactive clearance horizon    | shipped | Grants up to `CLEARANCE_HORIZON_EDGES` (3) edges ahead, topped up on every marker crossing — a moving train always carries several blocks of clearance, killing the per-marker stutter-brake. Behaviour-gated by `packages/simulator/src/clearance-horizon.test.ts`. |
+| Scheduler: switch actuation for routes    | shipped | The horizon reaching a junction edge emits `set_switch_position` autonomously — scheduled routes throw their own switches instead of waiting on the operator. |
+| Scheduler: deterministic station dwell    | shipped | `STATION_DWELL_MS` (2500 ms) hold at each scheduled stop via the injected monotonic clock; no pointer advance or onward grant until the dwell elapses. |
 | Scheduler: device disconnect               | shipped | `device_disconnected` event runs each capability's `onDeviceDisconnect` hook, deletes the device (and its train state if it owned `core.controls_motion`), then retries blocked clearances so peers waiting on a vanished gate's withhold or a vanished train's block get re-granted. |
 | `LayoutState`                             | shipped | Edges, marker lookup, switch positions, runtime `upsertMarker`, edge inference via `recordTraversal`, inferred→confirmed flip on N traversals (ADR-009), `toLayout()` serialiser for republishing as retained state. |
 | Anomaly emission for unknown tags         | shipped | `tag_observed` against unregistered marker → anomaly event.                                    |
@@ -69,6 +73,8 @@ Source: [`docs/spec/simulator-v0.1.md`](spec/simulator-v0.1.md); [`ADR-006`](adr
 | `VirtualGate`                                     | shipped | Withhold/release per marker.                                                   |
 | Despawn → `device_disconnected`                   | shipped | `Simulation.despawnTrain` and `despawnGate` drop the device and emit a `device_disconnected` event so the scheduler can run disconnect hooks and free held blocks/withholds. Stand-in for MQTT LWT in pre-broker tests. |
 | `Simulation.onEvent` listener API                 | shipped | Used by simulator-ui to bridge events onto MQTT.                              |
+| Exploration mode (`begin_exploration`)            | shipped | ADR-015. `VirtualTrain` rolls forward onto the next physical edge indefinitely, taking the switched branch at junctions, until `revoke_clearance`. A concrete `assign_route` supersedes exploration. |
+| Power-off → inert-in-place                        | shipped | Powering a train off freezes it where it stands — no motion, ignores commands, emits nothing — instead of despawning. Power-on resumes from the same spot. `train-power.test.ts`. |
 | `BrokerBridge` against a real server                   | shipped | The simulator's only mode now. Bridges `simulation.onEvent` → `railway/events/...` and routes `railway/commands/...` to `simulation.handleCommand()`. E2E covered by `@trainframe/integration`. |
 | `Simulation.bindIdentityTag(markerId)`                 | shipped | Silent identity bind for callers (the toy-table) that publish their own `tag_assignment` and only need the in-process `markerToTag` populated so virtual trains emit `tag_observed`. |
 | Realistic-time mode                               | partial | simulator-ui drives a `requestAnimationFrame` loop via `useToyHardware`; no first-class realtime mode in the package itself. |
@@ -106,7 +112,8 @@ Source: spec §"Transport: MQTT" (server is what runs the scheduler against a re
 | Custom-event dispatch (`railway/events/custom/...`) | not started | Server only subscribes to four-segment core events.                            |
 | Authentication / pairing                          | not started | Spec §"Authentication" defers details to garage-device pairing.                |
 | Discovery mode (learning new edges/markers)       | shipped | ADR-009, ADR-014. Marker creation on `tag_assignment`, edge inference on traversal, confirmation after 3 traversals (configurable). Layout republished as retained state on every change. Edge-length learning and cautious-clearance follow-ups deferred. |
-| Track-learn mode                                  | shipped | ADR-014. `LearnMode` peer module drives one operator-designated train edge-by-edge to bootstrap the graph. Operator topics: `railway/operator/learn_track_start`, `railway/operator/learn_track_stop`. State published retained to `railway/state/track_learning/active`. |
+| Track-learn mode                                  | shipped | ADR-014, reworked per ADR-015. `LearnMode` now bootstraps the graph by issuing `begin_exploration` to the operator-designated train (open-ended discovery clearance) instead of edge-by-edge grants. Operator topics: `railway/operator/learn_track_start`, `railway/operator/learn_track_stop`. State published retained to `railway/state/track_learning/active`. |
+| Stale deadlock-state cleanup on start             | shipped | `Server.start()` clears any retained deadlock state left by a previous run, so a restart doesn't show a phantom deadlock banner. |
 | Simulator-ui as virtual hardware only             | shipped | `simulator-ui` no longer runs a scheduler. All scheduling routes through `@trainframe/server`. |
 
 Coverage thresholds: 75 lines / 65 branches / 65 functions (new package; ratchet up as the surface stabilises).
@@ -130,6 +137,8 @@ Coverage thresholds: 75 lines / 65 branches / 65 functions (new package; ratchet
 | Schedule list                              | shipped | `ScheduleList` mirrors `railway/state/schedule/+`. Current stop highlighted. |
 | Deadlock banner + per-train revoke         | shipped | `DeadlockBanner` subscribes to `railway/state/deadlock/+`; per-train Revoke buttons publish `railway/operator/revoke_clearance`. |
 | Devices panel + recently-scanned highlight | shipped | `DevicesPanel` groups every registered device by capability bucket (Trains, Gates, Garages, Markers) with live state. `useLastScanned` watches `tag_observed`/`tag_assignment` and pulses an amber highlight on the matching row for 3s. |
+| Pan/zoom + fit-to-content                  | shipped | `LayoutCanvas` pans and zooms; fits to content on load. Markers/trains/glyphs render at constant screen size — zoom spreads the layout, not the glyphs. |
+| Merged bidirectional edges + smooth track  | shipped | A↔B edge pairs render as a single path; track smoothing via undirected neighbour-position tangents (no opposing-curve kinks at shared markers). |
 
 ---
 
@@ -145,7 +154,11 @@ Reframed per ADR-013 as the **toy table** — a virtual Brio-style table the ope
 | Power-off via click on live device         | shipped | Click a live train/gate on the canvas to power it off; emits `device_disconnected`. The piece stays on the table but returns to inert. |
 | Physics-only `Simulation` in browser       | shipped | `ToyHardware` class + `useToyHardware` hook own a `Simulation` + `BrokerBridge` wired to the broker. Scanned trains spawn `VirtualTrain` at the nearest outgoing edge; the loop ticks via `requestAnimationFrame` (`performance.now()` delta, capped at 200 ms). No scheduler — the server schedules. |
 | Private layout (per-piece markers)         | shipped | `compileLayout(pieces, ...)` produces an in-browser `Layout` whose markers use the same `M-{piece.id}` ids the scan flow publishes, so server-issued routes line up with the sim's internal physics. Never published. |
-| Train icon rides the rail                  | shipped | Train shape sized 24mm tall vs the rail's 16mm so it doesn't overhang. |
+| Train icon rides the rail                  | shipped | Train shape sized 24mm tall vs the rail's 16mm so it doesn't overhang. Trains travel the real track geometry — `edge-path.ts` interpolates world position along the piece's actual curve, not a straight chord. |
+| Hand-building: snap, flip, drag-connect    | shipped | End-based snapping (including when moving an already-placed piece), mirror/flip (`F`), drag-in connects geometry on drop, consistent junction branch orientation. `placement.ts`, `overlap.ts`. |
+| Editor layers + ramp piece (bridges)       | shipped | Height layers with layer-gated snapping and over/under rendering; ramp piece climbs between layers. Research note: `docs/research/bridges-and-height-layers.md`. |
+| Bridge two-train demo                      | shipped | Deterministic flyover layout (ground oval + perpendicular deck OVER it, zero overlaps) with a server-driven two-train schedule and DEV seed hook. Proven by a strict two-train gate: `bridge-demo.test.ts`, `two-train-flyover.test.ts`, plus `ui-tests/scripts/bridge-demo-server.mjs` for live demos. |
+| Wildcard MQTT subscriptions in-browser     | shipped | `topic-match.ts` — the in-memory broker client now delivers `+`/`#` wildcard subscriptions to in-browser devices, matching real-broker semantics. |
 | Carriage coupling                          | shipped | `computeTrainTrails` flood-fills carriages within 100 mm onto the nearest live train. Coupled carriages render with `data-coupled-to={trainPieceId}`. |
 | Carriage physics — trailing behind train   | shipped | `computeRenderPositions` reads `VirtualTrain.getDistanceIntoEdge()` each render and interpolates carriage world positions along the current edge. Carriages are spaced 50 mm behind the train (index 0 at `d-50`, index 1 at `d-100`, clamped to 0 = edge start when negative — full multi-edge trailing is a TODO). The train sprite moves with the sim too, not just the carriages. Render-position re-rendering is driven by `onTick` bumping a React state counter inside the existing RAF loop. |
 | `window.trainframeSim` devtools handle     | shipped | Hidden `pause`/`resume`/`step` no-ops (sim ticks forever); kept as a future hook for devtools-driven inspection. |
@@ -195,6 +208,7 @@ Private workspace package. Spawns the simulator-ui Vite preview, an aedes broker
 | Connected-to-broker test                          | shipped | UI connects to aedes via WS, `device_registered` round-trips through the server. |
 | Operator journeys                                 | shipped | `multi-train-journey`, `tag-assignment`, `discovery`, `feature-showcase`, plus five new specs: `route-reassignment` (expects `cleared_edges`-wipe fix), `unknown-tag-closure` (bound-tag → train lands on marker), `spawn-form-mishaps` (overshoot knob → anomaly in EventLog), `layout-swap` (preset swap + invalid-JSON error), `gate-hold-release` (admin HTTP hold/release → train stops/advances). |
 | Visualiser SVG assertions                         | shipped | `data-train-id` / `data-at-marker` / `data-on-edge` / `data-marker-id` / `data-inferred` assertions are routine across the new specs. |
+| Native drag specs                                 | shipped | `native-drag.spec.ts`: HTML5 drag-to-place from the toybox + pointer drag-to-move of a placed piece. |
 
 Coverage thresholds: not applicable (Playwright; covered by E2E pass/fail).
 
@@ -214,6 +228,9 @@ Coverage thresholds: not applicable (Playwright; covered by E2E pass/fail).
 | ADR-012                                        | shipped | Train length on registration; tail-clearance release derived from train_status internally; per-train EWMA on LayoutState. |
 | ADR-013                                        | shipped | Simulator as physical twin; visualiser as system view. Mechanically enforced boundary via Biome `noRestrictedImports`. |
 | ADR-014                                        | shipped | Track-learn mode: operator bootstrap gesture for edge-graph discovery; `LearnMode` peer module in `@trainframe/server`; operator surface in `@trainframe/visualiser`. |
+| ADR-015                                        | shipped | Exploration clearance: `begin_exploration` as the discovery-bootstrap primitive ("clearance, not commands" extended to open-ended discovery). Protocol bumped to 0.3.0; LearnMode reworked on top. |
+| ADR-016                                        | shipped | Train consists (carriages) + length-aware visualisation. Decision recorded; implementation beyond the toy-table carriage trailing is future work. |
+| `docs/research/bridges-and-height-layers.md`   | shipped | Research note on bridges and multiple height layers — groundwork for the editor-layers + ramp work in simulator-ui. |
 | Live clearance overlay                         | shipped | Retained `railway/state/clearance/<train_id>` topic per train; visualiser renders cleared edges with `data-cleared-to` + per-train hue. ADR-011 made it useful; phase 3 made it visible. |
 | Visualiser facelift                            | shipped | Edges as cubic bezier `<path>` arcs with **per-marker tangent continuity** (adjacent edges meeting at a marker share their tangent → smooth flow through the marker, no opposing-curve kinks); 6px → 9px stroke when cleared. Trains as top-down 5-point shapes: rectangular body, smooth rounded nose at the front, rotated to the bezier tangent at their current `t`, filled with `trainColor(train_id)`. All `data-*` attributes preserved for ui-tests + the live-driving doc. |
 | Deadlock detection + UI banner                 | shipped | Scheduler runs a waits-for cycle check on every `retryBlockedClearances` pass. Cycles publish to `railway/state/clearance` (entity `deadlock/active`) carrying the involved train IDs; the visualiser's `DeadlockBanner` shows them in their per-train hues with a recovery hint. Doesn't *resolve* the deadlock — that's an authoring decision (more markers, a passing siding). |
