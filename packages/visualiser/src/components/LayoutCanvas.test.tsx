@@ -253,23 +253,24 @@ describe('LayoutCanvas', () => {
   });
 });
 
-describe('buildMarkerTangents — tangent continuity', () => {
+describe('buildMarkerTangents — neighbour-position tangents', () => {
+  // Magnitude of the 2D cross product of two unit-ish vectors. ~0 ⇒ parallel
+  // (collinear). The tangent SIGN is unconstrained by the contract (the bezier
+  // builder re-orients per edge), so assert parallelism, not an exact sign.
+  const cross = (a: { x: number; y: number }, b: { x: number; y: number }): number =>
+    Math.abs(a.x * b.y - a.y * b.x);
+
   /**
    * Three markers in a horizontal straight line: A(0,0) B(100,0) C(200,0).
    * Edges: A→B and B→C.
    *
-   * The tangent at B should be (1,0) (pointing right, along the line).
-   * This means:
-   *   - The C2 handle of edge A→B lies at B - k*(1,0) → y=0
-   *   - The C1 handle of edge B→C lies at B + k*(1,0) → y=0
-   *
-   * Both handles are collinear with the A–C line, which proves C1 continuity.
-   *
-   * We verify by rendering the layout and checking that both edge path `d`
-   * strings have their control point y-values equal (within floating-point
-   * tolerance) to the y-coordinate of B, i.e. all on y=0.
+   * Under the Catmull-Rom rule, the degree-2 tangent at B is the chord through
+   * its two neighbours, unit(C − A) = (1,0). The degree-1 termini A and C take
+   * unit(marker − neighbour): tA = unit(A − B) = (−1,0), tC = unit(C − B) =
+   * (1,0). All three are PARALLEL to the line (the rendered curve is
+   * sign-invariant), and a unit length.
    */
-  it('gives C1-continuous bezier handles at a straight-through marker', () => {
+  it('gives a chord-through tangent at a degree-2 marker and along-line termini', () => {
     const markers = [{ id: 'A' }, { id: 'B' }, { id: 'C' }];
     const edges = [
       { from_marker_id: 'A', to_marker_id: 'B' },
@@ -283,21 +284,82 @@ describe('buildMarkerTangents — tangent continuity', () => {
 
     const tangents = buildMarkerTangents(markers, edges, markerPositions);
 
-    // Tangent at B must be (1,0) — or very close — so that both adjacent
-    // edges share the same horizontal direction at B.
-    const tB = tangents.get('B');
+    const horizontal = { x: 1, y: 0 };
+    for (const id of ['A', 'B', 'C']) {
+      const t = tangents.get(id);
+      expect(t).toBeDefined();
+      if (!t) continue;
+      // Parallel to the line…
+      expect(cross(t, horizontal)).toBeCloseTo(0, 5);
+      expect(t.y).toBeCloseTo(0, 5);
+      // …and a unit vector.
+      expect(Math.hypot(t.x, t.y)).toBeCloseTo(1, 5);
+    }
+  });
+
+  /**
+   * A degree-2 marker's tangent is exactly the unit chord of its two
+   * neighbours, regardless of the (non-straight) angle between the legs.
+   * Neighbours P(0,0) and Q(0,200) of B(100,0): chord = unit(Q − P) = (0,1).
+   */
+  it('sets a degree-2 tangent to the unit chord of its two neighbours', () => {
+    const markers = [{ id: 'P' }, { id: 'B' }, { id: 'Q' }];
+    const edges = [
+      { from_marker_id: 'P', to_marker_id: 'B' },
+      { from_marker_id: 'B', to_marker_id: 'Q' },
+    ];
+    const markerPositions = new Map([
+      ['P', { x: 0, y: 0 }],
+      ['B', { x: 100, y: 0 }],
+      ['Q', { x: 0, y: 200 }],
+    ]);
+
+    const tB = buildMarkerTangents(markers, edges, markerPositions).get('B');
     expect(tB).toBeDefined();
-    expect(tB?.x ?? 0).toBeCloseTo(1, 5);
-    expect(tB?.y ?? 1).toBeCloseTo(0, 5);
+    // unit(Q − P) = (0, 1), up to sign.
+    expect(cross(tB ?? { x: 0, y: 0 }, { x: 0, y: 1 })).toBeCloseTo(0, 5);
+    expect(tB?.x ?? 1).toBeCloseTo(0, 5);
+    expect(Math.hypot(tB?.x ?? 0, tB?.y ?? 0)).toBeCloseTo(1, 5);
+  });
 
-    // Tangent at A and C should also point right (single outgoing/incoming edge each).
-    const tA = tangents.get('A');
-    expect(tA?.x ?? 0).toBeCloseTo(1, 5);
-    expect(tA?.y ?? 1).toBeCloseTo(0, 5);
+  /**
+   * A junction (degree ≥ 3) picks the STRAIGHTEST neighbour pair. J at the
+   * origin with collinear neighbours A(−100,0), B(100,0) and a perpendicular
+   * branch C(0,100). The main line A–B is straightest, so the tangent is the
+   * A–B chord (horizontal) and the perpendicular branch is ignored.
+   */
+  it('picks the most-collinear neighbour pair at a junction (degree ≥ 3)', () => {
+    const markers = [{ id: 'J' }, { id: 'A' }, { id: 'B' }, { id: 'C' }];
+    const edges = [
+      { from_marker_id: 'A', to_marker_id: 'J' },
+      { from_marker_id: 'J', to_marker_id: 'B' },
+      { from_marker_id: 'J', to_marker_id: 'C' },
+    ];
+    const markerPositions = new Map([
+      ['J', { x: 0, y: 0 }],
+      ['A', { x: -100, y: 0 }],
+      ['B', { x: 100, y: 0 }],
+      ['C', { x: 0, y: 100 }],
+    ]);
 
-    const tC = tangents.get('C');
-    expect(tC?.x ?? 0).toBeCloseTo(1, 5);
-    expect(tC?.y ?? 1).toBeCloseTo(0, 5);
+    const tJ = buildMarkerTangents(markers, edges, markerPositions).get('J');
+    expect(tJ).toBeDefined();
+    // The straight A–B line wins: tangent is horizontal, NOT the C branch.
+    expect(cross(tJ ?? { x: 0, y: 0 }, { x: 1, y: 0 })).toBeCloseTo(0, 5);
+    expect(tJ?.y ?? 1).toBeCloseTo(0, 5);
+    expect(Math.hypot(tJ?.x ?? 0, tJ?.y ?? 0)).toBeCloseTo(1, 5);
+  });
+
+  /**
+   * An isolated marker (degree 0 — no incident edges) gets the sane {1, 0}
+   * fallback rather than NaN.
+   */
+  it('falls back to (1, 0) for an isolated (degree-0) marker', () => {
+    const markers = [{ id: 'LONE' }];
+    const markerPositions = new Map([['LONE', { x: 5, y: 5 }]]);
+
+    const t = buildMarkerTangents(markers, [], markerPositions).get('LONE');
+    expect(t).toEqual({ x: 1, y: 0 });
   });
 
   it('renders a straight three-marker chain with collinear control points at the shared marker', () => {

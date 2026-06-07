@@ -52,109 +52,157 @@ const FIT_MARGIN = MARKER_RADIUS * 3;
  *
  * A small fraction keeps the track flowing gently. Crucially it also makes
  * near-collinear runs render *essentially straight* without any explicit
- * snapping: along such a run the shared marker tangent (the normalised sum of
- * incident edge directions) already points along the chord, so short handles
- * sit almost exactly on the straight line — no S-wobble, no overshoot. Only
- * genuine corners and junction legs (where the tangent diverges from the
- * chord) keep a visible curve. Using the marker tangent at both ends preserves
- * exact C1 continuity at shared markers; deliberately straightening within a
- * tolerance band would trade that continuity for over-straightness, so we
- * don't.
+ * snapping: along such a run the Catmull-Rom marker tangent (the chord through
+ * a marker's two neighbours — see `buildMarkerTangents`) already points along
+ * the line, so short handles sit almost exactly on the straight line — no
+ * S-wobble, no overshoot. Only genuine corners and junction legs (where the
+ * tangent diverges from the chord) keep a visible curve. Using the marker
+ * tangent at both ends preserves exact C1 continuity at shared markers;
+ * deliberately straightening within a tolerance band would trade that
+ * continuity for over-straightness, so we don't.
  */
 const BEZIER_HANDLE_FRACTION = 0.15;
 
-/** Accumulate unit-vector edge contributions into a per-marker sum map. */
-function accumulateEdgeContributions(
-  edges: ReadonlyArray<{ from_marker_id: string; to_marker_id: string }>,
-  markerPositions: Map<string, Point>,
-  sums: Map<string, { x: number; y: number }>,
-): void {
-  for (const edge of edges) {
-    const fromPos = markerPositions.get(edge.from_marker_id);
-    const toPos = markerPositions.get(edge.to_marker_id);
-    if (!fromPos || !toPos) continue;
+const ISOLATED_TANGENT: Point = { x: 1, y: 0 };
 
-    const dx = toPos.x - fromPos.x;
-    const dy = toPos.y - fromPos.y;
-    const len = Math.sqrt(dx * dx + dy * dy);
-    if (len === 0) continue;
-
-    const ux = dx / len;
-    const uy = dy / len;
-
-    // Both endpoints get the same unit vector: the tangent convention is
-    // "the direction this edge flows" (from → to). For the `from` marker it
-    // is an outgoing contribution; for `to` it is the incoming direction
-    // (arriving from the same direction), which is the same vector. Summing
-    // and re-normalising produces a tangent that "points through" each marker.
-    const fromSum = sums.get(edge.from_marker_id);
-    if (fromSum) {
-      fromSum.x += ux;
-      fromSum.y += uy;
-    }
-    const toSum = sums.get(edge.to_marker_id);
-    if (toSum) {
-      toSum.x += ux;
-      toSum.y += uy;
-    }
-  }
+/** Unit vector from `a` to `b`, or `null` if they coincide (degenerate). */
+function unitBetween(a: Point, b: Point): Point | null {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  if (len <= 1e-9) return null;
+  return { x: dx / len, y: dy / len };
 }
 
 /**
- * Return a degenerate-fallback tangent for a marker whose directional sum
- * cancelled out to zero: perpendicular to the first incident edge found,
- * or (1, 0) if no edge can be located.
+ * Build the UNDIRECTED neighbour set for every marker: collapse the directed
+ * `A->B` / `B->A` edges into the set of DISTINCT neighbour marker ids per
+ * marker, with positions resolved. Self-loops and edges to unknown/unpositioned
+ * markers are skipped.
  */
-function degenerateTangent(
-  markerId: string,
+function buildNeighbours(
+  markers: ReadonlyArray<{ id: string }>,
   edges: ReadonlyArray<{ from_marker_id: string; to_marker_id: string }>,
   markerPositions: Map<string, Point>,
-): Point {
+): Map<string, Set<string>> {
+  const neighbours = new Map<string, Set<string>>();
+  for (const m of markers) neighbours.set(m.id, new Set());
+
   for (const edge of edges) {
-    if (edge.from_marker_id !== markerId && edge.to_marker_id !== markerId) continue;
-    const fromPos = markerPositions.get(edge.from_marker_id);
-    const toPos = markerPositions.get(edge.to_marker_id);
-    if (!fromPos || !toPos) continue;
-    const dx = toPos.x - fromPos.x;
-    const dy = toPos.y - fromPos.y;
-    const elen = Math.sqrt(dx * dx + dy * dy);
-    if (elen > 1e-9) return { x: -dy / elen, y: dx / elen };
+    const a = edge.from_marker_id;
+    const b = edge.to_marker_id;
+    if (a === b) continue;
+    if (!markerPositions.has(a) || !markerPositions.has(b)) continue;
+    neighbours.get(a)?.add(b);
+    neighbours.get(b)?.add(a);
   }
-  return { x: 1, y: 0 };
+  return neighbours;
 }
 
 /**
- * Build a map from marker ID to unit tangent vector for that marker.
+ * Tangent at a junction (degree ≥ 3): pick the pair of neighbours whose
+ * through-line is STRAIGHTEST and use that chord as the marker's tangent.
  *
- * The tangent at a marker is the normalised sum of all incident edge
- * direction contributions (outgoing and incoming both contribute the edge's
- * unit direction vector). This makes consecutive edges share their tangent at
- * the meeting marker, giving C1-continuous bezier arcs.
+ * "Straightest" maximises |dot(unit(marker − A), unit(B − marker))| over all
+ * neighbour pairs (A, B): the most-collinear pair is the layout's main line
+ * running through the junction. Using that chord makes the main line flow
+ * smoothly across the junction; the branch edge(s) join at the junction and
+ * may visibly kink there (its far end stays smooth via that marker's own
+ * tangent). The dot metric is symmetric in (A, B) so unordered pairs suffice;
+ * first-max-wins makes ties deterministic.
  *
- * If the sum is zero (symmetric opposing edges exactly cancel), falls back to
- * the right-hand perpendicular of the first incident edge, or (1, 0) if none.
+ * Returns the chord `unit(B.pos − A.pos)`, or `null` if every pair is
+ * degenerate (caller falls back).
  */
+/**
+ * Collinearity score in [0, 1] of the through-line A → self → B:
+ * |dot(unit(self − A), unit(B − self))|. 1 = perfectly straight, 0 =
+ * right-angle. `null` if either leg is degenerate.
+ */
+function throughLineScore(self: Point, a: Point, b: Point): number | null {
+  const inDir = unitBetween(a, self);
+  const outDir = unitBetween(self, b);
+  if (inDir === null || outDir === null) return null;
+  return Math.abs(inDir.x * outDir.x + inDir.y * outDir.y);
+}
+
+function junctionTangent(self: Point, neighbourPositions: ReadonlyArray<Point>): Point | null {
+  let best: Point | null = null;
+  let bestScore = -1;
+  for (let i = 0; i < neighbourPositions.length; i++) {
+    const a = neighbourPositions[i];
+    for (let j = i + 1; a !== undefined && j < neighbourPositions.length; j++) {
+      const b = neighbourPositions[j];
+      const score = b === undefined ? null : throughLineScore(self, a, b);
+      const chord = b === undefined ? null : unitBetween(a, b);
+      if (score !== null && chord !== null && score > bestScore) {
+        bestScore = score;
+        best = chord;
+      }
+    }
+  }
+  return best;
+}
+
+/**
+ * Build a map from marker ID to unit tangent vector for that marker, derived
+ * from the UNDIRECTED graph using neighbour POSITIONS (Catmull-Rom style).
+ *
+ * Edges are bidirectional, so a directed-edge-direction sum would cancel to
+ * zero at every interior marker — instead we collapse to undirected neighbours
+ * and read the geometry off their positions:
+ *
+ *   - degree 2 (neighbours P, Q): tangent = unit(Q.pos − P.pos), the chord
+ *     through the marker. Consecutive edges then share this tangent at their
+ *     shared marker → the whole run flows as one smooth C1 curve.
+ *   - degree 1 (terminus): tangent = unit(marker.pos − P.pos).
+ *   - degree ≥ 3 (junction): the straightest neighbour pair's chord — see
+ *     `junctionTangent`; the main line flows through, branches join.
+ *   - degree 0 (isolated) or any degenerate fallback: {1, 0}.
+ *
+ * The tangent's SIGN is unconstrained: `edgeBezierControls` re-orients it per
+ * edge toward the chord, so the rendered curve is sign-invariant.
+ */
+/**
+ * The unit tangent at one marker given its (position-resolved) distinct
+ * neighbours, by degree. See `buildMarkerTangents` for the rules. Returns
+ * `null` when every relevant chord is degenerate (caller falls back).
+ */
+function markerTangent(self: Point, neighbourPositions: ReadonlyArray<Point>): Point | null {
+  if (neighbourPositions.length === 1) {
+    const [p] = neighbourPositions;
+    return p === undefined ? null : unitBetween(p, self);
+  }
+  if (neighbourPositions.length === 2) {
+    const [p, q] = neighbourPositions;
+    return p === undefined || q === undefined ? null : unitBetween(p, q);
+  }
+  return junctionTangent(self, neighbourPositions);
+}
+
 export function buildMarkerTangents(
   markers: ReadonlyArray<{ id: string }>,
   edges: ReadonlyArray<{ from_marker_id: string; to_marker_id: string }>,
   markerPositions: Map<string, Point>,
 ): Map<string, Point> {
+  const neighbours = buildNeighbours(markers, edges, markerPositions);
   const tangents = new Map<string, Point>();
-  const sums = new Map<string, { x: number; y: number }>();
-  for (const m of markers) sums.set(m.id, { x: 0, y: 0 });
-
-  accumulateEdgeContributions(edges, markerPositions, sums);
 
   for (const m of markers) {
-    const sum = sums.get(m.id);
-    if (!sum) continue;
-    const len = Math.sqrt(sum.x * sum.x + sum.y * sum.y);
-    tangents.set(
-      m.id,
-      len > 1e-9
-        ? { x: sum.x / len, y: sum.y / len }
-        : degenerateTangent(m.id, edges, markerPositions),
-    );
+    const self = markerPositions.get(m.id);
+    const adj = neighbours.get(m.id);
+    if (self === undefined || adj === undefined || adj.size === 0) {
+      tangents.set(m.id, ISOLATED_TANGENT);
+      continue;
+    }
+
+    const positions: Point[] = [];
+    for (const id of adj) {
+      const p = markerPositions.get(id);
+      if (p !== undefined) positions.push(p);
+    }
+
+    tangents.set(m.id, markerTangent(self, positions) ?? ISOLATED_TANGENT);
   }
 
   return tangents;
