@@ -372,8 +372,12 @@ function layerFilter(layer: number): string | undefined {
   return `drop-shadow(${s.dx}px ${s.dy}px ${s.blur}px rgba(0,0,0,${opacity}))`;
 }
 
-interface PowerOnAction {
-  readonly type: 'power-on';
+/** An explicit request to power a live wire device OFF (emit
+ * `device_disconnected`). Raised by clicking the device's power dot or the
+ * ActionBar "Power off" button — NOT by clicking the device body, which only
+ * selects it. */
+interface PowerOffAction {
+  readonly type: 'power-off';
   readonly pieceId: string;
 }
 
@@ -751,17 +755,14 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     [client],
   );
 
-  // Click on a live device → power off (emit `device_disconnected`). The UI
-  // only routes this action for device pieces (see `PieceRenderer.handleClick`);
-  // track pieces don't have their own device so they have no power-off path.
-  const handlePiecePointerAction = useCallback(
-    (pieceId: string, action: 'select' | PowerOnAction) => {
-      if (action === 'select') {
-        setSelectedId(pieceId);
-        return;
-      }
-      // Powering a device off — only wire-visible devices (train / gate) can
-      // be powered off. Carriages are wire-invisible so this is a no-op for them.
+  // Power a live wire device OFF — emit `device_disconnected` and drop it from
+  // the live set. Only wire-visible devices (train / gate) can be powered off;
+  // carriages are wire-invisible so this is a no-op for them. This is the SOLE
+  // power-off path: it's reached by an EXPLICIT affordance (the device's power
+  // dot, or the ActionBar "Power off" button), never by clicking the device
+  // body — clicking the body merely selects it (see `PieceRenderer.handleClick`).
+  const powerOffPiece = useCallback(
+    (pieceId: string) => {
       const piece = piecesRef.current.find((p) => p.id === pieceId);
       if (piece === undefined) return;
       if (!isWireDevice(piece.type)) return;
@@ -776,6 +777,20 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       });
     },
     [client],
+  );
+
+  // Route a piece's pointer action: a body click selects; the power dot raises
+  // an explicit `power-off`. Selecting a live train does NOT power it off and
+  // does NOT teleport it — it keeps rendering at its simulated edge position.
+  const handlePiecePointerAction = useCallback(
+    (pieceId: string, action: 'select' | PowerOffAction) => {
+      if (action === 'select') {
+        setSelectedId(pieceId);
+        return;
+      }
+      powerOffPiece(pieceId);
+    },
+    [powerOffPiece],
   );
 
   const selectedPiece = pieces.find((p) => p.id === selectedId) ?? null;
@@ -816,6 +831,9 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
             onRotate={rotateSelected}
             onFlip={flipSelected}
             onDelete={deleteSelected}
+            onPowerOff={() => {
+              if (selectedPiece !== null) powerOffPiece(selectedPiece.id);
+            }}
             armedType={armedType}
             activeLayer={activeLayer}
             onActiveLayerChange={setActiveLayer}
@@ -927,6 +945,9 @@ interface ActionBarProps {
   readonly onRotate: () => void;
   readonly onFlip: () => void;
   readonly onDelete: () => void;
+  /** Power the selected piece off the bus (explicit; only shown for a live
+   * wire device). */
+  readonly onPowerOff: () => void;
   readonly armedType: TrackPieceType | null;
   /** The deck new pieces land on (0 = ground). */
   readonly activeLayer: number;
@@ -970,10 +991,15 @@ function ActionBar({
   onRotate,
   onFlip,
   onDelete,
+  onPowerOff,
   armedType,
   activeLayer,
   onActiveLayerChange,
 }: ActionBarProps) {
+  // The explicit power-off affordance: shown only when the selected piece is a
+  // live wire device (train / gate). Clicking a live train's body selects it
+  // (not power off), so this button is how the operator takes it off the bus.
+  const canPowerOff = selectedPiece !== null && selectedLive && isWireDevice(selectedPiece.type);
   return (
     <div className="tf-toytable__actions">
       <button type="button" onClick={onRotate} disabled={selectedPiece === null}>
@@ -985,6 +1011,11 @@ function ActionBar({
       <button type="button" onClick={onDelete} disabled={selectedPiece === null}>
         Delete (Del)
       </button>
+      {canPowerOff && (
+        <button type="button" onClick={onPowerOff} data-testid="action-power-off">
+          Power off
+        </button>
+      )}
       <span className="tf-toytable__layer-selector" aria-label="Active layer">
         {SELECTABLE_LAYERS.map(({ layer, label }) => (
           <button
@@ -1043,7 +1074,7 @@ interface TableProps {
   readonly onMovePiece: (pieceId: string, xMm: number, yMm: number) => void;
   /** Begin scanning a piece (pointer-dragged onto the scan box). */
   readonly onScanPiece: (pieceId: string) => void;
-  readonly onPieceAction: (pieceId: string, action: 'select' | PowerOnAction) => void;
+  readonly onPieceAction: (pieceId: string, action: 'select' | PowerOffAction) => void;
 }
 
 function Table({
@@ -1364,55 +1395,55 @@ function Table({
         {/* One group per layer, lowest first, so higher decks paint last and a
           bridge reads as over/under. The drop-shadow height cue is attached to
           this UN-rotated group (never the per-piece rotated/flipped <g>, where a
-          shadow would shear and point a different way per piece). Endpoint dots
-          ride in their own layer's group so upper dots sit on the deck and
-          ground dots beneath a bridge are occluded. */}
+          shadow would shear and point a different way per piece).
+
+          Within each layer group the paint order is THREE phases:
+            1. track pieces (the opaque rail bands),
+            2. subtle MARKER DOTS at each non-device piece's centre,
+            3. device pieces (trains / gates / carriages).
+          So a marker dot sits ABOVE the rail it marks (visible) but BELOW a
+          train passing over it (the train is not pierced by the dot). Dots ride
+          in their own layer's group, so an upper-deck dot sits on the deck and a
+          ground dot beneath a bridge is occluded by the deck above. */}
         {orderedLayers.map((layer) => {
           const layerPieces = byLayer.get(layer) ?? [];
+          const trackPieces = layerPieces.filter((p) => !isDevicePiece(p.type));
+          const devicePieces = layerPieces.filter((p) => isDevicePiece(p.type));
           const filter = layerFilter(layer);
+          const renderPiece = (p: TrackPiece) => (
+            <PieceRenderer
+              key={p.id}
+              piece={p}
+              selected={p.id === selectedId}
+              live={liveIds.has(p.id)}
+              armedType={armedType}
+              invalidOverlap={overlapIds.has(p.id)}
+              coupledToTrainId={carriageCoupledTo.get(p.id)}
+              renderPosition={renderPositions.get(p.id)}
+              onAction={(action) => onPieceAction(p.id, action)}
+              dragOverride={
+                pieceDragPreview?.id === p.id
+                  ? {
+                      x: pieceDragPreview.x,
+                      y: pieceDragPreview.y,
+                      rotationDeg: pieceDragPreview.rotationDeg,
+                    }
+                  : undefined
+              }
+              onDragMove={handlePieceDragMove}
+              onDragEnd={handlePieceDragEnd}
+            />
+          );
           return (
             <g key={`layer-${layer}`} data-layer={layer} style={filter ? { filter } : undefined}>
-              {/* Endpoint dots FIRST (track pieces only; devices have no endpoints)
-                so they paint UNDER the pieces and trains in this layer group — a
-                train riding a marker is drawn over its dot, not pierced by it. */}
-              {layerPieces.flatMap((p) =>
-                getEndpoints(p).map((ep, ei) => (
-                  <circle
-                    key={`${p.id}-ep${ei}`}
-                    cx={ep.x}
-                    cy={ep.y}
-                    r={4}
-                    fill={p.id === selectedId ? '#2563eb' : '#e11d48'}
-                    stroke="#fff"
-                    strokeWidth={1.5}
-                    style={{ pointerEvents: 'none' }}
-                  />
-                )),
-              )}
-              {layerPieces.map((p) => (
-                <PieceRenderer
-                  key={p.id}
-                  piece={p}
-                  selected={p.id === selectedId}
-                  live={liveIds.has(p.id)}
-                  armedType={armedType}
-                  invalidOverlap={overlapIds.has(p.id)}
-                  coupledToTrainId={carriageCoupledTo.get(p.id)}
-                  renderPosition={renderPositions.get(p.id)}
-                  onAction={(action) => onPieceAction(p.id, action)}
-                  dragOverride={
-                    pieceDragPreview?.id === p.id
-                      ? {
-                          x: pieceDragPreview.x,
-                          y: pieceDragPreview.y,
-                          rotationDeg: pieceDragPreview.rotationDeg,
-                        }
-                      : undefined
-                  }
-                  onDragMove={handlePieceDragMove}
-                  onDragEnd={handlePieceDragEnd}
-                />
+              {trackPieces.map(renderPiece)}
+              {/* Marker dots: one per track piece, at the piece CENTRE (where the
+                layout marker M-{id} sits), painted over the track but under the
+                devices below. Junctions get one too. Subtle + non-interactive. */}
+              {trackPieces.map((p) => (
+                <MarkerDot key={`marker-${p.id}`} piece={p} selected={p.id === selectedId} />
               ))}
+              {devicePieces.map(renderPiece)}
             </g>
           );
         })}
@@ -1432,6 +1463,35 @@ function Table({
         )}
       </svg>
     </>
+  );
+}
+
+/** Radius of the subtle centre-marker indicator, in mm. */
+const MARKER_DOT_RADIUS = 3;
+
+/**
+ * A subtle marker indicator at a track piece's CENTRE — exactly where the
+ * layout's `M-{piece.id}` marker sits (`piece.position`). Small, muted, and
+ * non-interactive (`pointerEvents: none`), so it reads as a quiet "a marker
+ * lives here" dot rather than the old bold endpoint dots. Rendered for every
+ * non-device piece including junctions. The selected piece's marker tints to
+ * the selection blue. Drawn between the track band and the devices in its layer
+ * group, so a train passing over it is never pierced.
+ */
+function MarkerDot({ piece, selected }: { piece: TrackPiece; selected: boolean }) {
+  return (
+    <circle
+      cx={piece.position.x}
+      cy={piece.position.y}
+      r={MARKER_DOT_RADIUS}
+      fill={selected ? '#2563eb' : '#1f2937'}
+      fillOpacity={selected ? 0.85 : 0.45}
+      stroke="#fff"
+      strokeWidth={0.75}
+      strokeOpacity={0.7}
+      style={{ pointerEvents: 'none' }}
+      data-testid={`marker-${piece.id}`}
+    />
   );
 }
 
@@ -1456,7 +1516,7 @@ interface PieceRendererProps {
    * (uncoupled or deferred pieces sit at their placement coordinates).
    */
   readonly renderPosition: WorldPosition | undefined;
-  readonly onAction: (action: 'select' | PowerOnAction) => void;
+  readonly onAction: (action: 'select' | PowerOffAction) => void;
   /**
    * While a pointer-drag of this piece is in progress, the live world position
    * (mm) to render it at — it follows the cursor. Placed pieces are SVG and
@@ -1470,11 +1530,11 @@ interface PieceRendererProps {
   readonly onDragEnd: (pieceId: string, clientX: number, clientY: number) => void;
 }
 
-/** The pointer cursor for a piece: crosshair while a type is armed (placing),
- * pointer for a live wire device (clickable to power off), grab otherwise. */
-function pieceCursor(armed: boolean, livePowerable: boolean): string {
+/** The pointer cursor for a piece body: crosshair while a type is armed
+ * (placing), grab otherwise. The body click selects (and a press-drag moves);
+ * power-off lives on the power dot, which carries its own pointer cursor. */
+function pieceCursor(armed: boolean): string {
   if (armed) return 'crosshair';
-  if (livePowerable) return 'pointer';
   return 'grab';
 }
 
@@ -1570,9 +1630,16 @@ function PieceRenderer({
       suppressClickRef.current = false;
       return; // the click that closes a drag — not a select.
     }
-    if (live && isWire) onAction({ type: 'power-on', pieceId: piece.id });
-    else onAction('select');
+    // A body click ALWAYS selects — including a live train. It must never power
+    // the device off (that despawns it and teleports it back to its placement
+    // marker). Power-off is an explicit affordance: the power dot or the
+    // ActionBar button.
+    onAction('select');
   }
+
+  // Click the power dot of a LIVE wire device → power it off. Stops propagation
+  // so the body click (which selects) doesn't also fire. On an inert device the
+  // dot is inert too — the device goes live by being scanned, not by clicking.
 
   // Keyboard equivalent of the click: Enter/Space selects the piece (rotate and
   // delete then work via the global R / Delete shortcuts).
@@ -1595,7 +1662,7 @@ function PieceRenderer({
   // takes priority), else blue for selection, else none. Computed in a helper
   // so the JSX stays flat.
   const outline = pieceOutline(invalidOverlap, selected);
-  const cursorStyle = pieceCursor(armedType !== null, live && isWire);
+  const cursorStyle = pieceCursor(armedType !== null);
   const ariaLabel = `${piece.type} piece${live ? ' (powered on)' : ''}${invalidOverlap ? ' (invalid overlap)' : ''}`;
 
   return (
@@ -1631,19 +1698,71 @@ function PieceRenderer({
         fillOpacity={isDevice && !live ? 0.4 : 1}
       />
       {/* Power dot for wire-visible devices only (train / gate): green when
-          live, grey when inert. Carriages have no wire identity — no dot. */}
+          live, grey when inert. Carriages have no wire identity — no dot.
+          Clicking the dot of a LIVE device powers it off (the explicit
+          power-off affordance); the device body click only selects. */}
       {isWire && (
-        <circle
+        <PowerDot
+          piece={piece}
+          live={live}
+          armed={armedType !== null}
           cx={shape.width / 2 - POWER_DOT_RADIUS}
           cy={-shape.height / 2 + POWER_DOT_RADIUS}
-          r={POWER_DOT_RADIUS}
-          fill={live ? '#16a34a' : '#888'}
-          stroke="#1c1c1c"
-          strokeWidth={1}
-          data-testid={`power-${piece.id}`}
+          onPowerOff={() => onAction({ type: 'power-off', pieceId: piece.id })}
         />
       )}
     </g>
+  );
+}
+
+/**
+ * The small power dot on a wire device. Green = live, grey = inert. Clicking (or
+ * Enter/Space on) the dot of a LIVE device powers it off — the explicit
+ * power-off affordance, distinct from the device body click which only selects.
+ * Extracted from PieceRenderer so the power-off interaction (click + keyboard +
+ * a11y wiring) lives in one place and doesn't bloat the renderer's complexity.
+ */
+function PowerDot({
+  piece,
+  live,
+  armed,
+  cx,
+  cy,
+  onPowerOff,
+}: {
+  readonly piece: TrackPiece;
+  readonly live: boolean;
+  readonly armed: boolean;
+  readonly cx: number;
+  readonly cy: number;
+  readonly onPowerOff: () => void;
+}) {
+  const fire = (e: React.SyntheticEvent) => {
+    if (armed || !live) return;
+    e.stopPropagation();
+    onPowerOff();
+  };
+  return (
+    <circle
+      cx={cx}
+      cy={cy}
+      r={POWER_DOT_RADIUS}
+      fill={live ? '#16a34a' : '#888'}
+      stroke="#1c1c1c"
+      strokeWidth={1}
+      data-testid={`power-${piece.id}`}
+      onClick={fire}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          fire(e);
+        }
+      }}
+      role={live ? 'button' : undefined}
+      tabIndex={live ? 0 : undefined}
+      aria-label={live ? `Power off ${piece.type}` : undefined}
+      style={{ cursor: live ? 'pointer' : 'default' }}
+    />
   );
 }
 

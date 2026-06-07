@@ -225,6 +225,24 @@ export class TestClient {
     return this.observedCommands.get(train_id) ?? [];
   }
 
+  /**
+   * Wait until an event of `event_type` from `device_id` has round-tripped
+   * through the broker (and so been delivered to the server, which subscribes to
+   * the same topic). Used to ORDER a broker-published event before a subsequent
+   * synchronous `server.*` call — e.g. ensuring a gate withhold is in effect
+   * before assigning a schedule, now that the clearance horizon attempts the
+   * gated edge eagerly at assign time rather than only on arrival.
+   */
+  async waitForEvent(event_type: string, device_id: string, timeout_ms = 2000): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeout_ms) {
+      if (this.observedEvents.some((e) => e.event_type === event_type && e.device_id === device_id))
+        return;
+      await delay(20);
+    }
+    throw new Error(`Timed out waiting for event ${event_type} from ${device_id}`);
+  }
+
   retained(): ReadonlyMap<string, unknown> {
     return this.retainedState;
   }

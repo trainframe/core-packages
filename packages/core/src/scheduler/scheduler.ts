@@ -15,6 +15,24 @@ import { type EdgeRef, edgesEqual } from './types.js';
  */
 export const STATION_DWELL_MS = 2500;
 
+/**
+ * How many edges of clearance the scheduler keeps granted AHEAD of the edge a
+ * train is currently on — the clearance HORIZON. Granted proactively (topped up
+ * on every marker crossing and after any retry) rather than one edge at a time
+ * when the train reaches its limit, so a moving train always has several blocks
+ * of room in front of it and never has to brake to a stop approaching a
+ * limit-marker that's only one block ahead.
+ *
+ * Three is enough to absorb the simulator's braking distance on the demo loop
+ * while staying small enough that the single-direction oval never over-locks: a
+ * chaser only ever needs to wait one block behind the leader's lock set, and the
+ * conflict check in `tryGrantClearance` runs BEFORE switch actuation, so a
+ * longer look-ahead can never flip points out from under a peer that already
+ * holds a junction. If a future topology deadlocks under N=3, lower it — it is a
+ * tuning floor, not a contract.
+ */
+export const CLEARANCE_HORIZON_EDGES = 3;
+
 export interface SchedulerOptions {
   /**
    * Monotonic clock callback in ms, used to time the station dwell. REQUIRED:
@@ -390,12 +408,17 @@ export class Scheduler {
     );
 
     // If we've just completed the current transit and replanned to the next
-    // stop, the replan emits its own initial grant — skip the
-    // extend-clearance pass on the *old* transit.
+    // stop, the replan emits its own initial grant + horizon — skip the
+    // top-up pass on the *old* transit.
     if (scheduleReplanEffects.length > 0) {
       out.push(...scheduleReplanEffects);
     } else {
-      out.push(...this.maybeExtendClearance(train, markerId));
+      // Top up the clearance horizon on every crossing, unconditionally — not
+      // only when the train reaches its limit marker. This is the headline of
+      // the proactive-horizon model: the train always carries several blocks of
+      // clearance ahead and so never decelerates to a stop at an intermediate
+      // marker.
+      out.push(...this.extendClearanceHorizon(train));
     }
 
     out.push(...this.retryBlockedClearances());
@@ -444,17 +467,52 @@ export class Scheduler {
   }
 
   /**
-   * If the train has just reached its clearance limit and the transit has
-   * more edges ahead, attempt to grant clearance for the next edge.
+   * Grant clearance PROACTIVELY to a horizon of `CLEARANCE_HORIZON_EDGES` edges
+   * ahead of the edge the train is currently on. Walks forward from
+   * `transit.progress_index`, granting any edge not yet held, until either the
+   * horizon is full or an edge can't be granted.
+   *
+   * Counting rule: edges already in `cleared_edges` count toward the horizon
+   * (they're clearance the train still holds ahead of it) but are skipped, not
+   * re-granted. We stop as soon as the count of cleared-ahead edges reaches the
+   * horizon.
+   *
+   * STOP-ON-GAP (load-bearing): if `tryGrantClearance` returns no grant for an
+   * edge — a peer-held conflict (ADR-011), a gate denial, or a switch that must
+   * first be actuated (which only *requests* the switch and withholds) — we stop
+   * immediately and never grant a later edge across the gap. This is what
+   * preserves block exclusivity, the length-aware switched-junction
+   * serialization, and the autonomous switch-throw: the horizon reaching a
+   * junction's divert/main edge requests the switch early, then stalls there
+   * until `switch_state_changed` → `retryBlockedClearances` resumes the walk.
    */
-  private maybeExtendClearance(
-    train: TrainState,
-    markerId: string,
-  ): ReadonlyArray<SchedulerEffect> {
-    if (train.clearance_limit_marker_id !== markerId || !train.transit) return [];
-    const nextEdge = train.transit.edges[train.transit.progress_index];
-    if (!nextEdge) return [];
-    return this.tryGrantClearance(train, nextEdge);
+  private extendClearanceHorizon(train: TrainState): ReadonlyArray<SchedulerEffect> {
+    if (!train.transit) return [];
+    const out: SchedulerEffect[] = [];
+    let granted = 0;
+    for (
+      let i = train.transit.progress_index;
+      i < train.transit.edges.length && granted < CLEARANCE_HORIZON_EDGES;
+      i++
+    ) {
+      const edge = train.transit.edges[i];
+      if (!edge) break;
+      if (train.cleared_edges.some((e) => edgesEqual(e, edge))) {
+        // Already held — counts toward the horizon, no re-grant.
+        granted++;
+        continue;
+      }
+      const effects = this.tryGrantClearance(train, edge);
+      out.push(...effects);
+      // No grant came back: a conflict, a denial, or a switch-actuate-and-hold.
+      // Stop — granting a later edge across this gap would defeat block
+      // exclusivity and the junction serialization.
+      if (!effects.some((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance')) {
+        break;
+      }
+      granted++;
+    }
+    return out;
   }
 
   // ---------- clearance request handling ----------
@@ -746,11 +804,10 @@ export class Scheduler {
     const out: SchedulerEffect[] = [];
     for (const train of this.trains.values()) {
       if (skipTrainIds?.has(train.train_id)) continue;
-      if (!train.transit) continue;
-      const nextEdge = train.transit.edges[train.transit.progress_index];
-      if (!nextEdge) continue;
-      if (train.cleared_edges.some((e) => edgesEqual(e, nextEdge))) continue;
-      out.push(...this.tryGrantClearance(train, nextEdge));
+      // Re-run the full horizon walk per train, not just the single next edge:
+      // an unblocked train should fill its whole look-ahead in one retry pass,
+      // not creep forward one edge per unrelated event.
+      out.push(...this.extendClearanceHorizon(train));
     }
     out.push(...this.maybeEmitDeadlockState());
     return out;
@@ -1040,7 +1097,9 @@ export class Scheduler {
         edges: transitEdges,
       }),
     ];
-    out.push(...this.tryGrantClearance(train, firstEdge));
+    // Grant the whole initial horizon, not just the first edge, so a fresh
+    // train pulls away with several blocks of clearance ahead of it.
+    out.push(...this.extendClearanceHorizon(train));
 
     // Wiping cleared_edges in assignSchedule may have released blocks that
     // peer trains were waiting on. Retry so they don't sit blocked until an

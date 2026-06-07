@@ -278,6 +278,40 @@ describe('ToyTable — palette and placement', () => {
     // the operator hasn't used the scan-box.
     expect(filterScanFlowAssignments(client)).toHaveLength(0);
   });
+
+  it('renders a subtle marker indicator at the centre of each track piece, including junctions', async () => {
+    renderToyTable();
+    const straightId = await placeArmedPiece('straight');
+    const junctionId = await placeArmedPiece('junction');
+
+    // A marker dot exists for the straight AND the junction.
+    expect(screen.getByTestId(`marker-${straightId}`)).toBeTruthy();
+    expect(screen.getByTestId(`marker-${junctionId}`)).toBeTruthy();
+
+    // The dot is non-interactive (drawn under devices, never intercepts clicks).
+    const dot = screen.getByTestId(`marker-${junctionId}`);
+    expect(dot.style.pointerEvents).toBe('none');
+  });
+
+  it('orders marker indicators BEFORE device/train elements so a train is not pierced by a dot', async () => {
+    renderToyTable();
+    const straightId = await placeArmedPiece('straight');
+    const trainId = await placeArmedPiece('train');
+
+    // Within the rendered SVG, the marker dot for a track piece must appear
+    // earlier in document order than the train piece, so the train (later =
+    // painted on top) is never pierced by the marker dot beneath it.
+    const all = Array.from(
+      document.querySelectorAll('[data-testid^="marker-"], [data-testid^="piece-"]'),
+    );
+    const markerIdx = all.findIndex(
+      (el) => el.getAttribute('data-testid') === `marker-${straightId}`,
+    );
+    const trainIdx = all.findIndex((el) => el.getAttribute('data-testid') === `piece-${trainId}`);
+    expect(markerIdx).toBeGreaterThanOrEqual(0);
+    expect(trainIdx).toBeGreaterThanOrEqual(0);
+    expect(markerIdx).toBeLessThan(trainIdx);
+  });
 });
 
 /** Place an armed piece of the given type and return its piece id. */
@@ -436,7 +470,7 @@ describe('ToyTable — scan and power', () => {
     expect(filterScanFlowAssignments(client)).toHaveLength(0);
   });
 
-  it('clicking a live train powers it off and publishes device_disconnected', async () => {
+  it('clicking a live train SELECTS it — it stays live and is NOT powered off', async () => {
     const user = userEvent.setup();
     const { client } = renderToyTable();
     const pieceId = await placeArmedPiece('train');
@@ -453,6 +487,54 @@ describe('ToyTable — scan and power', () => {
     // button again so subsequent clicks reach the piece's own handler.
     await user.click(screen.getByTestId('toybox-train'));
     fireEvent.click(placed);
+
+    // Clicking the body of a LIVE train selects it. It must NOT power off:
+    // no device_disconnected, and it stays live (so it keeps rendering at its
+    // simulated position rather than teleporting back to the placement marker).
+    const disconnects = client.published.filter((m) =>
+      m.topic.startsWith('railway/events/device_disconnected/T-'),
+    );
+    expect(disconnects.length).toBe(0);
+    expect(placed.getAttribute('data-live')).toBe('true');
+    // The action bar offers an explicit Power off affordance for the now-selected
+    // live train.
+    expect(screen.getByTestId('action-power-off')).toBeTruthy();
+  });
+
+  it('clicking a live train`s power dot powers it off and publishes device_disconnected', async () => {
+    const user = userEvent.setup();
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('train');
+
+    const placed = document.querySelector(`[data-piece-id="${pieceId}"]`) as HTMLElement | null;
+    if (!placed) throw new Error('unreachable');
+
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+    expect(placed.getAttribute('data-live')).toBe('true');
+
+    await user.click(screen.getByTestId('toybox-train')); // disarm
+    fireEvent.click(screen.getByTestId(`power-${pieceId}`));
+
+    const disconnects = client.published.filter((m) =>
+      m.topic.startsWith('railway/events/device_disconnected/T-'),
+    );
+    expect(disconnects.length).toBe(1);
+    expect(placed.getAttribute('data-live')).toBe('false');
+  });
+
+  it('the ActionBar Power off button powers a selected live train off', async () => {
+    const user = userEvent.setup();
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('train');
+
+    const placed = document.querySelector(`[data-piece-id="${pieceId}"]`) as HTMLElement | null;
+    if (!placed) throw new Error('unreachable');
+
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+    await user.click(screen.getByTestId('toybox-train')); // disarm
+    fireEvent.click(placed); // select the live train
+
+    fireEvent.click(screen.getByTestId('action-power-off'));
 
     const disconnects = client.published.filter((m) =>
       m.topic.startsWith('railway/events/device_disconnected/T-'),

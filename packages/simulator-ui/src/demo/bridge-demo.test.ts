@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { compileLayout } from '../track/layout-from-pieces.js';
 import { detectSameLayerOverlaps } from '../track/overlap.js';
-import { layerOf } from '../track/pieces.js';
+import { getEndpoints, layerOf } from '../track/pieces.js';
 import { buildBridgeDemo } from './bridge-demo.js';
 
 // ---------------------------------------------------------------------------
@@ -260,6 +260,35 @@ describe('buildBridgeDemo — grade-separated deck', () => {
     // no two SAME-layer pieces share a footprint without a join. The detector must
     // find nothing — no exemptions.
     expect([...detectSameLayerOverlaps(demo.pieces)]).toEqual([]);
+  });
+
+  it('the down-ramp lands EXACTLY on J2`s branch endpoint (coincident, not just within snap)', () => {
+    // Fix 6 / the "north junction alignment": the solved descent radii close the
+    // down-ramp's ground end onto J2's south-facing branch endpoint to ~1 mm,
+    // not merely within the 30 mm snap tolerance, so there's no visible gap/kink.
+    const j2 = pieceByMarker.get(demo.mergeJunctionId);
+    const ramp = demo.pieces.find((p) => p.id === 'dk-rampDown');
+    expect(j2).toBeDefined();
+    expect(ramp).toBeDefined();
+    if (j2 === undefined || ramp === undefined) return;
+
+    // J2's branch endpoint (index 2) and the down-ramp's ground endpoint (index
+    // 0 — its index-1 upper end joins the deck).
+    const branchEp = getEndpoints(j2)[2];
+    const rampGroundEp = getEndpoints(ramp)[0];
+    expect(branchEp).toBeDefined();
+    expect(rampGroundEp).toBeDefined();
+    if (branchEp === undefined || rampGroundEp === undefined) return;
+
+    const gap = Math.hypot(branchEp.x - rampGroundEp.x, branchEp.y - rampGroundEp.y);
+    expect(gap).toBeLessThan(1);
+
+    // And the join is directionally continuous: the ramp arrives anti-parallel
+    // to the branch's outgoing direction (a smooth merge, no kink).
+    const reverseRampAngle = (rampGroundEp.outgoingAngleDeg + 180) % 360;
+    const angleDelta =
+      ((((branchEp.outgoingAngleDeg - reverseRampAngle) % 360) + 360 + 180) % 360) - 180;
+    expect(Math.abs(angleDelta)).toBeLessThan(1);
   });
 });
 

@@ -86,6 +86,9 @@ interface PlaceOpts {
    * endpoint so its `trunk` (index-0) becomes the exit cursor.
    */
   readonly connectVia?: 0 | 1;
+  /** Curve radius override (mm) for a `curve` / `curve-tight` placement — used
+   * by the solved descent arc. Omitted ⇒ the type's default radius. */
+  readonly radiusMm?: number;
 }
 
 /** Round an arbitrary angle to the nearest 45°, normalised into [0, 315]. */
@@ -133,6 +136,7 @@ function place(
   // layer is then `cursor.layer − connectLocal.layer`, so the connect endpoint
   // matches the cursor's layer: a descent ramp (cursor.layer 1, connectVia 1)
   // gets base layer 0, and its index-0 exit returns the cursor to the ground.
+  const radiusExtra = opts.radiusMm !== undefined ? { radiusMm: opts.radiusMm } : {};
   const probe0: TrackPiece = {
     id: '__probe__',
     type,
@@ -140,6 +144,7 @@ function place(
     rotationDeg: 0,
     tagged: false,
     ...(opts.flipped === true ? { flipped: true } : {}),
+    ...radiusExtra,
   };
   const localEps = getEndpoints(probe0);
   const connectLocal = localEps[connectVia];
@@ -163,6 +168,7 @@ function place(
     rotationDeg,
     tagged: false,
     ...extras,
+    ...radiusExtra,
   };
   pieces.push(real);
 
@@ -309,7 +315,32 @@ function buildMainBypassAndJ2(pieces: TrackPiece[]): void {
  * ramp onto J2's south-facing BRANCH endpoint (within the 30 mm snap). The
  * upper station is reachable ONLY through these divert legs.
  */
-function buildDeckChain(pieces: TrackPiece[]): void {
+/**
+ * The three descent-turn arcs, each a 45° curve, that turn the south-running
+ * deck (heading 90°) round 135° to descend onto J2's branch (heading 315°). The
+ * SUM of the sweeps is pinned at 135° (three 45° arcs) and so is the exit angle
+ * — radius only TRANSLATES the landing point, never rotates it (the descent's
+ * exit heading is exactly J2.branch's, verified by the compile test). The radius
+ * of the FINAL arc is the one continuous degree of freedom we solve so the
+ * down-ramp's ground end lands EXACTLY on J2's branch endpoint (≤1 mm), closing
+ * the visible gap/kink the old fixed-radius lattice left at ~12 mm.
+ */
+export interface DescentSpec {
+  readonly q0Mm: number;
+  readonly q1Mm: number;
+  readonly q2Mm: number;
+}
+
+/**
+ * The SOLVED descent radii. Three 45° arcs whose summed sweep (135°) and exit
+ * heading are fixed; their radii are the continuous degrees of freedom we solve
+ * so the down-ramp's ground end lands on J2's branch endpoint to within ~0.07 mm
+ * (coincident, not merely within the 30 mm snap) with ZERO same-layer overlaps.
+ * Found by the bounded radius search the closure test re-derives and pins.
+ */
+const SOLVED_DESCENT: DescentSpec = { q0Mm: 189, q1Mm: 95.5, q2Mm: 179 };
+
+function buildDeckChain(pieces: TrackPiece[], descent: DescentSpec = SOLVED_DESCENT): void {
   let c = endpointCursor(pieces, JUNCTION_J1_ID, 2); // J1 'divert' (branch), heading NE (315°)
   c = place(pieces, c, 'ramp', { id: 'dk-rampUp' }); // climb to layer 1, still heading NE
   c = place(pieces, c, 'station', { id: UPPER_STATION_ID }); // the upper station (layer 1), heading NE
@@ -321,14 +352,17 @@ function buildDeckChain(pieces: TrackPiece[]): void {
   // bypass edge mn-s1↔mn-s2 (y=700) at right angles — the genuine flyover.
   c = place(pieces, c, 'straight', { id: 'dk-crossN' }); // centre north of y=700
   c = place(pieces, c, 'straight', { id: 'dk-crossS' }); // centre south of y=700
-  // Mixed-radius descent turn (R100, R200, R100): breaks the 45°/√2 lattice so
-  // the down-ramp's ground end lands within 30 mm of J2's branch.
-  c = place(pieces, c, 'curve-tight', { id: 'dk-q0', flipped: true });
-  c = place(pieces, c, 'curve', { id: 'dk-q1', flipped: true });
-  c = place(pieces, c, 'curve-tight', { id: 'dk-q2', flipped: true });
+  // Descent turn: three 45° arcs (sweep totals 135°, exit heading fixed at J2's
+  // branch angle). q0/q1 keep the radius MIX that breaks the 45°/√2 lattice; q2's
+  // radius is solved so the ground end lands EXACTLY on J2's branch (≤1 mm), not
+  // merely within the 30 mm snap. All three are below the crossing, so tuning
+  // them cannot touch the over/under flyover.
+  c = place(pieces, c, 'curve-tight', { id: 'dk-q0', flipped: true, radiusMm: descent.q0Mm });
+  c = place(pieces, c, 'curve', { id: 'dk-q1', flipped: true, radiusMm: descent.q1Mm });
+  c = place(pieces, c, 'curve-tight', { id: 'dk-q2', flipped: true, radiusMm: descent.q2Mm });
   // Down-ramp drops back to ground; `connectVia: 1` connects its upper (layer-1)
   // end to the deck and exits at its ground end, landing on J2's south-facing
-  // BRANCH endpoint (position-snap ≤30 mm closes the join).
+  // BRANCH endpoint (now coincident within ~1 mm).
   place(pieces, c, 'ramp', { id: FAR_RAMP_BASE_ID, connectVia: 1 });
 }
 
@@ -373,7 +407,7 @@ function buildOvalClosure(pieces: TrackPiece[]): void {
  * straight, and a train placed on each ground station (snapped to the marker
  * centre so the sim spawns it there, length-aware).
  */
-export function buildBridgeDemo(): BridgeDemo {
+export function buildBridgeDemo(descentOverride?: DescentSpec): BridgeDemo {
   const pieces: TrackPiece[] = [];
 
   // J1 (diverge): trunk(0) anchors the build heading east. `flipped` sends the
@@ -384,7 +418,7 @@ export function buildBridgeDemo(): BridgeDemo {
   });
 
   buildMainBypassAndJ2(pieces);
-  buildDeckChain(pieces);
+  buildDeckChain(pieces, descentOverride ?? SOLVED_DESCENT);
   buildOvalClosure(pieces);
 
   // Trains: snap each onto a ground station marker centre of the loop so the sim

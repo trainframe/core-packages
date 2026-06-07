@@ -116,6 +116,18 @@ export interface TrackPiece {
    * never written as `layer: undefined` (exactOptionalPropertyTypes).
    */
   readonly layer?: number;
+  /**
+   * Centreline turn-radius override (mm) for a `curve` / `curve-tight` piece.
+   * Absent ⇒ the type's default (200 for `curve`, 100 for `curve-tight`). It
+   * lets a build solve ONE arc's radius to land a chain exactly on a target
+   * endpoint — used by the bridge demo's descent to close the down-ramp onto
+   * J2's branch within ~1 mm rather than merely within snap. The same 45° sweep
+   * and heading lattice hold for any radius (see `curveArcCentre`), so the
+   * override only translates the arc's far end, never rotates it. Mirrors the
+   * `flipped?` / `layer?` idiom: never written as `radiusMm: undefined`
+   * (exactOptionalPropertyTypes). Ignored by non-curve pieces.
+   */
+  readonly radiusMm?: number;
 }
 
 /** The single place the ground-layer default lives. Absent ⇒ layer 0. */
@@ -166,8 +178,10 @@ const CURVE_RADIUS_MM = 200;
  */
 const CURVE_TIGHT_RADIUS_MM = 100;
 
-/** The centreline turn radius for a curve piece type. */
-function curveRadiusFor(type: TrackPieceType): number {
+/** The centreline turn radius for a curve piece. An explicit `radiusMm` override
+ * (a solved-radius arc) wins; otherwise the type's default. */
+function curveRadiusFor(type: TrackPieceType, radiusOverride?: number): number {
+  if (radiusOverride !== undefined && radiusOverride > 0) return radiusOverride;
   return type === 'curve-tight' ? CURVE_TIGHT_RADIUS_MM : CURVE_RADIUS_MM;
 }
 
@@ -263,6 +277,7 @@ function normaliseAngle(deg: number): number {
  */
 function localEndpoints(
   type: TrackPieceType,
+  radiusOverride?: number,
 ): ReadonlyArray<{ lx: number; ly: number; localAngle: number; layerDelta?: number }> {
   switch (type) {
     case 'straight':
@@ -289,7 +304,7 @@ function localEndpoints(
       // snapped end-to-end close into a circle (the old chord-approximation
       // endpoints did not). Origin is the arc midpoint, so the marker is on the
       // rail. `curve-tight` is the same arc at half the radius.
-      const r = curveRadiusFor(type);
+      const r = curveRadiusFor(type, radiusOverride);
       const entry = curvePointR(r, r, CURVE_ENTRY_ANGLE);
       const exit = curvePointR(r, r, CURVE_EXIT_ANGLE);
       return [
@@ -345,7 +360,7 @@ function localEndpoints(
  * north, west, south]; all others: [entry, exit]).
  */
 export function getEndpoints(piece: TrackPiece): ReadonlyArray<TrackEndpoint> {
-  const locals = localEndpoints(piece.type);
+  const locals = localEndpoints(piece.type, piece.radiusMm);
   const flip = piece.flipped === true;
   const baseLayer = layerOf(piece);
   return locals.map(({ lx, ly, localAngle, layerDelta }) => {
@@ -437,13 +452,110 @@ function curveHalfPath(radius: number, endAngleDeg: number): CentreLinePath {
   };
 }
 
+/**
+ * A smooth cubic-Bézier centre-line from the origin (0,0) out to `(ex, ey)`,
+ * leaving the origin along `startAngleDeg` and arriving at the endpoint along
+ * `endAngleDeg`. Used for the junction BRANCH leg: a straight chord from the
+ * junction centre to the 45° branch endpoint would make a train's heading JUMP
+ * from the trunk axis (0°) to 45° at the junction centre. A Bézier tangent to
+ * the trunk axis at the centre and to the branch direction at the endpoint
+ * turns the train smoothly through the divert — with NO change to the endpoint
+ * position, so connectivity and snapping are untouched.
+ *
+ * Sampling is by an arc-length lookup over a fixed set of parameter samples
+ * (the curve is short and gently curved, so a modest sample count is exact to
+ * well under a millimetre). Heading is the curve tangent in the travel
+ * direction.
+ */
+function bezierHalfPath(
+  ex: number,
+  ey: number,
+  startAngleDeg: number,
+  endAngleDeg: number,
+): CentreLinePath {
+  // Control handle length: a third of the chord is the standard choice for a
+  // visually circular-looking cubic; the exact value only affects the bulge of
+  // the (short) turn, never the endpoints or their tangents.
+  const chord = hypot(ex, ey);
+  const handle = chord / 3;
+  const s = toRad(startAngleDeg);
+  const e = toRad(endAngleDeg);
+  // p0 = origin, p3 = endpoint; p1/p2 set the end tangents.
+  const p1x = handle * Math.cos(s);
+  const p1y = handle * Math.sin(s);
+  const p2x = ex - handle * Math.cos(e);
+  const p2y = ey - handle * Math.sin(e);
+  const bez = (t: number): { x: number; y: number } => {
+    const u = 1 - t;
+    const x = 3 * u * u * t * p1x + 3 * u * t * t * p2x + t * t * t * ex;
+    const y = 3 * u * u * t * p1y + 3 * u * t * t * p2y + t * t * t * ey;
+    return { x, y };
+  };
+  // Analytic tangent (derivative) of the cubic at parameter t, giving the EXACT
+  // heading at both ends (0° at the centre, branch angle at the endpoint).
+  const tangentDeg = (t: number): number => {
+    const u = 1 - t;
+    const dx = 3 * u * u * p1x + 6 * u * t * (p2x - p1x) + 3 * t * t * (ex - p2x);
+    const dy = 3 * u * u * p1y + 6 * u * t * (p2y - p1y) + 3 * t * t * (ey - p2y);
+    return dx === 0 && dy === 0 ? startAngleDeg : (Math.atan2(dy, dx) * 180) / Math.PI;
+  };
+  // Build an arc-length table over N samples (t and cumulative length).
+  const N = 64;
+  const pts: Array<{ t: number; x: number; y: number; s: number }> = [];
+  let acc = 0;
+  let prev = bez(0);
+  pts.push({ t: 0, x: prev.x, y: prev.y, s: 0 });
+  for (let i = 1; i <= N; i++) {
+    const t = i / N;
+    const cur = bez(t);
+    acc += hypot(cur.x - prev.x, cur.y - prev.y);
+    pts.push({ t, x: cur.x, y: cur.y, s: acc });
+    prev = cur;
+  }
+  const length = acc;
+  return {
+    length,
+    at(distFromCentre: number): RailPose {
+      const target = Math.max(0, Math.min(length, distFromCentre));
+      // Find the segment containing `target` and lerp within it (position by
+      // arc length, heading from the analytic tangent at the lerped parameter).
+      let i = 1;
+      while (i < pts.length && (pts[i]?.s ?? length) < target) i++;
+      const a = pts[i - 1];
+      const b = pts[i] ?? a;
+      if (a === undefined || b === undefined) return { x: 0, y: 0, headingDeg: startAngleDeg };
+      const span = b.s - a.s;
+      const f = span > 0 ? (target - a.s) / span : 0;
+      const x = a.x + (b.x - a.x) * f;
+      const y = a.y + (b.y - a.y) * f;
+      const t = a.t + (b.t - a.t) * f;
+      return { x, y, headingDeg: tangentDeg(t) };
+    },
+  };
+}
+
 /** The piece-local centre-line half-path for endpoint `index`, or undefined
  * when the index is out of range (e.g. a device piece with no endpoints). */
-function localHalfPath(type: TrackPieceType, index: number): CentreLinePath | undefined {
+function localHalfPath(
+  type: TrackPieceType,
+  index: number,
+  radiusOverride?: number,
+): CentreLinePath | undefined {
   if (type === 'curve' || type === 'curve-tight') {
     const endAngle = index === 0 ? CURVE_ENTRY_ANGLE : CURVE_EXIT_ANGLE;
     if (index !== 0 && index !== 1) return undefined;
-    return curveHalfPath(curveRadiusFor(type), endAngle);
+    return curveHalfPath(curveRadiusFor(type, radiusOverride), endAngle);
+  }
+  // Junction BRANCH leg (index 2): a smooth turn from the trunk axis at the
+  // centre to the 45° branch endpoint, so a train diverting through the
+  // junction doesn't snap its heading at the marker. The trunk (0) and through
+  // (1) legs remain straight chords — they're collinear, already continuous.
+  if (type === 'junction' && index === 2) {
+    const branch = localEndpoints(type)[2];
+    if (branch === undefined) return undefined;
+    // Tangent at the centre is the trunk/through axis (0°, east); tangent at the
+    // endpoint is the branch's own outgoing direction.
+    return bezierHalfPath(branch.lx, branch.ly, 0, branch.localAngle);
   }
   const local = localEndpoints(type)[index];
   if (local === undefined) return undefined;
@@ -485,7 +597,7 @@ export function getCentreLinePath(
   piece: TrackPiece,
   endpointIndex: number,
 ): CentreLinePath | undefined {
-  const local = localHalfPath(piece.type, endpointIndex);
+  const local = localHalfPath(piece.type, endpointIndex, piece.radiusMm);
   if (local === undefined) return undefined;
   return worldHalfPath(piece, local);
 }
@@ -529,9 +641,9 @@ export function getPieceShape(piece: TrackPiece): PieceShape {
     case 'straight':
       return straightShape();
     case 'curve':
-      return curveShape(CURVE_RADIUS_MM);
+      return curveShape(curveRadiusFor('curve', piece.radiusMm));
     case 'curve-tight':
-      return curveShape(CURVE_TIGHT_RADIUS_MM);
+      return curveShape(curveRadiusFor('curve-tight', piece.radiusMm));
     case 'junction':
       return junctionShape();
     case 'station':
@@ -606,11 +718,29 @@ function curveShape(radius: number): PieceShape {
 
 function junctionShape(): PieceShape {
   // Y-shape: trunk on left, straight through on right, branch diverging at 45°
-  // down-right (matching the branch endpoint). Main rail band 16 mm wide.
-  const bx = (100 * Math.cos(toRad(45))).toFixed(1);
-  const by1 = (100 * Math.sin(toRad(45)) - 8).toFixed(1);
-  const by2 = (100 * Math.sin(toRad(45)) + 8).toFixed(1);
-  const d = `M -100 -8 H 100 V 8 H -100 Z M 0 -8 L ${bx} ${by1} L ${bx} ${by2} L 0 8 Z`;
+  // down-right (matching the branch endpoint). Both the through rail and the
+  // branch rail are RAIL_HALF_WIDTH (8 mm) half-width — i.e. 16 mm across.
+  //
+  // The branch band must be offset PERPENDICULAR to its own 45° axis, not
+  // vertically: a vertical ±8 offset on a 45° rail yields an effective width of
+  // only 16·cos45 ≈ 11.3 mm, visibly thinner than the through rail. We build the
+  // branch quad from its centre-line (origin → branch endpoint at 45°) offset by
+  // ±RAIL_HALF_WIDTH along the axis normal.
+  const hw = RAIL_HALF_WIDTH;
+  const a = toRad(45);
+  // Branch endpoint (centre-line), matching the index-2 endpoint geometry.
+  const ex = 100 * Math.cos(a);
+  const ey = 100 * Math.sin(a);
+  // Unit normal to the 45° branch axis (rotate the axis direction +90°).
+  const nx = -Math.sin(a);
+  const ny = Math.cos(a);
+  const pt = (px: number, py: number): string => `${px.toFixed(2)} ${py.toFixed(2)}`;
+  // Branch band: origin±normal → endpoint±normal, a true 16 mm-wide strip.
+  const branch =
+    `M ${pt(hw * nx, hw * ny)} L ${pt(ex + hw * nx, ey + hw * ny)} ` +
+    `L ${pt(ex - hw * nx, ey - hw * ny)} L ${pt(-hw * nx, -hw * ny)} Z`;
+  const through = `M -100 ${-hw} H 100 V ${hw} H -100 Z`;
+  const d = `${through} ${branch}`;
 
   return { svgPath: d, width: 200, height: 80 };
 }

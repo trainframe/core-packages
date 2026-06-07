@@ -106,6 +106,45 @@ const seedIdentityTags = (scheduler: Scheduler, markerIds: ReadonlyArray<string>
 
 const SIMPLE_LOOP_MARKERS = ['M1', 'M2', 'M3', 'M4'];
 
+/**
+ * A six-marker loop, longer than the clearance horizon (3 edges), so a single
+ * leg can hold the full horizon AND still have edges left to top up after a
+ * crossing — exercising the proactive top-up that the four-marker loop is too
+ * short to show.
+ *
+ *   N1 -- N2 -- N3 -- N4 -- N5 -- N6 -- N1
+ */
+const SIX_LOOP: Layout = {
+  name: 'six-loop',
+  markers: [
+    { id: 'N1', kind: 'block_boundary' },
+    { id: 'N2', kind: 'block_boundary' },
+    { id: 'N3', kind: 'block_boundary' },
+    { id: 'N4', kind: 'block_boundary' },
+    { id: 'N5', kind: 'block_boundary' },
+    { id: 'N6', kind: 'block_boundary' },
+  ],
+  edges: [
+    { from_marker_id: 'N1', to_marker_id: 'N2', estimated_length_mm: 200 },
+    { from_marker_id: 'N2', to_marker_id: 'N3', estimated_length_mm: 200 },
+    { from_marker_id: 'N3', to_marker_id: 'N4', estimated_length_mm: 200 },
+    { from_marker_id: 'N4', to_marker_id: 'N5', estimated_length_mm: 200 },
+    { from_marker_id: 'N5', to_marker_id: 'N6', estimated_length_mm: 200 },
+    { from_marker_id: 'N6', to_marker_id: 'N1', estimated_length_mm: 200 },
+  ],
+  junctions: [],
+};
+
+const setupSixLoop = () => {
+  const registry = new CapabilityRegistry();
+  registry.registerAll(BUILTIN_CAPABILITIES);
+  registry.freeze();
+  const layout = new LayoutState(SIX_LOOP, { now: () => 0 });
+  const scheduler = new Scheduler(registry, layout, { now: () => 0 });
+  seedIdentityTags(scheduler, ['N1', 'N2', 'N3', 'N4', 'N5', 'N6']);
+  return { scheduler };
+};
+
 // ---------- tests ----------
 
 describe('Scheduler — route assignment and clearance extension', () => {
@@ -126,22 +165,31 @@ describe('Scheduler — route assignment and clearance extension', () => {
     expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M2');
   });
 
-  it('extends clearance when a train arrives at its limit and more route remains', () => {
-    const { scheduler } = setup();
+  it('tops up the clearance horizon as a train crosses a marker mid-route', () => {
+    // The proactive-horizon contract (replaces the old reach-the-limit,
+    // grant-one-edge model): a moving train always carries up to
+    // CLEARANCE_HORIZON_EDGES of clearance ahead of the edge it's on. The
+    // six-marker loop gives a leg LONGER than the horizon, so a crossing
+    // genuinely tops it up by granting a fresh edge.
+    const { scheduler } = setupSixLoop();
     registerTrain(scheduler, 'T1');
-    // Train starts at M1, heading to M3 via M1→M2→M3.
-    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    // N1→…→N6 — a five-edge leg. With a 3-edge horizon, at assign T1 holds the
+    // first three (limit lands at N4); N4→N5 and N5→N6 are NOT yet granted.
+    scheduler.assignSchedule('T1', 'route-1', ['N1', 'N6']);
+    expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('N4');
 
-    // Train passes M1 (the start) - then arrives at M2.
+    // Train passes N1 (the start), then arrives at N2. As a point train it
+    // releases N1→N2; the horizon then tops up by granting the next edge,
+    // N4→N5, pushing the limit to N5.
     scheduler.handleEvent({
       event_type: 'tag_observed',
       device_id: 'T1',
-      payload: { tag_id: 'M1' },
+      payload: { tag_id: 'N1' },
     });
     const effects = scheduler.handleEvent({
       event_type: 'tag_observed',
       device_id: 'T1',
-      payload: { tag_id: 'M2' },
+      payload: { tag_id: 'N2' },
     });
 
     const grant = effects.find(
@@ -149,7 +197,25 @@ describe('Scheduler — route assignment and clearance extension', () => {
         e.kind === 'send_command' && e.command_type === 'grant_clearance',
     );
     expect(grant).toBeDefined();
-    expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M3');
+    // The newly-granted edge (N4→N5) tops the horizon back up to three ahead.
+    expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('N5');
+    expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('N5');
+  });
+
+  it('grants the whole horizon up front on a clear route (proactive look-ahead)', () => {
+    const { scheduler } = setupSixLoop();
+    registerTrain(scheduler, 'T1');
+    // A five-edge leg on a clear loop. The horizon grants exactly the first
+    // three edges ahead at assign time — not just the first, and not the whole
+    // leg — so the train pulls away with several blocks of room.
+    scheduler.assignSchedule('T1', 'route-1', ['N1', 'N6']);
+    const t1 = scheduler.getTrainState('T1');
+    expect(t1?.cleared_edges).toEqual([
+      { from_marker_id: 'N1', to_marker_id: 'N2' },
+      { from_marker_id: 'N2', to_marker_id: 'N3' },
+      { from_marker_id: 'N3', to_marker_id: 'N4' },
+    ]);
+    expect(t1?.clearance_limit_marker_id).toBe('N4');
   });
 });
 
@@ -400,13 +466,16 @@ describe('Scheduler — deadlock detection', () => {
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
 
-    // T1: schedule [A, C] (transit A→B→C). T1 spawns at A, holds A→B.
+    // T1: schedule [A, C] (transit A→B→C). T1 spawns at A. Under the proactive
+    // horizon it grants the whole two-edge leg up front: A→B then B→C, so T1
+    // holds {A, B, C}.
     scheduler.assignSchedule('T1', 'r1', ['A', 'C']);
     expect(scheduler.getTrainState('T1')?.cleared_edges).toEqual([
       { from_marker_id: 'A', to_marker_id: 'B' },
+      { from_marker_id: 'B', to_marker_id: 'C' },
     ]);
     // T2: schedule [C, B] (transit C→A→B). T2 spawns at C, wants C→A — but
-    // C→A shares A with T1's lock {A, B}. Denied.
+    // C→A shares A and C with T1's locked edges. Denied.
     scheduler.assignSchedule('T2', 'r2', ['C', 'B']);
     expect(scheduler.getTrainState('T2')?.cleared_edges).toEqual([]);
     // T1 advances: traverse to B. T1's lock becomes {B, C} (holds B→C).
@@ -628,9 +697,10 @@ describe('Scheduler — clearance revocation', () => {
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
 
-    // T1 takes M1→M2 (gets initial clearance).
+    // T1 takes its whole two-edge leg up front (M1→M2, M2→M3) under the
+    // proactive horizon.
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
-    expect(scheduler.getTrainState('T1')?.cleared_edges).toHaveLength(1);
+    expect(scheduler.getTrainState('T1')?.cleared_edges).toHaveLength(2);
 
     // T2 also wants M1→M2 — denied because T1 holds the block.
     const t2Initial = scheduler.assignSchedule('T2', 'route-2', ['M1', 'M2']);
@@ -911,23 +981,19 @@ describe('Scheduler — switch-state edge filtering', () => {
       payload: { junction_marker_id: 'M2', position: 'main', confirmed: true },
     });
 
-    // Planner picks M1→M2→M3 (cheaper). Switch is 'main', matching M2→M3.
-    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    // Planner picks M1→M2→M3 (cheaper). Switch is 'main', matching M2→M3, so
+    // under the proactive horizon the junction edge is cleared at assign time —
+    // the look-ahead reaches it before the train ever arrives at M2.
+    const assigned = scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
-    scheduler.handleEvent({
-      event_type: 'tag_observed',
-      device_id: 'T1',
-      payload: { tag_id: 'M1' },
-    });
-    const atM2 = scheduler.handleEvent({
-      event_type: 'tag_observed',
-      device_id: 'T1',
-      payload: { tag_id: 'M2' },
-    });
-
-    const grant = findGrant(atM2);
-    expect(grant).toBeDefined();
-    expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M3');
+    const grants = assigned.filter(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance',
+    );
+    // Both M1→M2 and the junction edge M2→M3 are granted up front.
+    const limits = grants.map((g) => (g.payload as { limit_marker_id: string }).limit_marker_id);
+    expect(limits).toContain('M3');
+    expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('M3');
   });
 
   it('denies clearance across a junction when the switch is in the wrong position', () => {
@@ -1689,26 +1755,31 @@ describe('Scheduler — switch actuation for scheduled routes', () => {
     registerTrain(scheduler, 'T1');
 
     // T1: A1 -> J -> PM -> X. The junction edge J->PM needs 'main'; junction
-    // position is initially unknown, so the crossing attempt must actuate.
-    scheduler.assignSchedule('T1', 'route-1', ['A1', 'X']);
-    observe(scheduler, 'T1', 'A1');
-    const atJ = observe(scheduler, 'T1', 'J');
+    // position is initially unknown. Under the proactive horizon the look-ahead
+    // reaches the junction edge at ASSIGN time (it grants A1->J, then attempts
+    // J->PM): the switch is not on 'main', so a single set_switch_position is
+    // emitted, clearance is WITHHELD there, and the horizon STOPS at the gap.
+    // Throwing the switch earlier (before the train physically reaches J) is the
+    // intended win of the horizon, not a regression.
+    const assigned = scheduler.assignSchedule('T1', 'route-1', ['A1', 'X']);
 
-    // Reaching J (the clearance limit) attempts to extend across J->PM. The
-    // switch is not on 'main', so a single set_switch_position is emitted and
-    // clearance is WITHHELD.
-    const sets = findSetSwitch(atJ);
+    const sets = findSetSwitch(assigned);
     expect(sets).toHaveLength(1);
     expect(sets[0]?.device_id).toBe('SW-J');
     expect(sets[0]?.payload).toEqual({ junction_marker_id: 'J', position: 'main' });
-    expect(findGrant(atJ)).toBeUndefined();
+    // A1->J is granted (the limit reaches J) but the junction edge is withheld.
     expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('J');
+    expect(scheduler.getTrainState('T1')?.cleared_edges).toEqual([
+      { from_marker_id: 'A1', to_marker_id: 'J' },
+    ]);
 
-    // The switch confirms 'main' — the existing confirm path retries and grants.
+    // The switch confirms 'main' — the existing confirm path retries the
+    // horizon and grants across the junction (J->PM, then PM->X tops up).
     const afterConfirm = confirmSwitch(scheduler, 'J', 'main');
     const grant = findGrant(afterConfirm);
     expect(grant).toBeDefined();
-    expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('PM');
+    // The horizon now reaches the end of the leg: limit lands at the stop X.
+    expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('X');
   });
 
   it('serializes two trains over one junction needing conflicting positions, flipping once per handover', () => {
@@ -1751,8 +1822,10 @@ describe('Scheduler — switch actuation for scheduled routes', () => {
     const t2held = scheduler.getTrainState('T2');
     expect(t2held?.cleared_edges).toEqual([]);
     expect(t2held?.clearance_limit_marker_id).toBe('A2');
-    // T1 is cleared onward across the now-correct switch.
-    expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('PM');
+    // T1 is cleared onward across the now-correct switch. The proactive horizon
+    // runs the look-ahead to the end of the (short) leg, so the limit lands at
+    // the stop X — J->PM and PM->X are both held now.
+    expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('X');
 
     // T1's head moves along J->PM. While the head is only 50mm in, the tail
     // still occupies A1->J, so A1->J is not released and J stays locked.

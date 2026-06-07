@@ -141,6 +141,67 @@ describe('composeEdgePath — rotated curve render', () => {
   });
 });
 
+describe('composeEdgePath — smooth junction traversal (heading continuity)', () => {
+  // A train traversing INTO a junction on one leg and OUT on another rides two
+  // composed edges: A->J then J->B. The heading must be CONTINUOUS across the
+  // junction marker (no jump) on every leg pairing. The branch leg used to snap
+  // the heading 45° at the marker (straight trunk axis -> straight 45° spur);
+  // the Bézier branch centre-line removes that.
+
+  /** Place a straight onto endpoint `epIndex` of the junction, snapped. */
+  function straightOnJunctionEndpoint(id: string, j: TrackPiece, epIndex: number): TrackPiece {
+    const ep = must(getEndpoints(j)[epIndex]);
+    const placement = computePlacement(ep.x, ep.y, 'straight', [j], false);
+    expect(placement.connected).toBe(true);
+    return {
+      id,
+      type: 'straight',
+      position: { x: placement.x, y: placement.y },
+      rotationDeg: placement.rotationDeg,
+      tagged: false,
+      flipped: false,
+    };
+  }
+
+  /** Max heading jump across the J marker between edge A->J and edge J->B,
+   * sampling each half just shy of the join so we read the J-side tangent. */
+  function headingJumpAcrossJunction(a: TrackPiece, j: TrackPiece, b: TrackPiece): number {
+    const aToJ = composeEdgePath(a, j);
+    const jToB = composeEdgePath(j, b);
+    const arrive = aToJ.at(aToJ.length - 0.01).headingDeg; // heading entering J's centre
+    const depart = jToB.at(0.01).headingDeg; // heading leaving J's centre
+    return angleDelta(arrive, depart);
+  }
+
+  it('trunk -> through is continuous (collinear)', () => {
+    const j = piece('J', 'junction', 500, 500);
+    const a = straightOnJunctionEndpoint('A', j, 0); // trunk side (west)
+    const b = straightOnJunctionEndpoint('B', j, 1); // through side (east)
+    expect(headingJumpAcrossJunction(a, j, b)).toBeLessThan(1);
+  });
+
+  it('trunk -> branch is SMOOTH (no large heading jump at the junction)', () => {
+    const j = piece('J', 'junction', 500, 500);
+    const a = straightOnJunctionEndpoint('A', j, 0); // trunk side (west)
+    const c = straightOnJunctionEndpoint('C', j, 2); // branch side (45°)
+    // Before the fix this was a 45° jump. The Bézier branch makes the heading at
+    // the marker the trunk axis, so the only residual is the small curvature of
+    // a gentle turn — well under a quarter of the old 45° discontinuity.
+    expect(headingJumpAcrossJunction(a, j, c)).toBeLessThan(10);
+  });
+
+  it('branch -> trunk is SMOOTH in the reverse direction too', () => {
+    // The mirror of trunk->branch: a train arriving on the branch and leaving via
+    // the trunk. (through<->branch is NOT a valid turnout path — a train enters on
+    // the stem (trunk) and leaves on through OR branch, or vice versa — so it's
+    // not exercised.)
+    const j = piece('J', 'junction', 500, 500);
+    const c = straightOnJunctionEndpoint('C', j, 2); // branch side (45°)
+    const a = straightOnJunctionEndpoint('A', j, 0); // trunk side (west)
+    expect(headingJumpAcrossJunction(c, j, a)).toBeLessThan(10);
+  });
+});
+
 describe('composeEdgePath — fallback when no joint', () => {
   it('falls back to the centre-to-centre chord when pieces are not adjacent', () => {
     const a = piece('A', 'straight', 0, 0);

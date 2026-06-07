@@ -314,6 +314,41 @@ describe('getPieceShape', () => {
   it('terminus shape has width 60', () => {
     expect(getPieceShape(makePiece('terminus')).width).toBe(60);
   });
+
+  it('junction branch rail is the same width as the through rail (16mm)', () => {
+    // The branch band must be RAIL_HALF_WIDTH (8mm) on EACH side of its 45°
+    // centre-line — a full 16mm across, matching the through rail. A naive
+    // vertical ±8 offset would make the perpendicular width only 16·cos45 ≈
+    // 11.3mm (visibly thinner); this test guards against that regression.
+    const RAIL_HALF_WIDTH = 8;
+    const path = getPieceShape(makePiece('junction')).svgPath;
+
+    // Pull every "x y" coordinate pair out of the path.
+    const coords = [...path.matchAll(/(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)/g)].map((m) => ({
+      x: Number(m[1]),
+      y: Number(m[2]),
+    }));
+
+    // The branch axis runs from the origin to the index-2 endpoint at 45°.
+    const a = Math.PI / 4;
+    const dirx = Math.cos(a);
+    const diry = Math.sin(a);
+    // Perpendicular distance of a point from the 45° axis through the origin.
+    const perp = (p: { x: number; y: number }): number => Math.abs(-diry * p.x + dirx * p.y);
+    // Signed position along the branch axis (so we can pick points NEAR the
+    // branch, not the through rail which lies along the x-axis).
+    const along = (p: { x: number; y: number }): number => dirx * p.x + diry * p.y;
+
+    // The branch band's four corners sit at perpendicular distance == half-width
+    // from the axis, with a positive along-axis component (they're on the branch,
+    // not the through rail's far-left corners). There must be at least two such
+    // corners (origin-side and endpoint-side) on each flank.
+    const branchCorners = coords.filter((p) => along(p) > 1 && approx(perp(p), RAIL_HALF_WIDTH));
+    expect(branchCorners.length).toBeGreaterThanOrEqual(2);
+    for (const c of branchCorners) {
+      expect(perp(c)).toBeCloseTo(RAIL_HALF_WIDTH, 1);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -339,11 +374,23 @@ describe('getCentreLinePath — half lengths', () => {
     expect(path.length).toBeCloseTo(110, 3);
   });
 
-  it('junction trunk/through halves are 100mm, branch half is 100mm', () => {
+  it('junction trunk/through halves are 100mm straight chords', () => {
     const j = makePiece('junction');
     expect(must(getCentreLinePath(j, 0)).length).toBeCloseTo(100, 3);
     expect(must(getCentreLinePath(j, 1)).length).toBeCloseTo(100, 3);
-    expect(must(getCentreLinePath(j, 2)).length).toBeCloseTo(100, 3);
+  });
+
+  it('junction branch half is a smooth turn (arc length > the 100mm chord)', () => {
+    // The branch leg is no longer a straight chord but a Bézier turn from the
+    // trunk axis to the 45° branch endpoint, so its arc length exceeds the
+    // straight-line 100mm — but only modestly (it's a gentle 45° turn).
+    const branch = must(getCentreLinePath(makePiece('junction'), 2));
+    expect(branch.length).toBeGreaterThan(100);
+    expect(branch.length).toBeLessThan(115);
+    // Heading at the centre is the trunk axis (0°), so a diverting train doesn't
+    // snap its heading at the marker; at the far end it's the 45° branch tangent.
+    expect(angleDelta(branch.at(0).headingDeg, 0)).toBeLessThan(0.5);
+    expect(angleDelta(branch.at(branch.length).headingDeg, 45)).toBeLessThan(0.5);
   });
 
   it('terminus half-length is 30mm', () => {

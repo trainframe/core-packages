@@ -58,6 +58,10 @@ describe('Clearance flow through a real broker', () => {
       state: 'withholding',
       reason: 'crane busy',
     });
+    // The proactive clearance horizon attempts the gated edge M2->M3 eagerly at
+    // assign time (not only on arrival at M2), so the withhold must be in effect
+    // BEFORE we assign — wait for it to round-trip the broker to the server.
+    await harness.testClient.waitForEvent('gate_state_changed', 'GATE-M3');
 
     harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance'); // initial M2 grant
@@ -71,7 +75,9 @@ describe('Clearance flow through a real broker', () => {
     const grants = harness.testClient
       .commandsFor('T1')
       .filter((c) => c.command_type === 'grant_clearance');
-    expect(grants).toHaveLength(1); // still only the initial M2 grant
+    // The gate withholds M3, so the horizon stops at the gated edge: only the
+    // initial M2 grant — no onward clearance past the withheld marker.
+    expect(grants).toHaveLength(1);
   });
 
   it('When the gate releases, the train sees the previously-withheld clearance arrive', async () => {
@@ -87,6 +93,9 @@ describe('Clearance flow through a real broker', () => {
       marker_id: 'M3',
       state: 'withholding',
     });
+    // Order the withhold before the synchronous assign (the proactive horizon
+    // attempts the gated edge eagerly at assign time, not only on arrival).
+    await harness.testClient.waitForEvent('gate_state_changed', 'GATE-M3');
     harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
     await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M1' });
@@ -131,6 +140,9 @@ describe('Clearance flow through a real broker', () => {
       marker_id: 'M3',
       state: 'withholding',
     });
+    // Order the withhold before the synchronous assign (the proactive horizon
+    // attempts the gated edge eagerly at assign time, not only on arrival).
+    await harness.testClient.waitForEvent('gate_state_changed', 'GATE-M3');
     harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
     await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M1' });
