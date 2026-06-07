@@ -61,6 +61,20 @@ describe('Server — startup', () => {
     if (!layoutMsg) throw new Error('unreachable');
     expect(decode<Layout>(layoutMsg.payload).name).toBe('simple-loop');
   });
+
+  it('publishes a cleared deadlock state retained on start (resets stale retained)', () => {
+    const { client } = makeServer();
+    // Subscribe AFTER start: the in-memory client replays retained messages to
+    // new subscribers, so this proves the cleared deadlock state is retained —
+    // a fresh subscriber (or a restarted server's visualiser) sees no deadlock,
+    // rather than a previous instance's stale `{trains:[…]}`.
+    let received: { trains: string[] } | undefined;
+    client.subscribe('railway/state/deadlock/active', (m) => {
+      received = decode<{ trains: string[] }>(m.payload);
+    });
+    expect(received).toBeDefined();
+    expect(received?.trains).toEqual([]);
+  });
 });
 
 describe('Server — registers a train and grants its initial clearance', () => {

@@ -92,6 +92,7 @@ export class Server {
       this.handleOperatorCommand(msg.topic, msg.payload),
     );
     this.publishLayoutState();
+    this.publishInitialDeadlockState();
     this.learnMode.publishInitialState();
   }
 
@@ -273,6 +274,20 @@ export class Server {
       encodeJson(this.options.layout),
       { retain: true },
     );
+  }
+
+  /**
+   * Publish a cleared deadlock snapshot on start, resetting the retained
+   * `railway/state/deadlock/active` topic. The scheduler only emits this topic
+   * when its waits-for set *changes* (see `maybeEmitDeadlockState`), so a fresh
+   * server that never deadlocks would otherwise leave a previous instance's
+   * stale `{trains:[…]}` retained forever — a deadlock banner that never clears.
+   * A fresh scheduler has no cycle, so `{trains:[]}` is the correct initial state.
+   */
+  private publishInitialDeadlockState(): void {
+    this.options.client.publish('railway/state/deadlock/active', encodeJson({ trains: [] }), {
+      retain: true,
+    });
   }
 
   private publishLearnModeState(snapshot: LearnModeStateSnapshot): void {
