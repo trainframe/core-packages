@@ -1,8 +1,8 @@
-import { act, render, screen, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
 import { InMemoryBrokerSubscriber } from '../broker/in-memory-client.js';
-import { LayoutCanvas, buildMarkerTangents } from './LayoutCanvas.js';
+import { LayoutCanvas, buildMarkerTangents, mergeEdges } from './LayoutCanvas.js';
 
 const SIMPLE_LOOP_LAYOUT = {
   name: 'simple-loop',
@@ -350,5 +350,276 @@ describe('buildMarkerTangents — tangent continuity', () => {
       expect(cy1).toBeCloseTo(startY, 2);
       expect(cy2).toBeCloseTo(startY, 2);
     }
+  });
+});
+
+describe('mergeEdges — undirected pair collapsing', () => {
+  it('collapses a both-directions pair into one two-way merged edge', () => {
+    const merged = mergeEdges([
+      { from_marker_id: 'A', to_marker_id: 'B' },
+      { from_marker_id: 'B', to_marker_id: 'A' },
+    ]);
+    expect(merged.length).toBe(1);
+    expect(merged[0]?.oneWay).toBe(false);
+    expect(merged[0]?.pairKey).toBe('A|B');
+  });
+
+  it('keeps a single-direction pair as a one-way merged edge in the permitted direction', () => {
+    const merged = mergeEdges([{ from_marker_id: 'B', to_marker_id: 'A' }]);
+    expect(merged.length).toBe(1);
+    expect(merged[0]?.oneWay).toBe(true);
+    // Forward preserves the permitted direction (B→A), not the sorted pair order.
+    expect(merged[0]?.forward.from_marker_id).toBe('B');
+    expect(merged[0]?.forward.to_marker_id).toBe('A');
+  });
+
+  it('marks a merged edge inferred when either direction is inferred', () => {
+    const merged = mergeEdges([
+      { from_marker_id: 'A', to_marker_id: 'B' },
+      { from_marker_id: 'B', to_marker_id: 'A', inferred: true },
+    ]);
+    expect(merged.length).toBe(1);
+    expect(merged[0]?.inferred).toBe(true);
+  });
+});
+
+const TWO_WAY_LAYOUT = {
+  name: 'two-way-pair',
+  markers: [
+    { id: 'M1', kind: 'block_boundary', position: { x_mm: 0, y_mm: 0 } },
+    { id: 'M2', kind: 'block_boundary', position: { x_mm: 100, y_mm: 0 } },
+    { id: 'M3', kind: 'block_boundary', position: { x_mm: 100, y_mm: 100 } },
+  ],
+  edges: [
+    // M1↔M2 is bidirectional (two-way); M2→M3 is one-way only.
+    { from_marker_id: 'M1', to_marker_id: 'M2', estimated_length_mm: 200 },
+    { from_marker_id: 'M2', to_marker_id: 'M1', estimated_length_mm: 200 },
+    { from_marker_id: 'M2', to_marker_id: 'M3', estimated_length_mm: 200 },
+  ],
+  junctions: [],
+};
+
+describe('LayoutCanvas — merged edge rendering', () => {
+  it('renders ONE rail path per undirected marker pair (not one per direction)', () => {
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/two-way-pair', TWO_WAY_LAYOUT));
+
+    const edges = screen.getByTestId('edges');
+    // Two undirected pairs (M1|M2, M2|M3) despite three directed edges.
+    const pairs = edges.querySelectorAll('[data-edge-pair]');
+    expect(pairs.length).toBe(2);
+    // Exactly one rail <path> per pair.
+    const rails = edges.querySelectorAll('path[d]');
+    expect(rails.length).toBe(2);
+  });
+
+  it('marks the two-way pair as two-way and the single-direction pair as one-way', () => {
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/two-way-pair', TWO_WAY_LAYOUT));
+
+    const edges = screen.getByTestId('edges');
+    const twoWay = edges.querySelector('[data-edge-pair="M1|M2"]');
+    const oneWay = edges.querySelector('[data-edge-pair="M2|M3"]');
+    expect(twoWay?.getAttribute('data-direction')).toBe('two-way');
+    expect(oneWay?.getAttribute('data-direction')).toBe('one-way');
+  });
+
+  it('draws an arrowhead glyph on the one-way pair but not the uncleared two-way pair', () => {
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/two-way-pair', TWO_WAY_LAYOUT));
+
+    const edges = screen.getByTestId('edges');
+    const twoWay = edges.querySelector('[data-edge-pair="M1|M2"]');
+    const oneWay = edges.querySelector('[data-edge-pair="M2|M3"]');
+    expect(oneWay?.querySelector('polygon[data-edge-arrow="true"]')).not.toBeNull();
+    expect(twoWay?.querySelector('polygon[data-edge-arrow="true"]')).toBeNull();
+  });
+
+  it('highlights a merged two-way edge in the holding train colour, even when only the reverse direction is cleared', () => {
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/two-way-pair', TWO_WAY_LAYOUT));
+
+    // T1 holds M2→M1, which is the REVERSE of the merged pair's forward (M1→M2).
+    act(() =>
+      deliverState(client, 'railway/state/clearance/T1', {
+        train_id: 'T1',
+        cleared_edges: [{ from_marker_id: 'M2', to_marker_id: 'M1' }],
+      }),
+    );
+
+    const edges = screen.getByTestId('edges');
+    const pair = edges.querySelector('[data-edge-pair="M1|M2"]');
+    const railPath = pair?.querySelector('path[data-cleared-to="T1"]');
+    expect(railPath).not.toBeNull();
+    // A cleared edge gets the thicker rail and an arrowhead (direction of hold).
+    expect(railPath?.getAttribute('stroke-width')).toBe('9');
+    expect(pair?.querySelector('polygon[data-edge-arrow="true"]')).not.toBeNull();
+  });
+
+  it('still places a train on the single merged rail when its current_edge is the reverse direction', () => {
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/two-way-pair', TWO_WAY_LAYOUT));
+    // Train running M2→M1 — the reverse of the merged pair's forward sense.
+    act(() =>
+      deliverEvent(client, 'railway/events/train_status/T9', {
+        train_id: 'T9',
+        current_edge: { from_marker_id: 'M2', to_marker_id: 'M1' },
+        estimated_distance_from_edge_start_mm: 100,
+        speed_normalised: 0.5,
+      }),
+    );
+    const trainNode = screen.getByTestId('trains').querySelector('[data-train-id="T9"]');
+    expect(trainNode?.getAttribute('data-on-edge')).toBe('M2->M1');
+    const transform = trainNode?.querySelector('path')?.getAttribute('transform') ?? '';
+    expect(transform).toMatch(/translate\(/);
+  });
+});
+
+/**
+ * Mock getBoundingClientRect so client→world conversion has a non-zero rect in
+ * jsdom (which otherwise reports 0×0). Returns a restore fn.
+ */
+function mockSvgRect(): () => void {
+  const spy = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue({
+    left: 0,
+    top: 0,
+    right: 600,
+    bottom: 600,
+    width: 600,
+    height: 600,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  });
+  return () => spy.mockRestore();
+}
+
+describe('LayoutCanvas — fit-to-content + pan/zoom', () => {
+  it('fits the viewBox to the graph bounding box (not the fixed 600×600 box)', () => {
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/two-way-pair', TWO_WAY_LAYOUT));
+
+    const svg = screen.getByTestId('layout-canvas');
+    const viewBox = (svg.getAttribute('viewBox') ?? '').split(' ').map(Number);
+    // The spatial layout spans 100×100 mm; the fitted square window is that plus
+    // margin — well under the legacy 600 box and not the legacy "0 0 600 600".
+    expect(viewBox[2]).toBeGreaterThan(0);
+    expect(viewBox[2]).toBeLessThan(600);
+    expect(viewBox[2]).toBe(viewBox[3]); // square window
+  });
+
+  it('zooms in on wheel-up: the viewBox window shrinks', () => {
+    const restore = mockSvgRect();
+    try {
+      const { client } = renderCanvas();
+      act(() => deliverState(client, 'railway/state/layout/two-way-pair', TWO_WAY_LAYOUT));
+
+      const svg = screen.getByTestId('layout-canvas');
+      const before = Number(svg.getAttribute('data-viewport-size'));
+      fireEvent.wheel(svg, { deltaY: -100, clientX: 300, clientY: 300 });
+      const after = Number(svg.getAttribute('data-viewport-size'));
+      expect(after).toBeLessThan(before);
+    } finally {
+      restore();
+    }
+  });
+
+  it('zooms out on wheel-down: the viewBox window grows', () => {
+    const restore = mockSvgRect();
+    try {
+      const { client } = renderCanvas();
+      act(() => deliverState(client, 'railway/state/layout/two-way-pair', TWO_WAY_LAYOUT));
+
+      const svg = screen.getByTestId('layout-canvas');
+      const before = Number(svg.getAttribute('data-viewport-size'));
+      fireEvent.wheel(svg, { deltaY: 120, clientX: 300, clientY: 300 });
+      const after = Number(svg.getAttribute('data-viewport-size'));
+      expect(after).toBeGreaterThan(before);
+    } finally {
+      restore();
+    }
+  });
+
+  it('pans the viewBox origin on pointer drag', () => {
+    const restore = mockSvgRect();
+    try {
+      const { client } = renderCanvas();
+      act(() => deliverState(client, 'railway/state/layout/two-way-pair', TWO_WAY_LAYOUT));
+
+      const svg = screen.getByTestId('layout-canvas');
+      const beforeX = Number(svg.getAttribute('data-viewport-x'));
+      act(() => {
+        svg.dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, clientX: 300, clientY: 300 }),
+        );
+        svg.dispatchEvent(
+          new MouseEvent('pointermove', { bubbles: true, clientX: 360, clientY: 300 }),
+        );
+        svg.dispatchEvent(
+          new MouseEvent('pointerup', { bubbles: true, clientX: 360, clientY: 300 }),
+        );
+      });
+      const afterX = Number(svg.getAttribute('data-viewport-x'));
+      // Dragging right moves the content right, so the world origin moves left.
+      expect(afterX).toBeLessThan(beforeX);
+    } finally {
+      restore();
+    }
+  });
+
+  it('re-fits the view when a new layout (different topology) arrives, discarding zoom', () => {
+    const restore = mockSvgRect();
+    try {
+      const { client } = renderCanvas();
+      act(() => deliverState(client, 'railway/state/layout/two-way-pair', TWO_WAY_LAYOUT));
+      const svg = screen.getByTestId('layout-canvas');
+      const fitSize = Number(svg.getAttribute('data-viewport-size'));
+
+      // Perturb the view by zooming in — proves the next assertion isn't vacuous.
+      fireEvent.wheel(svg, { deltaY: -100, clientX: 300, clientY: 300 });
+      expect(Number(svg.getAttribute('data-viewport-size'))).toBeLessThan(fitSize);
+
+      // A new layout (different name + marker count) re-fits, discarding the zoom.
+      const otherLayout = {
+        name: 'other',
+        markers: [
+          { id: 'A', kind: 'block_boundary', position: { x_mm: 0, y_mm: 0 } },
+          { id: 'B', kind: 'block_boundary', position: { x_mm: 100, y_mm: 0 } },
+        ],
+        edges: [{ from_marker_id: 'A', to_marker_id: 'B' }],
+        junctions: [],
+      };
+      act(() => deliverState(client, 'railway/state/layout/other', otherLayout));
+      // Both layouts normalise into the same scaled box, so the re-fit size is
+      // back to the fit size — the zoom was discarded.
+      expect(Number(svg.getAttribute('data-viewport-size'))).toBe(fitSize);
+    } finally {
+      restore();
+    }
+  });
+
+  it('zooms with a degenerate (zero-size) rect by anchoring on the centre', () => {
+    // No rect mock: jsdom reports a 0×0 rect, exercising the zero-size
+    // fallback branches in zoomViewport (frac defaults to 0.5).
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/two-way-pair', TWO_WAY_LAYOUT));
+    const svg = screen.getByTestId('layout-canvas');
+    const before = Number(svg.getAttribute('data-viewport-size'));
+    fireEvent.wheel(svg, { deltaY: -100, clientX: 0, clientY: 0 });
+    expect(Number(svg.getAttribute('data-viewport-size'))).toBeLessThan(before);
+  });
+
+  it('pans with a degenerate (zero-size) rect without moving the origin', () => {
+    // No rect mock → 0×0 rect → panViewport's zero-size branch (no movement).
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/two-way-pair', TWO_WAY_LAYOUT));
+    const svg = screen.getByTestId('layout-canvas');
+    const beforeX = Number(svg.getAttribute('data-viewport-x'));
+    act(() => {
+      svg.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true, clientX: 10, clientY: 10 }));
+      svg.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: 80, clientY: 80 }));
+      svg.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 80, clientY: 80 }));
+    });
+    expect(Number(svg.getAttribute('data-viewport-x'))).toBe(beforeX);
   });
 });

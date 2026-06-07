@@ -1,4 +1,4 @@
-import type { JSX } from 'react';
+import { type JSX, useEffect, useRef, useState } from 'react';
 import { type ClearanceMap, useClearanceState } from '../state/use-clearance-state.js';
 import {
   type VisualiserEdge,
@@ -19,6 +19,17 @@ const VIEWBOX = 600;
 const CENTER = VIEWBOX / 2;
 const RADIUS = CENTER - 60;
 const MARKER_RADIUS = 14;
+
+/** Minimum and maximum zoom levels for wheel-zoom (1 = fit-to-content). */
+const MIN_ZOOM = 0.2;
+const MAX_ZOOM = 8;
+
+/**
+ * Margin (in world units, i.e. the same units as the computed marker
+ * positions) added around the graph bounding box when fitting to content, so
+ * markers and their labels don't sit flush against the viewport edge.
+ */
+const FIT_MARGIN = MARKER_RADIUS * 3;
 
 /**
  * Fraction of the edge length used as the bezier handle length (k factor).
@@ -279,45 +290,268 @@ function trainShapeD(halfL: number, halfW: number): string {
   ].join(' ');
 }
 
-/** Render a single edge as a `<path>`, or null if endpoint positions are missing. */
-function renderEdge(
-  edge: VisualiserEdge,
+/**
+ * A connection between two markers, collapsing the (up to two) DIRECTED edges
+ * the data carries for that pair into a single undirected rail to render.
+ *
+ * `forward` is the direction we draw the curve in (and the direction a one-way
+ * arrowhead points). For a two-way pair it's arbitrary (the smaller marker id
+ * first, for stable ordering); for a one-way pair it's the permitted direction.
+ */
+interface MergedEdge {
+  /** Stable key for the unordered pair: `${min}|${max}`. */
+  readonly pairKey: string;
+  readonly forward: VisualiserEdge;
+  readonly oneWay: boolean;
+  /** True if either directed edge is `inferred`. */
+  readonly inferred: boolean;
+}
+
+/** Unordered-pair key: the two marker ids sorted, joined by `|`. */
+function pairKeyOf(a: string, b: string): string {
+  return a < b ? `${a}|${b}` : `${b}|${a}`;
+}
+
+/**
+ * Collapse the directed `layout.edges` into one `MergedEdge` per undirected
+ * marker pair. A pair present in both directions is two-way (drawn as the
+ * default rail); a pair present in only one direction is one-way (drawn with
+ * an arrowhead in the permitted direction).
+ *
+ * The edge MODEL is untouched — this is purely a rendering merge. Insertion
+ * order of first-seen pairs is preserved so the rendered output is stable.
+ */
+export function mergeEdges(edges: ReadonlyArray<VisualiserEdge>): MergedEdge[] {
+  const byPair = new Map<string, { forward: VisualiserEdge; reverse?: VisualiserEdge }>();
+  const order: string[] = [];
+  for (const edge of edges) {
+    const key = pairKeyOf(edge.from_marker_id, edge.to_marker_id);
+    const existing = byPair.get(key);
+    if (existing === undefined) {
+      byPair.set(key, { forward: edge });
+      order.push(key);
+    } else if (
+      existing.forward.from_marker_id === edge.to_marker_id &&
+      existing.forward.to_marker_id === edge.from_marker_id
+    ) {
+      // The opposite direction of an already-seen edge → two-way.
+      existing.reverse = edge;
+    }
+    // A duplicate of the same direction is ignored (model shouldn't emit it).
+  }
+
+  const out: MergedEdge[] = [];
+  for (const key of order) {
+    const entry = byPair.get(key);
+    if (entry === undefined) continue;
+    const oneWay = entry.reverse === undefined;
+    out.push({
+      pairKey: key,
+      forward: entry.forward,
+      oneWay,
+      inferred: (entry.forward.inferred ?? false) || (entry.reverse?.inferred ?? false),
+    });
+  }
+  return out;
+}
+
+/**
+ * The train holding this pair (if any) and the direction it holds, by checking
+ * both directed keys in the clearance map. Prefers the forward direction when
+ * both are somehow present.
+ */
+function clearanceForPair(
+  forward: VisualiserEdge,
+  clearanceMap: ClearanceMap,
+): {
+  holder: string;
+  from: VisualiserEdge['from_marker_id'];
+  to: VisualiserEdge['to_marker_id'];
+} | null {
+  const fwdKey = `${forward.from_marker_id}->${forward.to_marker_id}`;
+  const revKey = `${forward.to_marker_id}->${forward.from_marker_id}`;
+  const fwdHolder = clearanceMap.get(fwdKey);
+  if (fwdHolder !== undefined) {
+    return { holder: fwdHolder, from: forward.from_marker_id, to: forward.to_marker_id };
+  }
+  const revHolder = clearanceMap.get(revKey);
+  if (revHolder !== undefined) {
+    return { holder: revHolder, from: forward.to_marker_id, to: forward.from_marker_id };
+  }
+  return null;
+}
+
+/**
+ * Build the arrowhead glyph for a one-way (or cleared-directional) edge: a
+ * small triangle at the curve midpoint pointing along the direction of travel.
+ * Sampled from the same bezier the rail is drawn on so it sits on the track,
+ * and filled with the rail's stroke colour (so a cleared one-way edge gets the
+ * train's hue for free — a shared `<marker>` def couldn't match the hashed
+ * train colour).
+ */
+function arrowheadPolygon(from: Point, to: Point, c1: Point, c2: Point, fill: string): JSX.Element {
+  const mid = cubicBezierPoint(from, c1, c2, to, 0.5);
+  const tan = cubicBezierTangent(from, c1, c2, to, 0.5);
+  const angleDeg = Math.atan2(tan.y, tan.x) * (180 / Math.PI);
+  // Local triangle: tip forward (+x), base behind. Sized relative to the rail.
+  const len = MARKER_RADIUS * 0.9;
+  const half = MARKER_RADIUS * 0.55;
+  const points = `${len},0 ${-len * 0.4},${half} ${-len * 0.4},${-half}`;
+  return (
+    <polygon
+      points={points}
+      fill={fill}
+      transform={`translate(${mid.x},${mid.y}) rotate(${angleDeg})`}
+      data-edge-arrow="true"
+    />
+  );
+}
+
+const EDGE_COLOR = 'var(--tf-vis-color-edge, #888)';
+const EDGE_INFERRED_COLOR = 'var(--tf-vis-color-edge-inferred, #aaa)';
+
+/**
+ * Rail stroke colour. SVG presentation attributes ignore CSS `var()` in real
+ * browsers, so theme-token colours go through inline `style`. A cleared edge
+ * takes the holding train's hue; an inferred (un-cleared) edge a muted grey.
+ */
+function railStroke(clearedTo: string, inferred: boolean): string {
+  if (clearedTo !== '') return trainColor(clearedTo);
+  return inferred ? EDGE_INFERRED_COLOR : EDGE_COLOR;
+}
+
+/** Render a single merged edge as a `<path>` rail plus optional arrowhead glyph. */
+function renderMergedEdge(
+  merged: MergedEdge,
   markerPositions: Map<string, Point>,
   markerTangents: Map<string, Point>,
   clearanceMap: ClearanceMap,
 ): JSX.Element | null {
-  const from = markerPositions.get(edge.from_marker_id);
-  const to = markerPositions.get(edge.to_marker_id);
+  const cleared = clearanceForPair(merged.forward, clearanceMap);
+  // Draw in the cleared direction when a train holds it (so the train's
+  // arrowhead reads correctly), otherwise in the merged edge's forward sense.
+  const fromId = cleared?.from ?? merged.forward.from_marker_id;
+  const toId = cleared?.to ?? merged.forward.to_marker_id;
+  const from = markerPositions.get(fromId);
+  const to = markerPositions.get(toId);
   if (!from || !to) return null;
 
-  const key = `${edge.from_marker_id}->${edge.to_marker_id}`;
-  const clearedTo = clearanceMap.get(key) ?? '';
-  const tFrom = markerTangents.get(edge.from_marker_id) ?? { x: 1, y: 0 };
-  const tTo = markerTangents.get(edge.to_marker_id) ?? { x: 1, y: 0 };
+  const tFrom = markerTangents.get(fromId) ?? { x: 1, y: 0 };
+  const tTo = markerTangents.get(toId) ?? { x: 1, y: 0 };
   const { c1, c2 } = edgeBezierControls(from, to, tFrom, tTo);
   const d = bezierPathD(from, to, c1, c2);
-  // SVG presentation attributes ignore CSS var() in real browsers.
-  // Use inline style for theme-token colours.
-  const stroke = clearedTo
-    ? trainColor(clearedTo)
-    : edge.inferred
-      ? 'var(--tf-vis-color-edge-inferred, #aaa)'
-      : 'var(--tf-vis-color-edge, #888)';
+
+  const clearedTo = cleared?.holder ?? '';
+  const stroke = railStroke(clearedTo, merged.inferred);
   const inferredProps =
-    edge.inferred && !clearedTo ? { strokeDasharray: '8 6', 'data-inferred': 'true' } : {};
+    merged.inferred && clearedTo === '' ? { strokeDasharray: '8 6', 'data-inferred': 'true' } : {};
+
+  // An arrowhead is shown when the edge is one-way (always) or when a train
+  // holds it (to show which way clearance points). Two-way uncleared edges
+  // render as a plain bidirectional rail with no arrowhead.
+  const showArrow = merged.oneWay || clearedTo !== '';
+  const arrow = showArrow
+    ? arrowheadPolygon(from, to, c1, c2, clearedTo !== '' ? stroke : EDGE_COLOR)
+    : null;
 
   return (
-    <path
-      key={key}
-      d={d}
-      fill="none"
-      style={{ stroke }}
-      strokeWidth={clearedTo ? 9 : 6}
-      strokeLinecap="round"
-      data-cleared-to={clearedTo}
-      {...inferredProps}
-    />
+    <g
+      key={merged.pairKey}
+      data-edge-pair={merged.pairKey}
+      data-direction={merged.oneWay ? 'one-way' : 'two-way'}
+    >
+      <path
+        d={d}
+        fill="none"
+        style={{ stroke }}
+        strokeWidth={clearedTo !== '' ? 9 : 6}
+        strokeLinecap="round"
+        data-cleared-to={clearedTo}
+        {...inferredProps}
+      />
+      {arrow}
+    </g>
   );
+}
+
+/** A square world-space window: top-left corner + side length (world units). */
+interface Viewport {
+  readonly x: number;
+  readonly y: number;
+  readonly size: number;
+}
+
+/**
+ * Apply a wheel-zoom to `prev`, keeping the world point under the cursor fixed.
+ * `deltaY < 0` (scroll up) zooms in; the new window size is clamped so zoom
+ * stays within [MIN_ZOOM, MAX_ZOOM] relative to the *fit* size embedded in the
+ * gesture. Falls back to centre-anchored when the rect has zero dimensions
+ * (jsdom). Pure.
+ */
+function zoomViewport(
+  prev: Viewport,
+  rect: DOMRect,
+  clientX: number,
+  clientY: number,
+  deltaY: number,
+): Viewport {
+  const zoomFactor = deltaY < 0 ? 1 / 1.15 : 1.15;
+  // size shrinks as we zoom IN. Clamp against the gesture's own size so the
+  // window can't collapse below MIN_ZOOM or expand past MAX_ZOOM of itself.
+  const newSize = Math.min(
+    prev.size / MIN_ZOOM,
+    Math.max(prev.size / MAX_ZOOM, prev.size * zoomFactor),
+  );
+  const fracX = rect.width > 0 ? (clientX - rect.left) / rect.width : 0.5;
+  const fracY = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5;
+  // World point under the cursor before the zoom.
+  const worldX = prev.x + fracX * prev.size;
+  const worldY = prev.y + fracY * prev.size;
+  return {
+    x: worldX - fracX * newSize,
+    y: worldY - fracY * newSize,
+    size: newSize,
+  };
+}
+
+/**
+ * Translate `start` by a client-space drag delta, converting px to world units
+ * via the rect. Dragging right/down moves the content right/down (origin moves
+ * opposite the drag). Falls back to no movement on a zero-size rect. Pure.
+ */
+function panViewport(start: Viewport, rect: DOMRect, dxPx: number, dyPx: number): Viewport {
+  const dxWorld = rect.width > 0 ? -(dxPx / rect.width) * start.size : 0;
+  const dyWorld = rect.height > 0 ? -(dyPx / rect.height) * start.size : 0;
+  return { x: start.x + dxWorld, y: start.y + dyWorld, size: start.size };
+}
+
+/**
+ * Compute the square fit-to-content viewport for a set of marker positions:
+ * the graph bounding box, expanded to a square (so the SVG's 1:1 aspect ratio
+ * doesn't distort the layout) and padded by `FIT_MARGIN`. Falls back to the
+ * legacy 0..VIEWBOX window when there are no positioned markers.
+ */
+function fitViewport(markerPositions: Map<string, Point>): Viewport {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const p of markerPositions.values()) {
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x);
+    maxY = Math.max(maxY, p.y);
+  }
+  if (!Number.isFinite(minX)) return { x: 0, y: 0, size: VIEWBOX };
+  const w = maxX - minX;
+  const h = maxY - minY;
+  const size = Math.max(w, h, 1) + FIT_MARGIN * 2;
+  // Centre the (possibly non-square) bbox inside the square window.
+  return {
+    x: minX - (size - w) / 2,
+    y: minY - (size - h) / 2,
+    size,
+  };
 }
 
 /**
@@ -326,6 +560,10 @@ function renderEdge(
  * marker's `position.x_mm` / `position.y_mm` is used directly. Edges are
  * cubic bezier paths; trains render as top-down pointed shapes at their
  * interpolated position along the edge, rotated to face their direction of travel.
+ *
+ * Bidirectional marker pairs render as a SINGLE rail (see `mergeEdges`); the
+ * SVG is pannable (drag) and zoomable (wheel) and fits the graph to the
+ * viewport by default.
  */
 export function LayoutCanvas() {
   const layout = useLayoutState();
@@ -342,24 +580,121 @@ export function LayoutCanvas() {
     );
   }
 
+  return (
+    <LayoutSvg
+      layout={layout}
+      trains={trains}
+      trainStatuses={trainStatuses}
+      clearanceMap={clearanceMap}
+    />
+  );
+}
+
+interface LayoutSvgProps {
+  readonly layout: VisualiserLayout;
+  readonly trains: TrainPositions;
+  readonly trainStatuses: TrainStatuses;
+  readonly clearanceMap: ClearanceMap;
+}
+
+/**
+ * The drawn SVG for a known-present layout. Split out from `LayoutCanvas` so
+ * the pan/zoom hooks run unconditionally (they sit below the `!layout` early
+ * return, which would otherwise violate the rules-of-hooks).
+ */
+function LayoutSvg({ layout, trains, trainStatuses, clearanceMap }: LayoutSvgProps) {
   const markerPositions = computeMarkerPositions(layout);
   const edgeIndex = indexEdges(layout.edges);
   const markerTangents = buildMarkerTangents(layout.markers, layout.edges, markerPositions);
+  const mergedEdges = mergeEdges(layout.edges);
+
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [viewport, setViewport] = useState<Viewport>(() => fitViewport(markerPositions));
+
+  // Re-fit when the layout (its name / topology) changes. Keyed on a cheap
+  // signature so re-renders from train/clearance updates don't reset the view.
+  const fitSignature = `${layout.name}:${layout.markers.length}:${layout.edges.length}`;
+  const lastFitRef = useRef(fitSignature);
+  if (lastFitRef.current !== fitSignature) {
+    lastFitRef.current = fitSignature;
+    // Defer the state write to an effect-free path: compute the new fit now and
+    // set it. Calling setViewport during render is the React-sanctioned way to
+    // adjust state on a prop change (it re-renders before committing).
+    setViewport(fitViewport(markerPositions));
+  }
+
+  // Non-passive wheel listener so we can preventDefault page scroll while
+  // zooming on the canvas (mirrors ToyTable). Cursor-anchored zoom.
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (svg === null) return;
+    function onWheel(e: WheelEvent) {
+      e.preventDefault();
+      const rect = svg?.getBoundingClientRect() ?? new DOMRect();
+      setViewport((prev) => zoomViewport(prev, rect, e.clientX, e.clientY, e.deltaY));
+    }
+    svg.addEventListener('wheel', onWheel, { passive: false });
+    return () => svg.removeEventListener('wheel', onWheel);
+  }, []);
+
+  const panStartRef = useRef<{ clientX: number; clientY: number; viewport: Viewport } | null>(null);
+
+  function getRect(): DOMRect {
+    return svgRef.current?.getBoundingClientRect() ?? new DOMRect();
+  }
+
+  function handlePointerDown(e: React.PointerEvent<SVGSVGElement>) {
+    panStartRef.current = { clientX: e.clientX, clientY: e.clientY, viewport };
+    const svg = e.currentTarget;
+    if (typeof svg.setPointerCapture === 'function') svg.setPointerCapture(e.pointerId);
+  }
+
+  function handlePointerMove(e: React.PointerEvent<SVGSVGElement>) {
+    const start = panStartRef.current;
+    if (start === null) return;
+    const rect = getRect();
+    setViewport(
+      panViewport(start.viewport, rect, e.clientX - start.clientX, e.clientY - start.clientY),
+    );
+  }
+
+  function handlePointerUp(e: React.PointerEvent<SVGSVGElement>) {
+    panStartRef.current = null;
+    const svg = e.currentTarget;
+    if (typeof svg.releasePointerCapture === 'function') {
+      try {
+        svg.releasePointerCapture(e.pointerId);
+      } catch {
+        // jsdom may throw if the pointer was never captured.
+      }
+    }
+  }
+
+  const viewBox = `${viewport.x} ${viewport.y} ${viewport.size} ${viewport.size}`;
 
   return (
     <section aria-label="Layout">
       <h2>Layout · {layout.name}</h2>
       <svg
-        viewBox={`0 0 ${VIEWBOX} ${VIEWBOX}`}
+        ref={svgRef}
+        viewBox={viewBox}
         width={VIEWBOX}
         height={VIEWBOX}
         role="img"
         aria-label={`Track diagram for ${layout.name}`}
+        data-testid="layout-canvas"
+        data-viewport-x={viewport.x}
+        data-viewport-y={viewport.y}
+        data-viewport-size={viewport.size}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        style={{ touchAction: 'none', cursor: 'grab' }}
       >
         <title>Track diagram for {layout.name}</title>
         <g data-testid="edges">
-          {layout.edges.map((edge) =>
-            renderEdge(edge, markerPositions, markerTangents, clearanceMap),
+          {mergedEdges.map((merged) =>
+            renderMergedEdge(merged, markerPositions, markerTangents, clearanceMap),
           )}
         </g>
         <g data-testid="markers">
