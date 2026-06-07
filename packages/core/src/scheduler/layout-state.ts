@@ -9,10 +9,11 @@ export interface LayoutStateOptions {
   readonly confirmTraversals?: number;
   /**
    * Clock callback used to timestamp traversals for learned traversal time
-   * computation. Defaults to `Date.now`. Inject a virtual clock in tests and
-   * the simulator for determinism.
+   * computation. REQUIRED: core never reads the wall clock directly
+   * (determinism contract). The IO layer supplies `Date.now`; tests and the
+   * simulator inject a virtual clock.
    */
-  readonly now?: () => number;
+  readonly now: () => number;
 }
 
 export interface RecordTraversalResult {
@@ -76,10 +77,10 @@ export class LayoutState {
   private readonly lastRecordedAtByTrain = new Map<string, number>();
   private readonly now: () => number;
 
-  constructor(layout: Layout, options: LayoutStateOptions = {}) {
+  constructor(layout: Layout, options: LayoutStateOptions) {
     this.name = layout.name;
     this.confirmTraversals = options.confirmTraversals ?? 3;
-    this.now = options.now ?? Date.now;
+    this.now = options.now;
 
     for (const marker of layout.markers) {
       this.markers.set(marker.id, marker);

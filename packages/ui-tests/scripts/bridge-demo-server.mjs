@@ -86,24 +86,33 @@ async function main() {
   function assignSchedules() {
     if (scheduled) return;
     scheduled = true;
-    // Train A: ground A -> UPPER station (forces J1 to 'divert', up the bridge)
-    // -> ground B. stops[0] must equal the marker the train physically sits on
-    // (the scheduler treats the first stop as the spawn marker before the train
-    // has moved). The scheduler throws J1 autonomously when A reaches it.
-    log(
-      `assigning schedule rA to ${demo.trainAId}: [${groundA}, ${demo.upperStation}, ${groundB}]`,
-    );
-    server.assignSchedule(demo.trainAId, 'rA', [groundA, demo.upperStation, groundB]);
-    // Train B: stays on the ground loop. The `rt-u0` waypoint forces B around the
-    // return chain in the SAME rotational direction as A (out via the J2 side),
-    // rather than the shortest head-on path that would meet A nose-to-nose on the
-    // single-track return chain and deadlock under block exclusivity. Continuous
-    // collision-free two-train circulation on a single-track shared section still
-    // needs same-direction tuning / live spacing — see the report caveat; this
-    // schedule lets A throw the switch and climb the bridge while B circulates.
-    const bWaypoint = 'M-rt-u0';
-    log(`assigning schedule rB to ${demo.trainBId}: [${groundB}, ${bWaypoint}, ${groundA}]`);
-    server.assignSchedule(demo.trainBId, 'rB', [groundB, bWaypoint, groundA]);
+    // The EXACT schedules proven by the strict deterministic gate
+    // (packages/simulator-ui/src/demo/two-train-flyover.test.ts). stops[0] must
+    // equal the marker the train physically sits on (the scheduler treats the
+    // first stop as the spawn marker before the train has moved). The scheduler
+    // throws J1 autonomously when each train reaches it.
+    //
+    // Train A: a COMPLETE waypoint sequence pinning the whole lap so the only
+    // forward path is up-over-and-DOWN-THE-FAR-SIDE. groundA -> upper (forces J1
+    // divert + climb) -> far ramp base (forces continuing down the FAR side past
+    // J2, never a bounce) -> groundB -> loop waypoint (pins the return leg the
+    // long way round the oval, same direction as B — the shared single-track
+    // section never sees a head-on).
+    const aStops = [
+      groundA,
+      demo.bridgeSpine.upper,
+      demo.bridgeSpine.rampDown,
+      groundB,
+      demo.loopWaypoint,
+    ];
+    log(`assigning schedule rA to ${demo.trainAId}: [${aStops.join(', ')}]`);
+    server.assignSchedule(demo.trainAId, 'rA', aStops);
+    // Train B: light ground loop. The loop waypoint direction-pins its return leg
+    // the long way round (same direction as A); the main-bypass waypoint keeps it
+    // on the ground straight under the deck (never on the bridge).
+    const bStops = [groundB, demo.loopWaypoint, demo.mainWaypoint];
+    log(`assigning schedule rB to ${demo.trainBId}: [${bStops.join(', ')}]`);
+    server.assignSchedule(demo.trainBId, 'rB', bStops);
     log(
       'schedules assigned — A throws J1 to divert and climbs the bridge; B circulates the ground loop.',
     );

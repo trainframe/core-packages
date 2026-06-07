@@ -35,8 +35,8 @@ const setup = () => {
   const registry = new CapabilityRegistry();
   registry.registerAll(BUILTIN_CAPABILITIES);
   registry.freeze();
-  const layout = new LayoutState(SIMPLE_LOOP);
-  const scheduler = new Scheduler(registry, layout);
+  const layout = new LayoutState(SIMPLE_LOOP, { now: () => 0 });
+  const scheduler = new Scheduler(registry, layout, { now: () => 0 });
   seedIdentityTags(scheduler, SIMPLE_LOOP_MARKERS);
   return { scheduler, registry };
 };
@@ -213,7 +213,9 @@ describe('Scheduler — section-as-edge-plus-boundary-markers (ADR-011)', () => 
     const registry = new CapabilityRegistry();
     registry.registerAll(BUILTIN_CAPABILITIES);
     registry.freeze();
-    const scheduler = new Scheduler(registry, new LayoutState(FIGURE_8));
+    const scheduler = new Scheduler(registry, new LayoutState(FIGURE_8, { now: () => 0 }), {
+      now: () => 0,
+    });
     seedIdentityTags(scheduler, ['X', 'R_NE', 'R_SE', 'L_NW', 'L_SW']);
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
@@ -325,7 +327,9 @@ describe('Scheduler — deadlock detection', () => {
     const registry = new CapabilityRegistry();
     registry.registerAll(BUILTIN_CAPABILITIES);
     registry.freeze();
-    const scheduler = new Scheduler(registry, new LayoutState(FIGURE_8));
+    const scheduler = new Scheduler(registry, new LayoutState(FIGURE_8, { now: () => 0 }), {
+      now: () => 0,
+    });
     seedIdentityTags(scheduler, ['X', 'A', 'B', 'C', 'D']);
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
@@ -389,7 +393,9 @@ describe('Scheduler — deadlock detection', () => {
     const registry = new CapabilityRegistry();
     registry.registerAll(BUILTIN_CAPABILITIES);
     registry.freeze();
-    const scheduler = new Scheduler(registry, new LayoutState(TRI_LOOP));
+    const scheduler = new Scheduler(registry, new LayoutState(TRI_LOOP, { now: () => 0 }), {
+      now: () => 0,
+    });
     seedIdentityTags(scheduler, ['A', 'B', 'C']);
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
@@ -850,8 +856,8 @@ const setupFigure8 = () => {
   const registry = new CapabilityRegistry();
   registry.registerAll(BUILTIN_CAPABILITIES);
   registry.freeze();
-  const layout = new LayoutState(FIGURE_8);
-  const scheduler = new Scheduler(registry, layout);
+  const layout = new LayoutState(FIGURE_8, { now: () => 0 });
+  const scheduler = new Scheduler(registry, layout, { now: () => 0 });
   seedIdentityTags(scheduler, ['M1', 'M2', 'M3', 'M4', 'M5']);
   return { scheduler, registry };
 };
@@ -1230,8 +1236,8 @@ describe('Scheduler — discovery mode', () => {
     const registry = new CapabilityRegistry();
     registry.registerAll(BUILTIN_CAPABILITIES);
     registry.freeze();
-    const layout = new LayoutState(SIMPLE_LOOP, { confirmTraversals: 1 });
-    const scheduler = new Scheduler(registry, layout);
+    const layout = new LayoutState(SIMPLE_LOOP, { confirmTraversals: 1, now: () => 0 });
+    const scheduler = new Scheduler(registry, layout, { now: () => 0 });
     seedIdentityTags(scheduler, SIMPLE_LOOP_MARKERS);
     registerTrain(scheduler, 'T1');
 
@@ -1644,8 +1650,8 @@ const setupDiverge = () => {
   const registry = new CapabilityRegistry();
   registry.registerAll(BUILTIN_CAPABILITIES);
   registry.freeze();
-  const layout = new LayoutState(DIVERGE);
-  const scheduler = new Scheduler(registry, layout);
+  const layout = new LayoutState(DIVERGE, { now: () => 0 });
+  const scheduler = new Scheduler(registry, layout, { now: () => 0 });
   seedIdentityTags(scheduler, ['A1', 'A2', 'J', 'PM', 'PD', 'X', 'Y']);
   // The switch device that controls junction J. The `controls_marker_id`
   // pairing is what makes the scheduler actuate rather than merely withhold.
@@ -1801,7 +1807,7 @@ describe('Scheduler — deterministic station dwell', () => {
     const registry = new CapabilityRegistry();
     registry.registerAll(BUILTIN_CAPABILITIES);
     registry.freeze();
-    const layout = new LayoutState(SIMPLE_LOOP);
+    const layout = new LayoutState(SIMPLE_LOOP, { now: () => 0 });
     let clock = 0;
     const scheduler = new Scheduler(registry, layout, { now: () => clock });
     seedIdentityTags(scheduler, SIMPLE_LOOP_MARKERS);

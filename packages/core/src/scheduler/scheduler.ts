@@ -17,11 +17,12 @@ export const STATION_DWELL_MS = 2500;
 
 export interface SchedulerOptions {
   /**
-   * Monotonic clock callback in ms, used to time the station dwell. Defaults
-   * to `Date.now`. Inject a virtual clock in tests and the simulator for
-   * determinism — mirrors the seam `LayoutState` already exposes.
+   * Monotonic clock callback in ms, used to time the station dwell. REQUIRED:
+   * core never reads the wall clock directly (determinism contract). The IO
+   * layer (`@trainframe/server`) supplies `Date.now`; tests and the simulator
+   * inject a virtual clock — mirrors the seam `LayoutState` exposes.
    */
-  readonly now?: () => number;
+  readonly now: () => number;
 }
 
 /**
@@ -63,9 +64,9 @@ export class Scheduler {
   constructor(
     private readonly registry: CapabilityRegistry,
     private readonly layout: LayoutState,
-    options: SchedulerOptions = {},
+    options: SchedulerOptions,
   ) {
-    this.now = options.now ?? Date.now;
+    this.now = options.now;
   }
 
   /** Read-only view of the tag registry, exposed for the visualiser/tests. */

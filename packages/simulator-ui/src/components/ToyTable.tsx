@@ -543,11 +543,20 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       const demo = buildBridgeDemo();
       setPieces(demo.pieces);
       setLiveIds(new Set(demo.liveIds));
+      // Commission every piece on the bus exactly as the scan-box would, so an
+      // external server's tag registry resolves marker observations. The seed
+      // path otherwise only binds tags inside the in-browser sim (silent on the
+      // wire), leaving the server unable to resolve `tag_observed` events.
+      let garage = garageRegisteredRef.current;
+      for (const piece of demo.pieces) {
+        if (scanPiece(client, piece, garage)) garage = true;
+      }
+      garageRegisteredRef.current = garage;
     };
     return () => {
       window.__tfLoadBridgeDemo = undefined;
     };
-  }, []);
+  }, [client]);
 
   // pagehide: publish `device_disconnected` for every wire-visible live
   // device before the WebSocket tears down. Playwright's `page.close()`

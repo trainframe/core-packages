@@ -67,7 +67,7 @@ export class Simulation {
     }
     this.registry.freeze();
 
-    this.layout = new LayoutState(opts.layout);
+    this.layout = new LayoutState(opts.layout, { now: () => this.clock.now() });
   }
 
   /**

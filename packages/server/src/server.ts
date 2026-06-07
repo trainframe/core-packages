@@ -19,6 +19,14 @@ export interface ServerOptions {
   readonly extraCapabilities?: ReadonlyArray<Capability<unknown>>;
   /** UUID source for outbound envelopes. Defaults to `crypto.randomUUID`. */
   readonly newId?: () => string;
+  /**
+   * Monotonic clock (ms) the scheduler/layout-state use for dwell timing and
+   * learned-traversal estimates. The server is the IO boundary, so it defaults
+   * to the real `Date.now`. Tests and the in-process sim harness inject a
+   * virtual clock (e.g. `() => sim.clock.now()`) so a synchronous `advance(ms)`
+   * deterministically expires station dwell. See the determinism contract.
+   */
+  readonly now?: () => number;
 }
 
 interface IncomingEnvelope {
@@ -55,8 +63,9 @@ export class Server {
     this.registry.registerAll(BUILTIN_CAPABILITIES);
     if (options.extraCapabilities) this.registry.registerAll(options.extraCapabilities);
     this.registry.freeze();
-    this.layoutState = new LayoutState(options.layout);
-    this.scheduler = new Scheduler(this.registry, this.layoutState);
+    const now = options.now ?? Date.now;
+    this.layoutState = new LayoutState(options.layout, { now });
+    this.scheduler = new Scheduler(this.registry, this.layoutState, { now });
     this.newId = options.newId ?? defaultNewId;
     this.learnMode = new LearnMode({
       layoutState: this.layoutState,

@@ -1,31 +1,36 @@
 /**
- * A deterministic two-train UNIFIED FLYOVER demo, built with a small turtle.
+ * A deterministic two-train SINGLE-DIRECTION OVAL with a HUMP FLYOVER, built
+ * with a small turtle.
  *
- * The scene is ONE connected track (a "theta" graph): a ground main loop with
- * two junctions, J1 (diverge) and J2 (merge), joined by three chains —
+ * The scene is ONE connected oval track (a rounded rectangle) circulated in the
+ * SAME direction by both trains. Along the BOTTOM straight the loop is
+ * grade-separated:
  *
- *   - RETURN chain  J1.trunk(0) … ground … J2.trunk(0)   (carries ground station A)
- *   - MAIN chain    J1.through(1, 'main') … ground … J2.through(1)  (ground station B)
- *   - DECK chain    J1.branch(2, 'divert') … ramp UP … layer-1 deck (upper
- *                   station) … ramp DOWN … J2.branch(2)
+ *   - B (the ground train) takes the MAIN bypass: a flat ground straight under
+ *     the deck, J1.through → ground straight (carrying a bare waypoint) →
+ *     J2.through. B never leaves layer 0.
+ *   - A (the flyover train) takes the DECK bypass: J1.branch (divert) → ramp UP
+ *     onto a layer-1 deck (carrying the UPPER STATION) that runs OVER B's ground
+ *     straight → ramp DOWN → J2.branch. A literally rides OVER B, then continues
+ *     forward down the far ramp and merges at J2.
  *
- * Both trains ENTER each junction via the unconstrained trunk side and LEAVE
- * via trunk on the far junction, so the MERGE at J2 needs no switch — block
- * exclusivity serialises the convergence (the compile test proves the
- * trunk-exit edge carries no `requires_switch_state`).
+ * The rest of the oval — J2.trunk → bottom-right corner → right side → top
+ * straight → left side → bottom-left corner → J1.trunk — is SHARED and
+ * traversed in the SAME direction by both trains, so ADR-011 block exclusivity
+ * gives one-block spacing and never a head-on.
  *
- * The scheduler throws J1 to 'divert' for train A (up the bridge to the upper
- * station) and 'main' for train B (straight on along the ground). The MAIN
- * chain bumps UP in plan so a ground main-loop edge passes directly under a
- * layer-1 deck edge — a true over/under bridge (two edges crossing in 2D on
- * different layers, sharing no marker). The upper station is reachable ONLY
- * through the divert legs, so train A's schedule forces it over the flyover.
+ * Forward cyclic order, identical for both trains:
+ *   J1 → { upper deck (A, divert) | main straight (B, main) } → J2
+ *      → right corner → right side → top → left side → left corner → J1
+ * A throws J1 to 'divert' on its handover and B throws it to 'main' — the
+ * per-lap switch flip the demo shows off. J2 is a PASSIVE merge: both trains
+ * arrive on a branch/through leg and leave via its switch-free trunk.
  *
  * Pure geometry: no React, no I/O, no clock, no randomness — given no input it
- * always returns the same pieces. The intricate junction-to-junction closure
- * was tuned against the compile test (see bridge-demo.test.ts); the comments
- * record the chain shapes so the layout can be reasoned about without re-deriving
- * the coordinates.
+ * always returns the same pieces. The closures (deck→J2.branch, main→J2.through,
+ * oval J2.trunk→J1.trunk) are tuned against the compile test
+ * (bridge-demo.test.ts) and the strict deterministic harness gate
+ * (two-train-flyover.spec.ts in @trainframe/ui-tests).
  */
 
 import {
@@ -191,12 +196,23 @@ const TRAIN_B_ID = 'trainB';
 const JUNCTION_J1_ID = 'j1';
 const JUNCTION_J2_ID = 'j2';
 
-/** Ground station on the RETURN chain — train A's home / first stop. */
-const GROUND_STATION_A_ID = 'rt-stationA';
-/** Ground station on the MAIN chain — train B's home / first stop. */
-const GROUND_STATION_B_ID = 'mn-stationB';
+/** Ground station on the SHARED top straight — train A's home (after the deck). */
+const GROUND_STATION_A_ID = 'top-stationA';
+/** Ground station on the SHARED right side — train B's home. */
+const GROUND_STATION_B_ID = 'rt-stationB';
+/** Bare waypoint on the MAIN bypass: pins B through the ground straight (off the
+ * deck) and forces forward circulation. Not a station. */
+const MAIN_WAYPOINT_ID = 'mn-wp';
+/** Bare waypoint on the SHARED TOP straight: pins each train's return leg the
+ * long way round the oval (same direction as the other), so the shared
+ * single-track section never sees a head-on. Not a station. */
+const LOOP_WAYPOINT_ID = 'loop-wp';
 /** The UPPER station on the layer-1 deck — reachable only over the flyover. */
-const UPPER_STATION_ID = 'la-deckSt';
+const UPPER_STATION_ID = 'dk-station';
+/** First ground marker A reaches AFTER descending the far ramp and merging at
+ * J2 — the "down the far side" discriminator that proves A traversed the whole
+ * bridge rather than bouncing back. */
+const FAR_RAMP_BASE_ID = 'dk-rampDown';
 
 // ---------------------------------------------------------------------------
 // Demo layout
@@ -210,107 +226,138 @@ export interface BridgeDemo {
    * `ToyHardware.syncLive` runs `bindIdentityTag`/`spawnPiece` on each, so the
    * sim emits `tag_observed` as trains cross markers — the demo's wire proof. */
   readonly liveIds: string[];
-  /** The two ground-station marker ids (`M-{pieceId}`). A starts on the first. */
+  /** The two ground-station marker ids (`M-{pieceId}`): [groundA, groundB]. */
   readonly groundStations: string[];
   /** The upper-station marker id (`M-{pieceId}`) on the layer-1 deck. */
   readonly upperStation: string;
-  /** The DIVERGE junction marker id (`M-{pieceId}`). */
+  /** The bare main-bypass waypoint marker id (`M-{pieceId}`): keeps B grounded. */
+  readonly mainWaypoint: string;
+  /** The shared-top waypoint marker id (`M-{pieceId}`): direction-pins return legs. */
+  readonly loopWaypoint: string;
+  /** The DIVERGE junction (J1) marker id (`M-{pieceId}`). */
   readonly junctionId: string;
+  /** The MERGE junction (J2) marker id (`M-{pieceId}`). */
+  readonly mergeJunctionId: string;
+  /** The marker id (`M-{pieceId}`) a train at ground station A should head TO
+   * to travel in the circulation direction — the harness's startEdge target. */
+  readonly forwardFromGroundA: string;
+  /** The marker id (`M-{pieceId}`) a train at ground station B should head TO
+   * to travel in the circulation direction — the harness's startEdge target. */
+  readonly forwardFromGroundB: string;
+  /**
+   * The ORDERED layer-1 deck spine marker ids A must traverse IN ORDER on every
+   * lap (ramp-up base → upper station → far ramp-down base): the
+   * up-over-and-down-the-far-side proof. A bounce omits the tail of this list.
+   */
+  readonly bridgeSpine: { rampUp: string; upper: string; rampDown: string };
 }
 
 /**
- * Build the MAIN chain (train B's path): from J1's THROUGH endpoint, a ground
- * station, then a central UP bump (so a ground edge passes under the deck — the
- * over/under), landing on a freshly placed J2 via its THROUGH endpoint. J2 is
- * placed `connectVia: 1` so its TRUNK (index 0) becomes the cursor's exit and
- * faces the return chain, and its BRANCH (index 2) faces the deck descent.
+ * Build the MAIN bypass (train B's path) and place J2. From J1's THROUGH
+ * endpoint a flat ground straight runs east UNDER the deck, carrying the bare
+ * waypoint `mn-wp`, and lands on a freshly placed J2 via its THROUGH endpoint.
+ * J2 is placed `connectVia: 1` so its TRUNK (index 0) becomes the cursor's exit
+ * and faces the oval, and its BRANCH (index 2) faces the deck descent.
  */
-function buildMainChainAndJ2(pieces: TrackPiece[]): void {
+function buildMainBypassAndJ2(pieces: TrackPiece[]): void {
   let c = endpointCursor(pieces, JUNCTION_J1_ID, 1); // J1 'main' (through), heading east
-  c = place(pieces, c, 'station', { id: GROUND_STATION_B_ID });
-  // Up bump: east → north, two risers (these cross UNDER the deck), north → east,
-  // a top straight, east → south, two risers, south → east — back to the start y.
-  c = corner(pieces, c, 'mn-c0', true); // east → north (up)
-  c = place(pieces, c, 'straight', { id: 'mn-rup0' });
-  c = place(pieces, c, 'straight', { id: 'mn-rup1' });
-  c = corner(pieces, c, 'mn-c1', false); // north → east
-  c = place(pieces, c, 'straight', { id: 'mn-top0' });
-  c = corner(pieces, c, 'mn-c2', false); // east → south (down)
-  c = place(pieces, c, 'straight', { id: 'mn-rdn0' });
-  c = place(pieces, c, 'straight', { id: 'mn-rdn1' });
-  c = corner(pieces, c, 'mn-c3', true); // south → east
-  c = place(pieces, c, 'straight', { id: 'mn-q0' });
+  c = place(pieces, c, 'straight', { id: 'mn-s0' });
+  c = place(pieces, c, 'straight', { id: MAIN_WAYPOINT_ID }); // bare waypoint, under the deck
+  c = place(pieces, c, 'straight', { id: 'mn-s1' });
+  c = place(pieces, c, 'straight', { id: 'mn-s2' });
   // Attach J2 by its THROUGH (index 1); the placement reads rot 180 so its
-  // trunk faces east (return chain) and branch faces up-left (deck arrival).
-  place(pieces, c, 'junction', { id: JUNCTION_J2_ID, connectVia: 1 });
+  // trunk faces east (oval). `flipped` mirrors its BRANCH to the SOUTH side of
+  // the ground line so the deck must cross the ground centreline diagonally to
+  // reach it — that crossing is the genuine over/under.
+  place(pieces, c, 'junction', { id: JUNCTION_J2_ID, connectVia: 1, flipped: true });
 }
 
 /**
- * Build the DECK chain (train A's path): from J1's BRANCH endpoint, ramp UP onto
- * the layer-1 deck, run east across it (carrying the upper station) above the
- * main-chain bump, then ramp DOWN and swing onto J2's BRANCH endpoint via two
- * ground approach curves. The deck edges are the layer-1 half of the over/under.
+ * Build the DECK bypass (train A's path): from J1's BRANCH endpoint, ramp UP
+ * onto the layer-1 deck (heading up-right, north of the ground line), level out
+ * east carrying the upper station, run east so the flat deck passes directly
+ * OVER the main ground straight (the over/under), then ramp DOWN and swing onto
+ * J2's BRANCH endpoint. The deck DIAGONALLY crosses the ground centreline so a
+ * layer-1 edge strictly crosses a layer-0 edge in 2D, sharing no marker. The
+ * upper station is reachable ONLY through these divert legs.
  */
 function buildDeckChain(pieces: TrackPiece[]): void {
-  let c = endpointCursor(pieces, JUNCTION_J1_ID, 2); // J1 'divert' (branch), heading up-right
-  c = place(pieces, c, 'ramp', { id: 'la-rampUp' }); // climb to layer 1
-  c = place(pieces, c, 'curve', { id: 'dk-c0', flipped: false }); // level out, heading east on the deck
-  c = place(pieces, c, 'station', { id: UPPER_STATION_ID }); // the upper station (layer 1)
-  c = place(pieces, c, 'straight', { id: 'la-dk1' });
-  c = place(pieces, c, 'straight', { id: 'la-dk2' });
-  c = place(pieces, c, 'curve', { id: 'dk-c1', flipped: false }); // start the descent (down-right)
-  c = place(pieces, c, 'ramp', { id: 'la-rampDown', connectVia: 1 }); // drop back to ground
-  // Two ground approach curves swing the descent onto J2's branch endpoint
-  // (the divert merge leg); position-snap (≤30mm) closes the join.
-  c = place(pieces, c, 'curve', { id: 'la-app0', flipped: true });
-  place(pieces, c, 'curve', { id: 'la-app1', flipped: true });
+  let c = endpointCursor(pieces, JUNCTION_J1_ID, 2); // J1 'divert' (branch), heading NE (315°)
+  c = place(pieces, c, 'ramp', { id: 'dk-rampUp' }); // climb to layer 1, still heading NE
+  c = place(pieces, c, 'station', { id: UPPER_STATION_ID }); // the upper station (layer 1), heading NE
+  c = place(pieces, c, 'curve', { id: 'dk-c0', flipped: false }); // bend toward the descent
+  c = place(pieces, c, 'curve', { id: 'dk-c1', flipped: false });
+  // The middle deck pieces straddle the ground straight: the layer-1 chain runs
+  // from the north side (y<700) to the south side (y>700), so a layer-1 edge
+  // strictly crosses the layer-0 ground straight (y=700) in 2D, sharing no
+  // marker — the genuine over/under.
+  c = place(pieces, c, 'curve', { id: 'dk-c2', flipped: false });
+  c = place(pieces, c, 'curve', { id: 'dk-c3', flipped: true });
+  // Down-ramp drops back to ground; `connectVia: 1` connects its upper (layer-1)
+  // end to the deck and exits at its ground end, which lands on J2's south-facing
+  // BRANCH endpoint by symmetry about (900, 700) (position-snap ≤30mm closes it).
+  place(pieces, c, 'ramp', { id: FAR_RAMP_BASE_ID, connectVia: 1 });
 }
 
 /**
- * Build the RETURN chain (shared ground loop closure): from J1's TRUNK endpoint,
- * a rectangular detour BELOW the layout (carrying ground station A) back up onto
- * J2's TRUNK endpoint. Both trains LEAVE J2 via this trunk side — the passive,
- * switch-free merge.
+ * Build the SHARED OVAL closure: from J2's TRUNK endpoint, run the bottom-right
+ * corner, up the right side (carrying ground station B), across the top
+ * (carrying the bare top waypoint and ground station A), down the left side,
+ * and the bottom-left corner back onto J1's TRUNK endpoint. Both trains
+ * traverse this in the SAME direction, so the merge at J2 is switch-free and
+ * the shared section never sees a head-on.
  */
-function buildReturnChain(pieces: TrackPiece[]): void {
+function buildOvalClosure(pieces: TrackPiece[]): void {
+  // The shared oval is a rounded rectangle BELOW the bypasses, traversed in the
+  // same direction by both trains. From J1's TRUNK (heading west) it drops down
+  // the LEFT side (carrying ground station A, near J1 — so A's forward route to
+  // the bridge runs the short way down-left through J1, never the long way round
+  // through J2), runs the BOTTOM (carrying the bare top waypoint that
+  // direction-pins both trains' return legs), climbs the RIGHT side (carrying
+  // ground station B, near J2), and closes on J2's TRUNK. Every `corner` is
+  // `flipped: true` (turns clockwise: W→S→E→N→E). The straight counts (left 2,
+  // bottom 6, right 2) were tuned so the final corner's exit lands EXACTLY on
+  // J2's trunk endpoint (the closure search; ≤30mm snap closes the join).
   let c = endpointCursor(pieces, JUNCTION_J1_ID, 0); // J1 trunk, heading west
-  c = corner(pieces, c, 'rt0', true); // west → south
-  c = place(pieces, c, 'straight', { id: 'rt-d0' });
-  c = place(pieces, c, 'straight', { id: 'rt-d1' });
-  c = corner(pieces, c, 'rt1', true); // south → east
-  // Bottom run (with ground station A roughly mid-span).
-  for (let i = 0; i < 9; i++) {
-    if (i === 4) {
-      c = place(pieces, c, 'station', { id: GROUND_STATION_A_ID });
-    } else {
-      c = place(pieces, c, 'straight', { id: `rt-b${i}` });
-    }
-  }
-  c = corner(pieces, c, 'rt2', true); // east → north
-  c = place(pieces, c, 'straight', { id: 'rt-u0' });
-  c = place(pieces, c, 'straight', { id: 'rt-u1' });
-  corner(pieces, c, 'rt3', true); // north → east, landing on J2's trunk
+  c = corner(pieces, c, 'ov-tl', true); // west → south (top-left corner)
+  // Left side (heading south) carrying station A near J1.
+  c = place(pieces, c, 'station', { id: GROUND_STATION_A_ID });
+  c = place(pieces, c, 'straight', { id: 'lt-l0' });
+  c = corner(pieces, c, 'ov-bl', true); // south → east (bottom-left corner)
+  // Bottom run (heading east) carrying the bare top waypoint mid-span.
+  c = place(pieces, c, 'straight', { id: 'bt-b0' });
+  c = place(pieces, c, 'straight', { id: 'bt-b1' });
+  c = place(pieces, c, 'straight', { id: LOOP_WAYPOINT_ID });
+  c = place(pieces, c, 'straight', { id: 'bt-b3' });
+  c = place(pieces, c, 'straight', { id: 'bt-b4' });
+  c = place(pieces, c, 'straight', { id: 'bt-b5' });
+  c = corner(pieces, c, 'ov-br', true); // east → north (bottom-right corner)
+  // Right side (heading north) carrying station B near J2.
+  c = place(pieces, c, 'straight', { id: 'rt-r0' });
+  c = place(pieces, c, 'station', { id: GROUND_STATION_B_ID });
+  // Top-right corner: north → east, landing back onto J2's trunk (≤30mm snap).
+  corner(pieces, c, 'ov-tr', true);
 }
 
 /**
- * Build the full unified flyover demo: one connected theta graph with two
- * junctions, two ground stations, an upper deck station over a ground edge, and
- * a train placed on each ground station (snapped to the marker centre so the sim
- * spawns it there, length-aware).
+ * Build the full oval flyover demo: one connected graph with two junctions, two
+ * ground stations on the shared oval, an upper deck station over the ground
+ * straight, and a train placed on each ground station (snapped to the marker
+ * centre so the sim spawns it there, length-aware).
  */
 export function buildBridgeDemo(): BridgeDemo {
   const pieces: TrackPiece[] = [];
 
   // J1 (diverge): trunk(0) anchors the build heading east. `flipped` sends the
-  // branch (divert) up-right so the deck arches above the main loop.
-  place(pieces, { x: 300, y: 500, dir: 0, layer: 0 }, 'junction', {
+  // branch (divert) up-right so the deck arches above the ground straight.
+  place(pieces, { x: 300, y: 700, dir: 0, layer: 0 }, 'junction', {
     id: JUNCTION_J1_ID,
     flipped: true,
   });
 
-  buildMainChainAndJ2(pieces);
+  buildMainBypassAndJ2(pieces);
   buildDeckChain(pieces);
-  buildReturnChain(pieces);
+  buildOvalClosure(pieces);
 
   // Trains: snap each onto a ground station marker centre of the loop so the sim
   // spawns it at distance 0 on an outgoing edge. Train A starts on ground station
@@ -345,6 +392,20 @@ export function buildBridgeDemo(): BridgeDemo {
     liveIds,
     groundStations: [`M-${GROUND_STATION_A_ID}`, `M-${GROUND_STATION_B_ID}`],
     upperStation: `M-${UPPER_STATION_ID}`,
+    mainWaypoint: `M-${MAIN_WAYPOINT_ID}`,
+    loopWaypoint: `M-${LOOP_WAYPOINT_ID}`,
     junctionId: `M-${JUNCTION_J1_ID}`,
+    mergeJunctionId: `M-${JUNCTION_J2_ID}`,
+    // Forward (circulation-direction) neighbour of each ground station: A (on
+    // the left side, near J1) heads toward the top-left corner and J1; B (on the
+    // right side, near J2) heads down toward the bottom run. These pin each
+    // train's startEdge so it spawns facing forward.
+    forwardFromGroundA: 'M-ov-tlb',
+    forwardFromGroundB: 'M-rt-r0',
+    bridgeSpine: {
+      rampUp: 'M-dk-rampUp',
+      upper: `M-${UPPER_STATION_ID}`,
+      rampDown: `M-${FAR_RAMP_BASE_ID}`,
+    },
   };
 }

@@ -30,7 +30,7 @@ describe('LayoutState constructor', () => {
       edges: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
       junctions: [],
     };
-    expect(() => new LayoutState(broken)).toThrow(/unknown marker: M1 -> M2/);
+    expect(() => new LayoutState(broken, { now: () => 0 })).toThrow(/unknown marker: M1 -> M2/);
   });
 });
 
@@ -198,7 +198,7 @@ describe('LayoutState per-train getLearnedTraversalMs', () => {
 
 describe('LayoutState core graph operations', () => {
   it('finds edges in a pre-configured layout', () => {
-    const layout = new LayoutState(SIMPLE_LOOP);
+    const layout = new LayoutState(SIMPLE_LOOP, { now: () => 0 });
     expect(layout.findEdge('M1', 'M2')).toBeDefined();
     expect(layout.findEdge('M2', 'M1')).toBeUndefined();
   });
@@ -211,7 +211,7 @@ describe('LayoutState core graph operations', () => {
       edges: SIMPLE_LOOP.edges.slice(1), // drop M1→M2
       junctions: [],
     };
-    const ls = new LayoutState(partial, { confirmTraversals: 2 });
+    const ls = new LayoutState(partial, { confirmTraversals: 2, now: () => 0 });
     expect(ls.findEdge('M1', 'M2')).toBeUndefined();
 
     const r1 = ls.recordTraversal('M1', 'M2');
@@ -230,25 +230,25 @@ describe('LayoutState core graph operations', () => {
 
 describe('LayoutState — switch pairing', () => {
   it('switchDeviceForMarker returns undefined before any pairing is recorded', () => {
-    const layout = new LayoutState(SIMPLE_LOOP);
+    const layout = new LayoutState(SIMPLE_LOOP, { now: () => 0 });
     expect(layout.switchDeviceForMarker('M1')).toBeUndefined();
   });
 
   it('recordSwitchPairing + switchDeviceForMarker round-trips the device id', () => {
-    const layout = new LayoutState(SIMPLE_LOOP);
+    const layout = new LayoutState(SIMPLE_LOOP, { now: () => 0 });
     layout.recordSwitchPairing('SWITCH-M1', 'M1');
     expect(layout.switchDeviceForMarker('M1')).toBe('SWITCH-M1');
   });
 
   it('re-registering the same marker updates the pairing (idempotent)', () => {
-    const layout = new LayoutState(SIMPLE_LOOP);
+    const layout = new LayoutState(SIMPLE_LOOP, { now: () => 0 });
     layout.recordSwitchPairing('SWITCH-M1-v1', 'M1');
     layout.recordSwitchPairing('SWITCH-M1-v2', 'M1');
     expect(layout.switchDeviceForMarker('M1')).toBe('SWITCH-M1-v2');
   });
 
   it('multiple junctions are tracked independently', () => {
-    const layout = new LayoutState(SIMPLE_LOOP);
+    const layout = new LayoutState(SIMPLE_LOOP, { now: () => 0 });
     layout.recordSwitchPairing('SWITCH-M1', 'M1');
     layout.recordSwitchPairing('SWITCH-M2', 'M2');
     expect(layout.switchDeviceForMarker('M1')).toBe('SWITCH-M1');

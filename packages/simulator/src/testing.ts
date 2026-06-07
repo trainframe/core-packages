@@ -171,7 +171,11 @@ export function startTestEnvironment(opts: TestEnvironmentOptions): TestEnvironm
   };
   const bridge = new BrokerBridge(sim, client, { newId });
   bridge.start();
-  const server = new Server({ layout: opts.layout, client, newId });
+  // Wire the server's scheduler clock to the simulation's virtual clock so a
+  // synchronous `env.advance(ms)` deterministically expires station dwell —
+  // without this the scheduler would read wall-clock time and never release a
+  // dwelling train inside a synchronous test.
+  const server = new Server({ layout: opts.layout, client, newId, now: () => sim.clock.now() });
   server.start();
 
   // Seed identity tags AFTER the bridge and server are subscribed; otherwise
