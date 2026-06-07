@@ -10,8 +10,10 @@ import { useToyHardware } from '../sim/use-toy-hardware.js';
 import { CARRIAGE_SPACING_MM, type WorldPosition, computeTrainTrails } from '../track/coupling.js';
 import { type EdgePath, composeEdgePath } from '../track/edge-path.js';
 import { SNAP_DISTANCE, compileLayout } from '../track/layout-from-pieces.js';
+import { detectSameLayerOverlaps } from '../track/overlap.js';
 import {
   type RotationDeg,
+  TRAIN_LENGTH_MM,
   type TrackPiece,
   type TrackPieceType,
   getEndpoints,
@@ -527,12 +529,14 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     };
   }, []);
 
-  // DEV-only: a console/orchestrator hook that stages the two-train bridge demo
-  // — two independent closed loops, one ramping onto a deck that bridges over
-  // the other — and marks every piece (track + both trains) live so the sim
-  // binds identity tags and the trains spawn. The orchestrator then publishes
-  // `begin_exploration` to each train to set them circulating. Behind
-  // `import.meta.env.DEV` so it never ships to production; cleared on unmount.
+  // DEV-only: a console/orchestrator hook that stages the unified flyover demo
+  // — one connected theta-graph track with a diverge junction (J1), a layer-1
+  // deck bridging over a ground main-loop edge, and a passive merge (J2) — and
+  // marks every piece (track + both trains) live so the sim binds identity tags
+  // and the length-aware trains spawn. The orchestrator (scripts/bridge-demo-
+  // server.mjs) then runs a real server that assigns each train a schedule, and
+  // the scheduler throws J1 to 'divert' for train A (over the bridge) and 'main'
+  // for train B. Behind `import.meta.env.DEV` so it never ships; cleared on unmount.
   useEffect(() => {
     if (!import.meta.env.DEV) return;
     window.__tfLoadBridgeDemo = () => {
@@ -1309,96 +1313,113 @@ function Table({
   }
   const orderedLayers = [...byLayer.keys()].sort((a, b) => a - b);
 
+  // Same-layer track-on-track overlap detection: two track pieces sharing a 2D
+  // footprint on the SAME layer with no shared endpoint is an authoring mistake
+  // (a bridge crossing is the legitimate different-layer case, never flagged).
+  // Offending pieces get a red error outline; the status bar surfaces a count.
+  const overlapIds = detectSameLayerOverlaps(pieces);
+
   return (
-    <svg
-      ref={svgRef}
-      width={CANVAS_W_MM * SCALE}
-      height={CANVAS_H_MM * SCALE}
-      viewBox={viewBox}
-      className="tf-toytable__canvas"
-      style={{ cursor }}
-      onClick={handleClick}
-      onKeyDown={handleKeyDown}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
-      onDrop={handleDrop}
-      role="img"
-      aria-label="Toy table"
-      data-testid="toy-table-canvas"
-      data-viewport-zoom={viewport.zoom}
-      data-viewport-x={viewport.x}
-      data-viewport-y={viewport.y}
-    >
-      {/* One group per layer, lowest first, so higher decks paint last and a
+    <>
+      {overlapIds.size > 0 && (
+        <div className="tf-toytable__overlap-warning" role="alert" data-testid="overlap-warning">
+          ⚠ {overlapIds.size} track piece{overlapIds.size === 1 ? '' : 's'} overlap on the same
+          layer with no shared join — move or delete the highlighted pieces.
+        </div>
+      )}
+      <svg
+        ref={svgRef}
+        width={CANVAS_W_MM * SCALE}
+        height={CANVAS_H_MM * SCALE}
+        viewBox={viewBox}
+        className="tf-toytable__canvas"
+        style={{ cursor }}
+        onClick={handleClick}
+        onKeyDown={handleKeyDown}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+        role="img"
+        aria-label="Toy table"
+        data-testid="toy-table-canvas"
+        data-viewport-zoom={viewport.zoom}
+        data-viewport-x={viewport.x}
+        data-viewport-y={viewport.y}
+      >
+        {/* One group per layer, lowest first, so higher decks paint last and a
           bridge reads as over/under. The drop-shadow height cue is attached to
           this UN-rotated group (never the per-piece rotated/flipped <g>, where a
           shadow would shear and point a different way per piece). Endpoint dots
           ride in their own layer's group so upper dots sit on the deck and
           ground dots beneath a bridge are occluded. */}
-      {orderedLayers.map((layer) => {
-        const layerPieces = byLayer.get(layer) ?? [];
-        const filter = layerFilter(layer);
-        return (
-          <g key={`layer-${layer}`} data-layer={layer} style={filter ? { filter } : undefined}>
-            {layerPieces.map((p) => (
-              <PieceRenderer
-                key={p.id}
-                piece={p}
-                selected={p.id === selectedId}
-                live={liveIds.has(p.id)}
-                armedType={armedType}
-                coupledToTrainId={carriageCoupledTo.get(p.id)}
-                renderPosition={renderPositions.get(p.id)}
-                onAction={(action) => onPieceAction(p.id, action)}
-                dragOverride={
-                  pieceDragPreview?.id === p.id
-                    ? {
-                        x: pieceDragPreview.x,
-                        y: pieceDragPreview.y,
-                        rotationDeg: pieceDragPreview.rotationDeg,
-                      }
-                    : undefined
-                }
-                onDragMove={handlePieceDragMove}
-                onDragEnd={handlePieceDragEnd}
-              />
-            ))}
-            {/* Endpoint dots for track pieces only. Devices have no endpoints. */}
-            {layerPieces.flatMap((p) =>
-              getEndpoints(p).map((ep, ei) => (
-                <circle
-                  key={`${p.id}-ep${ei}`}
-                  cx={ep.x}
-                  cy={ep.y}
-                  r={4}
-                  fill={p.id === selectedId ? '#2563eb' : '#e11d48'}
-                  stroke="#fff"
-                  strokeWidth={1.5}
-                  style={{ pointerEvents: 'none' }}
+        {orderedLayers.map((layer) => {
+          const layerPieces = byLayer.get(layer) ?? [];
+          const filter = layerFilter(layer);
+          return (
+            <g key={`layer-${layer}`} data-layer={layer} style={filter ? { filter } : undefined}>
+              {/* Endpoint dots FIRST (track pieces only; devices have no endpoints)
+                so they paint UNDER the pieces and trains in this layer group — a
+                train riding a marker is drawn over its dot, not pierced by it. */}
+              {layerPieces.flatMap((p) =>
+                getEndpoints(p).map((ep, ei) => (
+                  <circle
+                    key={`${p.id}-ep${ei}`}
+                    cx={ep.x}
+                    cy={ep.y}
+                    r={4}
+                    fill={p.id === selectedId ? '#2563eb' : '#e11d48'}
+                    stroke="#fff"
+                    strokeWidth={1.5}
+                    style={{ pointerEvents: 'none' }}
+                  />
+                )),
+              )}
+              {layerPieces.map((p) => (
+                <PieceRenderer
+                  key={p.id}
+                  piece={p}
+                  selected={p.id === selectedId}
+                  live={liveIds.has(p.id)}
+                  armedType={armedType}
+                  invalidOverlap={overlapIds.has(p.id)}
+                  coupledToTrainId={carriageCoupledTo.get(p.id)}
+                  renderPosition={renderPositions.get(p.id)}
+                  onAction={(action) => onPieceAction(p.id, action)}
+                  dragOverride={
+                    pieceDragPreview?.id === p.id
+                      ? {
+                          x: pieceDragPreview.x,
+                          y: pieceDragPreview.y,
+                          rotationDeg: pieceDragPreview.rotationDeg,
+                        }
+                      : undefined
+                  }
+                  onDragMove={handlePieceDragMove}
+                  onDragEnd={handlePieceDragEnd}
                 />
-              )),
-            )}
-          </g>
-        );
-      })}
-      {/* Snap highlight — a faint ring drawn over the would-snap-to endpoint. */}
-      {snapHighlight !== null && (
-        <circle
-          cx={snapHighlight.x}
-          cy={snapHighlight.y}
-          r={SNAP_DISTANCE / 2}
-          fill="none"
-          stroke="#facc15"
-          strokeWidth={3}
-          strokeOpacity={0.85}
-          style={{ pointerEvents: 'none' }}
-          data-testid="snap-highlight"
-        />
-      )}
-    </svg>
+              ))}
+            </g>
+          );
+        })}
+        {/* Snap highlight — a faint ring drawn over the would-snap-to endpoint. */}
+        {snapHighlight !== null && (
+          <circle
+            cx={snapHighlight.x}
+            cy={snapHighlight.y}
+            r={SNAP_DISTANCE / 2}
+            fill="none"
+            stroke="#facc15"
+            strokeWidth={3}
+            strokeOpacity={0.85}
+            style={{ pointerEvents: 'none' }}
+            data-testid="snap-highlight"
+          />
+        )}
+      </svg>
+    </>
   );
 }
 
@@ -1407,6 +1428,9 @@ interface PieceRendererProps {
   readonly selected: boolean;
   readonly live: boolean;
   readonly armedType: TrackPieceType | null;
+  /** When true, this piece is part of an invalid same-layer track-on-track
+   * overlap and is drawn with a red error outline. */
+  readonly invalidOverlap: boolean;
   /**
    * For carriage pieces: the id of the live train this carriage is currently
    * coupled to (within COUPLING_DISTANCE_MM), or undefined if uncoupled.
@@ -1434,11 +1458,31 @@ interface PieceRendererProps {
   readonly onDragEnd: (pieceId: string, clientX: number, clientY: number) => void;
 }
 
+/** The pointer cursor for a piece: crosshair while a type is armed (placing),
+ * pointer for a live wire device (clickable to power off), grab otherwise. */
+function pieceCursor(armed: boolean, livePowerable: boolean): string {
+  if (armed) return 'crosshair';
+  if (livePowerable) return 'pointer';
+  return 'grab';
+}
+
+/** The outline overlay drawn behind a piece body, or null for none. An invalid
+ * same-layer overlap (red error) wins over selection (blue). Pure. */
+function pieceOutline(
+  invalidOverlap: boolean,
+  selected: boolean,
+): { stroke: string; strokeWidth: number; strokeOpacity: number } | null {
+  if (invalidOverlap) return { stroke: '#dc2626', strokeWidth: 5, strokeOpacity: 0.9 };
+  if (selected) return { stroke: '#2563eb', strokeWidth: 6, strokeOpacity: 0.4 };
+  return null;
+}
+
 function PieceRenderer({
   piece,
   selected,
   live,
   armedType,
+  invalidOverlap,
   coupledToTrainId,
   renderPosition,
   onAction,
@@ -1535,6 +1579,13 @@ function PieceRenderer({
   // exactly what release commits; otherwise follow the sim, then placement.
   const rotationDeg = dragOverride?.rotationDeg ?? renderPosition?.rotationDeg ?? piece.rotationDeg;
 
+  // A single outline overlay: red for an invalid same-layer overlap (error,
+  // takes priority), else blue for selection, else none. Computed in a helper
+  // so the JSX stays flat.
+  const outline = pieceOutline(invalidOverlap, selected);
+  const cursorStyle = pieceCursor(armedType !== null, live && isWire);
+  const ariaLabel = `${piece.type} piece${live ? ' (powered on)' : ''}${invalidOverlap ? ' (invalid overlap)' : ''}`;
+
   return (
     <g
       transform={`translate(${x}, ${y}) rotate(${rotationDeg}) scale(1, ${piece.flipped === true ? -1 : 1})`}
@@ -1543,18 +1594,22 @@ function PieceRenderer({
       onPointerUp={handlePointerUp}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
-      style={{
-        cursor: armedType !== null ? 'crosshair' : live && isWire ? 'pointer' : 'grab',
-        touchAction: 'none',
-      }}
+      style={{ cursor: cursorStyle, touchAction: 'none' }}
       data-testid={`piece-${piece.id}`}
       data-piece-id={piece.id}
       data-live={live ? 'true' : 'false'}
       data-coupled-to={coupledToTrainId}
-      aria-label={`${piece.type} piece${live ? ' (powered on)' : ''}`}
+      data-invalid-overlap={invalidOverlap ? 'true' : undefined}
+      aria-label={ariaLabel}
     >
-      {selected && (
-        <path d={shape.svgPath} fill="none" stroke="#2563eb" strokeWidth={6} strokeOpacity={0.4} />
+      {outline !== null && (
+        <path
+          d={shape.svgPath}
+          fill="none"
+          stroke={outline.stroke}
+          strokeWidth={outline.strokeWidth}
+          strokeOpacity={outline.strokeOpacity}
+        />
       )}
       <path
         d={shape.svgPath}
@@ -1605,8 +1660,15 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
   if (piece.type === 'carriage') return false;
   if (piece.type === 'train') {
     const device_id = deviceIdForDevicePiece(piece);
+    // Announce the train length-aware (train_length_mm > 0). The server's
+    // scheduler needs a physical length to serialise a switched junction (it
+    // defers releasing the approach block until the head clears the train's
+    // own length); a point train would deadlock a diverging junction such as
+    // the bridge demo's J1. Mirrors the length spawned into the sim by
+    // ToyHardware so the wire payload and physics agree.
     const reg = encodeDeviceEvent('device_registered', device_id, {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
+      train_length_mm: TRAIN_LENGTH_MM,
     });
     client.publish(reg.topic, reg.payload);
     return false;

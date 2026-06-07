@@ -1,45 +1,74 @@
 import { describe, expect, it } from 'vitest';
 import { compileLayout } from '../track/layout-from-pieces.js';
-import { getEndpoints, layerOf } from '../track/pieces.js';
+import { layerOf } from '../track/pieces.js';
 import { buildBridgeDemo } from './bridge-demo.js';
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Build once — every assertion reads the same compiled layout.
 // ---------------------------------------------------------------------------
 
-type Layout = ReturnType<typeof compileLayout>;
+const demo = buildBridgeDemo();
+const layout = compileLayout(demo.pieces, 'bridge-demo');
 
-/** Markers in `layout` whose id begins `M-{prefix}` (loop partition by id). */
-function markersWithPrefix(layout: Layout, prefix: string): string[] {
-  return layout.markers.map((m) => m.id).filter((id) => id.startsWith(`M-${prefix}`));
-}
+type Layout = typeof layout;
+type Edge = (typeof layout.edges)[number];
 
-function inboundCount(layout: Layout, markerId: string): number {
-  return layout.edges.filter((e) => e.to_marker_id === markerId).length;
-}
-function outboundCount(layout: Layout, markerId: string): number {
-  return layout.edges.filter((e) => e.from_marker_id === markerId).length;
-}
+/** Map marker id → its piece (track pieces only; trains have no marker). */
+const pieceByMarker = new Map<string, (typeof demo.pieces)[number]>(
+  demo.pieces.filter((p) => p.type !== 'train').map((p) => [`M-${p.id}`, p] as const),
+);
 
-/** The set of distinct neighbour markers of `markerId` (via any edge, either
- * direction). In a single simple cycle every node has exactly two neighbours —
- * the discriminating proof of "closed loop, no dead ends, no junctions"
- * (`≥1 in/out` alone is satisfied by any connected piece, since edges are
- * emitted bidirectionally). */
-function neighbours(layout: Layout, markerId: string): Set<string> {
-  const ns = new Set<string>();
-  for (const e of layout.edges) {
-    if (e.from_marker_id === markerId) ns.add(e.to_marker_id);
-    if (e.to_marker_id === markerId) ns.add(e.from_marker_id);
+// ---------------------------------------------------------------------------
+// Graph helpers
+// ---------------------------------------------------------------------------
+
+/** Undirected adjacency over all markers, optionally skipping a set of
+ * `from|to` directed-edge keys (used to "cut" the divert legs). */
+function buildAdjacency(l: Layout, cut: ReadonlySet<string> = new Set()): Map<string, Set<string>> {
+  const adj = new Map<string, Set<string>>();
+  for (const m of l.markers) adj.set(m.id, new Set());
+  for (const e of l.edges) {
+    if (cut.has(`${e.from_marker_id}|${e.to_marker_id}`)) continue;
+    adj.get(e.from_marker_id)?.add(e.to_marker_id);
+    adj.get(e.to_marker_id)?.add(e.from_marker_id);
   }
-  return ns;
+  return adj;
 }
+
+/** The set of markers reachable from `start` over `adj` (BFS). */
+function reachable(adj: ReadonlyMap<string, Set<string>>, start: string): Set<string> {
+  const seen = new Set<string>([start]);
+  const queue = [start];
+  while (queue.length > 0) {
+    const next = queue.pop();
+    if (next === undefined) break;
+    for (const n of adj.get(next) ?? []) {
+      if (!seen.has(n)) {
+        seen.add(n);
+        queue.push(n);
+      }
+    }
+  }
+  return seen;
+}
+
+// ---------------------------------------------------------------------------
+// 2D segment-crossing helpers (for the over/under bridge proof)
+// ---------------------------------------------------------------------------
 
 interface Seg {
   readonly ax: number;
   readonly ay: number;
   readonly bx: number;
   readonly by: number;
+}
+
+/** The 2D segment for an edge: its two pieces' centres. */
+function edgeSeg(e: Edge): Seg | undefined {
+  const a = pieceByMarker.get(e.from_marker_id);
+  const b = pieceByMarker.get(e.to_marker_id);
+  if (a === undefined || b === undefined) return undefined;
+  return { ax: a.position.x, ay: a.position.y, bx: b.position.x, by: b.position.y };
 }
 
 /** True when segments p and q properly cross (strict, so shared-endpoint
@@ -54,36 +83,6 @@ function segmentsCross(p: Seg, q: Seg): boolean {
   return d1 * d2 < 0 && d3 * d4 < 0;
 }
 
-const demo = buildBridgeDemo();
-const layout = compileLayout(demo.pieces, 'bridge-demo');
-
-/** Map marker id → its piece (track pieces only). */
-const pieceByMarker = new Map<string, (typeof demo.pieces)[number]>(
-  demo.pieces.filter((p) => p.type !== 'train').map((p) => [`M-${p.id}`, p] as const),
-);
-
-type Edge = (typeof layout.edges)[number];
-
-/** The 2D segment for an edge: its two pieces' centres. */
-function edgeSeg(from: string, to: string): Seg | undefined {
-  const a = pieceByMarker.get(from);
-  const b = pieceByMarker.get(to);
-  if (a === undefined || b === undefined) return undefined;
-  return { ax: a.position.x, ay: a.position.y, bx: b.position.x, by: b.position.y };
-}
-
-/** True when both endpoints of the edge are layer-1 pieces (a deck edge). */
-function isLayer1DeckEdge(e: Edge): boolean {
-  const a = pieceByMarker.get(e.from_marker_id);
-  const b = pieceByMarker.get(e.to_marker_id);
-  return a !== undefined && b !== undefined && layerOf(a) === 1 && layerOf(b) === 1;
-}
-
-/** True when both edge endpoints are loop-B ground markers. */
-function isGroundBEdge(e: Edge): boolean {
-  return e.from_marker_id.startsWith('M-lb') && e.to_marker_id.startsWith('M-lb');
-}
-
 /** True when two edges share any marker. */
 function edgesShareMarker(p: Edge, q: Edge): boolean {
   return (
@@ -94,95 +93,162 @@ function edgesShareMarker(p: Edge, q: Edge): boolean {
   );
 }
 
-/** True when a deck edge's 2D segment properly crosses a ground edge's, sharing
- * no marker — a true over-crossing (bridge), not a merge. */
-function crossesAsBridge(deck: Edge, ground: Edge): boolean {
-  if (edgesShareMarker(deck, ground)) return false;
-  const ds = edgeSeg(deck.from_marker_id, deck.to_marker_id);
-  const gs = edgeSeg(ground.from_marker_id, ground.to_marker_id);
-  if (ds === undefined || gs === undefined) return false;
-  return segmentsCross(ds, gs);
+/** True when both endpoints of the edge are layer-1 pieces (a deck edge). */
+function isLayer1DeckEdge(e: Edge): boolean {
+  const a = pieceByMarker.get(e.from_marker_id);
+  const b = pieceByMarker.get(e.to_marker_id);
+  return a !== undefined && b !== undefined && layerOf(a) === 1 && layerOf(b) === 1;
+}
+
+/** True when both edge endpoints are MAIN-chain ground markers. */
+function isMainGroundEdge(e: Edge): boolean {
+  const a = pieceByMarker.get(e.from_marker_id);
+  const b = pieceByMarker.get(e.to_marker_id);
+  return (
+    e.from_marker_id.startsWith('M-mn') &&
+    e.to_marker_id.startsWith('M-mn') &&
+    a !== undefined &&
+    b !== undefined &&
+    layerOf(a) === 0 &&
+    layerOf(b) === 0
+  );
 }
 
 // ---------------------------------------------------------------------------
-// Both loops compile to CLOSED cycles
+// One connected component
 // ---------------------------------------------------------------------------
 
-describe('buildBridgeDemo — closed loops', () => {
-  it('every loop-B track marker has at least one inbound and one outbound edge', () => {
-    const bMarkers = markersWithPrefix(layout, 'lb');
-    expect(bMarkers.length).toBeGreaterThan(0);
-    for (const m of bMarkers) {
-      expect(inboundCount(layout, m), `${m} inbound`).toBeGreaterThanOrEqual(1);
-      expect(outboundCount(layout, m), `${m} outbound`).toBeGreaterThanOrEqual(1);
-    }
+describe('buildBridgeDemo — unified connectivity', () => {
+  it('compiles to a single connected component (every marker reachable)', () => {
+    expect(layout.markers.length).toBeGreaterThan(0);
+    const adj = buildAdjacency(layout);
+    const first = layout.markers[0];
+    expect(first).toBeDefined();
+    if (first === undefined) return;
+    const seen = reachable(adj, first.id);
+    expect(seen.size).toBe(layout.markers.length);
   });
 
-  it('every loop-A track marker has at least one inbound and one outbound edge', () => {
-    const aMarkers = markersWithPrefix(layout, 'la');
-    expect(aMarkers.length).toBeGreaterThan(0);
-    for (const m of aMarkers) {
-      expect(inboundCount(layout, m), `${m} inbound`).toBeGreaterThanOrEqual(1);
-      expect(outboundCount(layout, m), `${m} outbound`).toBeGreaterThanOrEqual(1);
-    }
-  });
-
-  it('every loop-B track marker has exactly two distinct neighbours (a simple cycle)', () => {
-    for (const m of markersWithPrefix(layout, 'lb')) {
-      expect(neighbours(layout, m).size, `${m} neighbours`).toBe(2);
-    }
-  });
-
-  it('every loop-A track marker has exactly two distinct neighbours (a simple cycle)', () => {
-    for (const m of markersWithPrefix(layout, 'la')) {
-      expect(neighbours(layout, m).size, `${m} neighbours`).toBe(2);
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Disjoint loops — no edge bridges loop A to loop B
-// ---------------------------------------------------------------------------
-
-describe('buildBridgeDemo — disjoint loops', () => {
-  it('no edge connects a loop-A marker to a loop-B marker', () => {
-    for (const e of layout.edges) {
-      const aToB = e.from_marker_id.startsWith('M-la') && e.to_marker_id.startsWith('M-lb');
-      const bToA = e.from_marker_id.startsWith('M-lb') && e.to_marker_id.startsWith('M-la');
-      expect(aToB || bToA, `${e.from_marker_id} -> ${e.to_marker_id}`).toBe(false);
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Loop A structure: ramps, upper station, a layer-1 deck edge
-// ---------------------------------------------------------------------------
-
-describe('buildBridgeDemo — loop A deck', () => {
-  it('has both ramp markers and the upper station marker', () => {
-    const ids = layout.markers.map((m) => m.id);
-    expect(ids).toContain('M-la-rampUp');
-    expect(ids).toContain('M-la-rampDown');
-    expect(ids).toContain('M-la-deckSt');
-  });
-
-  it('has a deck edge between two layer-1 pieces', () => {
-    expect(layout.edges.find(isLayer1DeckEdge)).toBeDefined();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Over-crossing — the discriminating test
-// ---------------------------------------------------------------------------
-
-describe('buildBridgeDemo — bridge over-crossing', () => {
-  it('a layer-1 deck edge crosses a layer-0 loop-B edge in 2D, sharing no marker', () => {
-    const deckEdges = layout.edges.filter(isLayer1DeckEdge);
-    const groundBEdges = layout.edges.filter(isGroundBEdge);
-    const crossing = deckEdges.some((deck) =>
-      groundBEdges.some((ground) => crossesAsBridge(deck, ground)),
+  it('exposes both junctions, both ground stations and the upper station', () => {
+    const ids = new Set(layout.markers.map((m) => m.id));
+    expect(ids.has(demo.junctionId)).toBe(true);
+    for (const s of demo.groundStations) expect(ids.has(s)).toBe(true);
+    expect(ids.has(demo.upperStation)).toBe(true);
+    // The named stations really are station stops in the compiled layout.
+    const stations = new Set(
+      layout.markers.filter((m) => m.kind === 'station_stop').map((m) => m.id),
     );
-    expect(crossing, 'expected a layer-1 deck edge crossing a layer-0 loop-B edge').toBe(true);
+    for (const s of demo.groundStations) expect(stations.has(s)).toBe(true);
+    expect(stations.has(demo.upperStation)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// J1 diverge: emits a 'main' AND a 'divert' outbound edge
+// ---------------------------------------------------------------------------
+
+describe('buildBridgeDemo — J1 diverge', () => {
+  it("J1 emits both a 'main' and a 'divert' outbound edge", () => {
+    const j1Out = layout.edges.filter((e) => e.from_marker_id === demo.junctionId);
+    const states = new Set(j1Out.map((e) => e.requires_switch_state));
+    expect(states.has('main')).toBe(true);
+    expect(states.has('divert')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Over/under bridge — the discriminating test
+// ---------------------------------------------------------------------------
+
+describe('buildBridgeDemo — over/under bridge', () => {
+  it('a layer-1 deck edge crosses a layer-0 main-loop edge in 2D, sharing no marker', () => {
+    const deckEdges = layout.edges.filter(isLayer1DeckEdge);
+    const groundEdges = layout.edges.filter(isMainGroundEdge);
+    expect(deckEdges.length).toBeGreaterThan(0);
+    expect(groundEdges.length).toBeGreaterThan(0);
+    const crossing = deckEdges.some((deck) =>
+      groundEdges.some((ground) => {
+        if (edgesShareMarker(deck, ground)) return false;
+        const ds = edgeSeg(deck);
+        const gs = edgeSeg(ground);
+        return ds !== undefined && gs !== undefined && segmentsCross(ds, gs);
+      }),
+    );
+    expect(crossing).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Upper station reachable ONLY via the divert legs
+// ---------------------------------------------------------------------------
+
+describe('buildBridgeDemo — upper station gated by divert', () => {
+  it('removing the divert adjacencies disconnects the upper station', () => {
+    // Cut BOTH directed edges of every divert adjacency (the two junction-branch
+    // legs). A directed-only cut would leave the reverse (ramp → junction) intact
+    // and keep the deck connected — a phantom pass.
+    const cut = new Set<string>();
+    for (const e of layout.edges) {
+      if (e.requires_switch_state === 'divert') {
+        cut.add(`${e.from_marker_id}|${e.to_marker_id}`);
+        cut.add(`${e.to_marker_id}|${e.from_marker_id}`);
+      }
+    }
+    expect(cut.size).toBeGreaterThan(0);
+    const adj = buildAdjacency(layout, cut);
+    const groundStartA = demo.groundStations[0];
+    expect(groundStartA).toBeDefined();
+    if (groundStartA === undefined) return;
+    const seen = reachable(adj, groundStartA);
+    // The ground loop stays connected; the deck (upper station) is isolated.
+    expect(seen.has(groundStartA)).toBe(true);
+    expect(seen.has(demo.upperStation)).toBe(false);
+  });
+
+  it('the upper station IS reachable on the full graph (sanity)', () => {
+    const adj = buildAdjacency(layout);
+    const groundStartA = demo.groundStations[0];
+    if (groundStartA === undefined) return;
+    expect(reachable(adj, groundStartA).has(demo.upperStation)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// J2 merge is PASSIVE: the trunk-exit path carries no switch constraint
+// ---------------------------------------------------------------------------
+
+describe('buildBridgeDemo — J2 passive merge', () => {
+  it('J2 has exactly one switch-unconstrained outbound edge (its trunk exit), which both trains traverse', () => {
+    // J2's marker id: the other junction (not J1).
+    const junctionMarkers = layout.junctions.map((j) => j.marker_id);
+    expect(junctionMarkers).toContain(demo.junctionId);
+    const j2 = junctionMarkers.find((id) => id !== demo.junctionId);
+    expect(j2).toBeDefined();
+    if (j2 === undefined) return;
+    const j2Out = layout.edges.filter((e) => e.from_marker_id === j2);
+    const unconstrained = j2Out.filter((e) => e.requires_switch_state === undefined);
+    // The trunk (endpoint 0) is the sole switch-free outbound — the path BOTH
+    // trains take when leaving J2 (they enter via through/branch, leave via trunk).
+    expect(unconstrained.length).toBe(1);
+    // The constrained outbounds are exactly the main + divert legs (never traversed
+    // on the way OUT — trains arrive on them and leave via the trunk).
+    const constrained = new Set(
+      j2Out.map((e) => e.requires_switch_state).filter((s) => s !== undefined),
+    );
+    expect(constrained.has('main')).toBe(true);
+    expect(constrained.has('divert')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Edge lengths stay above the length-aware tail-release floor
+// ---------------------------------------------------------------------------
+
+describe('buildBridgeDemo — edge lengths', () => {
+  it('every edge is longer than the 60mm train length (switched-junction serialisation precondition)', () => {
+    for (const e of layout.edges) {
+      expect(e.estimated_length_mm ?? 0).toBeGreaterThan(60);
+    }
   });
 });
 
@@ -199,7 +265,11 @@ describe('buildBridgeDemo — trains', () => {
   it('exposes stable device ids and a complete liveIds set', () => {
     expect(demo.trainAId).toBe('T-trainA');
     expect(demo.trainBId).toBe('T-trainB');
-    // Every piece id (track + trains) is live.
     expect(new Set(demo.liveIds)).toEqual(new Set(demo.pieces.map((p) => p.id)));
+  });
+
+  it('the two trains start at distinct ground-station markers', () => {
+    expect(demo.groundStations.length).toBe(2);
+    expect(demo.groundStations[0]).not.toBe(demo.groundStations[1]);
   });
 });

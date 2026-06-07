@@ -177,3 +177,17 @@
 .tf-scanbox__cancel:hover {
   background: var(--tf-color-surface-hover, #e5e5e5);
 }
+
+/* Same-layer track-on-track overlap warning banner — surfaces the count of
+   invalid overlapping pieces above the canvas; the offending pieces also carry
+   a red error outline (see PieceRenderer `invalidOverlap`). */
+.tf-toytable__overlap-warning {
+  background: var(--tf-color-negative-surface, #fde2e2);
+  color: var(--tf-color-negative, #991b1b);
+  border: 1px solid var(--tf-color-negative, #dc2626);
+  border-radius: 4px;
+  padding: 0.4em 0.8em;
+  margin-bottom: 0.5em;
+  font-size: 0.9em;
+  font-weight: 600;
+}

@@ -76,6 +76,18 @@ export function pieceMarkerKind(type: TrackPieceType): TrackMarkerKind {
   return 'block_boundary';
 }
 
+/**
+ * Physical length (mm) announced for a virtual train when it goes live, and
+ * spawned into the in-browser sim. MUST be > 0 and < the shortest layout edge:
+ * the server's scheduler only serialises a switched junction for length-aware
+ * trains (it defers releasing the approach block until the head has travelled
+ * the train's own length past the boundary). A point train (length 0) would
+ * deadlock a diverging junction. The single source of truth shared by the
+ * scan-box (`scanPiece`) and the sim spawn path (`ToyHardware`) so the wire
+ * payload and the physics can never drift. See ADR-014 / the bridge demo.
+ */
+export const TRAIN_LENGTH_MM = 60;
+
 /** Rotation is constrained to multiples of 45° in the range [0, 315]. */
 export type RotationDeg = 0 | 45 | 90 | 135 | 180 | 225 | 270 | 315;
 

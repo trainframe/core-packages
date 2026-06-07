@@ -2,7 +2,7 @@ import type { Layout } from '@trainframe/protocol';
 import { BrokerBridge, Simulation } from '@trainframe/simulator';
 import type { BrokerClient } from '../broker/client.js';
 import { compileLayout } from '../track/layout-from-pieces.js';
-import { type TrackPiece, isDevicePiece, layerOf } from '../track/pieces.js';
+import { TRAIN_LENGTH_MM, type TrackPiece, isDevicePiece, layerOf } from '../track/pieces.js';
 import { nearestStartEdge } from './nearest-edge.js';
 
 /** Device id for a piece's own broker identity. Must match `ToyTable`. */
@@ -161,7 +161,16 @@ export class ToyHardware {
     if (piece.type === 'train') {
       const startEdge = nearestStartEdge(this.layout, piece.position);
       if (startEdge === undefined) return; // defer until track exists
-      this.simulation.spawnTrain(deviceIdForDevicePiece(piece), { startEdge });
+      // Spawn length-aware (length_mm > 0). The server's scheduler only
+      // serialises a switched junction for trains with a known physical length
+      // (it defers tail-release until the head clears the train's own length);
+      // a point train would deadlock the switch on the bridge demo. 60mm sits
+      // safely under the shortest compiled edge (~148mm). This is the SAME
+      // length scanPiece announces in the train's device_registered payload.
+      this.simulation.spawnTrain(deviceIdForDevicePiece(piece), {
+        startEdge,
+        config: { length_mm: TRAIN_LENGTH_MM },
+      });
       return;
     }
     if (piece.type === 'gate') {
