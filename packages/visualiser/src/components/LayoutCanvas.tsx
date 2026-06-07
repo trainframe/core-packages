@@ -20,6 +20,22 @@ const CENTER = VIEWBOX / 2;
 const RADIUS = CENTER - 60;
 const MARKER_RADIUS = 14;
 
+/**
+ * Per-render screen-size factor. The SVG is drawn at `width=height=VIEWBOX` px
+ * with a `viewBox` side of `viewport.size` world units, so the on-screen
+ * px-per-world-unit is `VIEWBOX / size`. To hold a glyph at a constant *screen*
+ * size of `D` px regardless of zoom, its *world* size must be `D * size /
+ * VIEWBOX = D * f`. Multiplying every fixed glyph dimension (marker radius,
+ * font sizes, stroke widths, train shape, arrowheads) by `f` therefore pins
+ * them to a constant number of screen pixels while marker *positions* (world
+ * space, unscaled) magnify on zoom-in — i.e. markers spread apart and stay
+ * readable. At the fit default this renders the same ≈14px marker / 12px label
+ * / 6px rail as before.
+ */
+function screenScale(viewportSize: number): number {
+  return viewportSize / VIEWBOX;
+}
+
 /** Minimum and maximum zoom levels for wheel-zoom (1 = fit-to-content). */
 const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 8;
@@ -33,9 +49,19 @@ const FIT_MARGIN = MARKER_RADIUS * 3;
 
 /**
  * Fraction of the edge length used as the bezier handle length (k factor).
- * Controls how tightly curved the arcs are. 0.3 gives smooth, readable arcs.
+ *
+ * A small fraction keeps the track flowing gently. Crucially it also makes
+ * near-collinear runs render *essentially straight* without any explicit
+ * snapping: along such a run the shared marker tangent (the normalised sum of
+ * incident edge directions) already points along the chord, so short handles
+ * sit almost exactly on the straight line — no S-wobble, no overshoot. Only
+ * genuine corners and junction legs (where the tangent diverges from the
+ * chord) keep a visible curve. Using the marker tangent at both ends preserves
+ * exact C1 continuity at shared markers; deliberately straightening within a
+ * tolerance band would trade that continuity for over-straightness, so we
+ * don't.
  */
-const BEZIER_HANDLE_FRACTION = 0.3;
+const BEZIER_HANDLE_FRACTION = 0.15;
 
 /** Accumulate unit-vector edge contributions into a per-marker sum map. */
 function accumulateEdgeContributions(
@@ -162,23 +188,23 @@ function edgeBezierControls(
 
   const k = len * BEZIER_HANDLE_FRACTION;
 
-  // Ensure the handle at `from` points toward `to` (not away from it).
-  // The tangent is a unit "forward through marker" vector; if it points
-  // mostly away from `to`, flip it so the curve exits toward `to`.
-  const dotFrom = tangentFrom.x * dx + tangentFrom.y * dy;
-  const signFrom = dotFrom >= 0 ? 1 : -1;
+  // Orient each marker tangent toward `to` along the chord. The tangent is a
+  // unit "forward through marker" vector; if it points mostly away from the
+  // chord direction, flip it so the handle lands on the correct side. Using
+  // the marker tangent (not the chord) at both ends is what gives C1
+  // continuity at shared markers.
+  function handleDir(tangent: Point): Point {
+    const dot = tangent.x * dx + tangent.y * dy;
+    const sign = dot >= 0 ? 1 : -1;
+    return { x: sign * tangent.x, y: sign * tangent.y };
+  }
 
-  // Similarly for the `to` handle: tangent[to] should point *away* from
-  // the edge (the curve arrives at `to`, so the handle sits behind `to`).
-  // The arriving direction is from→to, so the handle direction must align
-  // with that: we subtract tangent[to]*k from `to`. If tangent[to] points
-  // away from `from` (dot > 0), we negate so the handle lands on the correct side.
-  const dotTo = tangentTo.x * dx + tangentTo.y * dy;
-  const signTo = dotTo >= 0 ? 1 : -1;
+  const hFrom = handleDir(tangentFrom);
+  const hTo = handleDir(tangentTo);
 
   return {
-    c1: { x: from.x + signFrom * tangentFrom.x * k, y: from.y + signFrom * tangentFrom.y * k },
-    c2: { x: to.x - signTo * tangentTo.x * k, y: to.y - signTo * tangentTo.y * k },
+    c1: { x: from.x + hFrom.x * k, y: from.y + hFrom.y * k },
+    c2: { x: to.x - hTo.x * k, y: to.y - hTo.y * k },
   };
 }
 
@@ -389,11 +415,20 @@ function clearanceForPair(
  * train's hue for free — a shared `<marker>` def couldn't match the hashed
  * train colour).
  */
-function arrowheadPolygon(from: Point, to: Point, c1: Point, c2: Point, fill: string): JSX.Element {
+function arrowheadPolygon(
+  from: Point,
+  to: Point,
+  c1: Point,
+  c2: Point,
+  fill: string,
+  f: number,
+): JSX.Element {
   const mid = cubicBezierPoint(from, c1, c2, to, 0.5);
   const tan = cubicBezierTangent(from, c1, c2, to, 0.5);
   const angleDeg = Math.atan2(tan.y, tan.x) * (180 / Math.PI);
   // Local triangle: tip forward (+x), base behind. Sized relative to the rail.
+  // The midpoint position is world-space (unscaled); the glyph's *size* is held
+  // at a constant screen size via the trailing `scale(f)` — see `screenScale`.
   const len = MARKER_RADIUS * 0.9;
   const half = MARKER_RADIUS * 0.55;
   const points = `${len},0 ${-len * 0.4},${half} ${-len * 0.4},${-half}`;
@@ -401,7 +436,7 @@ function arrowheadPolygon(from: Point, to: Point, c1: Point, c2: Point, fill: st
     <polygon
       points={points}
       fill={fill}
-      transform={`translate(${mid.x},${mid.y}) rotate(${angleDeg})`}
+      transform={`translate(${mid.x},${mid.y}) rotate(${angleDeg}) scale(${f})`}
       data-edge-arrow="true"
     />
   );
@@ -426,6 +461,7 @@ function renderMergedEdge(
   markerPositions: Map<string, Point>,
   markerTangents: Map<string, Point>,
   clearanceMap: ClearanceMap,
+  f: number,
 ): JSX.Element | null {
   const cleared = clearanceForPair(merged.forward, clearanceMap);
   // Draw in the cleared direction when a train holds it (so the train's
@@ -451,7 +487,7 @@ function renderMergedEdge(
   // render as a plain bidirectional rail with no arrowhead.
   const showArrow = merged.oneWay || clearedTo !== '';
   const arrow = showArrow
-    ? arrowheadPolygon(from, to, c1, c2, clearedTo !== '' ? stroke : EDGE_COLOR)
+    ? arrowheadPolygon(from, to, c1, c2, clearedTo !== '' ? stroke : EDGE_COLOR, f)
     : null;
 
   return (
@@ -464,7 +500,7 @@ function renderMergedEdge(
         d={d}
         fill="none"
         style={{ stroke }}
-        strokeWidth={clearedTo !== '' ? 9 : 6}
+        strokeWidth={(clearedTo !== '' ? 9 : 6) * f}
         strokeLinecap="round"
         data-cleared-to={clearedTo}
         {...inferredProps}
@@ -671,6 +707,9 @@ function LayoutSvg({ layout, trains, trainStatuses, clearanceMap }: LayoutSvgPro
   }
 
   const viewBox = `${viewport.x} ${viewport.y} ${viewport.size} ${viewport.size}`;
+  // Per-render factor that holds every glyph at a constant screen size as the
+  // viewBox window (and thus zoom) changes. See `screenScale`.
+  const f = screenScale(viewport.size);
 
   return (
     <section aria-label="Layout">
@@ -694,7 +733,7 @@ function LayoutSvg({ layout, trains, trainStatuses, clearanceMap }: LayoutSvgPro
         <title>Track diagram for {layout.name}</title>
         <g data-testid="edges">
           {mergedEdges.map((merged) =>
-            renderMergedEdge(merged, markerPositions, markerTangents, clearanceMap),
+            renderMergedEdge(merged, markerPositions, markerTangents, clearanceMap, f),
           )}
         </g>
         <g data-testid="markers">
@@ -706,14 +745,20 @@ function LayoutSvg({ layout, trains, trainStatuses, clearanceMap }: LayoutSvgPro
                 <circle
                   cx={p.x}
                   cy={p.y}
-                  r={MARKER_RADIUS}
+                  r={MARKER_RADIUS * f}
                   style={{
                     fill: 'var(--tf-vis-color-marker, #fff)',
                     stroke: 'var(--tf-vis-color-marker-stroke, #333)',
                   }}
-                  strokeWidth={2}
+                  strokeWidth={2 * f}
                 />
-                <text x={p.x} y={p.y + 4} textAnchor="middle" fontSize={12} fontFamily="sans-serif">
+                <text
+                  x={p.x}
+                  y={p.y + 4 * f}
+                  textAnchor="middle"
+                  fontSize={12 * f}
+                  fontFamily="sans-serif"
+                >
                   {marker.label ?? marker.id}
                 </text>
               </g>
@@ -721,7 +766,7 @@ function LayoutSvg({ layout, trains, trainStatuses, clearanceMap }: LayoutSvgPro
           })}
         </g>
         <g data-testid="trains">
-          {renderTrains(trains, trainStatuses, markerPositions, edgeIndex, markerTangents)}
+          {renderTrains(trains, trainStatuses, markerPositions, edgeIndex, markerTangents, f)}
         </g>
       </svg>
     </section>
@@ -744,6 +789,7 @@ function renderTrains(
   markerPositions: Map<string, Point>,
   edgeIndex: Map<string, VisualiserEdge>,
   markerTangents: Map<string, Point>,
+  f: number,
 ): JSX.Element[] {
   const out: JSX.Element[] = [];
   const trainIds = new Set<string>([...trains.keys(), ...statuses.keys()]);
@@ -777,13 +823,13 @@ function renderTrains(
           fill={fill}
           stroke={stroke}
           strokeWidth={1.5}
-          transform={`translate(${x},${y}) rotate(${angleDeg})`}
+          transform={`translate(${x},${y}) rotate(${angleDeg}) scale(${f})`}
         />
         <text
           x={x}
-          y={y - TRAIN_HALF_L - MARKER_RADIUS * 0.5}
+          y={y - (TRAIN_HALF_L + MARKER_RADIUS * 0.5) * f}
           textAnchor="middle"
-          fontSize={11}
+          fontSize={11 * f}
           fontFamily="sans-serif"
           fill={stroke}
         >

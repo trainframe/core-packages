@@ -447,12 +447,16 @@ describe('LayoutCanvas — merged edge rendering', () => {
       }),
     );
 
+    const svg = screen.getByTestId('layout-canvas');
     const edges = screen.getByTestId('edges');
     const pair = edges.querySelector('[data-edge-pair="M1|M2"]');
     const railPath = pair?.querySelector('path[data-cleared-to="T1"]');
     expect(railPath).not.toBeNull();
-    // A cleared edge gets the thicker rail and an arrowhead (direction of hold).
-    expect(railPath?.getAttribute('stroke-width')).toBe('9');
+    // A cleared edge gets the thicker rail (9px on screen) and an arrowhead
+    // (direction of hold). Stroke widths are now scaled by f = size / 600 so
+    // they render at a constant *screen* size; derive the expected world width.
+    const f = Number(svg.getAttribute('data-viewport-size')) / 600;
+    expect(Number(railPath?.getAttribute('stroke-width'))).toBeCloseTo(9 * f, 5);
     expect(pair?.querySelector('polygon[data-edge-arrow="true"]')).not.toBeNull();
   });
 
@@ -621,5 +625,78 @@ describe('LayoutCanvas — fit-to-content + pan/zoom', () => {
       svg.dispatchEvent(new MouseEvent('pointerup', { bubbles: true, clientX: 80, clientY: 80 }));
     });
     expect(Number(svg.getAttribute('data-viewport-x'))).toBe(beforeX);
+  });
+});
+
+describe('LayoutCanvas — zoom spreads markers at constant screen size', () => {
+  // Read a marker's world radius and its world position from the rendered SVG.
+  const markerOf = (id: string): { r: number; cx: number; cy: number } => {
+    const circle = screen.getByTestId('markers').querySelector(`[data-marker-id="${id}"] circle`);
+    if (circle === null) throw new Error(`marker ${id} not rendered`);
+    return {
+      r: Number(circle.getAttribute('r')),
+      cx: Number(circle.getAttribute('cx')),
+      cy: Number(circle.getAttribute('cy')),
+    };
+  };
+  // Screen px = world value × (VIEWBOX / viewport.size).
+  const toScreen = (worldValue: number, viewportSize: number): number =>
+    (worldValue * 600) / viewportSize;
+  const worldSeparation = (a: { cx: number; cy: number }, b: { cx: number; cy: number }): number =>
+    Math.hypot(a.cx - b.cx, a.cy - b.cy);
+
+  it('holds marker SCREEN size constant while world size shrinks, and grows inter-marker SCREEN distance, on zoom-in', () => {
+    const restore = mockSvgRect();
+    try {
+      const { client } = renderCanvas();
+      act(() => deliverState(client, 'railway/state/layout/two-way-pair', TWO_WAY_LAYOUT));
+      const svg = screen.getByTestId('layout-canvas');
+
+      const sizeBefore = Number(svg.getAttribute('data-viewport-size'));
+      const m1Before = markerOf('M1');
+      const m2Before = markerOf('M2');
+      const screenRadiusBefore = toScreen(m1Before.r, sizeBefore);
+      const screenSepBefore = toScreen(worldSeparation(m1Before, m2Before), sizeBefore);
+
+      // Zoom in: the viewBox window shrinks.
+      fireEvent.wheel(svg, { deltaY: -100, clientX: 300, clientY: 300 });
+
+      const sizeAfter = Number(svg.getAttribute('data-viewport-size'));
+      expect(sizeAfter).toBeLessThan(sizeBefore);
+
+      const m1After = markerOf('M1');
+      const m2After = markerOf('M2');
+
+      // World radius SHRINKS on zoom-in (sizes scale with f = size / 600)…
+      expect(m1After.r).toBeLessThan(m1Before.r);
+      // …but the SCREEN radius is unchanged: nodes stay the same on screen.
+      const screenRadiusAfter = toScreen(m1After.r, sizeAfter);
+      expect(screenRadiusAfter).toBeCloseTo(screenRadiusBefore, 5);
+
+      // World positions are NOT scaled, so on screen the markers spread apart:
+      // their SCREEN separation grows even though their screen size held.
+      const screenSepAfter = toScreen(worldSeparation(m1After, m2After), sizeAfter);
+      expect(screenSepAfter).toBeGreaterThan(screenSepBefore);
+    } finally {
+      restore();
+    }
+  });
+
+  it('scales every glyph at the fit default to the documented constant screen sizes (≈14px marker, 12px label, 6px rail)', () => {
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/two-way-pair', TWO_WAY_LAYOUT));
+    const svg = screen.getByTestId('layout-canvas');
+    const size = Number(svg.getAttribute('data-viewport-size'));
+
+    const circle = screen.getByTestId('markers').querySelector('[data-marker-id="M1"] circle');
+    const label = screen.getByTestId('markers').querySelector('[data-marker-id="M1"] text');
+    // The uncleared two-way rail is the 6px-screen stroke.
+    const rail = screen
+      .getByTestId('edges')
+      .querySelector('[data-edge-pair="M1|M2"] path[data-cleared-to=""]');
+
+    expect(toScreen(Number(circle?.getAttribute('r')), size)).toBeCloseTo(14, 5);
+    expect(toScreen(Number(label?.getAttribute('font-size')), size)).toBeCloseTo(12, 5);
+    expect(toScreen(Number(rail?.getAttribute('stroke-width')), size)).toBeCloseTo(6, 5);
   });
 });
