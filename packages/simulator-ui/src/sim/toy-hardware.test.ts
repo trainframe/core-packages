@@ -66,7 +66,55 @@ describe('ToyHardware', () => {
       const sim = hardware.getSimulation();
       expect(sim.getTrain(`T-${train.id}`)).toBeUndefined();
       const offTopic = `railway/events/device_disconnected/T-${train.id}`;
-      expect(client.published.find((m) => m.topic === offTopic)).toBeDefined();
+      expect(client.published.filter((m) => m.topic === offTopic)).toHaveLength(1);
+    } finally {
+      hardware.dispose();
+    }
+  });
+
+  it('publishes exactly one device_disconnected when a live train piece is DELETED', () => {
+    /* Delete removes the piece from `pieces` and the live set in the same
+     * render, so the despawn must resolve the piece via the previous snapshot
+     * — and still disconnect exactly once (the sim's own despawn event is the
+     * only publish; no doubled direct publish). */
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId });
+    try {
+      const { pieces, train } = twoStraightsAndATrain();
+      hardware.syncLayout(pieces);
+      hardware.syncLive(pieces, new Set([train.id]));
+      expect(hardware.getSimulation().getTrain(`T-${train.id}`)).toBeDefined();
+
+      const remaining = pieces.filter((p) => p.id !== train.id);
+      hardware.syncLayout(remaining); // device pieces aren't topology — no rebuild
+      hardware.syncLive(remaining, new Set());
+
+      expect(hardware.getSimulation().getTrain(`T-${train.id}`)).toBeUndefined();
+      const offTopic = `railway/events/device_disconnected/T-${train.id}`;
+      expect(client.published.filter((m) => m.topic === offTopic)).toHaveLength(1);
+    } finally {
+      hardware.dispose();
+    }
+  });
+
+  it('publishes exactly one device_disconnected when a deleted train never spawned (no track)', () => {
+    /* A train scanned with no track near it defers its sim spawn, but its
+     * device_registered already went out at scan time — deleting it must
+     * still announce the departure on the wire. */
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId });
+    try {
+      const train = piece('train', 100, 100);
+      hardware.syncLayout([train]);
+      hardware.syncLive([train], new Set([train.id]));
+      expect(hardware.getSimulation().getTrain(`T-${train.id}`)).toBeUndefined();
+
+      hardware.syncLive([], new Set());
+
+      const offTopic = `railway/events/device_disconnected/T-${train.id}`;
+      expect(client.published.filter((m) => m.topic === offTopic)).toHaveLength(1);
     } finally {
       hardware.dispose();
     }

@@ -564,6 +564,32 @@ describe('ToyTable — scan and power', () => {
     expect(placed.getAttribute('data-powered')).toBe('true');
   });
 
+  it('deleting a selected live train publishes exactly one device_disconnected', async () => {
+    const user = userEvent.setup();
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('train');
+
+    const placed = document.querySelector(`[data-piece-id="${pieceId}"]`) as HTMLElement | null;
+    if (!placed) throw new Error('unreachable');
+
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+    expect(placed.getAttribute('data-live')).toBe('true');
+
+    await user.click(screen.getByTestId('toybox-train')); // disarm
+    fireEvent.click(placed); // select the live train
+
+    /* Delete is a genuine despawn: the device announced itself at scan time,
+     * so its departure must be wire-visible — even though the piece and its
+     * live id leave in the same render, and a train with no track never
+     * spawned in the in-browser sim. */
+    await user.keyboard('{Delete}');
+
+    const disconnects = client.published.filter(
+      (m) => m.topic === `railway/events/device_disconnected/T-${pieceId}`,
+    );
+    expect(disconnects).toHaveLength(1);
+  });
+
   it('dropping a gate publishes device_registered with the gating capability', async () => {
     const { client } = renderToyTable();
     const pieceId = await placeArmedPiece('gate');

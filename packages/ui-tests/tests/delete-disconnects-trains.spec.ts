@@ -10,12 +10,13 @@ import {
 import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
 /**
- * When the operator clicks a live device piece in the toy table, the train is
- * powered off (emits `device_disconnected`). The visualiser's train hooks
- * remove the entry when they see the disconnect, so the icon disappears.
+ * The inert-in-place power model, observed from the visualiser:
  *
- * Per the toy-table architecture: clicking a live device piece triggers
- * `device_disconnected` — the equivalent of the old "Stop" button.
+ *  - POWER OFF keeps the train on the table and on the bus — it goes silent
+ *    but emits NO `device_disconnected`, so the visualiser keeps drawing it
+ *    (and the server keeps its block reserved).
+ *  - DELETE is a genuine despawn — it publishes `device_disconnected` and the
+ *    visualiser stops drawing the train.
  *
  * The train icon precondition is satisfied via the Node-side harness
  * simulation (same marker IDs as the server layout) rather than the
@@ -25,13 +26,13 @@ import { type UiHarness, startUiHarness } from '../src/test-harness.js';
  * share the graph, so `harness.advance()` produces the `marker_traversed`
  * events the visualiser needs to place the icon.
  *
- * The power-off path (`device_disconnected`) is a direct `client.publish`
- * in `ToyTable.handlePiecePointerAction` — it works regardless of whether
- * the in-browser sim ever spawned the train.
+ * Because the in-browser train never spawned, the delete also exercises the
+ * deferred-train disconnect path: the wire-visible `device_disconnected`
+ * comes from the toy table directly, not from a sim despawn.
  */
 
 const STOP_LOOP: Layout = {
-  name: 'stop-disconnects',
+  name: 'delete-disconnects',
   markers: [
     { id: 'M1', kind: 'block_boundary' },
     { id: 'M2', kind: 'block_boundary' },
@@ -48,7 +49,7 @@ const STOP_LOOP: Layout = {
 };
 
 test.describe
-  .serial('Operator powers off a train and the visualiser stops drawing it', () => {
+  .serial('Operator powers off, then deletes a train; the visualiser follows', () => {
     let harness: UiHarness;
 
     test.beforeAll(async () => {
@@ -59,9 +60,7 @@ test.describe
       await harness.shutdown();
     });
 
-    test('clicking a live train piece removes the train icon from the visualiser', async ({
-      browser,
-    }) => {
+    test('power-off keeps the train icon; deleting the piece removes it', async ({ browser }) => {
       const visualiser = await openVisualiser(browser, { brokerUrl: harness.brokerWsUrl });
       const sim = await openSimulatorUi(browser, { brokerUrl: harness.brokerWsUrl });
 
@@ -111,12 +110,20 @@ test.describe
         return btn?.getAttribute('aria-pressed') === 'false';
       });
 
-      // Click the live train piece — the toy-table handler emits
-      // device_disconnected and clears it from liveIds.
+      // Click the train piece body — this SELECTS it (it does not power off
+      // or disconnect). The ActionBar now offers the explicit power affordance.
       const trainPiece = sim.getByTestId(`piece-${trainPieceId}`);
       await trainPiece.click();
 
-      // The train icon should disappear from the visualiser.
+      // Power the train off in place. It goes silent on the bus but emits no
+      // device_disconnected — the visualiser must keep drawing it.
+      await sim.getByTestId('action-power-off').click();
+      await sim.waitForTimeout(500);
+      await expect(visualiser.locator(`[data-train-id="${trainDeviceId}"]`)).toHaveCount(1);
+
+      // Delete the (still selected) train piece. Delete is a genuine despawn:
+      // device_disconnected goes out and the visualiser stops drawing it.
+      await sim.keyboard.press('Delete');
       await expect(visualiser.locator(`[data-train-id="${trainDeviceId}"]`)).toHaveCount(0, {
         timeout: 5_000,
       });

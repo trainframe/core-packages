@@ -1,6 +1,7 @@
 import type { Layout } from '@trainframe/protocol';
 import { BrokerBridge, Simulation } from '@trainframe/simulator';
 import type { BrokerClient } from '../broker/client.js';
+import { encodeDeviceEvent } from '../broker/encode-event.js';
 import { compileLayout } from '../track/layout-from-pieces.js';
 import { TRAIN_LENGTH_MM, type TrackPiece, isDevicePiece, layerOf } from '../track/pieces.js';
 import { nearestStartEdge } from './nearest-edge.js';
@@ -109,6 +110,10 @@ export class ToyHardware {
   private layout: Layout;
   private topology: string;
   private lastLive: ReadonlySet<string> = new Set();
+  /* Pieces as of the previous syncLive call. Deleting a piece removes it from
+   * `pieces` and the live set in the same render, so despawns must resolve
+   * the departed piece against this snapshot. */
+  private lastPieces: ReadonlyMap<string, TrackPiece> = new Map();
   // The subset of on-track (live) trains the operator has powered OFF in place.
   // Distinct from `lastLive`: a powered-off train stays spawned in the sim (it
   // is still on the track) but is inert and silent. Power is not lifecycle —
@@ -149,6 +154,7 @@ export class ToyHardware {
     this.bridge = this.createBridge(this.simulation);
     this.bridge.start();
     this.lastLive = new Set();
+    this.lastPieces = new Map();
     this.lastPoweredOff = new Set();
   }
 
@@ -197,11 +203,14 @@ export class ToyHardware {
     }
     for (const pieceId of this.lastLive) {
       if (liveIds.has(pieceId)) continue;
-      const piece = piecesById.get(pieceId);
+      // A deleted piece is already gone from `pieces` — fall back to the
+      // previous snapshot so the despawn still fires.
+      const piece = piecesById.get(pieceId) ?? this.lastPieces.get(pieceId);
       if (piece !== undefined) this.despawnPiece(piece);
     }
 
     this.lastLive = new Set(liveIds);
+    this.lastPieces = piecesById;
   }
 
   private spawnPiece(piece: TrackPiece): void {
@@ -257,7 +266,24 @@ export class ToyHardware {
 
   private despawnPiece(piece: TrackPiece): void {
     if (piece.type === 'train') {
-      this.simulation.despawnTrain(deviceIdForDevicePiece(piece));
+      const device_id = deviceIdForDevicePiece(piece);
+      if (this.simulation.getTrain(device_id) !== undefined) {
+        // Spawned: the sim emits device_disconnected and the bridge republishes.
+        this.simulation.despawnTrain(device_id);
+        return;
+      }
+      /* Deferred (scanned with no track to spawn on): the device still
+       * announced itself at scan time, so its departure must be wire-visible.
+       * The sim has nothing to despawn — publish the disconnect directly. */
+      const { topic, payload } = encodeDeviceEvent(
+        'device_disconnected',
+        device_id,
+        {},
+        {
+          newId: this.newId,
+        },
+      );
+      this.client.publish(topic, payload);
       return;
     }
     if (piece.type === 'gate') {
