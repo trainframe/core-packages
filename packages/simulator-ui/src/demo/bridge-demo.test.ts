@@ -121,23 +121,98 @@ describe('buildBridgeDemo — J1 diverge', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Grade separation — the deck is a genuine second layer, disjoint from ground
+// Grade separation — the deck genuinely crosses OVER the ground, with NO
+// same-layer overlap anywhere (the "clean" bar).
 // ---------------------------------------------------------------------------
-//
-// DEVIATION (flagged in the PR report): the original brief asked for A to ride
-// directly OVER B's ground straight — a layer-1 deck edge strictly crossing the
-// layer-0 ground straight in 2D. With this piece set (45° curves, 200 mm
-// straights, 220 mm stations, the 45° junction branch) an empirical closure
-// search found NO deck that both (a) lands on J2's branch within the 30 mm snap
-// AND (b) has a layer-1 edge whose 2D segment crosses the ground straight: the
-// 45° branch geometry forces the elevated deck to one side (a side-viaduct), and
-// the only north→south crossing happens through the down-ramp (a layer
-// transition), not a pure layer-1 edge. The deck is therefore a real
-// grade-separated SECOND LAYER alongside the ground straight rather than
-// collinear above it. The behavioural guarantee the demo actually needs — A
-// climbs to an upper deck reachable ONLY via the diverge junction, on a distinct
-// layer, with no same-layer overlap — holds and is asserted here. Whether to
-// invest further in a collinear over-ride is a design call left to the user.
+
+/** A 2D point. */
+interface Pt {
+  readonly x: number;
+  readonly y: number;
+}
+
+/** Signed area of triangle (o, p, q) — its sign is the orientation of the turn
+ * o→p→q. Used to test strict segment intersection. */
+function orient(o: Pt, p: Pt, q: Pt): number {
+  return (p.x - o.x) * (q.y - o.y) - (p.y - o.y) * (q.x - o.x);
+}
+
+/** True when segments a-b and c-d strictly cross (proper intersection: the two
+ * endpoints of each segment fall on opposite sides of the other). Touching at a
+ * shared endpoint is NOT a crossing. */
+function segmentsCross(a: Pt, b: Pt, c: Pt, d: Pt): boolean {
+  const d1 = orient(c, d, a);
+  const d2 = orient(c, d, b);
+  const d3 = orient(a, b, c);
+  const d4 = orient(a, b, d);
+  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+}
+
+/** Marker-id → its 2D position (piece centre) in the compiled layout. Markers
+ * without a recorded position (`position` is optional on the wire) are omitted;
+ * the crossing search skips any edge touching one. */
+const markerPos = new Map<string, Pt>(
+  layout.markers
+    .filter(
+      (m): m is typeof m & { position: NonNullable<typeof m.position> } => m.position !== undefined,
+    )
+    .map((m) => [m.id, { x: m.position.x_mm, y: m.position.y_mm }] as const),
+);
+
+/** The layer (0 ground, 1 deck) of a marker, via its owning piece. */
+function markerLayer(id: string): number | undefined {
+  const p = pieceByMarker.get(id);
+  return p === undefined ? undefined : layerOf(p);
+}
+
+/** Undirected, de-duplicated edge list (the compiler emits both directions). */
+function undirectedEdges(): ReadonlyArray<{ a: string; b: string }> {
+  const seen = new Set<string>();
+  const out: { a: string; b: string }[] = [];
+  for (const e of layout.edges) {
+    const key = [e.from_marker_id, e.to_marker_id].sort().join('|');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ a: e.from_marker_id, b: e.to_marker_id });
+  }
+  return out;
+}
+
+/** The endpoints of an undirected edge as 2D points, or undefined if either
+ * marker has no recorded position. */
+function edgeSegment(e: { a: string; b: string }): { p: Pt; q: Pt } | undefined {
+  const p = markerPos.get(e.a);
+  const q = markerPos.get(e.b);
+  return p === undefined || q === undefined ? undefined : { p, q };
+}
+
+/**
+ * All grade-separated crossings: a layer-1↔layer-1 edge whose 2D segment
+ * strictly crosses a layer-0↔layer-0 edge's segment. Generic over the compiled
+ * graph (not pinned to ids) so it survives piece renames. A side-viaduct (deck
+ * alongside the ground, never crossing) yields an EMPTY list.
+ */
+function gradeSeparatedCrossings(): string[] {
+  const edges = undirectedEdges();
+  const onLayer = (n: number) => (e: { a: string; b: string }) =>
+    markerLayer(e.a) === n && markerLayer(e.b) === n;
+  const deckEdges = edges.filter(onLayer(1));
+  const groundEdges = edges.filter(onLayer(0));
+  const crossings: string[] = [];
+  for (const deck of deckEdges) {
+    const ds = edgeSegment(deck);
+    if (ds === undefined) continue;
+    for (const ground of groundEdges) {
+      const gs = edgeSegment(ground);
+      if (gs === undefined) continue;
+      if (segmentsCross(ds.p, ds.q, gs.p, gs.q)) {
+        crossings.push(`${deck.a}->${deck.b} OVER ${ground.a}->${ground.b}`);
+      }
+    }
+  }
+  return crossings;
+}
+
 describe('buildBridgeDemo — grade-separated deck', () => {
   it('the deck pieces sit on layer 1, distinct from the layer-0 ground loop', () => {
     const deckEdges = layout.edges.filter(isLayer1DeckEdge);
@@ -167,17 +242,24 @@ describe('buildBridgeDemo — grade-separated deck', () => {
     expect(spurious).toHaveLength(0);
   });
 
-  it('the only same-layer footprint overlap is the known descent-ramp/main-bypass crossing', () => {
-    // KNOWN LIMITATION (flagged in the report): because J2's branch faces south
-    // (so the deck can rejoin via a divert leg), the down-ramp's ground end
-    // crosses the main bypass straight `mn-s2` at ramp (partial) height near J2.
-    // That is the single same-layer 2D overlap this piece set forces; the deck
-    // and main bypass remain graph-disjoint (asserted above). We exempt exactly
-    // that pair by id so the detector still flags any NEW/unexpected overlap.
-    const overlaps = detectSameLayerOverlaps(demo.pieces);
-    const KNOWN = new Set(['mn-s2', 'dk-rampDown']);
-    const unexpected = [...overlaps].filter((id) => !KNOWN.has(id));
-    expect(unexpected).toEqual([]);
+  it('a layer-1 deck edge crosses OVER a layer-0 ground edge in 2D (the genuine flyover)', () => {
+    // Gate (C): prove a real over/under. A side-viaduct (the deck running
+    // ALONGSIDE the ground without crossing) passes the "layers distinct" test
+    // above but FAILS here — there is no layer-1 edge whose 2D segment strictly
+    // crosses a layer-0 edge's segment. The search is generic over compiled edges
+    // (not pinned to specific ids) so the assertion survives id renames.
+    //
+    // At least one grade-separated crossing exists — the deck rides OVER the
+    // ground. (Different layers, so this 2D crossing is overlap-free by
+    // construction; see the same-layer overlap assertion below.)
+    expect(gradeSeparatedCrossings().length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('has ZERO same-layer footprint overlaps (no red overlap banner)', () => {
+    // The "clean" bar: every layer-1-over-layer-0 crossing is grade-separated, and
+    // no two SAME-layer pieces share a footprint without a join. The detector must
+    // find nothing — no exemptions.
+    expect([...detectSameLayerOverlaps(demo.pieces)]).toEqual([]);
   });
 });
 

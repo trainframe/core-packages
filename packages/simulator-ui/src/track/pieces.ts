@@ -12,6 +12,7 @@
 export type TrackPieceType =
   | 'straight'
   | 'curve'
+  | 'curve-tight'
   | 'junction'
   | 'station'
   | 'terminus'
@@ -148,12 +149,27 @@ export interface PieceShape {
 // ---------------------------------------------------------------------------
 
 /**
- * Centreline turn radius of a curve piece, in mm. A curve is a 45° arc; eight
- * of them tile a full circle (8 × 45° = 360°). The endpoint geometry and the
- * rendered arc are both derived from this single constant so they can never
- * drift apart.
+ * Centreline turn radius of the standard `curve` piece, in mm. A curve is a 45°
+ * arc; eight of them tile a full circle (8 × 45° = 360°). The endpoint geometry
+ * and the rendered arc are both derived from this single constant so they can
+ * never drift apart.
  */
 const CURVE_RADIUS_MM = 200;
+
+/**
+ * Centreline turn radius of the `curve-tight` variant, in mm — half the
+ * standard radius. Same 45° sweep (so it still tiles 8-to-a-circle and snaps
+ * into the same 45° heading lattice), but a much smaller footprint, so a deck
+ * can turn back on itself within a compact span. Added for the bridge demo's
+ * flying junction, where the R=200 arc forced the elevated deck to sprawl into
+ * a side-viaduct rather than cross cleanly over the ground line.
+ */
+const CURVE_TIGHT_RADIUS_MM = 100;
+
+/** The centreline turn radius for a curve piece type. */
+function curveRadiusFor(type: TrackPieceType): number {
+  return type === 'curve-tight' ? CURVE_TIGHT_RADIUS_MM : CURVE_RADIUS_MM;
+}
 
 /** Half-width of a rendered rail band, in mm (band is 16 mm across). */
 const RAIL_HALF_WIDTH = 8;
@@ -170,22 +186,45 @@ function toRad(deg: number): number {
 // `CURVE_EXIT_ANGLE`. Crucially the piece *origin* is the arc midpoint, so the
 // marker a curve contributes sits ON the rail — a train (or carriage) rendered
 // at the marker rides the track instead of floating ~24 mm inside the bend.
-const CURVE_ARC_CENTRE = { x: -100, y: CURVE_RADIUS_MM };
+//
+// The construction is parametrised by radius `R`: arc centre at (−R/2, R) puts
+// the entry endpoint at (−R/2, 0) with a due-west tangent for any R, so both
+// the standard `curve` (R=200) and the `curve-tight` variant (R=100) share one
+// geometry and the same 45° heading lattice. (At R=200 the centre is (−100,
+// 200), recovering the original constants.)
 const CURVE_ENTRY_ANGLE = -90;
 const CURVE_EXIT_ANGLE = -45;
 const CURVE_MID_ANGLE = (CURVE_ENTRY_ANGLE + CURVE_EXIT_ANGLE) / 2;
-/** Offset that moves the arc midpoint to the piece origin (0, 0). */
-const CURVE_ORIGIN = {
-  x: CURVE_ARC_CENTRE.x + CURVE_RADIUS_MM * Math.cos(toRad(CURVE_MID_ANGLE)),
-  y: CURVE_ARC_CENTRE.y + CURVE_RADIUS_MM * Math.sin(toRad(CURVE_MID_ANGLE)),
-};
 
-/** A point on the curve's arc (at `radius` from the centre), in origin-relative
- * piece-local coordinates. */
-function curvePoint(radius: number, angleDeg: number): { x: number; y: number } {
+/** Arc centre for a curve of the given radius (the marker is recentred to the
+ * arc midpoint below). */
+function curveArcCentre(radius: number): { x: number; y: number } {
+  return { x: -radius / 2, y: radius };
+}
+
+/** Offset that moves the arc midpoint to the piece origin (0, 0). */
+function curveOrigin(radius: number): { x: number; y: number } {
+  const c = curveArcCentre(radius);
   return {
-    x: CURVE_ARC_CENTRE.x + radius * Math.cos(toRad(angleDeg)) - CURVE_ORIGIN.x,
-    y: CURVE_ARC_CENTRE.y + radius * Math.sin(toRad(angleDeg)) - CURVE_ORIGIN.y,
+    x: c.x + radius * Math.cos(toRad(CURVE_MID_ANGLE)),
+    y: c.y + radius * Math.sin(toRad(CURVE_MID_ANGLE)),
+  };
+}
+
+/** A point at `pointRadius` from the centre of a curve whose centreline radius
+ * is `radius`, at arc angle `angleDeg`, in origin-relative piece-local
+ * coordinates. `pointRadius` differs from `radius` only when drawing the rail
+ * band's inner/outer edges. */
+function curvePointR(
+  radius: number,
+  pointRadius: number,
+  angleDeg: number,
+): { x: number; y: number } {
+  const c = curveArcCentre(radius);
+  const o = curveOrigin(radius);
+  return {
+    x: c.x + pointRadius * Math.cos(toRad(angleDeg)) - o.x,
+    y: c.y + pointRadius * Math.sin(toRad(angleDeg)) - o.y,
   };
 }
 
@@ -243,14 +282,16 @@ function localEndpoints(
         { lx: -100, ly: 0, localAngle: 180 }, // entry, on piece.layer
         { lx: 100, ly: 0, localAngle: 0, layerDelta: 1 }, // exit, on piece.layer + 1
       ];
-    case 'curve': {
+    case 'curve':
+    case 'curve-tight': {
       // A true 45° circular arc, entry tangent pointing west (180°) and exit
       // tangent at 45°, both lying on one consistent arc — so eight curves
       // snapped end-to-end close into a circle (the old chord-approximation
       // endpoints did not). Origin is the arc midpoint, so the marker is on the
-      // rail.
-      const entry = curvePoint(CURVE_RADIUS_MM, CURVE_ENTRY_ANGLE);
-      const exit = curvePoint(CURVE_RADIUS_MM, CURVE_EXIT_ANGLE);
+      // rail. `curve-tight` is the same arc at half the radius.
+      const r = curveRadiusFor(type);
+      const entry = curvePointR(r, r, CURVE_ENTRY_ANGLE);
+      const exit = curvePointR(r, r, CURVE_EXIT_ANGLE);
       return [
         { lx: entry.x, ly: entry.y, localAngle: 180 },
         { lx: exit.x, ly: exit.y, localAngle: 45 },
@@ -383,15 +424,14 @@ function linearHalfPath(ex: number, ey: number): CentreLinePath {
  * arc angle toward `endAngleDeg`, and the heading is the arc tangent in that
  * travel direction (`arcAngle + 90` when sweeping positive, `- 90` otherwise).
  */
-function curveHalfPath(endAngleDeg: number): CentreLinePath {
+function curveHalfPath(radius: number, endAngleDeg: number): CentreLinePath {
   const sweepSign = endAngleDeg >= CURVE_MID_ANGLE ? 1 : -1;
-  const length = CURVE_RADIUS_MM * toRad(Math.abs(endAngleDeg - CURVE_MID_ANGLE));
+  const length = radius * toRad(Math.abs(endAngleDeg - CURVE_MID_ANGLE));
   return {
     length,
     at(distFromCentre: number): RailPose {
-      const arcAngle =
-        CURVE_MID_ANGLE + (sweepSign * ((distFromCentre / CURVE_RADIUS_MM) * 180)) / Math.PI;
-      const p = curvePoint(CURVE_RADIUS_MM, arcAngle);
+      const arcAngle = CURVE_MID_ANGLE + (sweepSign * ((distFromCentre / radius) * 180)) / Math.PI;
+      const p = curvePointR(radius, radius, arcAngle);
       return { x: p.x, y: p.y, headingDeg: arcAngle + sweepSign * 90 };
     },
   };
@@ -400,10 +440,10 @@ function curveHalfPath(endAngleDeg: number): CentreLinePath {
 /** The piece-local centre-line half-path for endpoint `index`, or undefined
  * when the index is out of range (e.g. a device piece with no endpoints). */
 function localHalfPath(type: TrackPieceType, index: number): CentreLinePath | undefined {
-  if (type === 'curve') {
+  if (type === 'curve' || type === 'curve-tight') {
     const endAngle = index === 0 ? CURVE_ENTRY_ANGLE : CURVE_EXIT_ANGLE;
     if (index !== 0 && index !== 1) return undefined;
-    return curveHalfPath(endAngle);
+    return curveHalfPath(curveRadiusFor(type), endAngle);
   }
   const local = localEndpoints(type)[index];
   if (local === undefined) return undefined;
@@ -489,7 +529,9 @@ export function getPieceShape(piece: TrackPiece): PieceShape {
     case 'straight':
       return straightShape();
     case 'curve':
-      return curveShape();
+      return curveShape(CURVE_RADIUS_MM);
+    case 'curve-tight':
+      return curveShape(CURVE_TIGHT_RADIUS_MM);
     case 'junction':
       return junctionShape();
     case 'station':
@@ -531,14 +573,15 @@ function straightShape(): PieceShape {
   return { svgPath: d, width: w, height: h };
 }
 
-function curveShape(): PieceShape {
+function curveShape(radius: number): PieceShape {
   // The rail band of the 45° arc, drawn on exactly the same geometry (and
   // origin) the endpoints use, so the band connects its own endpoint dots
-  // instead of floating away from them.
-  const outer = CURVE_RADIUS_MM + RAIL_HALF_WIDTH;
-  const inner = CURVE_RADIUS_MM - RAIL_HALF_WIDTH;
-  const at = (radius: number, deg: number): string => {
-    const p = curvePoint(radius, deg);
+  // instead of floating away from them. Parametrised by centreline `radius` so
+  // the standard `curve` (R=200) and `curve-tight` (R=100) share one builder.
+  const outer = radius + RAIL_HALF_WIDTH;
+  const inner = radius - RAIL_HALF_WIDTH;
+  const at = (pointRadius: number, deg: number): string => {
+    const p = curvePointR(radius, pointRadius, deg);
     return `${p.x.toFixed(2)} ${p.y.toFixed(2)}`;
   };
 
@@ -553,7 +596,12 @@ function curveShape(): PieceShape {
     d += ` M ${at(inner, deg)} L ${at(outer, deg)}`;
   }
 
-  return { svgPath: d, width: 160, height: 80 };
+  // Bounding box scales with radius (the R=200 curve was 160×80).
+  return {
+    svgPath: d,
+    width: (160 * radius) / CURVE_RADIUS_MM,
+    height: (80 * radius) / CURVE_RADIUS_MM,
+  };
 }
 
 function junctionShape(): PieceShape {

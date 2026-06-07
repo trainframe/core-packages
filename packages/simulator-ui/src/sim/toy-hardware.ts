@@ -167,9 +167,17 @@ export class ToyHardware {
       // a point train would deadlock the switch on the bridge demo. 60mm sits
       // safely under the shortest compiled edge (~148mm). This is the SAME
       // length scanPiece announces in the train's device_registered payload.
+      // `miss_rate: 0` — the toy-table runs detection-fault-free. The default
+      // VirtualTrain config drops ~1% of marker reads; under schedule-based
+      // clearance a single missed read is silent and unrecoverable (the server
+      // never hears the train pass the marker, so it never extends clearance and
+      // the train stalls dead — taking its block peer down with it). Exploration
+      // tolerated misses because it doesn't wait for clearance; schedules don't.
+      // Making the server recover from a missed read is a separate, larger piece
+      // of work; for the live demo/dev tool we run pristine so trains circulate.
       this.simulation.spawnTrain(deviceIdForDevicePiece(piece), {
         startEdge,
-        config: { length_mm: TRAIN_LENGTH_MM },
+        config: { length_mm: TRAIN_LENGTH_MM, miss_rate: 0 },
       });
       return;
     }

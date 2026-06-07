@@ -106,6 +106,43 @@ describe('getEndpoints — curve', () => {
   });
 });
 
+describe('getEndpoints — curve-tight (R=100 variant)', () => {
+  it('returns 2 endpoints with the SAME entry/exit tangents as the standard curve', () => {
+    const eps = getEndpoints(makePiece('curve-tight'));
+    expect(eps).toHaveLength(2);
+    // Same 45° sweep / heading lattice as the R=200 curve, so it tiles 8-to-a-circle.
+    expect(must(eps[0]).outgoingAngleDeg).toBe(180);
+    expect(must(eps[1]).outgoingAngleDeg).toBe(45);
+  });
+
+  it('has exactly half the footprint of the standard curve (R=100 vs R=200)', () => {
+    const tight = getEndpoints(makePiece('curve-tight'));
+    const wide = getEndpoints(makePiece('curve'));
+    // Each tight endpoint is the corresponding wide endpoint scaled by 1/2 about
+    // the origin (both arcs share the construction centre (−R/2, R), recentred to
+    // the arc midpoint), so the compact deck turns back within half the span.
+    expect(approx(must(tight[0]).x, must(wide[0]).x / 2)).toBe(true);
+    expect(approx(must(tight[0]).y, must(wide[0]).y / 2)).toBe(true);
+    expect(approx(must(tight[1]).x, must(wide[1]).x / 2)).toBe(true);
+    expect(approx(must(tight[1]).y, must(wide[1]).y / 2)).toBe(true);
+  });
+
+  it('mirrors the bend when flipped (exit 45° → 315°, y negated)', () => {
+    const normal = getEndpoints(makePiece('curve-tight'));
+    const flipped = getEndpoints({ ...makePiece('curve-tight'), flipped: true });
+    expect(must(flipped[0]).outgoingAngleDeg).toBe(180);
+    expect(must(flipped[1]).outgoingAngleDeg).toBe(315);
+    expect(approx(must(flipped[1]).y, -must(normal[1]).y)).toBe(true);
+    expect(approx(must(flipped[1]).x, must(normal[1]).x)).toBe(true);
+  });
+
+  it('angles shift by rotation at 90° (same lattice as the standard curve)', () => {
+    const eps = getEndpoints(makePiece('curve-tight', 90));
+    expect(must(eps[0]).outgoingAngleDeg).toBe(270);
+    expect(must(eps[1]).outgoingAngleDeg).toBe(135);
+  });
+});
+
 describe('getEndpoints — junction', () => {
   it('returns 3 endpoints (trunk, through, branch)', () => {
     expect(getEndpoints(makePiece('junction'))).toHaveLength(3);
@@ -250,6 +287,7 @@ describe('getPieceShape', () => {
   const PIECE_TYPES: TrackPiece['type'][] = [
     'straight',
     'curve',
+    'curve-tight',
     'junction',
     'station',
     'terminus',
@@ -316,6 +354,23 @@ describe('getCentreLinePath — half lengths', () => {
     const path = must(getCentreLinePath(makePiece('curve'), 0));
     expect(path.length).toBeCloseTo(CURVE_HALF_LEN, 2);
     expect(path.length).toBeGreaterThan(CURVE_HALF_LEN - 0.01);
+  });
+
+  it('curve-tight half-length is HALF the standard curve arc (R=100 · π/8 ≈ 39.27mm)', () => {
+    const path = must(getCentreLinePath(makePiece('curve-tight'), 0));
+    expect(path.length).toBeCloseTo(CURVE_HALF_LEN / 2, 2);
+  });
+
+  it('curve-tight: sampling at length reproduces its endpoint pose', () => {
+    const piece = makePiece('curve-tight', 90);
+    const eps = getEndpoints(piece);
+    for (const i of [0, 1]) {
+      const path = must(getCentreLinePath(piece, i));
+      const end = path.at(path.length);
+      expect(approx(end.x, must(eps[i]).x)).toBe(true);
+      expect(approx(end.y, must(eps[i]).y)).toBe(true);
+      expect(angleDelta(end.headingDeg, must(eps[i]).outgoingAngleDeg)).toBeLessThan(0.5);
+    }
   });
 
   it('returns undefined for a device piece (no endpoints)', () => {

@@ -1,27 +1,43 @@
 /**
- * A deterministic two-train SINGLE-DIRECTION OVAL with a HUMP FLYOVER, built
- * with a small turtle.
+ * A deterministic two-train SINGLE-DIRECTION OVAL with a CLEAN GRADE-SEPARATED
+ * FLYOVER, built with a small turtle.
  *
  * The scene is ONE connected oval track (a rounded rectangle) circulated in the
- * SAME direction by both trains. Along the BOTTOM straight the loop is
+ * SAME direction by both trains. Across the TOP straight the loop is
  * grade-separated:
  *
- *   - B (the ground train) takes the MAIN bypass: a flat ground straight under
- *     the deck, J1.through → ground straight (carrying a bare waypoint) →
- *     J2.through. B never leaves layer 0.
+ *   - B (the ground train) takes the MAIN bypass: a flat layer-0 straight run
+ *     east from J1.through to J2.through (carrying a bare waypoint), passing
+ *     UNDER the deck. B never leaves layer 0.
  *   - A (the flyover train) takes the DECK bypass: J1.branch (divert) → ramp UP
- *     onto a layer-1 deck (carrying the UPPER STATION) that runs OVER B's ground
- *     straight → ramp DOWN → J2.branch. A literally rides OVER B, then continues
- *     forward down the far ramp and merges at J2.
+ *     onto a layer-1 deck (carrying the UPPER STATION) that arcs up and turns to
+ *     run due SOUTH, so a layer-1 deck edge crosses PERPENDICULARLY OVER B's
+ *     layer-0 ground straight (the genuine over/under — different layers, so the
+ *     2D footprint crossing is overlap-free by construction). On the far side
+ *     the deck arcs back and ramps DOWN onto J2.branch, merging.
  *
- * The rest of the oval — J2.trunk → bottom-right corner → right side → top
- * straight → left side → bottom-left corner → J1.trunk — is SHARED and
- * traversed in the SAME direction by both trains, so ADR-011 block exclusivity
- * gives one-block spacing and never a head-on.
+ * The genuine flyover crossing: the deck's `dk-crossN → dk-crossS` layer-1 edge
+ * runs vertically at x≈1038 and crosses the layer-0 bypass edge `mn-s1 → mn-s2`
+ * (which runs along y=700) at right angles. Because the two edges are on
+ * different layers they share no marker and CANNOT same-layer-overlap — that is
+ * exactly what makes it a bridge rather than a flat crossing.
+ *
+ * The descent threads back onto J2's branch with a MIXED-RADIUS turn
+ * (curve-tight R=100 + curve R=200 + curve-tight R=100): the half-radius variant
+ * breaks the 45°/√2 chord lattice that an all-R=200 (or all-R=100) descent would
+ * beat against, so the ground end lands within the 30 mm snap of J2's branch
+ * with NO same-layer overlap anywhere. (An all-one-radius descent could not get
+ * the diagonal landing onto the 200 mm bypass grid; that mismatch was the side-
+ * viaduct's root cause.)
+ *
+ * The rest of the oval — J2.trunk → top-right corner → right side → bottom →
+ * left side → top-left corner → J1.trunk — is SHARED and traversed in the SAME
+ * direction by both trains, so ADR-011 block exclusivity gives one-block spacing
+ * and never a head-on.
  *
  * Forward cyclic order, identical for both trains:
  *   J1 → { upper deck (A, divert) | main straight (B, main) } → J2
- *      → right corner → right side → top → left side → left corner → J1
+ *      → right side → bottom → left side → J1
  * A throws J1 to 'divert' on its handover and B throws it to 'main' — the
  * per-lap switch flip the demo shows off. J2 is a PASSIVE merge: both trains
  * arrive on a branch/through leg and leave via its switch-free trunk.
@@ -30,7 +46,7 @@
  * always returns the same pieces. The closures (deck→J2.branch, main→J2.through,
  * oval J2.trunk→J1.trunk) are tuned against the compile test
  * (bridge-demo.test.ts) and the strict deterministic harness gate
- * (two-train-flyover.spec.ts in @trainframe/ui-tests).
+ * (two-train-flyover.test.ts).
  */
 
 import {
@@ -196,17 +212,21 @@ const TRAIN_B_ID = 'trainB';
 const JUNCTION_J1_ID = 'j1';
 const JUNCTION_J2_ID = 'j2';
 
-/** Ground station on the SHARED top straight — train A's home (after the deck). */
+/** Ground station on the SHARED left side — train A's home (after the deck). */
 const GROUND_STATION_A_ID = 'top-stationA';
 /** Ground station on the SHARED right side — train B's home. */
 const GROUND_STATION_B_ID = 'rt-stationB';
-/** Bare waypoint on the MAIN bypass: pins B through the ground straight (off the
- * deck) and forces forward circulation. Not a station. */
-const MAIN_WAYPOINT_ID = 'mn-wp';
-/** Bare waypoint on the SHARED TOP straight: pins each train's return leg the
+/** Bare waypoint on the MAIN bypass (the FIRST bypass straight, near J1): pins B
+ * through the ground straight (off the deck) and forces forward circulation. It
+ * MUST sit at the J1 end: B reaches it from the bottom loop-waypoint by
+ * continuing FORWARD (bottom → left side → J1 → bypass), shorter than reversing
+ * back through J2 — that forward bias is what stops B doubling back into A on
+ * the shared right side. Not a station. */
+const MAIN_WAYPOINT_ID = 'mn-s0';
+/** Bare waypoint on the SHARED BOTTOM straight: pins each train's return leg the
  * long way round the oval (same direction as the other), so the shared
  * single-track section never sees a head-on. Not a station. */
-const LOOP_WAYPOINT_ID = 'loop-wp';
+const LOOP_WAYPOINT_ID = 'bt-b2';
 /** The UPPER station on the layer-1 deck — reachable only over the flyover. */
 const UPPER_STATION_ID = 'dk-station';
 /** First ground marker A reaches AFTER descending the far ramp and merging at
@@ -232,7 +252,7 @@ export interface BridgeDemo {
   readonly upperStation: string;
   /** The bare main-bypass waypoint marker id (`M-{pieceId}`): keeps B grounded. */
   readonly mainWaypoint: string;
-  /** The shared-top waypoint marker id (`M-{pieceId}`): direction-pins return legs. */
+  /** The shared-bottom waypoint marker id (`M-{pieceId}`): direction-pins return legs. */
   readonly loopWaypoint: string;
   /** The DIVERGE junction (J1) marker id (`M-{pieceId}`). */
   readonly junctionId: string;
@@ -255,76 +275,84 @@ export interface BridgeDemo {
 /**
  * Build the MAIN bypass (train B's path) and place J2. From J1's THROUGH
  * endpoint a flat ground straight runs east UNDER the deck, carrying the bare
- * waypoint `mn-wp`, and lands on a freshly placed J2 via its THROUGH endpoint.
- * J2 is placed `connectVia: 1` so its TRUNK (index 0) becomes the cursor's exit
- * and faces the oval, and its BRANCH (index 2) faces the deck descent.
+ * waypoint `mn-s0` (at the J1 end), and lands on a freshly placed J2 via its
+ * THROUGH endpoint. J2 is placed `connectVia: 1` so its TRUNK (index 0) becomes
+ * the cursor's exit and faces the oval, and its BRANCH (index 2) faces the deck
+ * descent.
+ *
+ * Exactly FOUR bypass straights, at centres x=700/900/1100/1300 — the deck's
+ * vertical layer-1 crossing edge sits at x≈1038, BETWEEN `mn-s1` (900) and
+ * `mn-s2` (1100), so the crossed layer-0 edge is `mn-s1 → mn-s2`. Do not change
+ * the count without re-checking the crossing (bridge-demo.test.ts asserts a
+ * generic layer-1-over-layer-0 segment intersection, not this exact pair).
  */
 function buildMainBypassAndJ2(pieces: TrackPiece[]): void {
   let c = endpointCursor(pieces, JUNCTION_J1_ID, 1); // J1 'main' (through), heading east
-  c = place(pieces, c, 'straight', { id: 'mn-s0' });
-  c = place(pieces, c, 'straight', { id: MAIN_WAYPOINT_ID }); // bare waypoint, under the deck
-  c = place(pieces, c, 'straight', { id: 'mn-s1' });
-  c = place(pieces, c, 'straight', { id: 'mn-s2' });
-  // Attach J2 by its THROUGH (index 1); the placement reads rot 180 so its
-  // trunk faces east (oval). `flipped` mirrors its BRANCH to the SOUTH side of
-  // the ground line so the deck must cross the ground centreline diagonally to
-  // reach it — that crossing is the genuine over/under.
+  c = place(pieces, c, 'straight', { id: MAIN_WAYPOINT_ID }); // bare waypoint, J1 end
+  c = place(pieces, c, 'straight', { id: 'mn-s1' }); // crossed UNDER the deck (with mn-s2)
+  c = place(pieces, c, 'straight', { id: 'mn-s2' }); // crossed UNDER the deck (with mn-s1)
+  c = place(pieces, c, 'straight', { id: 'mn-s3' }); // bypass tail, near J2
+  // Attach J2 by its THROUGH (index 1); the placement reads rot 180 so its trunk
+  // faces east (oval). `flipped` mirrors its BRANCH to the SOUTH side of the
+  // ground line so the descent threads onto it from below.
   place(pieces, c, 'junction', { id: JUNCTION_J2_ID, connectVia: 1, flipped: true });
 }
 
 /**
  * Build the DECK bypass (train A's path): from J1's BRANCH endpoint, ramp UP
  * onto the layer-1 deck (heading up-right, north of the ground line), level out
- * east carrying the upper station, run east so the flat deck passes directly
- * OVER the main ground straight (the over/under), then ramp DOWN and swing onto
- * J2's BRANCH endpoint. The deck DIAGONALLY crosses the ground centreline so a
- * layer-1 edge strictly crosses a layer-0 edge in 2D, sharing no marker. The
+ * carrying the upper station, arc round to head due SOUTH, and run two straights
+ * down so the layer-1 deck edge `dk-crossN → dk-crossS` crosses PERPENDICULARLY
+ * over the layer-0 bypass edge `mn-s1 → mn-s2` (the genuine over/under — a
+ * layer-1 edge strictly crossing a layer-0 edge in 2D, sharing no marker). On
+ * the south side a MIXED-RADIUS turn (R100 + R200 + R100) threads the descent
+ * ramp onto J2's south-facing BRANCH endpoint (within the 30 mm snap). The
  * upper station is reachable ONLY through these divert legs.
  */
 function buildDeckChain(pieces: TrackPiece[]): void {
   let c = endpointCursor(pieces, JUNCTION_J1_ID, 2); // J1 'divert' (branch), heading NE (315°)
   c = place(pieces, c, 'ramp', { id: 'dk-rampUp' }); // climb to layer 1, still heading NE
   c = place(pieces, c, 'station', { id: UPPER_STATION_ID }); // the upper station (layer 1), heading NE
-  c = place(pieces, c, 'curve', { id: 'dk-c0', flipped: false }); // bend toward the descent
-  c = place(pieces, c, 'curve', { id: 'dk-c1', flipped: false });
-  // The middle deck pieces straddle the ground straight: the layer-1 chain runs
-  // from the north side (y<700) to the south side (y>700), so a layer-1 edge
-  // strictly crosses the layer-0 ground straight (y=700) in 2D, sharing no
-  // marker — the genuine over/under.
-  c = place(pieces, c, 'curve', { id: 'dk-c2', flipped: false });
-  c = place(pieces, c, 'curve', { id: 'dk-c3', flipped: true });
+  // Arc from NE round to due SOUTH (three tight R=100 curves: 315°→0°→45°→90°).
+  c = place(pieces, c, 'curve-tight', { id: 'dk-c0', flipped: false });
+  c = place(pieces, c, 'curve-tight', { id: 'dk-c1', flipped: false });
+  c = place(pieces, c, 'curve-tight', { id: 'dk-c2', flipped: false }); // now heading south, x≈1038
+  // Two layer-1 straights run due south. Their shared edge crosses the layer-0
+  // bypass edge mn-s1↔mn-s2 (y=700) at right angles — the genuine flyover.
+  c = place(pieces, c, 'straight', { id: 'dk-crossN' }); // centre north of y=700
+  c = place(pieces, c, 'straight', { id: 'dk-crossS' }); // centre south of y=700
+  // Mixed-radius descent turn (R100, R200, R100): breaks the 45°/√2 lattice so
+  // the down-ramp's ground end lands within 30 mm of J2's branch.
+  c = place(pieces, c, 'curve-tight', { id: 'dk-q0', flipped: true });
+  c = place(pieces, c, 'curve', { id: 'dk-q1', flipped: true });
+  c = place(pieces, c, 'curve-tight', { id: 'dk-q2', flipped: true });
   // Down-ramp drops back to ground; `connectVia: 1` connects its upper (layer-1)
-  // end to the deck and exits at its ground end, which lands on J2's south-facing
-  // BRANCH endpoint by symmetry about (900, 700) (position-snap ≤30mm closes it).
+  // end to the deck and exits at its ground end, landing on J2's south-facing
+  // BRANCH endpoint (position-snap ≤30 mm closes the join).
   place(pieces, c, 'ramp', { id: FAR_RAMP_BASE_ID, connectVia: 1 });
 }
 
 /**
- * Build the SHARED OVAL closure: from J2's TRUNK endpoint, run the bottom-right
- * corner, up the right side (carrying ground station B), across the top
- * (carrying the bare top waypoint and ground station A), down the left side,
- * and the bottom-left corner back onto J1's TRUNK endpoint. Both trains
- * traverse this in the SAME direction, so the merge at J2 is switch-free and
- * the shared section never sees a head-on.
+ * Build the SHARED OVAL closure: from J1's TRUNK endpoint, run the top-left
+ * corner, down the left side (carrying ground station A, near J1), across the
+ * bottom (carrying the bare loop waypoint), up the right side (carrying ground
+ * station B, near J2), and the top-right corner back onto J2's TRUNK endpoint.
+ * Both trains traverse this in the SAME direction, so the merge at J2 is
+ * switch-free and the shared section never sees a head-on.
+ *
+ * Symmetric rounded rectangle: left 1 straight + bottom 6 straights + right 1
+ * straight, every `corner` clockwise (`flipped: true`). The counts were tuned so
+ * the final corner's exit lands EXACTLY on J2's trunk endpoint (the closure
+ * search; ≤30 mm snap closes the join).
  */
 function buildOvalClosure(pieces: TrackPiece[]): void {
-  // The shared oval is a rounded rectangle BELOW the bypasses, traversed in the
-  // same direction by both trains. From J1's TRUNK (heading west) it drops down
-  // the LEFT side (carrying ground station A, near J1 — so A's forward route to
-  // the bridge runs the short way down-left through J1, never the long way round
-  // through J2), runs the BOTTOM (carrying the bare top waypoint that
-  // direction-pins both trains' return legs), climbs the RIGHT side (carrying
-  // ground station B, near J2), and closes on J2's TRUNK. Every `corner` is
-  // `flipped: true` (turns clockwise: W→S→E→N→E). The straight counts (left 2,
-  // bottom 6, right 2) were tuned so the final corner's exit lands EXACTLY on
-  // J2's trunk endpoint (the closure search; ≤30mm snap closes the join).
   let c = endpointCursor(pieces, JUNCTION_J1_ID, 0); // J1 trunk, heading west
   c = corner(pieces, c, 'ov-tl', true); // west → south (top-left corner)
   // Left side (heading south) carrying station A near J1.
   c = place(pieces, c, 'station', { id: GROUND_STATION_A_ID });
   c = place(pieces, c, 'straight', { id: 'lt-l0' });
   c = corner(pieces, c, 'ov-bl', true); // south → east (bottom-left corner)
-  // Bottom run (heading east) carrying the bare top waypoint mid-span.
+  // Bottom run (heading east) carrying the bare loop waypoint mid-span.
   c = place(pieces, c, 'straight', { id: 'bt-b0' });
   c = place(pieces, c, 'straight', { id: 'bt-b1' });
   c = place(pieces, c, 'straight', { id: LOOP_WAYPOINT_ID });
@@ -335,7 +363,7 @@ function buildOvalClosure(pieces: TrackPiece[]): void {
   // Right side (heading north) carrying station B near J2.
   c = place(pieces, c, 'straight', { id: 'rt-r0' });
   c = place(pieces, c, 'station', { id: GROUND_STATION_B_ID });
-  // Top-right corner: north → east, landing back onto J2's trunk (≤30mm snap).
+  // Top-right corner: north → east, landing back onto J2's trunk (≤30 mm snap).
   corner(pieces, c, 'ov-tr', true);
 }
 
@@ -350,7 +378,7 @@ export function buildBridgeDemo(): BridgeDemo {
 
   // J1 (diverge): trunk(0) anchors the build heading east. `flipped` sends the
   // branch (divert) up-right so the deck arches above the ground straight.
-  place(pieces, { x: 300, y: 700, dir: 0, layer: 0 }, 'junction', {
+  place(pieces, { x: 400, y: 700, dir: 0, layer: 0 }, 'junction', {
     id: JUNCTION_J1_ID,
     flipped: true,
   });

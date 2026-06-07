@@ -56,6 +56,7 @@ const GARAGE_DEVICE_ID = 'GARAGE';
 const TRACK_PIECE_TYPES = [
   'straight',
   'curve',
+  'curve-tight',
   'junction',
   'station',
   'terminus',
@@ -67,6 +68,7 @@ const DEVICE_PIECE_TYPES = ['train', 'gate', 'carriage'] as const;
 const PIECE_LABELS: Record<TrackPieceType, string> = {
   straight: 'Straight',
   curve: 'Curve',
+  'curve-tight': 'Tight Curve',
   junction: 'Junction',
   station: 'Station',
   terminus: 'Terminus',
@@ -80,6 +82,7 @@ const PIECE_LABELS: Record<TrackPieceType, string> = {
 const PIECE_FILL: Record<TrackPieceType, string> = {
   straight: '#7b8eac',
   curve: '#7b9cac',
+  'curve-tight': '#6b9cbc',
   junction: '#8c7bac',
   station: '#ac9b7b',
   terminus: '#ac7b7b',
