@@ -209,6 +209,7 @@ Private workspace package. Spawns the simulator-ui Vite preview, an aedes broker
 | Operator journeys                                 | shipped | `multi-train-journey`, `tag-assignment`, `discovery`, `feature-showcase`, plus five new specs: `route-reassignment` (expects `cleared_edges`-wipe fix), `unknown-tag-closure` (bound-tag → train lands on marker), `spawn-form-mishaps` (overshoot knob → anomaly in EventLog), `layout-swap` (preset swap + invalid-JSON error), `gate-hold-release` (admin HTTP hold/release → train stops/advances). |
 | Visualiser SVG assertions                         | shipped | `data-train-id` / `data-at-marker` / `data-on-edge` / `data-marker-id` / `data-inferred` assertions are routine across the new specs. |
 | Native drag specs                                 | shipped | `native-drag.spec.ts`: HTML5 drag-to-place from the toybox + pointer drag-to-move of a placed piece. |
+| Runs in CI                                        | shipped | CI workflow installs Chromium via `playwright install --with-deps` before `pnpm test`. Before this, every ui-test failed at browser launch in CI (masked behind an unrelated integration flake). |
 
 Coverage thresholds: not applicable (Playwright; covered by E2E pass/fail).
 

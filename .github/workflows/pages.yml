@@ -36,10 +36,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Build workspace deps consumed by the UIs
-        run: |
-          pnpm --filter @trainframe/protocol build
-          pnpm --filter @trainframe/core build
-          pnpm --filter @trainframe/simulator build
+        # `...` selects the simulator plus its full workspace-dependency
+        # closure (protocol, core, server) and builds in topological order.
+        # The simulator's tsc build needs @trainframe/server's declaration
+        # output — hand-listing deps here previously missed it.
+        run: pnpm --filter @trainframe/simulator... build
 
       - name: Build visualiser
         env:

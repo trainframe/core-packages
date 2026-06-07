@@ -80,6 +80,13 @@ describe('Operator hold/release gate: the scheduler obeys the gate state', () =>
       marker_id: 'M3',
       reason: 'operator hold test',
     });
+    // The hold is a full round-trip (server → broker → gate →
+    // gate_state_changed → server). Wait for the gate's withholding event to
+    // come back on the wire before assigning the route — otherwise the
+    // scheduler can grant M3 before it learns the gate is holding. VirtualGate
+    // only emits gate_state_changed on transitions, so the first one observed
+    // here is necessarily the withholding event.
+    await harness.testClient.waitForEvent('gate_state_changed', 'GATE-1');
 
     // Spawn the train and assign a route through the gated marker.
     simulation.spawnTrain('T1', {

@@ -21,6 +21,9 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      - name: Install Playwright browsers (ui-tests)
+        run: pnpm --filter @trainframe/ui-tests exec playwright install --with-deps chromium
+
       - name: Lint (zero warnings)
         run: pnpm lint
 
