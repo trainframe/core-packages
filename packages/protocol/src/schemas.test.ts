@@ -35,6 +35,7 @@ import {
   ClearanceRevoked,
   CoreEvent,
   DeviceRegistered,
+  DeviceRetainedState,
   GateStateChanged,
   MarkerTraversed,
   SwitchStateChanged,
@@ -304,6 +305,34 @@ describe('Layout', () => {
       junctions: [],
     };
     expect(Value.Check(Layout, layout)).toBe(false);
+  });
+});
+
+describe('DeviceRetainedState', () => {
+  it('validates a payload with capabilities only', () => {
+    expect(Value.Check(DeviceRetainedState, { capabilities: ['core.controls_motion'] })).toBe(true);
+  });
+
+  it('validates a payload with capabilities and train_length_mm', () => {
+    expect(
+      Value.Check(DeviceRetainedState, {
+        capabilities: ['core.controls_motion', 'core.accepts_route'],
+        train_length_mm: 250,
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects train_length_mm of zero (must be positive)', () => {
+    expect(
+      Value.Check(DeviceRetainedState, {
+        capabilities: ['core.controls_motion'],
+        train_length_mm: 0,
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects a payload missing capabilities', () => {
+    expect(Value.Check(DeviceRetainedState, { train_length_mm: 100 })).toBe(false);
   });
 });
 

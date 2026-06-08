@@ -101,6 +101,14 @@ railway/discovery/register                    # device registration handshake
 
 Events use the `event_type` segment so consumers can subscribe selectively (the visualiser subscribes `railway/events/#`, the scheduler subscribes only to events it cares about). Retained state messages mean a fresh subscriber gets current train positions, switch states, and clearance grants without replaying history.
 
+**Retained device state (0.4.0):** `railway/state/devices/{device_id}` carries the registered device snapshot:
+
+```json
+{ "capabilities": ["core.controls_motion", "core.accepts_route"], "train_length_mm": 250 }
+```
+
+`capabilities` is always present. `train_length_mm` is present only when the device declared `core.controls_motion` and supplied a positive length on registration; omitted otherwise. Subscribers may use `train_length_mm` to render a length-scaled consist (ADR-016).
+
 ### Quality of service
 
 QoS 1 (at-least-once) for events and commands. Idempotency is enforced via `event_id` / `command_id` UUIDs; receivers deduplicate.
@@ -264,4 +272,8 @@ The split between MQTT pub/sub and HTTP query API is currently informal; some qu
 
 ---
 
-*End of v0.2.*
+**Changes in 0.3.0:** added `begin_exploration` command (ADR-015).
+
+**Changes in 0.4.0:** documents `railway/state/devices/{device_id}` retained payload shape; adds optional `train_length_mm` field (ADR-016). Multi-edge tail-release now supported in the scheduler (ADR-012 refinement — trains spanning more than one edge are correctly handled).
+
+*End of v0.2 (current protocol 0.4.0).*

@@ -9,5 +9,8 @@
  *
  * 0.3.0 — added the `begin_exploration` command (ADR-015): open-ended discovery
  * clearance. Backward-compatible addition.
+ * 0.4.0 — devices retained state documents { capabilities, train_length_mm? }
+ * (ADR-016); multi-edge tail-release in the scheduler (ADR-012 refinement).
+ * Backward-compatible addition.
  */
-export const PROTOCOL_VERSION = '0.3.0' as const;
+export const PROTOCOL_VERSION = '0.4.0' as const;

@@ -241,3 +241,25 @@ export const CORE_EVENT_SCHEMAS = {
   tag_assignment: TagAssignment,
   anomaly: Anomaly,
 } as const;
+
+// ---------- retained device state (railway/state/devices/{device_id}) ----------
+
+/**
+ * Retained state the server publishes to `railway/state/devices/{device_id}`
+ * when a device registers. Subscribers (the visualiser, satellite services)
+ * receive the current state of every connected device on first subscribe
+ * without replaying history.
+ *
+ * `capabilities` — the capability IDs the device declared at registration.
+ * `train_length_mm` — physical length of a train in mm, present only when the
+ *   device declared `core.controls_motion` and supplied a positive length.
+ *   Used by the visualiser to render the consist to scale (ADR-016).
+ *
+ * Added 0.4.0 (ADR-016): documents the previously-implicit retained payload
+ * shape and adds the optional `train_length_mm` field.
+ */
+export const DeviceRetainedState = Type.Object({
+  capabilities: Type.Array(CapabilityId),
+  train_length_mm: Type.Optional(Type.Number({ minimum: 0, exclusiveMinimum: 0 })),
+});
+export type DeviceRetainedState = Static<typeof DeviceRetainedState>;

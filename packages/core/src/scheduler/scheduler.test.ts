@@ -1495,6 +1495,396 @@ describe('Scheduler — train-length-aware tail clearance', () => {
   });
 });
 
+describe('Scheduler — multi-edge tail release (ADR-012 refinement, ADR-016 step 5)', () => {
+  /*
+   * Five-marker loop, 100mm edges. A 250mm train spans 3 edges behind its head.
+   *
+   *   P1 -- P2 -- P3 -- P4 -- P5 -- P1
+   *
+   * Schedule: ['P1', 'P5'] — transit P1→P2→P3→P4→P5 (4 edges). The train does
+   * not reach its stop (P5) until the 5th crossing, so all tests below drive at
+   * most 4 crossings and stay within the first transit. This avoids the station
+   * dwell that would park the train with a frozen clock.
+   *
+   * Arithmetic for 250mm train, 100mm edges, head on P4→P5 at distance d:
+   *   depth-1 P3→P4: cumulative = d           — releases when d >= 250 (impossible on 100mm)
+   *   depth-2 P2→P3: cumulative = d + 100      — releases when d >= 150 (impossible on 100mm)
+   *   depth-3 P1→P2: cumulative = d + 200      — releases when d >= 50
+   *
+   * Two-at-once case (d is deliberately over-sized — valid input, not physical):
+   *   At d=150 on P4→P5:
+   *     depth-1 P3→P4: 150 < 250. Not released.
+   *     depth-2 P2→P3: 150+100=250 >= 250. Released.
+   *     depth-3 P1→P2: 150+200=350 >= 250. Released.
+   */
+  const FIVE_LOOP: Layout = {
+    name: 'five-loop',
+    markers: [
+      { id: 'P1', kind: 'block_boundary' },
+      { id: 'P2', kind: 'block_boundary' },
+      { id: 'P3', kind: 'block_boundary' },
+      { id: 'P4', kind: 'block_boundary' },
+      { id: 'P5', kind: 'block_boundary' },
+    ],
+    edges: [
+      { from_marker_id: 'P1', to_marker_id: 'P2', estimated_length_mm: 100 },
+      { from_marker_id: 'P2', to_marker_id: 'P3', estimated_length_mm: 100 },
+      { from_marker_id: 'P3', to_marker_id: 'P4', estimated_length_mm: 100 },
+      { from_marker_id: 'P4', to_marker_id: 'P5', estimated_length_mm: 100 },
+      { from_marker_id: 'P5', to_marker_id: 'P1', estimated_length_mm: 100 },
+    ],
+    junctions: [],
+  };
+
+  const setupFiveLoop = () => {
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const layout = new LayoutState(FIVE_LOOP, { now: () => 0 });
+    const scheduler = new Scheduler(registry, layout, { now: () => 0 });
+    seedIdentityTags(scheduler, ['P1', 'P2', 'P3', 'P4', 'P5']);
+    return { scheduler };
+  };
+
+  const crossFiveLoop = (scheduler: Scheduler, trainId: string, markerId: string) =>
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: trainId,
+      payload: { tag_id: markerId },
+    });
+
+  it('releases only the depth-3 held edge when d=50 (d+200=250 exactly)', () => {
+    /* T1 is 250mm long. Drive to P4 (entering P4→P5, progress_index=3).
+     * At d=40 (40+200=240 < 250): nothing releases.
+     * At d=50 (50+200=250 >= 250): P1→P2 (depth-3) releases. P2→P3, P3→P4 stay held. */
+    const { scheduler } = setupFiveLoop();
+    registerLongTrain(scheduler, 'T1', 250);
+    scheduler.assignSchedule('T1', 'r1', ['P1', 'P5']);
+    crossFiveLoop(scheduler, 'T1', 'P1');
+    crossFiveLoop(scheduler, 'T1', 'P2');
+    crossFiveLoop(scheduler, 'T1', 'P3');
+    crossFiveLoop(scheduler, 'T1', 'P4');
+
+    // Before threshold: P1→P2 is held.
+    expect(
+      scheduler
+        .getTrainState('T1')
+        ?.cleared_edges.some((e) => e.from_marker_id === 'P1' && e.to_marker_id === 'P2'),
+    ).toBe(true);
+
+    // d=40: still held — 240 < 250.
+    sendTrainStatus(scheduler, 'T1', { from_marker_id: 'P4', to_marker_id: 'P5' }, 40);
+    expect(
+      scheduler
+        .getTrainState('T1')
+        ?.cleared_edges.some((e) => e.from_marker_id === 'P1' && e.to_marker_id === 'P2'),
+    ).toBe(true);
+
+    // d=50: P1→P2 releases (250 >= 250).
+    sendTrainStatus(scheduler, 'T1', { from_marker_id: 'P4', to_marker_id: 'P5' }, 50);
+    const afterRelease = scheduler.getTrainState('T1');
+    expect(
+      afterRelease?.cleared_edges.some((e) => e.from_marker_id === 'P1' && e.to_marker_id === 'P2'),
+    ).toBe(false);
+    // P2→P3 and P3→P4 are still held (cumulative 150 and 50, both < 250).
+    expect(
+      afterRelease?.cleared_edges.some((e) => e.from_marker_id === 'P2' && e.to_marker_id === 'P3'),
+    ).toBe(true);
+    expect(
+      afterRelease?.cleared_edges.some((e) => e.from_marker_id === 'P3' && e.to_marker_id === 'P4'),
+    ).toBe(true);
+  });
+
+  it('releases two held edges simultaneously when d=150 (depth-2 and depth-3 both >= length)', () => {
+    /* Same setup as above. At d=150:
+     *   depth-2 P2→P3: 150+100=250 >= 250 — released.
+     *   depth-3 P1→P2: 150+200=350 >= 250 — released.
+     *   depth-1 P3→P4: 150 < 250         — NOT released. */
+    const { scheduler } = setupFiveLoop();
+    registerLongTrain(scheduler, 'T1', 250);
+    scheduler.assignSchedule('T1', 'r1', ['P1', 'P5']);
+    crossFiveLoop(scheduler, 'T1', 'P1');
+    crossFiveLoop(scheduler, 'T1', 'P2');
+    crossFiveLoop(scheduler, 'T1', 'P3');
+    crossFiveLoop(scheduler, 'T1', 'P4');
+
+    // Both P1→P2 and P2→P3 are held.
+    const before = scheduler.getTrainState('T1');
+    expect(
+      before?.cleared_edges.some((e) => e.from_marker_id === 'P1' && e.to_marker_id === 'P2'),
+    ).toBe(true);
+    expect(
+      before?.cleared_edges.some((e) => e.from_marker_id === 'P2' && e.to_marker_id === 'P3'),
+    ).toBe(true);
+
+    sendTrainStatus(scheduler, 'T1', { from_marker_id: 'P4', to_marker_id: 'P5' }, 150);
+    const after = scheduler.getTrainState('T1');
+
+    // Both depth-2 and depth-3 edges are released.
+    expect(
+      after?.cleared_edges.some((e) => e.from_marker_id === 'P1' && e.to_marker_id === 'P2'),
+    ).toBe(false);
+    expect(
+      after?.cleared_edges.some((e) => e.from_marker_id === 'P2' && e.to_marker_id === 'P3'),
+    ).toBe(false);
+    // depth-1 P3→P4 stays held (150 < 250).
+    expect(
+      after?.cleared_edges.some((e) => e.from_marker_id === 'P3' && e.to_marker_id === 'P4'),
+    ).toBe(true);
+  });
+
+  it('blocked chaser is granted when multi-depth held edges release', () => {
+    /* T2 wants P1→P2. T1 holds P1→P2 and P2→P3 (both share P2, so T2 is
+     * denied by ADR-011). At d=150 on P4→P5 both P1→P2 (depth-3) and P2→P3
+     * (depth-2) release simultaneously. T1's remaining held edges are P3→P4
+     * and P4→P5 — neither shares a marker with P1→P2 — so T2 is granted in
+     * the same handler call.
+     *
+     * d=50 first: only P1→P2 releases, but T1 still holds P2→P3 (shares P2).
+     * d=150: both release, and P1→P2 is finally uncontested for T2. */
+    const { scheduler } = setupFiveLoop();
+    registerLongTrain(scheduler, 'T1', 250);
+    registerTrain(scheduler, 'T2');
+    scheduler.assignSchedule('T1', 'r1', ['P1', 'P5']);
+
+    /* T2 wants P1→P2. T1 holds it (P1 and P2 shared), so the initial grant
+     * is denied. */
+    const t2Initial = scheduler.assignSchedule('T2', 'r2', ['P1', 'P2']);
+    expect(
+      t2Initial.find(
+        (e) =>
+          e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+      ),
+    ).toBeUndefined();
+
+    crossFiveLoop(scheduler, 'T1', 'P1');
+    crossFiveLoop(scheduler, 'T1', 'P2');
+    crossFiveLoop(scheduler, 'T1', 'P3');
+    crossFiveLoop(scheduler, 'T1', 'P4');
+
+    // d=50: only P1→P2 releases (depth-3). T1 still holds P2→P3 (depth-2),
+    // which shares P2 with T2's wanted P1→P2. T2 remains blocked.
+    const onlyOneReleased = sendTrainStatus(
+      scheduler,
+      'T1',
+      { from_marker_id: 'P4', to_marker_id: 'P5' },
+      50,
+    );
+    expect(
+      onlyOneReleased.find(
+        (e) =>
+          e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+      ),
+    ).toBeUndefined();
+
+    // d=150: P2→P3 (depth-2) also releases. T1 now holds only P3→P4 and P4→P5
+    // — no shared markers with P1→P2. T2 is granted in this same call.
+    const released = sendTrainStatus(
+      scheduler,
+      'T1',
+      { from_marker_id: 'P4', to_marker_id: 'P5' },
+      150,
+    );
+    const t2Grant = released.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+    );
+    expect(t2Grant).toBeDefined();
+    expect((t2Grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('P2');
+  });
+
+  it('conservative hold: missing edge length stops the walk — depth-1 releases, depth-2 stays held', () => {
+    /* Five-loop but Q3→Q4 has no estimated_length_mm. Train length = 50mm.
+     * On Q4→Q5 at d=50:
+     *   depth-1 Q3→Q4: cumulative = 50 >= 50 — released.
+     *   depth-2 Q2→Q3: needs Q3→Q4's length (unknown) — walk stops, Q2→Q3 held.
+     * This is the deliberate safety asymmetry: holding too long is safe. */
+    const PARTIAL_LOOP: Layout = {
+      name: 'partial-loop',
+      markers: [
+        { id: 'Q1', kind: 'block_boundary' },
+        { id: 'Q2', kind: 'block_boundary' },
+        { id: 'Q3', kind: 'block_boundary' },
+        { id: 'Q4', kind: 'block_boundary' },
+        { id: 'Q5', kind: 'block_boundary' },
+      ],
+      edges: [
+        { from_marker_id: 'Q1', to_marker_id: 'Q2', estimated_length_mm: 100 },
+        { from_marker_id: 'Q2', to_marker_id: 'Q3', estimated_length_mm: 100 },
+        /* Q3→Q4 intentionally has no estimated_length_mm — the walk cannot
+         * continue past it and deeper edges remain held. */
+        { from_marker_id: 'Q3', to_marker_id: 'Q4' },
+        { from_marker_id: 'Q4', to_marker_id: 'Q5', estimated_length_mm: 100 },
+        { from_marker_id: 'Q5', to_marker_id: 'Q1', estimated_length_mm: 100 },
+      ],
+      junctions: [],
+    };
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const layout = new LayoutState(PARTIAL_LOOP, { now: () => 0 });
+    const sched = new Scheduler(registry, layout, { now: () => 0 });
+    seedIdentityTags(sched, ['Q1', 'Q2', 'Q3', 'Q4', 'Q5']);
+
+    registerLongTrain(sched, 'T1', 50);
+    /* Schedule Q1→Q5: transit Q1→Q2→Q3→Q4→Q5 (4 edges). Head on Q4→Q5
+     * (progress_index=3), forward edges = [Q4→Q5]. */
+    sched.assignSchedule('T1', 'r1', ['Q1', 'Q5']);
+    sched.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'Q1' } });
+    sched.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'Q2' } });
+    sched.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'Q3' } });
+    sched.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'Q4' } });
+
+    sched.handleEvent({
+      event_type: 'train_status',
+      device_id: 'T1',
+      payload: {
+        train_id: 'T1',
+        current_edge: { from_marker_id: 'Q4', to_marker_id: 'Q5' },
+        estimated_distance_from_edge_start_mm: 50,
+        speed_normalised: 0.5,
+      },
+    });
+
+    const t1 = sched.getTrainState('T1');
+    // Q3→Q4 (depth-1, cumulative=50 >= 50) must be released.
+    expect(
+      t1?.cleared_edges.some((e) => e.from_marker_id === 'Q3' && e.to_marker_id === 'Q4'),
+    ).toBe(false);
+    // Q2→Q3 (depth-2, but Q3→Q4 has no length) must remain held.
+    expect(
+      t1?.cleared_edges.some((e) => e.from_marker_id === 'Q2' && e.to_marker_id === 'Q3'),
+    ).toBe(true);
+  });
+
+  it('cycle guard: train holding every edge of a small loop terminates and releases correctly', () => {
+    /* Three-edge loop, 100mm each, 250mm train. T1 holds all 3 edges (the whole
+     * loop), acquired across two laps. The backward walk from current_edge
+     * R2→R3 finds R1→R2 at depth-1 (cumulative=50<250). R3→R1 is the current
+     * edge (excluded). The visited-marker guard on R1 prevents re-entering R3→R1
+     * via R3. The loop terminates; cleared_edges is unchanged.
+     *
+     * This test asserts termination and correctness, not a specific release. */
+    const THREE_LOOP: Layout = {
+      name: 'three-loop',
+      markers: [
+        { id: 'R1', kind: 'block_boundary' },
+        { id: 'R2', kind: 'block_boundary' },
+        { id: 'R3', kind: 'block_boundary' },
+      ],
+      edges: [
+        { from_marker_id: 'R1', to_marker_id: 'R2', estimated_length_mm: 100 },
+        { from_marker_id: 'R2', to_marker_id: 'R3', estimated_length_mm: 100 },
+        { from_marker_id: 'R3', to_marker_id: 'R1', estimated_length_mm: 100 },
+      ],
+      junctions: [],
+    };
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const layout = new LayoutState(THREE_LOOP, { now: () => 0 });
+    const sched = new Scheduler(registry, layout, { now: () => 0 });
+    seedIdentityTags(sched, ['R1', 'R2', 'R3']);
+
+    /* Schedule R1→R3: transit R1→R2→R3. Head on R2→R3 (progress_index=1).
+     * Forward edges = [R2→R3]. Backward walk from R2:
+     *   depth-1: R1→R2 (to_marker=R2, not forward) — cumulative=50 < 250.
+     *   depth-1's from = R1. boundary = R1.
+     *   depth-2: look for edge with to_marker=R1, not forward. R3→R1 has
+     *     to_marker=R1 and is not in the transit. cumulative=50+100=150 < 250.
+     *   depth-2's from = R3. boundary = R3. R3 not yet visited.
+     *   depth-3: look for edge with to_marker=R3, not forward. R2→R3 IS
+     *     current_edge (in forwardEdgeKeys). No other. chainEdge=undefined. break.
+     * Nothing releases; the call returns normally. */
+    registerLongTrain(sched, 'T1', 250);
+    sched.assignSchedule('T1', 'r1', ['R1', 'R3']);
+    sched.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'R1' } });
+    sched.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'R2' } });
+
+    /* Inject R3→R1 into cleared_edges by having T1 hold it as a forward-horizon
+     * edge — this simulates the train holding the whole loop. After crossing R2
+     * (progress_index=1), extendClearanceHorizon would try to add the horizon
+     * edge at index 2 (R2→R3 = progress_index edge itself) — but the transit
+     * only has 2 edges, so no more horizon is added. Force the holding by
+     * directly requesting R3→R1 clearance via clearance_request. */
+    sched.handleEvent({
+      event_type: 'clearance_request',
+      device_id: 'T1',
+      payload: {
+        train_id: 'T1',
+        next_edge: { from_marker_id: 'R3', to_marker_id: 'R1' },
+      },
+    });
+
+    const before = sched.getTrainState('T1');
+    const beforeLen = before?.cleared_edges.length ?? 0;
+    expect(beforeLen).toBeGreaterThanOrEqual(1);
+
+    // Send a status — must return without hanging.
+    const result = sched.handleEvent({
+      event_type: 'train_status',
+      device_id: 'T1',
+      payload: {
+        train_id: 'T1',
+        current_edge: { from_marker_id: 'R2', to_marker_id: 'R3' },
+        estimated_distance_from_edge_start_mm: 50,
+        speed_normalised: 0.5,
+      },
+    });
+
+    /* The call returned (no hang). Nothing releases: maximum cumulative on
+     * this 3-edge 100mm loop with 250mm train cannot reach 250 without using
+     * forward horizon edges (which are excluded). */
+    expect(result).toBeDefined();
+    expect(sched.getTrainState('T1')?.cleared_edges.length).toBe(beforeLen);
+  });
+});
+
+describe('Scheduler — retained device state', () => {
+  it('device_registered with train_length_mm includes it in the updateState effect', () => {
+    const { scheduler } = setup();
+    const effects = registerLongTrain(scheduler, 'T1', 200);
+
+    const deviceUpdate = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'update_state_snapshot' }> =>
+        e.kind === 'update_state_snapshot' && e.entity_type === 'devices' && e.entity_id === 'T1',
+    );
+    expect(deviceUpdate).toBeDefined();
+    expect((deviceUpdate?.state as { train_length_mm?: number }).train_length_mm).toBe(200);
+  });
+
+  it('device_registered without train_length_mm omits it from the updateState effect', () => {
+    const { scheduler } = setup();
+    const effects = registerTrain(scheduler, 'T1');
+
+    const deviceUpdate = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'update_state_snapshot' }> =>
+        e.kind === 'update_state_snapshot' && e.entity_type === 'devices' && e.entity_id === 'T1',
+    );
+    expect(deviceUpdate).toBeDefined();
+    expect(deviceUpdate?.state).not.toHaveProperty('train_length_mm');
+  });
+
+  it('device_registered with train_length_mm=0 omits it from the updateState effect', () => {
+    const { scheduler } = setup();
+    const effects = scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'T1',
+      payload: {
+        capabilities: ['core.controls_motion', 'core.accepts_route'],
+        train_length_mm: 0,
+      },
+    });
+
+    const deviceUpdate = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'update_state_snapshot' }> =>
+        e.kind === 'update_state_snapshot' && e.entity_type === 'devices' && e.entity_id === 'T1',
+    );
+    expect(deviceUpdate).toBeDefined();
+    expect(deviceUpdate?.state).not.toHaveProperty('train_length_mm');
+  });
+});
+
 describe('Scheduler — referential validation', () => {
   it('rejects assignSchedule when a stop references a marker not in the layout', () => {
     const { scheduler } = setup();

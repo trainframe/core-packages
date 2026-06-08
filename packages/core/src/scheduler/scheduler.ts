@@ -177,7 +177,12 @@ export class Scheduler {
       this.maybeRecordSwitchPairing(deviceId, payload);
     }
 
-    return [effects.updateState('devices', deviceId, { capabilities })];
+    const trainLengthMm = (payload as { train_length_mm?: number }).train_length_mm;
+    const deviceState =
+      typeof trainLengthMm === 'number' && trainLengthMm > 0
+        ? { capabilities, train_length_mm: trainLengthMm }
+        : { capabilities };
+    return [effects.updateState('devices', deviceId, deviceState)];
   }
 
   /**
@@ -356,10 +361,11 @@ export class Scheduler {
     //
     // For trains with a known physical length (length_mm > 0), skip immediate
     // release on head arrival. The tail still occupies the section behind the
-    // head. Release is deferred until handleTrainStatus reports
-    // estimated_distance_from_edge_start_mm >= length_mm (phase-2 limitation:
-    // train must be shorter than the shortest edge it traverses; no multi-edge
-    // tail spanning is implemented).
+    // head. Release is deferred until handleTrainStatus reports progress far
+    // enough that the tail has vacated each held edge. Multi-edge spanning is
+    // supported: handleTrainStatus walks back through cleared_edges and releases
+    // every edge whose cumulative distance from the head exceeds length_mm (ADR-012
+    // refinement, ADR-016 step 5).
     //
     // SWITCHED-JUNCTION SAFETY: continuous junction protection across a switch
     // handover relies on this tail-occupancy deferral. When a train must cross
@@ -732,17 +738,20 @@ export class Scheduler {
    * Handle a `train_status` event from a length-aware train. For trains with
    * `length_mm > 0`, the head crossing a boundary marker is not sufficient to
    * release the section behind it — the tail must also have cleared. This
-   * method checks whether the tail has vacated the previous section by
-   * comparing `estimated_distance_from_edge_start_mm` against `length_mm`.
+   * method walks backward through `cleared_edges` to find every held edge
+   * whose cumulative distance from the head exceeds `length_mm`, and releases
+   * all of them in one pass.
    *
-   * When the tail clears, this filters `cleared_edges` by
-   * `to_marker_id === current_edge.from_marker_id` (i.e. releases the
-   * section whose `to` is where the head currently entered from), then
-   * retries blocked clearances so waiting peers are granted in the same call.
+   * The backward chain starts at B1 = current_edge.from_marker_id and follows
+   * the to_marker links: depth-k edge is the unique cleared edge whose
+   * to_marker_id equals the depth-(k-1) edge's from_marker_id. Cumulative
+   * distance at depth k is estimated_distance_from_edge_start_mm plus the sum
+   * of estimated_length_mm of the intervening edges at depths 1..k-1.
    *
-   * Phase-2 constraint: the implementation assumes `length_mm < shortest edge
-   * length`. Trains spanning more than one section behind the head are not
-   * supported; only the immediately-prior section is released here.
+   * Conservative hold: if an intermediate edge's estimated_length_mm is
+   * undefined, the walk stops there and deeper edges remain held. This is
+   * deliberate — the scheduler must never guess a length to release clearance
+   * (safety asymmetry: holding too long is safe, releasing too early is not).
    *
    * Point trains (length_mm undefined or 0) release on `marker_traversed`
    * (handleTrainAtMarker) and are unaffected by this method.
@@ -757,11 +766,11 @@ export class Scheduler {
     const train = this.trains.get(train_id);
     if (!train) return [];
 
-    // Deterministic station dwell. Checked before the length gate because the
-    // dwell applies to point trains too. When the dwell has elapsed, clear it
-    // and replan onward (advance the schedule pointer, plan the next leg, emit
-    // the route + grant). The parked train keeps emitting `train_status`, so a
-    // later status reliably observes the expiry.
+    /* Deterministic station dwell. Checked before the length gate because the
+     * dwell applies to point trains too. When the dwell has elapsed, clear it
+     * and replan onward (advance the schedule pointer, plan the next leg, emit
+     * the route + grant). The parked train keeps emitting `train_status`, so a
+     * later status reliably observes the expiry. */
     if (train.dwell_until !== undefined && this.now() >= train.dwell_until) {
       train.dwell_until = undefined;
       return this.advanceScheduleAndReplan(train);
@@ -773,19 +782,93 @@ export class Scheduler {
     // We need both the current edge and a distance reading.
     if (!current_edge || estimated_distance_from_edge_start_mm === undefined) return [];
 
-    // Tail has cleared the previous section when the head is at least
-    // `length_mm` into the current edge.
-    if (estimated_distance_from_edge_start_mm < train.length_mm) return [];
+    const edgesToRelease = this.collectTailReleases(
+      train,
+      current_edge,
+      estimated_distance_from_edge_start_mm,
+    );
+    if (edgesToRelease.length === 0) return [];
 
-    // The previous section's `to_marker_id` equals the current edge's
-    // `from_marker_id` — release it.
-    const previousToMarker = current_edge.from_marker_id;
-    const before = train.cleared_edges.length;
-    train.cleared_edges = train.cleared_edges.filter((e) => e.to_marker_id !== previousToMarker);
-    const released = before - train.cleared_edges.length;
-    if (released === 0) return [];
-
+    train.cleared_edges = train.cleared_edges.filter(
+      (e) => !edgesToRelease.some((r) => edgesEqual(r, e)),
+    );
     return [this.clearanceStateEffect(train), ...this.retryBlockedClearances()];
+  }
+
+  /**
+   * Walk backward through `cleared_edges` from the current boundary and
+   * collect every edge whose cumulative distance from the head has reached
+   * the train's physical length — those edges are now free of the tail.
+   *
+   * Depth-k boundary is reached by following `to_marker_id` links backward
+   * through previously-traversed edges, excluding forward-transit edges
+   * (which are ahead, not behind the head). The visited-marker guard plus a
+   * max-iteration bound of `cleared_edges.length` ensure termination on cyclic
+   * topologies where the train holds every edge of a small loop.
+   *
+   * Conservative hold: if an intermediate edge's `estimated_length_mm` is
+   * undefined the walk stops there. Deeper edges remain held. This asymmetry
+   * is deliberate: holding too long is safe, releasing too early is not.
+   */
+  private collectTailReleases(
+    train: TrainState,
+    currentEdge: { from_marker_id: string; to_marker_id: string },
+    distanceMm: number,
+  ): ReadonlyArray<EdgeRef> {
+    const lengthMm = train.length_mm ?? 0;
+    const result: EdgeRef[] = [];
+    const forwardEdgeKeys = this.buildForwardEdgeKeys(train, currentEdge);
+
+    const visitedMarkers = new Set<string>();
+    let boundaryMarker = currentEdge.from_marker_id;
+    let cumulative = distanceMm;
+
+    for (let depth = 0; depth < train.cleared_edges.length; depth++) {
+      if (visitedMarkers.has(boundaryMarker)) break;
+      visitedMarkers.add(boundaryMarker);
+
+      const chainEdge = train.cleared_edges.find(
+        (e) =>
+          e.to_marker_id === boundaryMarker &&
+          !forwardEdgeKeys.has(`${e.from_marker_id}->${e.to_marker_id}`),
+      );
+      if (!chainEdge) break;
+
+      if (cumulative >= lengthMm) result.push(chainEdge);
+
+      /* Conservative hold: unknown edge length → cannot compute the cumulative
+       * to the next boundary; stop here. Holding deeper edges is always safe. */
+      const edgeLength = this.layout.findEdge(
+        chainEdge.from_marker_id,
+        chainEdge.to_marker_id,
+      )?.estimated_length_mm;
+      if (edgeLength === undefined) break;
+
+      cumulative += edgeLength;
+      boundaryMarker = chainEdge.from_marker_id;
+    }
+
+    return result;
+  }
+
+  /**
+   * Build the set of edge keys that are in the forward transit (at or ahead of
+   * the current progress index) plus the current edge. The backward tail-release
+   * walk must exclude these to avoid mistaking a future-horizon edge for a
+   * past-traversed one on cyclic topologies.
+   */
+  private buildForwardEdgeKeys(
+    train: TrainState,
+    currentEdge: { from_marker_id: string; to_marker_id: string },
+  ): ReadonlySet<string> {
+    const keys = new Set<string>();
+    keys.add(`${currentEdge.from_marker_id}->${currentEdge.to_marker_id}`);
+    if (!train.transit) return keys;
+    for (let i = train.transit.progress_index; i < train.transit.edges.length; i++) {
+      const fe = train.transit.edges[i];
+      if (fe) keys.add(`${fe.from_marker_id}->${fe.to_marker_id}`);
+    }
+    return keys;
   }
 
   /**
