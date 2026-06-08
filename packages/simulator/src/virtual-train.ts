@@ -72,6 +72,11 @@ interface TrainEvent {
   payload: unknown;
 }
 
+/* Maximum number of completed edges kept in traversal history. Older entries
+   are dropped when this cap is exceeded. 32 edges covers even long trains on
+   the shortest reasonable layouts. */
+const MAX_TRAVERSAL_HISTORY = 32;
+
 /**
  * A virtual train that simulates motion along edges and emits tag_observed
  * events as it crosses markers.
@@ -86,29 +91,34 @@ export class VirtualTrain {
   private route: ReadonlyArray<RouteEdge> = [];
   private route_index = 0;
   private clearance_limit_marker_id: string | null = null;
-  // Once we've emitted the to_marker for the current edge, don't emit it again
-  // on subsequent ticks while parked. Reset on every edge transition.
+  /* Once we've emitted the to_marker for the current edge, don't emit it
+     again on subsequent ticks while parked. Reset on every edge transition. */
   private emitted_current_edge_end = false;
-  // Per-edge sticky flag for the overshoot mishap. Once the brake fails to
-  // engage on this edge, it stays failed until the train transitions to the
-  // next edge. See ADR-006.
+  /* Per-edge sticky flag for the overshoot mishap. Once the brake fails to
+     engage on this edge, it stays failed until the train transitions to the
+     next edge. See ADR-006. */
   private overshoot_engaged_this_edge = false;
   // Accumulator for the train_status emission cadence.
   private ms_since_status = 0;
   private route_id: string | null = null;
   private route_progress_edge_index = 0;
-  // Exploration mode (ADR-015): when true the train drives forward across
-  // markers indefinitely, choosing the next edge from its own layout (the
-  // physical rails) rather than a route, until released by revoke/emergency.
+  /* Exploration mode (ADR-015): when true the train drives forward across
+     markers indefinitely, choosing the next edge from its own layout (the
+     physical rails) rather than a route, until released by revoke/emergency. */
   private exploring = false;
-  // Power state. A powered-off train is INERT (does not move; ignores
-  // commands) and SILENT (emits nothing, including any already-scheduled
-  // detection-latency callbacks). It stays physically on the track — its
-  // edge, distance, route, and clearance limit are all retained, frozen — so
-  // power-on resumes exactly where it stopped. This is distinct from despawn:
-  // a powered-off train remains in the simulation and never emits
-  // `device_disconnected`, so a server on the bus keeps its block reserved.
+  /* Power state. A powered-off train is INERT (does not move; ignores
+     commands) and SILENT (emits nothing, including any already-scheduled
+     detection-latency callbacks). It stays physically on the track — its
+     edge, distance, route, and clearance limit are all retained, frozen — so
+     power-on resumes exactly where it stopped. This is distinct from despawn:
+     a powered-off train remains in the simulation and never emits
+     `device_disconnected`, so a server on the bus keeps its block reserved. */
   private powered = true;
+  /* Ordered list of edges the head has fully traversed, oldest first.
+     Capped at MAX_TRAVERSAL_HISTORY; oldest entry is dropped when the cap
+     is exceeded. Physical fact — persists across route re-assignment.
+     Starts empty at spawn; grows at each edge-transition site. */
+  private readonly traversal_history: RouteEdge[] = [];
 
   constructor(
     private readonly device_id: string,
@@ -130,6 +140,19 @@ export class VirtualTrain {
   placeAt(edge: RouteEdge, distance_mm = 0): void {
     this.current_edge = edge;
     this.distance_into_edge_mm = distance_mm;
+  }
+
+  /* Record that the head has just fully traversed `edge`. Maintains the cap:
+     once the history reaches MAX_TRAVERSAL_HISTORY the oldest entry is
+     dropped so the array never grows beyond the bound. */
+  private recordCompletedEdge(edge: RouteEdge): void {
+    this.traversal_history.push({
+      from_marker_id: edge.from_marker_id,
+      to_marker_id: edge.to_marker_id,
+    });
+    if (this.traversal_history.length > MAX_TRAVERSAL_HISTORY) {
+      this.traversal_history.shift();
+    }
   }
 
   /** Apply commands sent by the scheduler. */
@@ -172,10 +195,10 @@ export class VirtualTrain {
       case 'grant_clearance': {
         const { limit_marker_id } = payload as { limit_marker_id: string };
         this.clearance_limit_marker_id = limit_marker_id;
-        // If parked at end of current edge (= old limit), transition to next.
-        // Use the real edge length, not a hardcoded 200 — short edges would
-        // otherwise leave a parked train unable to advance when its
-        // extension grant arrives.
+        /* If parked at end of current edge (= old limit), transition to next.
+           Use the real edge length, not a hardcoded 200 — short edges would
+           otherwise leave a parked train unable to advance when its
+           extension grant arrives. */
         if (
           this.current_edge &&
           this.distance_into_edge_mm >= this.currentEdgeLength() &&
@@ -184,6 +207,7 @@ export class VirtualTrain {
           const at_marker = this.current_edge.to_marker_id;
           const next_edge = this.route[this.route_index + 1];
           if (next_edge && next_edge.from_marker_id === at_marker) {
+            this.recordCompletedEdge(this.current_edge);
             this.route_index += 1;
             this.current_edge = next_edge;
             this.distance_into_edge_mm = 0;
@@ -385,6 +409,9 @@ export class VirtualTrain {
       this.target_velocity_mm_s = 0;
       return;
     }
+    if (this.current_edge !== null) {
+      this.recordCompletedEdge(this.current_edge);
+    }
     this.current_edge = next;
     this.distance_into_edge_mm = 0;
     this.emitted_current_edge_end = false;
@@ -416,6 +443,11 @@ export class VirtualTrain {
   }
 
   private transitionToNextEdge(at_marker_id: string): void {
+    /* Record the edge we're leaving before reassigning current_edge — covers
+       both the route-advance and end-of-route (→ null) branches. */
+    if (this.current_edge !== null) {
+      this.recordCompletedEdge(this.current_edge);
+    }
     const next_edge = this.route[this.route_index + 1];
     if (next_edge && next_edge.from_marker_id === at_marker_id) {
       this.route_index += 1;
@@ -518,5 +550,55 @@ export class VirtualTrain {
   }
   getCurrentEdge(): RouteEdge | null {
     return this.current_edge;
+  }
+
+  /**
+   * Return the point on the rail `offset_mm` behind the head, walking
+   * backwards through the traversal history. Pure query: no state mutation.
+   *
+   * - No current edge (parked after route end) → null.
+   * - offset_mm <= 0 → head position itself.
+   * - offset <= distance_into_edge_mm → same edge, moved back by offset.
+   * - Otherwise walk history newest-first consuming each edge's length; if
+   *   the remaining offset fits inside an historical edge, return that point.
+   * - History exhausted → clamp: start of oldest known edge (or start of
+   *   current edge when history is empty). Mirrors the UI's spawn-time
+   *   clamp-at-edge-start behaviour.
+   */
+  getTrailingPosition(
+    offset_mm: number,
+  ): { edge: RouteEdge; distance_into_edge_mm: number } | null {
+    if (this.current_edge === null) return null;
+    if (offset_mm <= 0) {
+      return { edge: this.current_edge, distance_into_edge_mm: this.distance_into_edge_mm };
+    }
+    if (offset_mm <= this.distance_into_edge_mm) {
+      return {
+        edge: this.current_edge,
+        distance_into_edge_mm: this.distance_into_edge_mm - offset_mm,
+      };
+    }
+
+    /* Walk history from newest to oldest, consuming offset as we go. */
+    let remaining = offset_mm - this.distance_into_edge_mm;
+    const len = this.traversal_history.length;
+    for (let i = len - 1; i >= 0; i--) {
+      const histEdge = this.traversal_history[i];
+      if (histEdge === undefined) continue;
+      const histLen =
+        this.layout.findEdge(histEdge.from_marker_id, histEdge.to_marker_id)?.estimated_length_mm ??
+        200;
+      if (remaining <= histLen) {
+        return { edge: histEdge, distance_into_edge_mm: histLen - remaining };
+      }
+      remaining -= histLen;
+    }
+
+    /* History exhausted: clamp to the start of the oldest known position. */
+    const oldest = this.traversal_history[0];
+    if (oldest !== undefined) {
+      return { edge: oldest, distance_into_edge_mm: 0 };
+    }
+    return { edge: this.current_edge, distance_into_edge_mm: 0 };
   }
 }
