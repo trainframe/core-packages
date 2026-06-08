@@ -154,4 +154,105 @@ describe('RegisteredDevicesView (vanilla, no React)', () => {
     expect(view.getState().size).toBe(2);
     unsub2();
   });
+
+  it('surfaces train_length_mm when a positive finite value is present in the payload', () => {
+    const { client, view } = setup();
+    const unsub = view.subscribe(() => {});
+
+    client.deliver({
+      topic: 'railway/state/devices/T1',
+      payload: new TextEncoder().encode(
+        JSON.stringify({ capabilities: ['core.controls_motion'], train_length_mm: 120 }),
+      ),
+    });
+
+    expect(view.getState().get('T1')?.train_length_mm).toBe(120);
+    unsub();
+  });
+
+  it('omits train_length_mm when it is zero or negative', () => {
+    const { client, view } = setup();
+    const unsub = view.subscribe(() => {});
+
+    client.deliver({
+      topic: 'railway/state/devices/T1',
+      payload: new TextEncoder().encode(
+        JSON.stringify({ capabilities: ['core.controls_motion'], train_length_mm: 0 }),
+      ),
+    });
+    client.deliver({
+      topic: 'railway/state/devices/T2',
+      payload: new TextEncoder().encode(
+        JSON.stringify({ capabilities: ['core.controls_motion'], train_length_mm: -5 }),
+      ),
+    });
+
+    expect(view.getState().get('T1')?.train_length_mm).toBeUndefined();
+    expect(view.getState().get('T2')?.train_length_mm).toBeUndefined();
+    unsub();
+  });
+
+  it('omits train_length_mm when it is non-finite (Infinity, NaN)', () => {
+    const { client, view } = setup();
+    const unsub = view.subscribe(() => {});
+
+    /* JSON.stringify silently converts Infinity → null, NaN → null; test a
+     * defensive payload by hand to exercise the isFinite guard. */
+    client.deliver({
+      topic: 'railway/state/devices/T1',
+      payload: new TextEncoder().encode(
+        '{"capabilities":["core.controls_motion"],"train_length_mm":null}',
+      ),
+    });
+
+    expect(view.getState().get('T1')?.train_length_mm).toBeUndefined();
+    unsub();
+  });
+
+  it('notifies listener and updates state when only train_length_mm changes', () => {
+    const { client, view } = setup();
+    const listener = vi.fn();
+    const unsub = view.subscribe(listener);
+
+    /* Initial registration — no length. */
+    deliverDevice(client, 'T1', ['core.controls_motion']);
+    const callsAfterFirst = listener.mock.calls.length;
+
+    /* Re-deliver with a length added — capabilities unchanged. */
+    client.deliver({
+      topic: 'railway/state/devices/T1',
+      payload: new TextEncoder().encode(
+        JSON.stringify({ capabilities: ['core.controls_motion'], train_length_mm: 200 }),
+      ),
+    });
+
+    expect(listener.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+    expect(view.getState().get('T1')?.train_length_mm).toBe(200);
+    unsub();
+  });
+
+  it('does not notify when an identical snapshot (same capabilities AND same length) is re-delivered', () => {
+    const { client, view } = setup();
+    const listener = vi.fn();
+    const unsub = view.subscribe(listener);
+
+    client.deliver({
+      topic: 'railway/state/devices/T1',
+      payload: new TextEncoder().encode(
+        JSON.stringify({ capabilities: ['core.controls_motion'], train_length_mm: 120 }),
+      ),
+    });
+    const callsBefore = listener.mock.calls.length;
+
+    /* Re-deliver the exact same payload. */
+    client.deliver({
+      topic: 'railway/state/devices/T1',
+      payload: new TextEncoder().encode(
+        JSON.stringify({ capabilities: ['core.controls_motion'], train_length_mm: 120 }),
+      ),
+    });
+
+    expect(listener.mock.calls.length).toBe(callsBefore);
+    unsub();
+  });
 });

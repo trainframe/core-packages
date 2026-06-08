@@ -6,6 +6,8 @@ import {
   type VisualiserMarker,
   useLayoutState,
 } from '../state/use-layout-state.js';
+import { type RegisteredDevices, useRegisteredDevices } from '../state/use-registered-devices.js';
+import { type TrainEdgeHistory, useTrainEdgeHistory } from '../state/use-train-edge-history.js';
 import { type TrainPositions, useTrainPositions } from '../state/use-train-positions.js';
 import { type TrainStatuses, useTrainStatuses } from '../state/use-train-statuses.js';
 import { trainColor, trainHue } from '../train-color.js';
@@ -654,6 +656,8 @@ export function LayoutCanvas() {
   const trains = useTrainPositions();
   const trainStatuses = useTrainStatuses();
   const clearanceMap = useClearanceState();
+  const registeredDevices = useRegisteredDevices();
+  const edgeHistory = useTrainEdgeHistory();
 
   if (!layout) {
     return (
@@ -670,6 +674,8 @@ export function LayoutCanvas() {
       trains={trains}
       trainStatuses={trainStatuses}
       clearanceMap={clearanceMap}
+      registeredDevices={registeredDevices}
+      edgeHistory={edgeHistory}
     />
   );
 }
@@ -679,6 +685,8 @@ interface LayoutSvgProps {
   readonly trains: TrainPositions;
   readonly trainStatuses: TrainStatuses;
   readonly clearanceMap: ClearanceMap;
+  readonly registeredDevices: RegisteredDevices;
+  readonly edgeHistory: TrainEdgeHistory;
 }
 
 /**
@@ -686,8 +694,15 @@ interface LayoutSvgProps {
  * the pan/zoom hooks run unconditionally (they sit below the `!layout` early
  * return, which would otherwise violate the rules-of-hooks).
  */
-function LayoutSvg({ layout, trains, trainStatuses, clearanceMap }: LayoutSvgProps) {
-  const markerPositions = computeMarkerPositions(layout);
+function LayoutSvg({
+  layout,
+  trains,
+  trainStatuses,
+  clearanceMap,
+  registeredDevices,
+  edgeHistory,
+}: LayoutSvgProps) {
+  const { markerPositions, mmToSvgScale } = computeMarkerPositions(layout);
   const edgeIndex = indexEdges(layout.edges);
   const markerTangents = buildMarkerTangents(layout.markers, layout.edges, markerPositions);
   const mergedEdges = mergeEdges(layout.edges);
@@ -814,7 +829,17 @@ function LayoutSvg({ layout, trains, trainStatuses, clearanceMap }: LayoutSvgPro
           })}
         </g>
         <g data-testid="trains">
-          {renderTrains(trains, trainStatuses, markerPositions, edgeIndex, markerTangents, f)}
+          {renderTrains(
+            trains,
+            trainStatuses,
+            markerPositions,
+            edgeIndex,
+            markerTangents,
+            registeredDevices,
+            edgeHistory,
+            mmToSvgScale,
+            f,
+          )}
         </g>
       </svg>
     </section>
@@ -831,62 +856,369 @@ const TRAIN_HALF_W = MARKER_RADIUS * 0.6;
 
 const TRAIN_SHAPE_D = trainShapeD(TRAIN_HALF_L, TRAIN_HALF_W);
 
+/* Number of samples when building the swept body polyline. */
+const BODY_SAMPLE_COUNT = 14;
+
+/** Shared icon + label elements used by both the fixed and swept render paths. */
+function trainNoseAndLabel(
+  trainId: string,
+  x: number,
+  y: number,
+  angleDeg: number,
+  fill: string,
+  stroke: string,
+  f: number,
+): JSX.Element[] {
+  return [
+    <path
+      key="nose"
+      d={TRAIN_SHAPE_D}
+      fill={fill}
+      stroke={stroke}
+      strokeWidth={1.5}
+      transform={`translate(${x},${y}) rotate(${angleDeg}) scale(${f})`}
+    />,
+    <text
+      key="label"
+      x={x}
+      y={y - (TRAIN_HALF_L + MARKER_RADIUS * 0.5) * f}
+      textAnchor="middle"
+      fontSize={11 * f}
+      fontFamily="sans-serif"
+      fill={stroke}
+    >
+      {trainId}
+    </text>,
+  ];
+}
+
 function renderTrains(
   trains: TrainPositions,
   statuses: TrainStatuses,
   markerPositions: Map<string, Point>,
   edgeIndex: Map<string, VisualiserEdge>,
   markerTangents: Map<string, Point>,
+  registeredDevices: RegisteredDevices,
+  edgeHistory: TrainEdgeHistory,
+  mmToSvgScale: number | null,
   f: number,
 ): JSX.Element[] {
   const out: JSX.Element[] = [];
   const trainIds = new Set<string>([...trains.keys(), ...statuses.keys()]);
 
   for (const trainId of trainIds) {
-    const placement = placeTrain(
+    const el = renderOneTrain(
       trainId,
       trains,
       statuses,
       markerPositions,
       edgeIndex,
       markerTangents,
+      registeredDevices,
+      edgeHistory,
+      mmToSvgScale,
+      f,
     );
-    if (!placement) continue;
-    const { x, y, angleDeg, atMarker, onEdge } = placement;
-
-    const fill = trainColor(trainId);
-    // Darker stroke: same hue but much lower lightness.
-    const hue = trainHue(trainId);
-    const stroke = `hsl(${hue}, 70%, 25%)`;
-
-    out.push(
-      <g
-        key={trainId}
-        data-train-id={trainId}
-        {...(atMarker ? { 'data-at-marker': atMarker } : {})}
-        {...(onEdge ? { 'data-on-edge': onEdge } : {})}
-      >
-        <path
-          d={TRAIN_SHAPE_D}
-          fill={fill}
-          stroke={stroke}
-          strokeWidth={1.5}
-          transform={`translate(${x},${y}) rotate(${angleDeg}) scale(${f})`}
-        />
-        <text
-          x={x}
-          y={y - (TRAIN_HALF_L + MARKER_RADIUS * 0.5) * f}
-          textAnchor="middle"
-          fontSize={11 * f}
-          fontFamily="sans-serif"
-          fill={stroke}
-        >
-          {trainId}
-        </text>
-      </g>,
-    );
+    if (el) out.push(el);
   }
   return out;
+}
+
+function renderOneTrain(
+  trainId: string,
+  trains: TrainPositions,
+  statuses: TrainStatuses,
+  markerPositions: Map<string, Point>,
+  edgeIndex: Map<string, VisualiserEdge>,
+  markerTangents: Map<string, Point>,
+  registeredDevices: RegisteredDevices,
+  edgeHistory: TrainEdgeHistory,
+  mmToSvgScale: number | null,
+  f: number,
+): JSX.Element | null {
+  const placement = placeTrain(
+    trainId,
+    trains,
+    statuses,
+    markerPositions,
+    edgeIndex,
+    markerTangents,
+  );
+  if (!placement) return null;
+  const { x, y, angleDeg, atMarker, onEdge } = placement;
+
+  const fill = trainColor(trainId);
+  /* Darker stroke: same hue but much lower lightness. */
+  const hue = trainHue(trainId);
+  const stroke = `hsl(${hue}, 70%, 25%)`;
+
+  /* Attempt a swept body when: length known, spatial scale available, and the
+   * train is mid-edge (not snapped to a marker). */
+  const trainLengthMm = registeredDevices.get(trainId)?.train_length_mm;
+  const canSweep =
+    trainLengthMm !== undefined &&
+    trainLengthMm > 0 &&
+    mmToSvgScale !== null &&
+    onEdge !== undefined;
+
+  if (canSweep) {
+    const sweptBody = buildSweptBody(
+      trainId,
+      trainLengthMm,
+      statuses,
+      edgeIndex,
+      markerPositions,
+      markerTangents,
+      edgeHistory,
+    );
+    if (sweptBody !== null) {
+      return (
+        <g
+          key={trainId}
+          data-train-id={trainId}
+          data-on-edge={onEdge}
+          data-train-length-mm={trainLengthMm}
+          {...(sweptBody.tailOnEdge !== undefined
+            ? { 'data-tail-on-edge': sweptBody.tailOnEdge }
+            : {})}
+        >
+          <path
+            d={sweptBody.bodyPathD}
+            fill="none"
+            stroke={fill}
+            strokeWidth={TRAIN_HALF_W * 2 * f}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+          {...trainNoseAndLabel(trainId, x, y, angleDeg, fill, stroke, f)}
+        </g>
+      );
+    }
+  }
+
+  return (
+    <g
+      key={trainId}
+      data-train-id={trainId}
+      {...(atMarker ? { 'data-at-marker': atMarker } : {})}
+      {...(onEdge ? { 'data-on-edge': onEdge } : {})}
+    >
+      <path
+        d={TRAIN_SHAPE_D}
+        fill={fill}
+        stroke={stroke}
+        strokeWidth={1.5}
+        transform={`translate(${x},${y}) rotate(${angleDeg}) scale(${f})`}
+      />
+      <text
+        x={x}
+        y={y - (TRAIN_HALF_L + MARKER_RADIUS * 0.5) * f}
+        textAnchor="middle"
+        fontSize={11 * f}
+        fontFamily="sans-serif"
+        fill={stroke}
+      >
+        {trainId}
+      </text>
+    </g>
+  );
+}
+
+interface SweptBodyResult {
+  /* SVG `d` attribute for the body polyline. */
+  readonly bodyPathD: string;
+  /* The `from->to` key of the previous edge when the tail extends onto it. */
+  readonly tailOnEdge?: string;
+}
+
+/** Sample `count` bezier points from t=fromT down to t=toT (head→tail). */
+function sampleBezierRange(
+  p0: Point,
+  c1: Point,
+  c2: Point,
+  p3: Point,
+  fromT: number,
+  toT: number,
+  count: number,
+): Point[] {
+  const pts: Point[] = [];
+  for (let i = 0; i < count; i++) {
+    const t = fromT - (fromT - toT) * (i / (count - 1));
+    pts.push(cubicBezierPoint(p0, c1, c2, p3, t));
+  }
+  return pts;
+}
+
+/**
+ * Build bezier controls for a directed edge, looking up positions and tangents.
+ * Returns null when either endpoint is not positioned.
+ */
+function edgeBezierForMarkers(
+  fromId: string,
+  toId: string,
+  markerPositions: Map<string, Point>,
+  markerTangents: Map<string, Point>,
+): { from: Point; to: Point; c1: Point; c2: Point } | null {
+  const from = markerPositions.get(fromId);
+  const to = markerPositions.get(toId);
+  if (!from || !to) return null;
+  const tFrom = markerTangents.get(fromId) ?? { x: 1, y: 0 };
+  const tTo = markerTangents.get(toId) ?? { x: 1, y: 0 };
+  const { c1, c2 } = edgeBezierControls(from, to, tFrom, tTo);
+  return { from, to, c1, c2 };
+}
+
+/**
+ * Build the swept body path for a train with a known positive `train_length_mm`.
+ *
+ * Strategy (t-space, linear mm→t):
+ *   head_t  = distance_mm / edge_length_mm (clamped 0..1)
+ *   tail_mm = distance_mm - train_length_mm
+ *   If tail_mm >= 0: tail sits on the current edge at tail_mm / edge_length_mm.
+ *   If tail_mm < 0: tail has spilled onto the previous edge.
+ *     spill_mm = -tail_mm; tail_t_prev = 1 - spill_mm / prev_length_mm.
+ *
+ * Samples are collected head→tail (decreasing t on the bezier curve).
+ */
+function buildSweptBody(
+  trainId: string,
+  trainLengthMm: number,
+  statuses: TrainStatuses,
+  edgeIndex: Map<string, VisualiserEdge>,
+  markerPositions: Map<string, Point>,
+  markerTangents: Map<string, Point>,
+  edgeHistory: TrainEdgeHistory,
+): SweptBodyResult | null {
+  const status = statuses.get(trainId);
+  if (!status?.current_edge) return null;
+  const { from_marker_id, to_marker_id } = status.current_edge;
+
+  const currBez = edgeBezierForMarkers(
+    from_marker_id,
+    to_marker_id,
+    markerPositions,
+    markerTangents,
+  );
+  if (!currBez) return null;
+
+  const currKey = edgeKey(status.current_edge);
+  const currLengthMm = edgeIndex.get(currKey)?.estimated_length_mm;
+  if (!currLengthMm || currLengthMm <= 0) return null;
+
+  const distanceMm = status.distance_into_edge_mm ?? 0;
+  const headT = Math.min(1, Math.max(0, distanceMm / currLengthMm));
+  const tailMm = distanceMm - trainLengthMm;
+
+  if (tailMm >= 0) {
+    const tailT = Math.min(1, Math.max(0, tailMm / currLengthMm));
+    const pts = sampleBezierRange(
+      currBez.from,
+      currBez.c1,
+      currBez.c2,
+      currBez.to,
+      headT,
+      tailT,
+      BODY_SAMPLE_COUNT,
+    );
+    return { bodyPathD: pointsToPathD(pts) };
+  }
+
+  return buildSpilledBody(
+    trainId,
+    distanceMm,
+    -tailMm,
+    headT,
+    currBez,
+    edgeIndex,
+    markerPositions,
+    markerTangents,
+    edgeHistory,
+    from_marker_id,
+  );
+}
+
+/** Handle the case where the train body spills onto the previous edge. */
+function buildSpilledBody(
+  trainId: string,
+  distanceMm: number,
+  spillMm: number,
+  headT: number,
+  currBez: { from: Point; to: Point; c1: Point; c2: Point },
+  edgeIndex: Map<string, VisualiserEdge>,
+  markerPositions: Map<string, Point>,
+  markerTangents: Map<string, Point>,
+  edgeHistory: TrainEdgeHistory,
+  fromMarkerId: string,
+): SweptBodyResult {
+  /* Clamp: sample just the current edge from head down to its start (t=0). */
+  function clampedResult(): SweptBodyResult {
+    const pts = sampleBezierRange(
+      currBez.from,
+      currBez.c1,
+      currBez.c2,
+      currBez.to,
+      headT,
+      0,
+      BODY_SAMPLE_COUNT,
+    );
+    return { bodyPathD: pointsToPathD(pts) };
+  }
+
+  const history = edgeHistory.get(trainId) ?? [];
+  /* Take only the most-recent completed edge. If it doesn't connect to the
+   * current edge's start marker, the history is stale or from a different
+   * topology position — clamp rather than draw a ghost tail. */
+  const prevEdgeRef = history[0];
+  if (!prevEdgeRef || prevEdgeRef.to_marker_id !== fromMarkerId) return clampedResult();
+
+  const prevKey = edgeKey(prevEdgeRef);
+  const prevLengthMm = edgeIndex.get(prevKey)?.estimated_length_mm;
+  const prevBez = edgeBezierForMarkers(
+    prevEdgeRef.from_marker_id,
+    prevEdgeRef.to_marker_id,
+    markerPositions,
+    markerTangents,
+  );
+  if (!prevBez || !prevLengthMm || prevLengthMm <= 0) return clampedResult();
+
+  /* tail_t on prev edge measured from its start. */
+  const tailTPrev = Math.min(1, Math.max(0, (prevLengthMm - spillMm) / prevLengthMm));
+
+  /* Allocate samples proportionally between the two edges. */
+  const totalBodyMm = distanceMm + spillMm;
+  const currFrac = totalBodyMm > 0 ? distanceMm / totalBodyMm : 0.5;
+  const currSamples = Math.max(2, Math.round(BODY_SAMPLE_COUNT * currFrac));
+  const prevSamples = Math.max(2, BODY_SAMPLE_COUNT - currSamples + 1);
+
+  const pts: Point[] = sampleBezierRange(
+    currBez.from,
+    currBez.c1,
+    currBez.c2,
+    currBez.to,
+    headT,
+    0,
+    currSamples,
+  );
+  /* t=1 is the junction marker (already in pts); continue from just before it. */
+  for (let i = 1; i < prevSamples; i++) {
+    const t = 1 - (1 - tailTPrev) * (i / (prevSamples - 1));
+    pts.push(cubicBezierPoint(prevBez.from, prevBez.c1, prevBez.c2, prevBez.to, t));
+  }
+
+  return { bodyPathD: pointsToPathD(pts), tailOnEdge: prevKey };
+}
+
+/** Convert a sequence of 2D points into an SVG `M…L…` path string. */
+function pointsToPathD(points: ReadonlyArray<Point>): string {
+  if (points.length === 0) return '';
+  const first = points[0];
+  if (first === undefined) return '';
+  const parts: string[] = [`M ${first.x} ${first.y}`];
+  for (let i = 1; i < points.length; i++) {
+    const p = points[i];
+    if (p !== undefined) parts.push(`L ${p.x} ${p.y}`);
+  }
+  return parts.join(' ');
 }
 
 interface TrainPlacement extends Point {
@@ -948,13 +1280,19 @@ function indexEdges(edges: ReadonlyArray<VisualiserEdge>): Map<string, Visualise
   return out;
 }
 
-function computeMarkerPositions(layout: VisualiserLayout): Map<string, Point> {
-  const out = new Map<string, Point>();
+interface MarkerPositionResult {
+  readonly markerPositions: Map<string, Point>;
+  /* mm→SVG-world-unit scale factor; null for auto-circle layouts (no spatial coords). */
+  readonly mmToSvgScale: number | null;
+}
+
+function computeMarkerPositions(layout: VisualiserLayout): MarkerPositionResult {
   const spatial = layout.markers.filter((m) => m.position !== undefined);
   if (spatial.length === layout.markers.length && spatial.length > 0) {
     return scaleSpatialPositions(layout.markers);
   }
-  // Auto-place: evenly spaced around a circle, in marker-array order.
+  /* Auto-place: evenly spaced around a circle, in marker-array order. */
+  const out = new Map<string, Point>();
   const n = layout.markers.length;
   layout.markers.forEach((marker, i) => {
     const angle = (i / Math.max(n, 1)) * Math.PI * 2 - Math.PI / 2;
@@ -963,10 +1301,10 @@ function computeMarkerPositions(layout: VisualiserLayout): Map<string, Point> {
       y: CENTER + Math.sin(angle) * RADIUS,
     });
   });
-  return out;
+  return { markerPositions: out, mmToSvgScale: null };
 }
 
-function scaleSpatialPositions(markers: ReadonlyArray<VisualiserMarker>): Map<string, Point> {
+function scaleSpatialPositions(markers: ReadonlyArray<VisualiserMarker>): MarkerPositionResult {
   const out = new Map<string, Point>();
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
@@ -992,5 +1330,5 @@ function scaleSpatialPositions(markers: ReadonlyArray<VisualiserMarker>): Map<st
       y: m.position.y_mm * scale + offsetY,
     });
   }
-  return out;
+  return { markerPositions: out, mmToSvgScale: scale };
 }

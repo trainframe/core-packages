@@ -27,6 +27,12 @@ import type { BrokerMessage, BrokerSubscriber } from '../broker/client.js';
 export interface RegisteredDevice {
   readonly device_id: string;
   readonly capabilities: ReadonlyArray<string>;
+  /**
+   * Physical length of the train in mm. Present only when the device declared
+   * `core.controls_motion` and the retained state includes a positive finite
+   * `train_length_mm` value (ADR-016).
+   */
+  readonly train_length_mm?: number;
 }
 
 export type RegisteredDevices = ReadonlyMap<string, RegisteredDevice>;
@@ -79,9 +85,22 @@ export class RegisteredDevicesView {
       this.state = next;
     } else {
       const existing = prev.get(deviceId);
-      if (existing && capabilitiesEqual(existing.capabilities, parsed.capabilities)) return;
+      if (
+        existing &&
+        capabilitiesEqual(existing.capabilities, parsed.capabilities) &&
+        existing.train_length_mm === parsed.train_length_mm
+      ) {
+        return;
+      }
       const next = new Map(prev);
-      next.set(deviceId, { device_id: deviceId, capabilities: parsed.capabilities });
+      const device: RegisteredDevice = {
+        device_id: deviceId,
+        capabilities: parsed.capabilities,
+        ...(parsed.train_length_mm !== undefined
+          ? { train_length_mm: parsed.train_length_mm }
+          : {}),
+      };
+      next.set(deviceId, device);
       this.state = next;
     }
     for (const listener of this.listeners) listener();
@@ -96,7 +115,12 @@ function capabilitiesEqual(a: ReadonlyArray<string>, b: ReadonlyArray<string>): 
   return true;
 }
 
-function decodeDevicePayload(payload: Uint8Array): { capabilities: ReadonlyArray<string> } | null {
+interface DecodedDevicePayload {
+  readonly capabilities: ReadonlyArray<string>;
+  readonly train_length_mm?: number;
+}
+
+function decodeDevicePayload(payload: Uint8Array): DecodedDevicePayload | null {
   let text: string;
   try {
     text = new TextDecoder().decode(payload);
@@ -113,9 +137,17 @@ function decodeDevicePayload(payload: Uint8Array): { capabilities: ReadonlyArray
   if (!parsed || typeof parsed !== 'object' || !('capabilities' in parsed)) {
     return null;
   }
-  const caps = (parsed as { capabilities: unknown }).capabilities;
+  const obj = parsed as Record<string, unknown>;
+  const caps = obj.capabilities;
   if (!Array.isArray(caps) || !caps.every((c): c is string => typeof c === 'string')) {
     return null;
   }
-  return { capabilities: caps };
+  /* Parse train_length_mm defensively: must be a positive finite number. */
+  const rawLen = obj.train_length_mm;
+  const trainLengthMm =
+    typeof rawLen === 'number' && Number.isFinite(rawLen) && rawLen > 0 ? rawLen : undefined;
+  return {
+    capabilities: caps,
+    ...(trainLengthMm !== undefined ? { train_length_mm: trainLengthMm } : {}),
+  };
 }

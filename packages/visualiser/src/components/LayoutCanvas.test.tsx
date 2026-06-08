@@ -762,3 +762,188 @@ describe('LayoutCanvas — zoom spreads markers at constant screen size', () => 
     expect(toScreen(Number(rail?.getAttribute('stroke-width')), size)).toBeCloseTo(6, 5);
   });
 });
+
+/*
+ * Spatial layout used by the length-aware rendering tests.  All markers have
+ * x_mm / y_mm positions so `scaleSpatialPositions` fires and mmToSvgScale is
+ * non-null, enabling the swept-body path.
+ *
+ * Layout: M1→M2→M3→M4→M1, a simple directed loop.
+ * Each edge is 200 mm; spatial coords spread the markers widely enough that
+ * the scale factor is well-defined.
+ */
+const SPATIAL_LOOP_LAYOUT = {
+  name: 'spatial-loop',
+  markers: [
+    { id: 'M1', kind: 'block_boundary', position: { x_mm: 0, y_mm: 0 } },
+    { id: 'M2', kind: 'block_boundary', position: { x_mm: 200, y_mm: 0 } },
+    { id: 'M3', kind: 'block_boundary', position: { x_mm: 200, y_mm: 200 } },
+    { id: 'M4', kind: 'block_boundary', position: { x_mm: 0, y_mm: 200 } },
+  ],
+  edges: [
+    { from_marker_id: 'M1', to_marker_id: 'M2', estimated_length_mm: 200 },
+    { from_marker_id: 'M2', to_marker_id: 'M3', estimated_length_mm: 200 },
+    { from_marker_id: 'M3', to_marker_id: 'M4', estimated_length_mm: 200 },
+    { from_marker_id: 'M4', to_marker_id: 'M1', estimated_length_mm: 200 },
+  ],
+  junctions: [],
+};
+
+describe('LayoutCanvas — length-aware (ADR-016) rendering', () => {
+  it('parses train_length_mm from the device retained state into the registered-devices hook', async () => {
+    /* This is a state-level test: deliver a device payload with train_length_mm
+     * and verify the group carries the data attribute that the render function
+     * sets only when the field is present and positive. */
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/spatial-loop', SPATIAL_LOOP_LAYOUT));
+
+    /* Device retained state: T1 has train_length_mm = 120. */
+    act(() =>
+      deliverState(client, 'railway/state/devices/T1', {
+        capabilities: ['core.controls_motion'],
+        train_length_mm: 120,
+      }),
+    );
+    /* Place the train mid-edge so the swept body can render. */
+    act(() =>
+      deliverEvent(client, 'railway/events/train_status/T1', {
+        train_id: 'T1',
+        current_edge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+        estimated_distance_from_edge_start_mm: 150,
+        speed_normalised: 0.5,
+      }),
+    );
+
+    const trainGroup = screen.getByTestId('trains').querySelector('[data-train-id="T1"]');
+    /* The data-train-length-mm attribute is set only when the device payload
+     * was parsed and a positive length surfaced to the renderer. */
+    expect(trainGroup?.getAttribute('data-train-length-mm')).toBe('120');
+  });
+
+  it('renders a swept body path and no data-tail-on-edge when tail stays on current edge', () => {
+    /* Train length 120 mm, on a 200 mm edge, 150 mm into it.
+     * Tail is at 150-120 = 30 mm into M1→M2 — still on the same edge. */
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/spatial-loop', SPATIAL_LOOP_LAYOUT));
+    act(() =>
+      deliverState(client, 'railway/state/devices/T1', {
+        capabilities: ['core.controls_motion'],
+        train_length_mm: 120,
+      }),
+    );
+    act(() =>
+      deliverEvent(client, 'railway/events/train_status/T1', {
+        train_id: 'T1',
+        current_edge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+        estimated_distance_from_edge_start_mm: 150,
+        speed_normalised: 0.5,
+      }),
+    );
+
+    const trainGroup = screen.getByTestId('trains').querySelector('[data-train-id="T1"]');
+    /* Swept body: a <path> with fill="none" is the body stroke. */
+    const bodyPath = trainGroup?.querySelector('path[fill="none"]');
+    expect(bodyPath).not.toBeNull();
+    expect(bodyPath?.getAttribute('d')).toMatch(/^M /);
+    /* Pointed nose: a filled <path> (not fill="none") inside the same group. */
+    const nosePath = trainGroup?.querySelector('path:not([fill="none"])');
+    expect(nosePath).not.toBeNull();
+    expect(nosePath?.getAttribute('d')).toBeTruthy();
+    /* Label: a <text> element showing the train ID. */
+    const label = trainGroup?.querySelector('text');
+    expect(label).not.toBeNull();
+    expect(label?.textContent).toBe('T1');
+    /* Tail has not crossed into the previous edge. */
+    expect(trainGroup?.hasAttribute('data-tail-on-edge')).toBe(false);
+  });
+
+  it('sets data-tail-on-edge when the body spills onto the previous edge', () => {
+    /* Train length 120 mm, on a 200 mm edge, only 60 mm in.
+     * Tail is at 60-120 = -60 mm → spills 60 mm onto the previous edge M4→M1.
+     * History is seeded by a marker_traversed event with inferred_edge M4→M1. */
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/spatial-loop', SPATIAL_LOOP_LAYOUT));
+    act(() =>
+      deliverState(client, 'railway/state/devices/T1', {
+        capabilities: ['core.controls_motion'],
+        train_length_mm: 120,
+      }),
+    );
+    /* Seed history: crossing M1 with inferred_edge = M4→M1 records that the
+     * train completed that edge just before arriving on M1→M2. */
+    act(() =>
+      deliverEvent(client, 'railway/events/marker_traversed/T1', {
+        train_id: 'T1',
+        marker_id: 'M1',
+        inferred_edge: { from_marker_id: 'M4', to_marker_id: 'M1' },
+      }),
+    );
+    act(() =>
+      deliverEvent(client, 'railway/events/train_status/T1', {
+        train_id: 'T1',
+        current_edge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+        estimated_distance_from_edge_start_mm: 60,
+        speed_normalised: 0.3,
+      }),
+    );
+
+    const trainGroup = screen.getByTestId('trains').querySelector('[data-train-id="T1"]');
+    expect(trainGroup?.getAttribute('data-tail-on-edge')).toBe('M4->M1');
+    /* Body path still present. */
+    const bodyPath = trainGroup?.querySelector('path[fill="none"]');
+    expect(bodyPath).not.toBeNull();
+  });
+
+  it('clamps the body to the current edge when history is missing — no crash, no data-tail-on-edge', () => {
+    /* Same geometry as above but no marker_traversed seeding history. */
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/spatial-loop', SPATIAL_LOOP_LAYOUT));
+    act(() =>
+      deliverState(client, 'railway/state/devices/T1', {
+        capabilities: ['core.controls_motion'],
+        train_length_mm: 120,
+      }),
+    );
+    act(() =>
+      deliverEvent(client, 'railway/events/train_status/T1', {
+        train_id: 'T1',
+        current_edge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+        estimated_distance_from_edge_start_mm: 60,
+        speed_normalised: 0.3,
+      }),
+    );
+
+    const trainGroup = screen.getByTestId('trains').querySelector('[data-train-id="T1"]');
+    /* Body is clamped — no tail attribute. */
+    expect(trainGroup?.hasAttribute('data-tail-on-edge')).toBe(false);
+    /* A swept body path is still rendered (clamped to edge start). */
+    const bodyPath = trainGroup?.querySelector('path[fill="none"]');
+    expect(bodyPath).not.toBeNull();
+  });
+
+  it('renders the unchanged fixed icon for a point train (regression — no train_length_mm)', () => {
+    /* A train with no device-state entry should fall back to the classic icon. */
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/spatial-loop', SPATIAL_LOOP_LAYOUT));
+    act(() =>
+      deliverEvent(client, 'railway/events/train_status/T_POINT', {
+        train_id: 'T_POINT',
+        current_edge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+        estimated_distance_from_edge_start_mm: 100,
+        speed_normalised: 0.5,
+      }),
+    );
+
+    const trainGroup = screen.getByTestId('trains').querySelector('[data-train-id="T_POINT"]');
+    expect(trainGroup).not.toBeNull();
+    /* Fixed icon: a path with a filled shape (no fill="none" body stroke). */
+    const filledPath = trainGroup?.querySelector('path:not([fill="none"])');
+    expect(filledPath).not.toBeNull();
+    expect(filledPath?.getAttribute('d')).toBeTruthy();
+    /* Classic attribute set: data-on-edge, no data-train-length-mm. */
+    expect(trainGroup?.getAttribute('data-on-edge')).toBe('M1->M2');
+    expect(trainGroup?.hasAttribute('data-train-length-mm')).toBe(false);
+    /* No swept body path. */
+    expect(trainGroup?.querySelector('path[fill="none"]')).toBeNull();
+  });
+});
