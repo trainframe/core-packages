@@ -1107,6 +1107,38 @@ describe('Scheduler — tag resolution', () => {
     expect((traversed?.payload as { marker_id: string }).marker_id).toBe('M1');
   });
 
+  it('marker_traversed carries inferred_edge from the second traversal onward (ADR-016)', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+
+    const firstEffects = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    const first = firstEffects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
+        e.kind === 'publish_event' && e.event_type === 'marker_traversed',
+    );
+    /* No previous marker yet — the field must be absent, not null. */
+    expect(first?.payload).not.toHaveProperty('inferred_edge');
+
+    const secondEffects = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+    const second = secondEffects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
+        e.kind === 'publish_event' && e.event_type === 'marker_traversed',
+    );
+    expect(
+      (second?.payload as { inferred_edge?: { from_marker_id: string; to_marker_id: string } })
+        .inferred_edge,
+    ).toEqual({ from_marker_id: 'M1', to_marker_id: 'M2' });
+  });
+
   it('derives a vehicle_identified event when a trackside reader sees a vehicle tag', () => {
     const { scheduler } = setup();
     // Register a yard reader (identifies_vehicles) and a vehicle tag bound

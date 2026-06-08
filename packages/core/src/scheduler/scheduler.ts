@@ -404,12 +404,21 @@ export class Scheduler {
       }
     }
 
+    /* `inferred_edge` is the directed edge the server concluded was just
+     * completed (previous marker → this marker). Renderers use it to know
+     * where a length-aware train's tail still extends (ADR-016); omitted on
+     * the first traversal when there is no previous marker. */
+    const completedEdge =
+      previousMarker && previousMarker !== markerId
+        ? { inferred_edge: { from_marker_id: previousMarker, to_marker_id: markerId } }
+        : {};
     out.push(
       effects.publishEvent('marker_traversed', {
         train_id: trainId,
         marker_id: markerId,
         direction: 'forward',
         in_discovery_mode: inDiscoveryMode,
+        ...completedEdge,
       }),
     );
 
