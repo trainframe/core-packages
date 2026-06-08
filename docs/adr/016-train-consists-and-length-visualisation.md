@@ -2,14 +2,14 @@
 
 ## Status
 
-Proposed
+Accepted — implemented (June 2026), including ADR-012's deferred multi-edge
+tail-release. Implementation notes at the end of this document. The optional
+`consist` descriptor (step 4) remains deferred.
 
 Builds on [ADR-012](012-train-length-and-tail-clearance.md) (a train has a
 physical `train_length_mm` that drives tail-clearance) and
 [ADR-013](013-simulator-physical-twin-visualiser-system-view.md) (the visualiser
-renders the system's view). This ADR is a plan for a future session: it records
-the intended design for making carriages first-class and for *showing* train
-length, neither of which exists yet.
+renders the system's view).
 
 ## Context
 
@@ -104,3 +104,35 @@ one elongated body of the correct length.
 4. (If wanted) optional `consist` descriptor on `device_registered` + discrete
    carriage segments in both renderers — a flagged protocol bump.
 5. (Prerequisite for long consists) ADR-012's multi-edge tail-release queue.
+
+## Implementation notes (as landed)
+
+Steps 1, 2, 3 and 5 shipped together; step 4 stays deferred.
+
+- **Sim (step 1).** `VirtualTrain` records each completed edge (route and
+  exploration modes, bounded history of 32) and exposes
+  `getTrailingPosition(offset_mm)` — a pure query that walks backwards along
+  the rail across edge boundaries, clamping at the earliest known point and
+  returning `null` off-track. The toy-table queries it per coupled carriage.
+- **Visualiser (step 2).** `train_length_mm` rides the retained
+  `railway/state/devices/{id}` payload (now schema'd as `DeviceRetainedState`,
+  protocol 0.4.0). The body is swept along the edge bezier using the layout's
+  mm→SVG scale; when the tail hasn't cleared, it continues onto the previous
+  edge taken from a `marker_traversed` edge-history hook (`data-tail-on-edge`).
+  The scheduler now populates the previously always-absent `inferred_edge`
+  field on `marker_traversed` to feed that hook. Trains without a length, and
+  layouts without spatial positions or edge lengths (e.g. fresh discovery
+  layouts), keep the fixed icon.
+- **Scheduler (step 5).** The release queue is realised statelessly: each
+  `train_status` walks backwards through `cleared_edges` chaining
+  `to_marker_id` links, releasing every edge whose cumulative distance from
+  the head has reached `length_mm`. Unknown intermediate edge lengths stop the
+  walk (hold, never guess — release safety asymmetry); a visited-marker set
+  plus iteration bound guards cyclic topologies; forward-horizon transit edges
+  are excluded from the walk so future grants are never mistaken for
+  tail-occupied track.
+- **Coupling stays out of scope.** Toy-table coupling detection is still
+  drop-position proximity; consists don't (yet) contribute to the train's
+  declared `train_length_mm`. When a train reverses, carriages clamp at the
+  head rather than being pushed — shunting semantics belong to the coupling
+  ADR, not this one.
