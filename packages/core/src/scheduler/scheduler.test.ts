@@ -65,6 +65,25 @@ const registerLongTrain = (scheduler: Scheduler, trainId: string, lengthMm: numb
     },
   });
 
+const registerLengthReporter = (scheduler: Scheduler, deviceId: string) =>
+  scheduler.handleEvent({
+    event_type: 'device_registered',
+    device_id: deviceId,
+    payload: { capabilities: ['core.reports_length'] },
+  });
+
+const reportLength = (
+  scheduler: Scheduler,
+  reporterId: string,
+  trainId: string,
+  lengthMm: number,
+) =>
+  scheduler.handleEvent({
+    event_type: 'train_length_changed',
+    device_id: reporterId,
+    payload: { train_id: trainId, train_length_mm: lengthMm },
+  });
+
 const sendTrainStatus = (
   scheduler: Scheduler,
   trainId: string,
@@ -822,7 +841,11 @@ describe('Scheduler — gating', () => {
 describe('Scheduler — zone admission (gates_zone, ADR-026)', () => {
   const advanceToM2 = (scheduler: Scheduler) => {
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
-    scheduler.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'M1' } });
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
     return scheduler.handleEvent({
       event_type: 'tag_observed',
       device_id: 'T1',
@@ -1856,6 +1879,101 @@ describe('Scheduler — train-length-aware tail clearance', () => {
         e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
     );
     expect(t2Grant).toBeUndefined();
+  });
+});
+
+describe('Scheduler — runtime train length changes (ADR-023)', () => {
+  it('re-derives tail occupancy against a runtime-reported shorter length', () => {
+    // T1 is 150 mm; at distance=100 into M2→M3 its tail still sits in M1→M2, so
+    // M1→M2 stays held and T2 (wanting M4→M1, sharing M1) is denied. Shrinking
+    // T1 to 50 mm via train_length_changed means the SAME status now clears the
+    // tail out of M1→M2 — proving the walk re-derives against the new length.
+    const { scheduler } = setup();
+    registerLongTrain(scheduler, 'T1', 150);
+    registerTrain(scheduler, 'T2');
+    registerLengthReporter(scheduler, 'STATION-1');
+
+    scheduler.assignSchedule('T1', 'r1', ['M1', 'M3']);
+    scheduler.assignSchedule('T2', 'r2', ['M4', 'M1']); // denied — T1 holds M1→M2
+
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+
+    // Status at d=100 with length 150: tail still in M1→M2, T2 stays denied.
+    const beforeShrink = sendTrainStatus(
+      scheduler,
+      'T1',
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+      100,
+    );
+    expect(
+      beforeShrink.find(
+        (e) =>
+          e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+      ),
+    ).toBeUndefined();
+
+    // A trackside station reports T1 is now only 50 mm.
+    reportLength(scheduler, 'STATION-1', 'T1', 50);
+    expect(scheduler.getTrainState('T1')?.length_mm).toBe(50);
+
+    // The SAME status distance now clears the tail out of M1→M2, granting T2.
+    const afterShrink = sendTrainStatus(
+      scheduler,
+      'T1',
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+      100,
+    );
+    const t2Grant = afterShrink.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+    );
+    expect(t2Grant).toBeDefined();
+    expect((t2Grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M1');
+  });
+
+  it('republishes the train retained device state with the new length', () => {
+    const { scheduler } = setup();
+    registerLongTrain(scheduler, 'T1', 150);
+    registerLengthReporter(scheduler, 'STATION-1');
+
+    const effects = reportLength(scheduler, 'STATION-1', 'T1', 80);
+
+    expect(scheduler.getTrainState('T1')?.length_mm).toBe(80);
+    const retained = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'update_state_snapshot' }> =>
+        e.kind === 'update_state_snapshot' && e.entity_type === 'devices' && e.entity_id === 'T1',
+    );
+    expect(retained).toBeDefined();
+    expect((retained?.state as { train_length_mm: number }).train_length_mm).toBe(80);
+  });
+
+  it('rejects a length report from a device lacking core.reports_length', () => {
+    const { scheduler } = setup();
+    registerLongTrain(scheduler, 'T1', 150);
+    registerGate(scheduler, 'BOGUS'); // declares gates_clearance, not reports_length
+
+    const effects = reportLength(scheduler, 'BOGUS', 'T1', 999);
+
+    expect(
+      effects.find((e) => e.kind === 'publish_event' && e.event_type === 'anomaly'),
+    ).toBeDefined();
+    expect(scheduler.getTrainState('T1')?.length_mm).toBe(150); // unchanged
+  });
+
+  it('ignores a length report for an unknown train', () => {
+    const { scheduler } = setup();
+    registerLengthReporter(scheduler, 'STATION-1');
+
+    expect(reportLength(scheduler, 'STATION-1', 'GHOST', 100)).toHaveLength(0);
   });
 });
 

@@ -33,5 +33,12 @@
  * like a length (ADR-023) or a tag binding (ADR-007). TCF registry epoch bumped
  * 2 → 3 (event appended). Backward-compatible additions; consumers that don't
  * understand the event or capability ignore them.
+ * 0.9.0 — new `core.reports_length` capability + `train_length_changed` event
+ * (ADR-023): a device may assert a train's physical length at runtime — the
+ * producer need not be the train. The scheduler honours it only from a
+ * `core.reports_length` device (mirroring `core.assigns_tags`), updates
+ * `length_mm`, and re-derives tail-clearance occupancy on the next
+ * `train_status`. TCF registry epoch bumped 3 → 4 (event appended).
+ * Backward-compatible additions.
  */
-export const PROTOCOL_VERSION = '0.8.0' as const;
+export const PROTOCOL_VERSION = '0.9.0' as const;

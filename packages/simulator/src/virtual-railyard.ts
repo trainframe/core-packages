@@ -20,8 +20,10 @@ interface RailyardEvent {
  *
  * The interior (which slot, the single-lead shuffling, coupling/decoupling) is
  * the device's own business and is modelled here at the wire-faithful level:
- * the device emits real `zone_state_changed` occupancy facts. Length reconcile
- * on exit rides the ADR-023 `core.reports_length` seam once that lands.
+ * the device emits real `zone_state_changed` occupancy facts. When a train
+ * leaves with rearranged carriages the yard reconciles its length via the
+ * ADR-023 `core.reports_length` seam (`reportTrainLength`) — the "yard swallows
+ * a train of length X and emits one of length Y" headline.
  */
 export class VirtualRailyard {
   /** One entry per slot: an occupant label, or null if free. */
@@ -55,9 +57,25 @@ export class VirtualRailyard {
     this.emit({
       event_type: 'device_registered',
       device_id: this.device_id,
-      payload: { capabilities: ['core.gates_zone'] },
+      // gates_zone to arbitrate admission; reports_length to reconcile a train's
+      // length on its way out (ADR-023) — the railyard rearranges carriages.
+      payload: { capabilities: ['core.gates_zone', 'core.reports_length'] },
     });
     this.announce();
+  }
+
+  /**
+   * Reconcile a train's length as it leaves the yard with rearranged carriages
+   * (ADR-023). The scheduler honours this because the railyard declared
+   * `core.reports_length`; the train need not be aware. `length_mm` must be a
+   * positive number of millimetres.
+   */
+  reportTrainLength(train_id: string, length_mm: number): void {
+    this.emit({
+      event_type: 'train_length_changed',
+      device_id: this.device_id,
+      payload: { train_id, train_length_mm: length_mm },
+    });
   }
 
   /**

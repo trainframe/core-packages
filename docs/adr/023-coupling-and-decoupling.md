@@ -2,9 +2,16 @@
 
 ## Status
 
-Accepted (not yet implemented). Design-only; no code yet. When implemented it is
-an additive minor bump (0.7.0 → 0.8.0): one new event and one new capability,
-plus ordinary structural schema validation. Nothing else.
+Accepted — **implemented** (protocol 0.9.0). An additive minor bump: the
+`train_length_changed` event + `core.reports_length` capability (producer-authority
+gated exactly as `core.assigns_tags`), plus ordinary structural schema validation.
+The scheduler updates `length_mm` on receipt and re-derives tail-clearance
+occupancy on the train's next `train_status` (the walk reads head position from
+the status payload, not from stored state — so the re-derivation is deferred one
+tick, which ADR-016's hold-don't-guess asymmetry makes always safe). Built in
+`packages/core/src/scheduler/scheduler.ts` (`handleTrainLengthChanged`); the
+railyard (ADR-026) is the first producer, reconciling a train's length as it
+leaves the yard.
 
 Resolves the open design question recorded in CLAUDE.md and `docs/status.md`,
 *"Coupling/decoupling of trains as multi-vehicle compositions,"* by deciding —

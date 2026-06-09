@@ -142,4 +142,36 @@ describe('Railyard zone admission: the scheduler obeys the device-asserted occup
 
     expect(m3GrantsFor('T1').length).toBeGreaterThanOrEqual(1);
   });
+
+  it('reconciles a train length on its way out of the yard (ADR-023)', async () => {
+    // The yard swallows a train of one length and emits another: a 250 mm train
+    // enters, the yard rearranges its carriages, and reports it out at 100 mm.
+    const yard = simulation.spawnRailyard('YARD-1', 'M3', 2); // room to admit
+    await harness.testClient.waitForState('railway/state/devices/YARD-1');
+
+    simulation.spawnTrain('T1', {
+      startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+      config: { length_mm: 250 },
+    });
+    await harness.testClient.waitForState('railway/state/devices/T1');
+    const lengthOf = () =>
+      (
+        harness.testClient.retained().get('railway/state/devices/T1') as {
+          train_length_mm?: number;
+        }
+      )?.train_length_mm;
+    expect(lengthOf()).toBe(250);
+
+    // The railyard reports the train out at a shorter length (a carriage was
+    // dropped inside). It is honoured because the yard declared
+    // core.reports_length — the train itself is unaware.
+    yard.reportTrainLength('T1', 100);
+
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 20));
+      if (lengthOf() === 100) break;
+    }
+    expect(lengthOf()).toBe(100);
+  });
 });

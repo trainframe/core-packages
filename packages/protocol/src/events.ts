@@ -232,6 +232,30 @@ const ZoneStateChangedPayload = Type.Object({
 export const ZoneStateChanged = eventEnvelope('zone_state_changed', ZoneStateChangedPayload);
 export type ZoneStateChanged = Static<typeof ZoneStateChanged>;
 
+// ---------- train_length_changed ----------
+
+/**
+ * Emitted by a `core.reports_length` device to assert a train's physical
+ * length at runtime (ADR-023). The producer need NOT be the train itself — a
+ * trackside station that attaches/detaches carriages, or a railyard, may report
+ * a train's new length on its behalf. The scheduler honours it only from a
+ * device that declared `core.reports_length` (mirroring `core.assigns_tags`),
+ * updates the train's `length_mm`, and re-derives tail-clearance occupancy on
+ * the train's next `train_status`.
+ *
+ * `train_id` — the train whose length changed (not necessarily `device_id`).
+ * `train_length_mm` — the new nose-to-tail length; a finite, positive number.
+ *   No value validation beyond structure: there is no oracle for a train's
+ *   length, so the capability gate is the trust boundary (ADR-023 §1).
+ */
+const TrainLengthChangedPayload = Type.Object({
+  train_id: Uuid,
+  train_length_mm: Type.Number({ minimum: 0, exclusiveMinimum: 0 }),
+});
+
+export const TrainLengthChanged = eventEnvelope('train_length_changed', TrainLengthChangedPayload);
+export type TrainLengthChanged = Static<typeof TrainLengthChanged>;
+
 // ---------- aspect_changed ----------
 
 const AspectChangedPayload = Type.Object({
@@ -294,6 +318,7 @@ export const CoreEvent = Type.Union([
   GateStateChanged,
   SwitchStateChanged,
   ZoneStateChanged,
+  TrainLengthChanged,
   AspectChanged,
   TagAssignment,
   Anomaly,
@@ -317,6 +342,7 @@ export const CORE_EVENT_SCHEMAS = {
   gate_state_changed: GateStateChanged,
   switch_state_changed: SwitchStateChanged,
   zone_state_changed: ZoneStateChanged,
+  train_length_changed: TrainLengthChanged,
   aspect_changed: AspectChanged,
   tag_assignment: TagAssignment,
   anomaly: Anomaly,

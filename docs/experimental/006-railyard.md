@@ -98,13 +98,17 @@ table: full yard → train waits; slot frees → train enters.
 
 ## What's built, and what proves it
 
-The headline seam is implemented and tested end-to-end through a real broker +
-scheduler: a `VirtualRailyard` (scalable to N slots) asserts occupancy; a routed
-train holds at the throat of a full yard and is admitted when a slot frees, via
-the `core.gates_zone` consultation veto and the existing retry machinery
-(`packages/integration/src/zone-admission.test.ts`). The interior maneuvering and
-the ADR-023 length reconcile on exit are the remaining hand-waves, per ADR-026's
-implementation status.
+Two seams are implemented and tested end-to-end through a real broker +
+scheduler (`packages/integration/src/zone-admission.test.ts`): **admission** — a
+`VirtualRailyard` (scalable to N slots) asserts occupancy, and a routed train
+holds at the throat of a full yard and is admitted when a slot frees, via the
+`core.gates_zone` consultation veto and the existing retry machinery; and
+**length reconcile on exit** — the yard reports a train out at a different length
+via `core.reports_length` (ADR-023, now built), and the scheduler updates it. The
+"yard swallows length X, emits length Y" headline is real. The remaining hand-wave
+is the *interior maneuvering itself* (the single-lead shuffle driving interior
+markers under the device's authority), which needs the opaque-interior transit
+handoff — ADR-026 future work.
 
 ## Why it's experimental, not the norm
 

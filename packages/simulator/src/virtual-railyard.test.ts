@@ -35,15 +35,29 @@ describe('VirtualRailyard device mechanics', () => {
     expect(() => yard('YARD', 'M3', 2.5)).toThrow(/non-negative integer/);
   });
 
-  it('register announces the capability and the zone initial state', () => {
+  it('register announces the capabilities and the zone initial state', () => {
     const { events, yard } = capture();
     yard('YARD-1', 'M3', 3).register();
 
     const registered = events.find((e) => e.event_type === 'device_registered');
-    expect(registered?.payload).toEqual({ capabilities: ['core.gates_zone'] });
+    expect(registered?.payload).toEqual({
+      capabilities: ['core.gates_zone', 'core.reports_length'],
+    });
 
     const zone = zoneEvents(events).at(-1);
     expect(zone?.payload).toEqual({ zone_marker_id: 'M3', capacity: 3, occupancy: 0 });
+  });
+
+  it('reportTrainLength emits a train_length_changed for the departing train', () => {
+    const { events, yard } = capture();
+    const y = yard('YARD-1', 'M3', 2);
+    y.register();
+
+    y.reportTrainLength('T1', 120);
+
+    const lengthEvent = events.find((e) => e.event_type === 'train_length_changed');
+    expect(lengthEvent?.device_id).toBe('YARD-1');
+    expect(lengthEvent?.payload).toEqual({ train_id: 'T1', train_length_mm: 120 });
   });
 
   it('occupy fills the next free slot and asserts the new occupancy', () => {

@@ -45,6 +45,7 @@ describe('TCF registry anti-drift', () => {
       'anomaly',
       'topology_violation',
       'zone_state_changed',
+      'train_length_changed',
     ]);
   });
 

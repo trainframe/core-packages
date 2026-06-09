@@ -55,6 +55,12 @@ export const assignsTagsCapability = stubCapability(
   'A device that assigns meaning to previously-unknown tags.',
 );
 
+export const reportsLengthCapability = stubCapability(
+  'core.reports_length',
+  "A device that asserts a train's physical length at runtime (ADR-023). The " +
+    'scheduler enforces that only devices declaring it may emit train_length_changed.',
+);
+
 export { gatesClearanceCapability };
 export { gatesZoneCapability };
 
@@ -73,4 +79,5 @@ export const BUILTIN_CAPABILITIES: ReadonlyArray<Capability<unknown>> = [
   gatesClearanceCapability,
   assignsTagsCapability,
   gatesZoneCapability,
+  reportsLengthCapability,
 ] as ReadonlyArray<Capability<unknown>>;

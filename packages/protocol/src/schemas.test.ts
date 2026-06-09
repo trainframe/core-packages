@@ -40,6 +40,7 @@ import {
   MarkerTraversed,
   SwitchStateChanged,
   TagObserved,
+  TrainLengthChanged,
   TrainStatus,
   ZoneRetainedState,
   ZoneStateChanged,
@@ -106,6 +107,7 @@ describe('capabilities', () => {
     expect(BUILTIN_CAPABILITIES).toContain('core.gates_clearance');
     expect(BUILTIN_CAPABILITIES).toContain('core.controls_motion');
     expect(BUILTIN_CAPABILITIES).toContain('core.gates_zone');
+    expect(BUILTIN_CAPABILITIES).toContain('core.reports_length');
   });
 
   it('CapabilityId accepts dotted lowercase identifiers', () => {
@@ -383,6 +385,32 @@ describe('ZoneStateChanged', () => {
           capacity: 4,
           occupancy: -1,
         }),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('TrainLengthChanged', () => {
+  it('validates a well-formed payload', () => {
+    expect(
+      Value.Check(
+        TrainLengthChanged,
+        baseEnvelope('train_length_changed', { train_id: VALID_UUID, train_length_mm: 250 }),
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects a zero or negative length (must be positive)', () => {
+    expect(
+      Value.Check(
+        TrainLengthChanged,
+        baseEnvelope('train_length_changed', { train_id: VALID_UUID, train_length_mm: 0 }),
+      ),
+    ).toBe(false);
+    expect(
+      Value.Check(
+        TrainLengthChanged,
+        baseEnvelope('train_length_changed', { train_id: VALID_UUID, train_length_mm: -5 }),
       ),
     ).toBe(false);
   });

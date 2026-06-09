@@ -159,6 +159,10 @@ contradict: ADR-023 forbids shunting *in core*; ADR-026 puts it *in a device*.
 - `VirtualRailyard` simulator device: scalable to **N slots**, asserts occupancy,
   models park/separate/recouple at the wire-faithful level (it emits real
   `zone_state_changed`, holds and admits real trains).
+- **Length reconcile on exit** — [ADR-023](023-coupling-and-decoupling.md) is now
+  implemented (protocol 0.9.0), and the railyard declares `core.reports_length`
+  and reports a train out at a new length; the scheduler updates it. Proven
+  end-to-end in `zone-admission.test.ts`.
 
 **Designed here, not yet in core (future work):**
 
@@ -166,11 +170,11 @@ contradict: ADR-023 forbids shunting *in core*; ADR-026 puts it *in a device*.
   management of a *tracked* train while it is inside, and the device issuing that
   train's interior movement authority (reverse/creep). The current device models
   the interior in the simulator without handing core-tracked trains the
-  authority, sufficient to prove the admission seam end-to-end.
+  authority, sufficient to prove the admission + length-reconcile seams
+  end-to-end.
 - The topology-violation **exemption** for interior markers (needed only once
-  core-tracked trains drive interior markers core knows about).
-- Length reconcile depends on **ADR-023** being implemented (itself accepted, not
-  built); until then the device's length change is simulator-internal.
+  core-tracked trains drive interior markers core knows about — coupled with the
+  handoff above).
 
 This staging matches the house pattern: prove the load-bearing seam first; the
 experimental device ([006](../experimental/006-railyard.md)) is its end-to-end

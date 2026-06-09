@@ -178,6 +178,8 @@ export class Scheduler {
         return this.handleTagAssignment(event.device_id, event.payload);
       case 'train_status':
         return this.handleTrainStatus(event.payload);
+      case 'train_length_changed':
+        return this.handleTrainLengthChanged(event.device_id, event.payload);
       default:
         return this.dispatchToCapabilities(event);
     }
@@ -391,6 +393,51 @@ export class Scheduler {
     this.tags.assign(tag_id, { kind: assigned_kind, target_id });
     out.push(effects.updateState('tags', tag_id, { assigned_kind, target_id }));
     return out;
+  }
+
+  /**
+   * Runtime train-length change (ADR-023). A device asserts a train's new
+   * physical length; the producer need NOT be the train (a trackside station,
+   * a railyard). Honoured only from a device that declared `core.reports_length`
+   * — the same producer-authority gate `core.assigns_tags` uses. There is no
+   * oracle for a train's length, so the capability gate is the whole trust
+   * boundary; the value is trusted, only its structure is validated (protocol).
+   *
+   * On receipt we update `length_mm` and republish the train's retained device
+   * state. Occupancy is NOT re-derived here: the tail-release walk needs the
+   * head position, which the scheduler reads fresh from `train_status` rather
+   * than persisting. A shorter train releases freed tail edges on its next
+   * status (stopped trains keep emitting status); ADR-016's hold-don't-guess
+   * asymmetry makes the brief over-hold always safe.
+   */
+  private handleTrainLengthChanged(
+    deviceId: string,
+    payload: unknown,
+  ): ReadonlyArray<SchedulerEffect> {
+    const { train_id, train_length_mm } = payload as {
+      train_id: string;
+      train_length_mm: number;
+    };
+
+    const reporter = this.devices.get(deviceId);
+    if (!reporter || !reporter.capabilities.includes('core.reports_length')) {
+      return [
+        effects.publishEvent('anomaly', {
+          severity: 'warning',
+          description: `Device ${deviceId} attempted train_length_changed without core.reports_length`,
+        }),
+      ];
+    }
+
+    const train = this.trains.get(train_id);
+    if (!train) return [];
+
+    train.length_mm = train_length_mm;
+
+    // Republish the TRAIN's retained device state with the new length, using
+    // the train device's own capabilities (the reporter may be another device).
+    const capabilities = this.devices.get(train_id)?.capabilities ?? [];
+    return [effects.updateState('devices', train_id, { capabilities, train_length_mm })];
   }
 
   /**
