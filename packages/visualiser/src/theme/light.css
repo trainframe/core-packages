@@ -25,23 +25,38 @@
  */
 :root,
 [data-theme="light"] {
-  --tf-vis-color-bg: var(--tf-color-bg, #ffffff);
-  --tf-vis-color-fg: var(--tf-color-fg, #1a1a1a);
-  --tf-vis-color-fg-muted: var(--tf-color-fg-muted, #5a5a5a);
+  /* Warm "workshop" palette — shared with the simulator-ui so the two apps read
+     as one product. These override the ui-kit base tokens (imported first) so
+     the panels, buttons and text adopt the warm theme too. */
+  --tf-color-bg: #ece0c8;
+  --tf-color-fg: #4a371f;
+  --tf-color-fg-muted: #8a734f;
+  --tf-color-border: #d8c39a;
+  --tf-color-surface: #fdf8ee;
+  --tf-color-surface-hover: #f6ecd6;
+  --tf-color-accent: #e0902a;
+  --tf-color-accent-soft: #fcebc6;
+  --tf-font-sans: ui-rounded, "SF Pro Rounded", "Segoe UI", system-ui, sans-serif;
 
-  --tf-vis-color-marker: #ffffff;
-  --tf-vis-color-marker-stroke: #333333;
-  --tf-vis-color-marker-inferred: #cccccc;
+  --tf-vis-color-bg: #f3e7cf;
+  --tf-vis-color-fg: #4a371f;
+  --tf-vis-color-fg-muted: #8a734f;
 
-  --tf-vis-color-edge: #888888;
-  --tf-vis-color-edge-inferred: #aaaaaa;
+  /* Markers: warm cream pucks with a wood-brown rim. */
+  --tf-vis-color-marker: #fdf6e6;
+  --tf-vis-color-marker-stroke: #7a5a30;
+  --tf-vis-color-marker-inferred: #d8c4a0;
+
+  /* Edges: a wood-brown rail; inferred runs a softer, dashed tan. */
+  --tf-vis-color-edge: #9a7236;
+  --tf-vis-color-edge-inferred: #c2a877;
 
   /* Row highlight on tag-scan flash */
-  --tf-vis-color-highlight: var(--tf-color-highlight, rgba(255, 213, 79, 0.4));
+  --tf-vis-color-highlight: var(--tf-color-highlight, rgba(255, 196, 87, 0.45));
 
   /* Deadlock banner (warning palette) */
-  --tf-vis-color-warn-bg: #fff4e0;
+  --tf-vis-color-warn-bg: #fbe6cf;
   --tf-vis-color-warn-border: #b04500;
-  --tf-vis-color-warn-text: #b04500;
-  --tf-vis-color-warn-muted: #555555;
+  --tf-vis-color-warn-text: #9a3d00;
+  --tf-vis-color-warn-muted: #6b5436;
 }
