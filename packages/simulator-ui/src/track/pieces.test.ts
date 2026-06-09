@@ -317,39 +317,29 @@ describe('getPieceShape', () => {
     expect(getPieceShape(makePiece('terminus')).width).toBe(60);
   });
 
-  it('junction branch plank is the same width as the through plank', () => {
-    // The branch plank must be PLANK_HALF_WIDTH on EACH side of its 45°
-    // centre-line — the same width as the through plank. A naive vertical ±13
-    // offset would make the perpendicular width only 26·cos45 ≈ 18.4mm (visibly
-    // thinner); this test guards against that regression by checking the branch
-    // quad's corners sit a full half-width perpendicular from the 45° axis.
+  it('the junction branch wood sweeps along its centre-line at a half-plank width', () => {
+    // The branch plank must follow the SAME (bezier) centre-line a diverting
+    // train rides — PLANK_HALF_WIDTH to each side of it — so the wood curves with
+    // its rails instead of running straight off them while the grooves bend away.
+    // Check the swept band has an edge vertex at ±half-width perpendicular to the
+    // rail at its midpoint (mirrors the groove test, one plank-width out).
     const PLANK_HALF_WIDTH = 13;
-    const path = getPieceShape(makePiece('junction')).svgPath;
-
-    // Pull every "x y" coordinate pair out of the path.
-    const coords = [...path.matchAll(/(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)/g)].map((m) => ({
-      x: Number(m[1]),
-      y: Number(m[2]),
+    const branch = must(getCentreLinePath(makePiece('junction'), 2));
+    const mid = branch.at(branch.length / 2);
+    const normal = ((mid.headingDeg + 90) * Math.PI) / 180;
+    const edges = [1, -1].map((s) => ({
+      x: mid.x + s * PLANK_HALF_WIDTH * Math.cos(normal),
+      y: mid.y + s * PLANK_HALF_WIDTH * Math.sin(normal),
     }));
-
-    // The branch axis runs from the origin to the index-2 endpoint at 45°.
-    const a = Math.PI / 4;
-    const dirx = Math.cos(a);
-    const diry = Math.sin(a);
-    // Perpendicular distance of a point from the 45° axis through the origin.
-    const perp = (p: { x: number; y: number }): number => Math.abs(-diry * p.x + dirx * p.y);
-    // Signed position along the branch axis (so we can pick points NEAR the
-    // branch, not the through rail which lies along the x-axis).
-    const along = (p: { x: number; y: number }): number => dirx * p.x + diry * p.y;
-
-    // The branch band's four corners sit at perpendicular distance == half-width
-    // from the axis, with a positive along-axis component (they're on the branch,
-    // not the through rail's far-left corners). There must be at least two such
-    // corners (origin-side and endpoint-side) on each flank.
-    const branchCorners = coords.filter((p) => along(p) > 1 && approx(perp(p), PLANK_HALF_WIDTH));
-    expect(branchCorners.length).toBeGreaterThanOrEqual(2);
-    for (const c of branchCorners) {
-      expect(perp(c)).toBeCloseTo(PLANK_HALF_WIDTH, 1);
+    // The swept band is built from M/L vertices; pull them out of the body path.
+    const verts = [
+      ...getPieceShape(makePiece('junction')).svgPath.matchAll(
+        /[ML]\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)/g,
+      ),
+    ].map((m) => ({ x: Number(m[1]), y: Number(m[2]) }));
+    for (const e of edges) {
+      const nearest = Math.min(...verts.map((v) => Math.hypot(v.x - e.x, v.y - e.y)));
+      expect(nearest).toBeLessThan(4);
     }
   });
 });

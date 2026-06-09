@@ -200,18 +200,20 @@ function PieceBody({
 }) {
   return (
     <g opacity={dim}>
-      {/* Wooden plank (or device body). */}
-      <path d={shape.svgPath} fill={bodyFill} />
-      {/* Gentle functional colour wash over the wood (track pieces only). */}
-      {!isDevice && tint !== null && <path d={shape.svgPath} fill={tint} fillOpacity={0.22} />}
-      {/* Soft rim light for a bevelled, raised feel. */}
+      {/* Soft rim light for a bevelled, raised feel — drawn BEHIND the fill so the
+          opaque wood covers the internal seams of multi-plank pieces (junction,
+          crossing); only the outer silhouette edge shows. */}
       <path
         d={shape.svgPath}
         fill="none"
         stroke={isDevice ? '#ffffff' : '#f6e8c9'}
-        strokeOpacity={isDevice ? 0.3 : 0.5}
-        strokeWidth={1}
+        strokeOpacity={isDevice ? 0.3 : 0.55}
+        strokeWidth={2}
       />
+      {/* Wooden plank (or device body). */}
+      <path d={shape.svgPath} fill={bodyFill} />
+      {/* Gentle functional colour wash over the wood (track pieces only). */}
+      {!isDevice && tint !== null && <path d={shape.svgPath} fill={tint} fillOpacity={0.22} />}
       {/* Routed rail grooves, derived from the rail a train rides. */}
       {shape.grooves.map((g) => (
         <Groove key={g} d={g} />

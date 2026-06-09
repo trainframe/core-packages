@@ -799,6 +799,30 @@ function offsetGroove(local: CentreLinePath, sign: number): string {
 }
 
 /**
+ * A closed wooden band that follows a centre-line, `halfWidth` to each side —
+ * the plank a curved leg rides. Sampled forward along one edge then back along
+ * the other, so the wood sweeps along the very centre-line its grooves (and a
+ * train) follow, instead of a straight chord. Used for the junction BRANCH.
+ */
+function sweptBandAlong(local: CentreLinePath, halfWidth: number): string {
+  const samples = Math.max(2, Math.ceil(local.length / 6));
+  const forward: string[] = [];
+  const backward: string[] = [];
+  for (let i = 0; i <= samples; i++) {
+    const pose = local.at((i / samples) * local.length);
+    const nx = Math.cos(toRad(pose.headingDeg + 90));
+    const ny = Math.sin(toRad(pose.headingDeg + 90));
+    forward.push(`${fmt(pose.x + halfWidth * nx)} ${fmt(pose.y + halfWidth * ny)}`);
+    backward.push(`${fmt(pose.x - halfWidth * nx)} ${fmt(pose.y - halfWidth * ny)}`);
+  }
+  // Traverse the near edge start→end then the far edge end→start. The winding is
+  // chosen to match the through plank's roundRect (clockwise on screen) so the
+  // nonzero fill UNIONs the two with no hole where they overlap at the throat.
+  forward.reverse();
+  return `M ${backward.join(' L ')} L ${forward.join(' L ')} Z`;
+}
+
+/**
  * Both routed grooves for every leg of a track piece, derived from its
  * centre-line half-paths. Each leg contributes a groove on each side; collinear
  * legs (a straight's two halves) join into one continuous rail, so the twin
@@ -870,24 +894,19 @@ function curveShape(
 }
 
 function junctionShape(): PieceShape {
-  // A wooden Y: the through plank runs west↔east, the branch plank diverges at
-  // 45° down-right to the branch endpoint. Both are PLANK_HALF_WIDTH wide. The
-  // branch quad is offset PERPENDICULAR to its own 45° axis (a vertical offset
-  // would make it visibly thinner), and is wound the same way as the through
-  // plank so the nonzero fill UNIONs them with no hole at the throat. With no
-  // hard outline + one wood fill, the two planks read as a single forked piece;
-  // the diverging V between the legs is open table, as on a real turnout.
+  // A wooden Y: the through plank runs west↔east; the branch plank SWEEPS along
+  // the same bezier centre-line its grooves (and a diverting train) follow, so
+  // the branch wood curves WITH its rails instead of running off a straight 45°
+  // chord. With no hard outline + one wood fill, the through plank and the
+  // branch band read as a single forked piece; the diverging V between the legs
+  // is open table, as on a real turnout.
   const ph = PLANK_HALF_WIDTH;
-  const a = toRad(45);
-  const ex = 100 * Math.cos(a);
-  const ey = 100 * Math.sin(a);
-  const nx = -Math.sin(a);
-  const ny = Math.cos(a);
-  const pt = (px: number, py: number): string => `${fmt(px)} ${fmt(py)}`;
   const through = roundRect(-100, -ph, 200, ph * 2, PLANK_CORNER);
-  const branch =
-    `M ${pt(-ph * nx, -ph * ny)} L ${pt(ex - ph * nx, ey - ph * ny)} ` +
-    `L ${pt(ex + ph * nx, ey + ph * ny)} L ${pt(ph * nx, ph * ny)} Z`;
+  const branchLocal = localHalfPath('junction', 2);
+  const branch = branchLocal === undefined ? '' : sweptBandAlong(branchLocal, ph);
+  // Branch endpoint y (the lowest reach), plus a plank half-width, sets the box.
+  const branchEnd = localEndpoints('junction')[2];
+  const ey = branchEnd?.ly ?? 70.71;
   return {
     svgPath: `${through} ${branch}`,
     grooves: centreLineGrooves('junction'),

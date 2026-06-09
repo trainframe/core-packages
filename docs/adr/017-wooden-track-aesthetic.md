@@ -102,8 +102,13 @@ read as one product.
 ## Implementation notes
 
 - Geometry + decor: `packages/simulator-ui/src/track/pieces.ts`
-  (`getPieceShape`, `centreLineGrooves`/`offsetGroove`, the body builders,
-  `PIECE_TINT`, `PieceFeatureRole`).
+  (`getPieceShape`, `centreLineGrooves`/`offsetGroove`, `sweptBandAlong` — the
+  junction BRANCH wood is a band swept along the same bezier centre-line as its
+  grooves, so the wood follows the rails rather than a straight 45° chord — the
+  body builders, `PIECE_TINT`, `PieceFeatureRole`).
+- The rim-light highlight is drawn BEHIND the wood fill, so the opaque wood hides
+  the internal seams where a multi-plank piece's sub-paths overlap (junction
+  throat, crossing centre); only the outer silhouette edge shows.
 - Rendering: `ToyTable.tsx` (`PieceBody`, `Feature`, `Groove`, `WoodDefs`,
   `pieceFilter`) + `ToyTable.css` (workshop theme).
 - Visualiser theme: `packages/visualiser/src/theme/light.css`,
