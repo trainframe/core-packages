@@ -16,3 +16,4 @@ coverage/
 .tmp-*.png
 .screenshots/
 .playwright-mcp/
+.claude/

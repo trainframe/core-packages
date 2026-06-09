@@ -89,6 +89,26 @@ const registerGate = (scheduler: Scheduler, deviceId: string) =>
     payload: { capabilities: ['core.gates_clearance'] },
   });
 
+const registerRailyard = (scheduler: Scheduler, deviceId: string) =>
+  scheduler.handleEvent({
+    event_type: 'device_registered',
+    device_id: deviceId,
+    payload: { capabilities: ['core.gates_zone'] },
+  });
+
+const setZoneState = (
+  scheduler: Scheduler,
+  deviceId: string,
+  zoneMarkerId: string,
+  capacity: number,
+  occupancy: number,
+) =>
+  scheduler.handleEvent({
+    event_type: 'zone_state_changed',
+    device_id: deviceId,
+    payload: { zone_marker_id: zoneMarkerId, capacity, occupancy },
+  });
+
 /**
  * Tests need tag→marker bindings before `tag_observed` resolves to anything.
  * Pre-register a synthetic garage that declares `core.assigns_tags`, then bind
@@ -796,6 +816,100 @@ describe('Scheduler — gating', () => {
     );
     expect(grant).toBeDefined();
     expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M3');
+  });
+});
+
+describe('Scheduler — zone admission (gates_zone, ADR-026)', () => {
+  const advanceToM2 = (scheduler: Scheduler) => {
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    scheduler.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'M1' } });
+    return scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+  };
+  const grantIn = (effects: ReadonlyArray<SchedulerEffect>) =>
+    effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance',
+    );
+
+  it('withholds clearance into a full zone (occupancy >= capacity)', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    registerRailyard(scheduler, 'YARD-M3');
+    setZoneState(scheduler, 'YARD-M3', 'M3', 2, 2); // full
+
+    const effects = advanceToM2(scheduler);
+
+    expect(grantIn(effects)).toBeUndefined();
+    expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('M2');
+  });
+
+  it('admits the held train when a slot frees', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    registerRailyard(scheduler, 'YARD-M3');
+    setZoneState(scheduler, 'YARD-M3', 'M3', 2, 2);
+    advanceToM2(scheduler); // held at M2
+
+    // A consist leaves: one slot frees. The re-consult admits the train to M3.
+    const releaseEffects = setZoneState(scheduler, 'YARD-M3', 'M3', 2, 1);
+
+    const grant = grantIn(releaseEffects);
+    expect(grant).toBeDefined();
+    expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M3');
+  });
+
+  it('abstains (admits) when the zone has room', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    registerRailyard(scheduler, 'YARD-M3');
+    setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0); // empty
+
+    advanceToM2(scheduler);
+
+    // With room in the zone the gate abstains, so clearance extends to the
+    // route's end at the throat (M3) rather than stalling at M2.
+    expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('M3');
+  });
+
+  it('ignores unrelated events from the zone device without changing its gate', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    registerRailyard(scheduler, 'YARD-M3');
+    setZoneState(scheduler, 'YARD-M3', 'M3', 1, 1); // full
+    // A non-zone event reaches the gates_zone hook; it must be a no-op.
+    scheduler.handleEvent({
+      event_type: 'aspect_changed',
+      device_id: 'YARD-M3',
+      payload: { current_aspect: 'whatever' },
+    });
+
+    expect(grantIn(advanceToM2(scheduler))).toBeUndefined();
+  });
+
+  it('drops its admission gate when the zone device disconnects', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    registerRailyard(scheduler, 'YARD-M3');
+    setZoneState(scheduler, 'YARD-M3', 'M3', 1, 1); // full
+    advanceToM2(scheduler); // held at M2
+
+    const dcEffects = scheduler.handleEvent({
+      event_type: 'device_disconnected',
+      device_id: 'YARD-M3',
+      payload: {},
+    });
+
+    // The gate vanished, so the held train is admitted to M3, and the
+    // disconnect emits a warning anomaly.
+    const grant = grantIn(dcEffects);
+    expect(grant).toBeDefined();
+    expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M3');
+    const anomaly = dcEffects.find((e) => e.kind === 'publish_event' && e.event_type === 'anomaly');
+    expect(anomaly).toBeDefined();
   });
 });
 

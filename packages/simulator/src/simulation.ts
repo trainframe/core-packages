@@ -8,6 +8,7 @@ import type { Layout } from '@trainframe/protocol';
 import { VirtualClock } from './clock.js';
 import { SeededRandom } from './random.js';
 import { VirtualGate } from './virtual-gate.js';
+import { VirtualRailyard } from './virtual-railyard.js';
 import { VirtualSwitch } from './virtual-switch.js';
 import { DEFAULT_TRAIN_CONFIG, VirtualTrain, type VirtualTrainConfig } from './virtual-train.js';
 
@@ -52,6 +53,7 @@ export class Simulation {
   private readonly trains = new Map<string, VirtualTrain>();
   private readonly gates = new Map<string, VirtualGate>();
   private readonly switches = new Map<string, VirtualSwitch>();
+  private readonly railyards = new Map<string, VirtualRailyard>();
   private readonly tick_ms: number;
   private last_tick_ms = 0;
   private readonly markerToTag: Map<string, string> = new Map();
@@ -244,6 +246,37 @@ export class Simulation {
     this.switches.set(device_id, sw);
     sw.register();
     return sw;
+  }
+
+  /**
+   * Register a virtual railyard: a `core.gates_zone` device owning a
+   * capacity-limited territory behind `zone_marker_id` (the throat). Scalable to
+   * any number of slots. Returns the instance so a test can fill/vacate slots
+   * (each emits a `zone_state_changed` the scheduler gates admission on). See
+   * ADR-026.
+   */
+  spawnRailyard(device_id: string, zone_marker_id: string, capacity: number): VirtualRailyard {
+    const yard = new VirtualRailyard(device_id, zone_marker_id, capacity, (e) =>
+      this.captureEvent({ at_ms: this.clock.now(), ...e }),
+    );
+    this.railyards.set(device_id, yard);
+    yard.register();
+    return yard;
+  }
+
+  /**
+   * Despawn a virtual railyard. Emits `device_disconnected` so the server runs
+   * the gates_zone disconnect hook (which drops the zone's admission gate).
+   */
+  despawnRailyard(device_id: string): void {
+    if (!this.railyards.has(device_id)) return;
+    this.railyards.delete(device_id);
+    this.captureEvent({
+      at_ms: this.clock.now(),
+      event_type: 'device_disconnected',
+      device_id,
+      payload: {},
+    });
   }
 
   /**

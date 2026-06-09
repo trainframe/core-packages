@@ -26,5 +26,12 @@
  * track it provably holds. TCF registry epoch bumped 1 → 2 (command appended).
  * Backward-compatible addition; devices that don't understand it ignore it and
  * simply never reverse (default-stopped/safe).
+ * 0.8.0 — new `core.gates_zone` capability + `zone_state_changed` event +
+ * `ZoneRetainedState` (ADR-026): a device may own a capacity-limited territory
+ * (a railyard) and gate admission to it by its own asserted occupancy, which
+ * core cannot compute (carriages are invisible to it, ADR-016) and so trusts
+ * like a length (ADR-023) or a tag binding (ADR-007). TCF registry epoch bumped
+ * 2 → 3 (event appended). Backward-compatible additions; consumers that don't
+ * understand the event or capability ignore them.
  */
-export const PROTOCOL_VERSION = '0.7.0' as const;
+export const PROTOCOL_VERSION = '0.8.0' as const;

@@ -206,6 +206,32 @@ const SwitchStateChangedPayload = Type.Object({
 export const SwitchStateChanged = eventEnvelope('switch_state_changed', SwitchStateChangedPayload);
 export type SwitchStateChanged = Static<typeof SwitchStateChanged>;
 
+// ---------- zone_state_changed ----------
+
+/**
+ * Emitted by a `core.gates_zone` device (e.g. a railyard) whenever its
+ * occupancy changes — a consist parks or leaves, or a siding is locked by a
+ * cut of carriages with no locomotive. Carries the device's *own* judgment of
+ * how full it is; core has no oracle for this (carriages are invisible to core,
+ * ADR-016) and trusts the asserted count exactly as it trusts a length
+ * (ADR-023) or a tag binding (ADR-007). See ADR-026.
+ *
+ * `zone_marker_id` — the boundary marker the zone presents to the core graph
+ *   (the throat). Routing a train *into* the zone means clearing to this marker;
+ *   the `core.gates_zone` capability denies that clearance while full.
+ * `capacity` — total slots (parking positions) the zone owns.
+ * `occupancy` — slots currently occupied, by the device's reckoning. Admission
+ *   is denied while `occupancy >= capacity`.
+ */
+const ZoneStateChangedPayload = Type.Object({
+  zone_marker_id: Uuid,
+  capacity: Type.Integer({ minimum: 0 }),
+  occupancy: Type.Integer({ minimum: 0 }),
+});
+
+export const ZoneStateChanged = eventEnvelope('zone_state_changed', ZoneStateChangedPayload);
+export type ZoneStateChanged = Static<typeof ZoneStateChanged>;
+
 // ---------- aspect_changed ----------
 
 const AspectChangedPayload = Type.Object({
@@ -267,6 +293,7 @@ export const CoreEvent = Type.Union([
   ClearanceRevoked,
   GateStateChanged,
   SwitchStateChanged,
+  ZoneStateChanged,
   AspectChanged,
   TagAssignment,
   Anomaly,
@@ -289,6 +316,7 @@ export const CORE_EVENT_SCHEMAS = {
   clearance_revoked: ClearanceRevoked,
   gate_state_changed: GateStateChanged,
   switch_state_changed: SwitchStateChanged,
+  zone_state_changed: ZoneStateChanged,
   aspect_changed: AspectChanged,
   tag_assignment: TagAssignment,
   anomaly: Anomaly,
@@ -343,3 +371,24 @@ export const ClearanceRetainedState = Type.Object({
   block_reason: Type.Optional(Type.Literal('unknown_topology')),
 });
 export type ClearanceRetainedState = Static<typeof ClearanceRetainedState>;
+
+// ---------- retained zone state (railway/state/zones/{device_id}) ----------
+
+/**
+ * Retained state a `core.gates_zone` device publishes to
+ * `railway/state/zones/{device_id}`, mirroring the most recent
+ * `zone_state_changed`. Lets a fresh subscriber (the visualiser, a planner that
+ * wants to avoid routing toward a full yard) read the zone's current capacity
+ * and occupancy without replaying history.
+ *
+ * The values are the device's asserted reckoning — core neither computes nor
+ * validates them beyond structure (ADR-026, the no-oracle trust boundary).
+ *
+ * Added 0.8.0 (ADR-026).
+ */
+export const ZoneRetainedState = Type.Object({
+  zone_marker_id: Uuid,
+  capacity: Type.Integer({ minimum: 0 }),
+  occupancy: Type.Integer({ minimum: 0 }),
+});
+export type ZoneRetainedState = Static<typeof ZoneRetainedState>;

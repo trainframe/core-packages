@@ -44,6 +44,7 @@ describe('TCF registry anti-drift', () => {
       'tag_assignment',
       'anomaly',
       'topology_violation',
+      'zone_state_changed',
     ]);
   });
 

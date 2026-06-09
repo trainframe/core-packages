@@ -18,6 +18,7 @@ export const BUILTIN_CAPABILITIES = [
   'core.displays_aspect',
   'core.gates_clearance',
   'core.assigns_tags',
+  'core.gates_zone',
 ] as const;
 
 export type BuiltinCapability = (typeof BUILTIN_CAPABILITIES)[number];

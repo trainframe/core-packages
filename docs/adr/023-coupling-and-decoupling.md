@@ -75,6 +75,16 @@ system's only concept of a train's make-up is its length. It should stay that
 way.** If a feature seems to need the core to know *which* carriages are where,
 that is a simulator or visualiser concern, or it is the wrong feature.
 
+> **Update (ADR-026).** "No coupling maneuver — no shunting" remains true *of the
+> core*. [ADR-026](026-delegated-capacity-territory.md) later adds a delegated
+> **capacity-territory** (a railyard): a device may own an opaque region and
+> perform shunting *inside it*, emitting to core only a capacity/occupancy count
+> and, on exit, a length change via the `core.reports_length` seam this ADR
+> opens. That does not contradict the prohibition here — core still gains no
+> maneuver, no consist model, no reverse-to-mate. The shunting lives in a device,
+> not the scheduler, which is exactly where this ADR says physical make-up
+> belongs.
+
 ## Decision
 
 ### 1. `train_length_mm` becomes a runtime, capability-gated, retained fact

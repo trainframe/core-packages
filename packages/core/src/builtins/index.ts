@@ -8,6 +8,7 @@
 import { Type } from '@sinclair/typebox';
 import type { Capability } from '../capability.js';
 import { gatesClearanceCapability } from './gates-clearance.js';
+import { gatesZoneCapability } from './gates-zone.js';
 
 const stubCapability = (id: string, description: string): Capability<Record<string, never>> => ({
   id,
@@ -55,6 +56,7 @@ export const assignsTagsCapability = stubCapability(
 );
 
 export { gatesClearanceCapability };
+export { gatesZoneCapability };
 
 /**
  * The full set of built-in capabilities. The element type is
@@ -70,4 +72,5 @@ export const BUILTIN_CAPABILITIES: ReadonlyArray<Capability<unknown>> = [
   displaysAspectCapability,
   gatesClearanceCapability,
   assignsTagsCapability,
+  gatesZoneCapability,
 ] as ReadonlyArray<Capability<unknown>>;

@@ -41,6 +41,8 @@ import {
   SwitchStateChanged,
   TagObserved,
   TrainStatus,
+  ZoneRetainedState,
+  ZoneStateChanged,
 } from './events.js';
 import { Layout } from './layout.js';
 import { DeviceManifest } from './manifest.js';
@@ -103,6 +105,7 @@ describe('capabilities', () => {
   it('BUILTIN_CAPABILITIES includes the documented core set', () => {
     expect(BUILTIN_CAPABILITIES).toContain('core.gates_clearance');
     expect(BUILTIN_CAPABILITIES).toContain('core.controls_motion');
+    expect(BUILTIN_CAPABILITIES).toContain('core.gates_zone');
   });
 
   it('CapabilityId accepts dotted lowercase identifiers', () => {
@@ -333,6 +336,67 @@ describe('DeviceRetainedState', () => {
 
   it('rejects a payload missing capabilities', () => {
     expect(Value.Check(DeviceRetainedState, { train_length_mm: 100 })).toBe(false);
+  });
+});
+
+describe('ZoneStateChanged', () => {
+  const validPayload = { zone_marker_id: VALID_UUID, capacity: 4, occupancy: 2 };
+
+  it('validates a well-formed payload', () => {
+    expect(Value.Check(ZoneStateChanged, baseEnvelope('zone_state_changed', validPayload))).toBe(
+      true,
+    );
+  });
+
+  it('accepts a full zone (occupancy === capacity)', () => {
+    expect(
+      Value.Check(
+        ZoneStateChanged,
+        baseEnvelope('zone_state_changed', {
+          zone_marker_id: VALID_UUID,
+          capacity: 4,
+          occupancy: 4,
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects a non-integer capacity', () => {
+    expect(
+      Value.Check(
+        ZoneStateChanged,
+        baseEnvelope('zone_state_changed', {
+          zone_marker_id: VALID_UUID,
+          capacity: 2.5,
+          occupancy: 1,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it('rejects a negative occupancy', () => {
+    expect(
+      Value.Check(
+        ZoneStateChanged,
+        baseEnvelope('zone_state_changed', {
+          zone_marker_id: VALID_UUID,
+          capacity: 4,
+          occupancy: -1,
+        }),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('ZoneRetainedState', () => {
+  it('validates a well-formed payload', () => {
+    expect(
+      Value.Check(ZoneRetainedState, { zone_marker_id: VALID_UUID, capacity: 4, occupancy: 0 }),
+    ).toBe(true);
+  });
+
+  it('rejects a missing zone_marker_id', () => {
+    expect(Value.Check(ZoneRetainedState, { capacity: 4, occupancy: 0 })).toBe(false);
   });
 });
 
