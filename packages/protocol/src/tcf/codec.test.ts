@@ -13,6 +13,7 @@ import {
   encodeEvent,
   readFrame,
 } from './codec.js';
+import { commandPayloadCodec, eventPayloadCodec } from './payloads.js';
 import {
   COMMAND_TYPE_ORDER,
   EVENT_TYPE_ORDER,
@@ -118,17 +119,14 @@ function pairedContext() {
 }
 
 /*
- * Does a payload fit one frame under THIS PR's interim generic-JSON carrier?
- *
- * Reconciliation with ADR-021 §2/§Consequences ("frames fit"): the ADR's
- * "frames fit" claim rests on §4's per-type codec packing UUIDs down to short
- * refs — that byte layout is the ADR's *named deferred follow-up*. Until it
- * lands, the generic carrier keeps full 36-char UUID strings, so UUID-heavy
- * core payloads (e.g. clearance_request, three UUIDs) overflow 250 bytes and
- * the codec refuses to emit them. We therefore partition the type set by what
- * the generic carrier can carry today, asserting the bound on the fitting set
- * and the documented throw on the overflowing set. Each type graduates from
- * "throws" to "round-trips" automatically once a per-type codec shrinks it.
+ * ADR-021 §4 per-type codecs have landed for the hot, UUID-heavy types
+ * (`marker_traversed`, `clearance_request`, `clearance_granted`, and the
+ * `grant_clearance` command). For those, encode∘decode is byte-identical and
+ * the frame fits 250 bytes — they pack each 36-char UUID to 16 raw bytes. Every
+ * other type still rides the generic UTF-8-JSON carrier; for those the partition
+ * below selects only the payloads the generic carrier can fit. A type with a
+ * per-type codec is always tested for round-trip + size; a generic type that
+ * overflows (a pathological/synthetic payload) keeps the documented throw.
  */
 const TEST_PROTOCOL_VERSION = '0.4.0';
 const ISO = '2026-06-09T00:00:00.000Z';
@@ -158,6 +156,16 @@ function commandEnvelopeFor(commandType: string, payload: unknown): CommandEnvel
 function genericPayloadFits(payload: unknown): boolean {
   const json = new TextEncoder().encode(JSON.stringify(payload));
   return TCF_HEADER_BYTES + json.length <= ESP_NOW_MAX_FRAME_BYTES;
+}
+
+/* An event type fits one frame today iff it has a per-type codec or its
+ * generic JSON carrier is under the limit. */
+function eventFitsToday(eventType: string, payload: unknown): boolean {
+  return eventPayloadCodec(eventType) !== undefined || genericPayloadFits(payload);
+}
+
+function commandFitsToday(commandType: string, payload: unknown): boolean {
+  return commandPayloadCodec(commandType) !== undefined || genericPayloadFits(payload);
 }
 
 describe('TCF codec — header structure', () => {
@@ -208,7 +216,7 @@ describe('TCF codec — frame size bound (ADR-021 §Context, 250 bytes)', () => 
     let asserted = 0;
     for (const eventType of EVENT_TYPE_ORDER) {
       const payload = EVENT_PAYLOADS[eventType];
-      if (!genericPayloadFits(payload)) continue;
+      if (!eventFitsToday(eventType, payload)) continue;
       const frame = encodeEvent(eventEnvelopeFor(eventType, payload), ctx);
       expect(frame.length, `${eventType} frame fits`).toBeLessThanOrEqual(ESP_NOW_MAX_FRAME_BYTES);
       asserted += 1;
@@ -221,7 +229,7 @@ describe('TCF codec — frame size bound (ADR-021 §Context, 250 bytes)', () => 
     let asserted = 0;
     for (const commandType of COMMAND_TYPE_ORDER) {
       const payload = COMMAND_PAYLOADS[commandType];
-      if (!genericPayloadFits(payload)) continue;
+      if (!commandFitsToday(commandType, payload)) continue;
       const frame = encodeCommand(commandEnvelopeFor(commandType, payload), ctx);
       expect(frame.length, `${commandType} frame fits`).toBeLessThanOrEqual(
         ESP_NOW_MAX_FRAME_BYTES,
@@ -231,20 +239,49 @@ describe('TCF codec — frame size bound (ADR-021 §Context, 250 bytes)', () => 
     expect(asserted).toBeGreaterThan(0);
   });
 
-  it('refuses to emit a UUID-heavy core payload under the interim generic carrier', () => {
+  it('fits the UUID-heavy clearance_request via its per-type codec (ADR-021 §4)', () => {
     /*
-     * clearance_request is three full UUIDs — no arrays, the minimal hot-path
-     * shape — and overflows 250 bytes as generic JSON. The ADR's per-type ref
-     * codec (§4, deferred) is what shrinks the UUIDs to short refs so it fits;
-     * until then, the codec refuses rather than emit an oversized frame
-     * (ADR-021 §4: an unfittable frame is "the bridge's problem to solve over a
-     * slower path"). This documents the boundary as a tested fact.
+     * clearance_request is three full UUIDs and overflows 250 bytes as generic
+     * JSON (the boundary this codec exists to break). The per-type codec packs
+     * each UUID to 16 raw bytes, so it now FITS one frame and round-trips
+     * byte-identically. This is the type the ADR's "frames fit" claim names.
      */
     const ctx = pairedContext();
     expect(genericPayloadFits(EVENT_PAYLOADS.clearance_request)).toBe(false);
-    expect(() =>
-      encodeEvent(eventEnvelopeFor('clearance_request', EVENT_PAYLOADS.clearance_request), ctx),
-    ).toThrow(/exceeds/);
+    expect(eventPayloadCodec('clearance_request')).toBeDefined();
+    const frame = encodeEvent(
+      eventEnvelopeFor('clearance_request', EVENT_PAYLOADS.clearance_request),
+      ctx,
+    );
+    expect(frame.length).toBeLessThanOrEqual(ESP_NOW_MAX_FRAME_BYTES);
+    const decoded = decode(frame, ctx, makeDeps());
+    if (decoded.kind !== 'event') throw new Error('expected event');
+    expect(decoded.envelope.payload).toEqual(EVENT_PAYLOADS.clearance_request);
+  });
+
+  it('fits a marker_traversed carrying inferred_edge that overflows the generic carrier', () => {
+    /*
+     * A realistic marker_traversed with its optional inferred_edge is four
+     * UUIDs and overflows the generic JSON carrier — the ADR's other named
+     * "previously-overflowing" case. The per-type codec packs it well under 250.
+     */
+    const ctx = pairedContext();
+    const payload = {
+      train_id: 'aaaaaaaa-0000-4000-8000-000000000001',
+      marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+      direction: 'forward',
+      in_discovery_mode: true,
+      inferred_edge: {
+        from_marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+        to_marker_id: 'aaaaaaaa-0000-4000-8000-000000000003',
+      },
+    };
+    expect(genericPayloadFits(payload)).toBe(false);
+    const frame = encodeEvent(eventEnvelopeFor('marker_traversed', payload), ctx);
+    expect(frame.length).toBeLessThanOrEqual(ESP_NOW_MAX_FRAME_BYTES);
+    const decoded = decode(frame, ctx, makeDeps());
+    if (decoded.kind !== 'event') throw new Error('expected event');
+    expect(decoded.envelope.payload).toEqual(payload);
   });
 
   it('rejects an over-large payload rather than emitting an oversized frame', () => {
@@ -268,8 +305,7 @@ describe('TCF codec — round-trip (encode . decode == identity)', () => {
     let roundTripped = 0;
     for (const [index, eventType] of EVENT_TYPE_ORDER.entries()) {
       const payload = EVENT_PAYLOADS[eventType];
-      /* Overflowing types graduate to round-trip when per-type codecs land. */
-      if (!genericPayloadFits(payload)) continue;
+      if (!eventFitsToday(eventType, payload)) continue;
       const ctx = pairedContext();
       const original = eventEnvelopeFor(eventType, payload);
       /* Seed a frame with concrete header values, decode it, re-encode it. */
@@ -293,7 +329,7 @@ describe('TCF codec — round-trip (encode . decode == identity)', () => {
     let roundTripped = 0;
     for (const [index, commandType] of COMMAND_TYPE_ORDER.entries()) {
       const payload = COMMAND_PAYLOADS[commandType];
-      if (!genericPayloadFits(payload)) continue;
+      if (!commandFitsToday(commandType, payload)) continue;
       const ctx = pairedContext();
       const original = commandEnvelopeFor(commandType, payload);
       const seeded = encodeCommand(original, ctx, {
@@ -525,5 +561,154 @@ describe('TCF codec — structural validation', () => {
     const frame = encodeCommand(envelope, ctx);
     expect(frame.length).toBe(TCF_HEADER_BYTES);
     expect(readFrame(frame).payload).toEqual({});
+  });
+});
+
+describe('TCF per-type payload codecs (ADR-021 §4)', () => {
+  function roundTripEvent(eventType: string, payload: unknown): unknown {
+    const ctx = pairedContext();
+    const frame = encodeEvent(eventEnvelopeFor(eventType, payload), ctx, {
+      seq: 9,
+      uptimeMs: 99,
+      deviceRef: DEVICE_REF,
+    });
+    expect(frame.length).toBeLessThanOrEqual(ESP_NOW_MAX_FRAME_BYTES);
+    return readFrame(frame).payload;
+  }
+
+  it('marker_traversed round-trips WITH inferred_edge present', () => {
+    const payload = {
+      train_id: 'aaaaaaaa-0000-4000-8000-000000000001',
+      marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+      direction: 'reverse',
+      in_discovery_mode: true,
+      inferred_edge: {
+        from_marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+        to_marker_id: 'aaaaaaaa-0000-4000-8000-000000000003',
+      },
+    };
+    expect(roundTripEvent('marker_traversed', payload)).toEqual(payload);
+  });
+
+  it('marker_traversed round-trips WITHOUT inferred_edge (key stays absent)', () => {
+    const payload = {
+      train_id: 'aaaaaaaa-0000-4000-8000-000000000001',
+      marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+      direction: 'forward',
+      in_discovery_mode: false,
+    };
+    const decoded = roundTripEvent('marker_traversed', payload);
+    expect(decoded).toEqual(payload);
+    expect(Object.hasOwn(decoded as object, 'inferred_edge')).toBe(false);
+  });
+
+  it('clearance_granted round-trips an EMPTY edge array', () => {
+    const payload = {
+      train_id: 'aaaaaaaa-0000-4000-8000-000000000001',
+      new_limit_marker_id: 'aaaaaaaa-0000-4000-8000-000000000003',
+      edges_newly_cleared: [],
+    };
+    expect(roundTripEvent('clearance_granted', payload)).toEqual(payload);
+  });
+
+  it('clearance_granted round-trips a NON-EMPTY edge array', () => {
+    const payload = {
+      train_id: 'aaaaaaaa-0000-4000-8000-000000000001',
+      new_limit_marker_id: 'aaaaaaaa-0000-4000-8000-000000000003',
+      edges_newly_cleared: [
+        {
+          from_marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+          to_marker_id: 'aaaaaaaa-0000-4000-8000-000000000003',
+        },
+        {
+          from_marker_id: 'aaaaaaaa-0000-4000-8000-000000000003',
+          to_marker_id: 'aaaaaaaa-0000-4000-8000-000000000004',
+        },
+      ],
+    };
+    expect(roundTripEvent('clearance_granted', payload)).toEqual(payload);
+  });
+
+  it('grant_clearance command round-trips WITH and WITHOUT optional reason', () => {
+    const ctx = pairedContext();
+    const withReason = {
+      limit_marker_id: 'aaaaaaaa-0000-4000-8000-000000000003',
+      reason: 'block ahead clear — proceed (héllo)',
+    };
+    const withoutReason = { limit_marker_id: 'aaaaaaaa-0000-4000-8000-000000000003' };
+    for (const payload of [withReason, withoutReason]) {
+      const frame = encodeCommand(commandEnvelopeFor('grant_clearance', payload), ctx, {
+        deviceRef: DEVICE_REF,
+      });
+      expect(frame.length).toBeLessThanOrEqual(ESP_NOW_MAX_FRAME_BYTES);
+      expect(readFrame(frame).payload).toEqual(payload);
+    }
+  });
+
+  it('throws on a UUID-shaped field that is not a UUID (programmer error)', () => {
+    const ctx = pairedContext();
+    const bad = {
+      train_id: 'not-a-uuid',
+      current_limit_marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+      next_edge: {
+        from_marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+        to_marker_id: 'aaaaaaaa-0000-4000-8000-000000000003',
+      },
+    };
+    expect(() => encodeEvent(eventEnvelopeFor('clearance_request', bad), ctx)).toThrow(/UUID/);
+  });
+
+  it('throws when a per-type field has the wrong primitive type', () => {
+    const ctx = pairedContext();
+    const bad = {
+      train_id: 'aaaaaaaa-0000-4000-8000-000000000001',
+      marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+      direction: 'forward',
+      in_discovery_mode: 'yes' /* not a boolean */,
+    };
+    expect(() => encodeEvent(eventEnvelopeFor('marker_traversed', bad), ctx)).toThrow(/boolean/);
+  });
+
+  it('throws on an unknown direction enum value', () => {
+    const ctx = pairedContext();
+    const bad = {
+      train_id: 'aaaaaaaa-0000-4000-8000-000000000001',
+      marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+      direction: 'sideways',
+      in_discovery_mode: false,
+    };
+    expect(() => encodeEvent(eventEnvelopeFor('marker_traversed', bad), ctx)).toThrow(/direction/);
+  });
+
+  it('throws on a non-object per-type payload', () => {
+    const ctx = pairedContext();
+    expect(() => encodeEvent(eventEnvelopeFor('clearance_request', 'nope'), ctx)).toThrow(
+      /expected an object/,
+    );
+  });
+
+  it('throws decoding a corrupt per-type frame with trailing bytes', () => {
+    const ctx = pairedContext();
+    const frame = encodeEvent(
+      eventEnvelopeFor('clearance_request', EVENT_PAYLOADS.clearance_request),
+      ctx,
+      { deviceRef: DEVICE_REF },
+    );
+    /* Append a stray byte to the payload region. */
+    const corrupt = new Uint8Array(frame.length + 1);
+    corrupt.set(frame, 0);
+    expect(() => readFrame(corrupt)).toThrow(/trailing bytes/);
+  });
+
+  it('throws decoding a per-type frame that is truncated mid-field', () => {
+    const ctx = pairedContext();
+    const frame = encodeEvent(
+      eventEnvelopeFor('clearance_request', EVENT_PAYLOADS.clearance_request),
+      ctx,
+      { deviceRef: DEVICE_REF },
+    );
+    /* Drop the last byte so a UUID read runs off the end. */
+    const truncated = frame.subarray(0, frame.length - 1);
+    expect(() => readFrame(truncated)).toThrow(/ran out of bytes/);
   });
 });

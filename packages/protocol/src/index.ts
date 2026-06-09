@@ -6,3 +6,4 @@ export * from './commands.js';
 export * from './topics.js';
 export * from './manifest.js';
 export * from './layout.js';
+export * from './tcf/index.js';

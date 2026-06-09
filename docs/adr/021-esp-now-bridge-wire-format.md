@@ -2,17 +2,32 @@
 
 ## Status
 
-Accepted — implemented (June 2026), framework only. Trainframe Compact Frame
-(TCF) codec landed in `packages/protocol/src/tcf/`: epoch-versioned
-append-only registry of 1-byte event-type IDs, 13-byte header, ≤250-byte
-frames, lossless expansion to the canonical JSON envelope (clock/newId
-injected — no wall-clock/RNG), unknown IDs default-safe to `anomaly`.
-Implementation deviations flagged for a future pass: the codec lives in
-`protocol` (not a firmware-support package) under the no-new-package
-constraint and is not yet exported from the package barrel; the per-type byte
-codecs (and thus fitting the UUID-heavy payloads) remain the named deferred
-follow-up — today's generic-JSON carrier overflows those types, asserted as a
-boundary.
+Accepted — implemented (June 2026). Trainframe Compact Frame (TCF) codec lives
+in `packages/protocol/src/tcf/` and is exported from the package barrel
+(`@trainframe/protocol`): epoch-versioned append-only registry of 1-byte
+event-type IDs, 13-byte header, ≤250-byte frames, lossless expansion to the
+canonical JSON envelope (clock/newId injected — no wall-clock/RNG), unknown IDs
+default-safe to `anomaly`.
+
+The §4 per-type compact payload codecs have landed (`tcf/payloads.ts`): the
+hot, UUID-heavy core types — `marker_traversed`, `clearance_request`,
+`clearance_granted`, and the `grant_clearance` command — pack each 36-char UUID
+to 16 raw bytes (plus enums/bools to one byte), so they FIT one 250-byte frame
+and round-trip byte-identically. `clearance_request` (three UUIDs) and a
+`marker_traversed` carrying `inferred_edge` (four UUIDs) both overflow the
+generic JSON carrier and are exactly the cases this packing fixes; tests assert
+round-trip identity AND size ≤250 for them. Types without a pinned codec keep
+the generic UTF-8-JSON carrier as the documented fallback, and
+`flags.payload_is_cbor` stays reserved (0) for the CBOR escape hatch.
+
+One placement deviation stands by design: the codec lives in `protocol` (a pure
+wire-shape concern, alongside schemas and topic helpers) rather than a separate
+firmware-support package, under the repo's no-new-package constraint. The
+Consequences section below ("belongs in a new satellite/firmware-support
+package") is superseded by that choice. Genuinely deferred items remain: CBOR
+carriage for the variable/rare long tail, satellite-defined event IDs over
+ESP-NOW, oversized registration, and Thread/6LoWPAN bridges (see Deferred
+follow-ups).
 
 Resolves the open design question listed in CLAUDE.md and the protocol spec:
 "the MQTT bridge wire format for ESP-NOW devices (compact event-type IDs vs.
@@ -251,9 +266,14 @@ specifies. No constrained device needs a synchronised clock.
 
 ## Deferred follow-ups
 
-- **Concrete per-type payload codecs.** This ADR fixes the *framework* (header,
-  ID registry, codec-or-CBOR rule); the byte-level layout of each event's
-  payload is mechanical follow-up, to land with the firmware-support package.
+- **Concrete per-type payload codecs.** *Landed* (`tcf/payloads.ts`) for the
+  hot UUID-heavy set — `marker_traversed`, `clearance_request`,
+  `clearance_granted`, and the `grant_clearance` command. Remaining core types
+  ride the generic JSON carrier, which fits them comfortably today; adding a
+  fixed codec for any of them later is a drop-in table entry (no wire-format
+  change). CBOR carriage for the genuinely variable/rare long tail
+  (`device_registered` capability lists, free-form `anomaly` text) is still
+  reserved via `flags.payload_is_cbor` and not yet wired.
 - **Oversized registration.** A `device_registered` with a capability list too
   large for one frame needs a slower multi-frame or out-of-band pairing path;
   out of scope here (rare, one-time, not on the hot path).
