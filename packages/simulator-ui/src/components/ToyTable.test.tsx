@@ -505,7 +505,13 @@ describe('ToyTable — scan and power', () => {
     expect(envelope.event_type).toBe('device_registered');
     expect(envelope.protocol_version).toBe(PROTOCOL_VERSION);
     const payload = envelope.payload as { capabilities: string[] };
-    expect(payload.capabilities).toEqual(['core.controls_motion', 'core.accepts_route']);
+    // Toy-table trains declare can_reverse so they can be admitted to a railyard
+    // zone (ADR-027 — its interior is worked by shunting).
+    expect(payload.capabilities).toEqual([
+      'core.controls_motion',
+      'core.accepts_route',
+      'core.can_reverse',
+    ]);
 
     // Scanning a train must not trigger the scan-flow's GARAGE announcement
     // (that's only for track pieces). The in-browser sim may have emitted its
@@ -513,6 +519,22 @@ describe('ToyTable — scan and power', () => {
     // — what we check is that no scan-flow `tag_assignment` (the one with
     // `marker_kind`) ever fired for this train piece.
     expect(filterScanFlowAssignments(client)).toHaveLength(0);
+  });
+
+  it('dropping a placed railyard onto the scan box announces a gates_zone device', async () => {
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('railyard');
+
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+
+    const regs = client.published.filter((m) =>
+      m.topic.startsWith('railway/events/device_registered/YARD-'),
+    );
+    expect(regs.length).toBe(1);
+    const reg = regs[0];
+    if (!reg) throw new Error('unreachable');
+    const payload = decodeEnvelope(reg.payload).payload as { capabilities: string[] };
+    expect(payload.capabilities).toEqual(['core.gates_zone', 'core.reports_length']);
   });
 
   it('clicking a live train SELECTS it — it stays live and is NOT powered off', async () => {

@@ -321,7 +321,9 @@ export class ToyHardware {
       // of work; for the live demo/dev tool we run pristine so trains circulate.
       this.simulation.spawnTrain(deviceIdForDevicePiece(piece), {
         startEdge,
-        config: { length_mm: TRAIN_LENGTH_MM, miss_rate: 0 },
+        // `can_reverse: true` so the train may be admitted into a railyard zone
+        // (ADR-027); matches the capability the scan announces on the wire.
+        config: { length_mm: TRAIN_LENGTH_MM, miss_rate: 0, can_reverse: true },
       });
       return;
     }

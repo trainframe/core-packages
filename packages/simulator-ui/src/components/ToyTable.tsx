@@ -265,6 +265,7 @@ function nextRotation(r: RotationDeg): RotationDeg {
 function deviceIdForDevicePiece(piece: TrackPiece): string {
   if (piece.type === 'train') return `T-${piece.id}`;
   if (piece.type === 'gate') return `GATE-${piece.id}`;
+  if (piece.type === 'railyard') return `YARD-${piece.id}`;
   // Unreachable: callers gate on isWireDevice. Keeping the throw makes the
   // contract explicit for future maintainers.
   throw new Error(`deviceIdForDevicePiece called on non-wire-device piece ${piece.type}`);
@@ -2347,7 +2348,10 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
     // the bridge demo's J1. Mirrors the length spawned into the sim by
     // ToyHardware so the wire payload and physics agree.
     const reg = encodeDeviceEvent('device_registered', device_id, {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      // `core.can_reverse` so the train may be admitted into a railyard zone
+      // (ADR-027 — the interior is worked by shunting). Toy locos can be pushed,
+      // so every toy-table train declares it.
+      capabilities: ['core.controls_motion', 'core.accepts_route', 'core.can_reverse'],
       train_length_mm: TRAIN_LENGTH_MM,
     });
     client.publish(reg.topic, reg.payload);
@@ -2357,6 +2361,17 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
     const device_id = deviceIdForDevicePiece(piece);
     const reg = encodeDeviceEvent('device_registered', device_id, {
       capabilities: ['core.gates_clearance'],
+    });
+    client.publish(reg.topic, reg.payload);
+    return false;
+  }
+  if (piece.type === 'railyard') {
+    // A railyard announces gates_zone (admission) + reports_length (it may
+    // reconcile a train's length on the way out, ADR-023). Its zone capacity +
+    // occupancy arrive separately as zone_state_changed from the sim device.
+    const device_id = deviceIdForDevicePiece(piece);
+    const reg = encodeDeviceEvent('device_registered', device_id, {
+      capabilities: ['core.gates_zone', 'core.reports_length'],
     });
     client.publish(reg.topic, reg.payload);
     return false;
