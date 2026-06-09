@@ -10,6 +10,30 @@
  * or from localStorage (see main.tsx bootstrap).
  */
 [data-theme="dark"] {
+  /* Re-assert the ui-kit dark base tokens. theme/light.css sets the warm
+     "workshop" palette under `:root` (equal specificity, imported earlier), so
+     without this the warm values would leak into dark mode. */
+  --tf-color-bg: #141414;
+  --tf-color-fg: #e8e8e8;
+  --tf-color-fg-muted: #9a9a9a;
+  --tf-color-border: #3a3a3a;
+  --tf-color-surface: #1e1e1e;
+  --tf-color-surface-hover: #262626;
+  --tf-color-accent: #4d9ef5;
+  --tf-color-accent-soft: #1c2c3c;
+
+  /* Dark chrome surfaces (counterpart to the warm ones in light.css). */
+  --tf-vis-surround: radial-gradient(
+    1200px 700px at 28% -12%,
+    #1d1d1d 0%,
+    #141414 60%,
+    #0e0e0e 100%
+  );
+  --tf-vis-card: #1b1b1b;
+  --tf-vis-card-border: #333333;
+  --tf-vis-table: radial-gradient(120% 100% at 50% 0%, #232118 0%, #1a1a1a 60%, #151515 100%);
+  --tf-vis-table-border: #3a3a3a;
+
   --tf-vis-color-bg: var(--tf-color-bg, #141414);
   --tf-vis-color-fg: var(--tf-color-fg, #e8e8e8);
   --tf-vis-color-fg-muted: var(--tf-color-fg-muted, #9a9a9a);

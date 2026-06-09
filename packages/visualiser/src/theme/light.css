@@ -38,6 +38,19 @@
   --tf-color-accent-soft: #fcebc6;
   --tf-font-sans: ui-rounded, "SF Pro Rounded", "Segoe UI", system-ui, sans-serif;
 
+  /* Chrome surfaces — tokenised so dark mode (theme/dark.css) can flip them and
+     the warm gradients don't leak onto a dark page. */
+  --tf-vis-surround: radial-gradient(
+    1200px 700px at 28% -12%,
+    #e7d4ad 0%,
+    #d3b988 55%,
+    #c2a472 100%
+  );
+  --tf-vis-card: linear-gradient(180deg, #fdf9f0 0%, #f9f1e2 100%);
+  --tf-vis-card-border: #e3d3ad;
+  --tf-vis-table: radial-gradient(120% 100% at 50% 0%, #f5e9cf 0%, #ecdcb9 55%, #e0cca2 100%);
+  --tf-vis-table-border: #cbb78e;
+
   --tf-vis-color-bg: #f3e7cf;
   --tf-vis-color-fg: #4a371f;
   --tf-vis-color-fg-muted: #8a734f;
