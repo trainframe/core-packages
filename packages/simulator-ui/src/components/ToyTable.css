@@ -48,10 +48,10 @@ body {
   flex-direction: column;
   gap: 0.85rem;
   padding: 1.1rem 1.25rem 1.4rem;
-  /* Hug the table surface (capped to viewport height) so the card ends at the
-     table; the parts shelf lives below it on the desk, not inside the box. */
-  width: fit-content;
-  max-width: 100%;
+  /* Fill the available width (up to a comfortable max) so the card doesn't leave
+     wood gaps on either side; the table surface is centred within it. */
+  width: 100%;
+  max-width: 1200px;
   font-family: var(--tf-font-family);
   /* The app surface: a sheet of warm paper on the desk. */
   background: linear-gradient(180deg, #fdf9f0 0%, #f9f1e2 100%);
@@ -95,12 +95,13 @@ body {
   overflow: hidden;
 }
 
-/* The table stage: the canvas plus the scan zone floating over its corner.
-   Width is capped to the viewport HEIGHT (the canvas keeps its 3:2 ratio) so the
-   table never grows so tall that the parts tray below it falls off-screen. */
+/* The table stage: the canvas plus the scan zone floating over its corner. As
+   large as fits — bounded by the card width OR by the viewport height (so the
+   3:2 table plus the chrome above and the parts shelf below still fit on screen
+   without scrolling). Centred within the card. */
 .tf-toytable__stage {
   position: relative;
-  width: min(100%, 78vh);
+  width: min(100%, calc((100vh - 340px) * 1.5));
   margin-inline: auto;
 }
 
@@ -207,7 +208,8 @@ body {
   flex-wrap: wrap;
   align-items: flex-start;
   justify-content: center;
-  max-width: 100%;
+  width: 100%;
+  max-width: 1200px;
   padding: 0.75rem 0.9rem;
   /* A wooden parts shelf resting on the desk, below (off) the table card. */
   background: linear-gradient(180deg, #f1e4cb 0%, #e9d8b6 100%);
