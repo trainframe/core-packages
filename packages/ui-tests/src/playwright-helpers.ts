@@ -199,6 +199,12 @@ export interface PlacePieceOptions {
    */
   readonly xMm?: number;
   readonly yMm?: number;
+  /**
+   * For `type: 'carriage'`, the livery to pick before placing (a real operator
+   * clicks the swatch row that appears when the carriage tool is armed). The
+   * placed wagon carries this colour intrinsically.
+   */
+  readonly carriageColor?: 'red' | 'green' | 'amber' | 'blue' | 'purple';
 }
 
 /**
@@ -213,13 +219,18 @@ export interface PlacePieceOptions {
  *    rather than predicted from a module-level counter, which is fragile).
  */
 export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): Promise<string> {
-  const { type, xMm = 450, yMm = 300 } = opts;
+  const { type, xMm = 450, yMm = 300, carriageColor } = opts;
 
   // Arm the toybox button if not already armed.
   const toyboxBtn = sim.getByTestId(`toybox-${type}`);
   const pressed = await toyboxBtn.getAttribute('aria-pressed');
   if (pressed !== 'true') {
     await toyboxBtn.click();
+  }
+
+  // Pick the carriage livery (the swatch row appears once carriage is armed).
+  if (type === 'carriage' && carriageColor !== undefined) {
+    await sim.getByTestId(`toybox-carriage-color-${carriageColor}`).click();
   }
 
   // Capture the piece IDs that exist before the click, so we can diff.

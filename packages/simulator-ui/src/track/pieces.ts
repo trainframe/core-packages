@@ -71,6 +71,26 @@ export type DevicePieceType = 'train' | 'gate' | 'carriage';
 export type WireDeviceType = 'train' | 'gate';
 
 /**
+ * A carriage's livery. A carriage carries an intrinsic colour so a particular
+ * wagon stays visually identifiable as it is shunted between trains (e.g. a
+ * railyard swapping a train's leading pair). The id is semantic; the hex it
+ * maps to is the renderer's business (ADR-024 §4 — devices keep solid body
+ * colours, but the palette lives in `ToyTable`, never in this geometry module).
+ * Absent ⇒ the default carriage livery (the same blue carriages have always
+ * had), so existing layouts and screenshots are unchanged.
+ */
+export type CarriageColorId = 'red' | 'green' | 'amber' | 'blue' | 'purple';
+
+/** Liveries the toybox offers, in swatch order. */
+export const CARRIAGE_COLOR_IDS: readonly CarriageColorId[] = [
+  'red',
+  'green',
+  'amber',
+  'blue',
+  'purple',
+];
+
+/**
  * The marker kind a track piece contributes to the layout / scan flow.
  *
  * The scan-box (in `ToyTable`) and the private layout compiler (in
@@ -137,6 +157,14 @@ export interface TrackPiece {
    * (exactOptionalPropertyTypes). Ignored by non-curve pieces.
    */
   readonly radiusMm?: number;
+  /**
+   * Intrinsic livery for a `carriage` piece. Absent ⇒ the default carriage
+   * colour. Lets the operator place distinctly-coloured wagons so an individual
+   * carriage stays trackable as it is shunted between trains. Mirrors the
+   * `flipped?` / `layer?` idiom: never written as `colorId: undefined`
+   * (exactOptionalPropertyTypes). Ignored by non-carriage pieces.
+   */
+  readonly colorId?: CarriageColorId;
 }
 
 /** The single place the ground-layer default lives. Absent ⇒ layer 0. */

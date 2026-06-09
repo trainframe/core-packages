@@ -312,6 +312,39 @@ describe('ToyTable — palette and placement', () => {
     expect(trainIdx).toBeGreaterThanOrEqual(0);
     expect(markerIdx).toBeLessThan(trainIdx);
   });
+
+  it('shows the livery swatches only when the carriage tool is armed', async () => {
+    const user = userEvent.setup();
+    renderToyTable();
+
+    // No carriage armed → no swatches.
+    expect(screen.queryByTestId('toybox-carriage-color-purple')).toBeNull();
+
+    await user.click(screen.getByTestId('toybox-carriage'));
+    expect(screen.getByTestId('toybox-carriage-color-red')).toBeInTheDocument();
+    expect(screen.getByTestId('toybox-carriage-color-purple')).toBeInTheDocument();
+  });
+
+  it('places a carriage in the livery picked from the swatch row', async () => {
+    const user = userEvent.setup();
+    renderToyTable();
+
+    await user.click(screen.getByTestId('toybox-carriage'));
+    await user.click(screen.getByTestId('toybox-carriage-color-purple'));
+    await user.click(screen.getByTestId('toy-table-canvas'));
+
+    const placed = document.querySelector(
+      '[data-testid^="piece-carriage-"]',
+    ) as HTMLElement | null;
+    if (!placed) throw new Error('no carriage placed');
+    // The carriage body path is filled with the purple livery, not the default
+    // blue — the wagon carries its colour intrinsically so it stays trackable.
+    // (The first path is the seam-hiding rim-light with fill="none"; the body
+    // fill is a later path.)
+    const fills = Array.from(placed.querySelectorAll('path')).map((p) => p.getAttribute('fill'));
+    expect(fills).toContain('#8c5bb0');
+    expect(fills).not.toContain('#3f6fa6'); // not the default blue
+  });
 });
 
 /** Place an armed piece of the given type and return its piece id. */

@@ -11,6 +11,8 @@ import { type EdgePath, composeEdgePath } from '../track/edge-path.js';
 import { SNAP_DISTANCE, compileLayout } from '../track/layout-from-pieces.js';
 import { detectSameLayerOverlaps, pierSuppressed } from '../track/overlap.js';
 import {
+  CARRIAGE_COLOR_IDS,
+  type CarriageColorId,
   DEVICE_PIECE_TYPES,
   type DevicePieceType,
   PIECE_LABELS,
@@ -71,6 +73,26 @@ const DEVICE_FILL: Record<DevicePieceType, string> = {
   carriage: '#3f6fa6',
   gate: '#8a929c',
 };
+
+/**
+ * Carriage liveries (ADR-024 §4 — devices keep solid body colours; the palette
+ * lives here, not in the geometry module). A carriage with no `colorId` keeps
+ * `DEVICE_FILL.carriage`; these are the named liveries the toybox swatches
+ * offer. Chosen to stay legible against the warm wood and distinct from the red
+ * locomotive (`DEVICE_FILL.train`).
+ */
+const CARRIAGE_COLORS: Record<CarriageColorId, string> = {
+  red: '#c0392b',
+  green: '#3f8f54',
+  amber: '#d99a1c',
+  blue: '#3f6fa6',
+  purple: '#8c5bb0',
+};
+
+/** Body fill for a carriage piece: its intrinsic livery, or the default blue. */
+function carriageFill(piece: TrackPiece): string {
+  return piece.colorId !== undefined ? CARRIAGE_COLORS[piece.colorId] : DEVICE_FILL.carriage;
+}
 
 /* SVG gradient/fill ids defined once in the page <defs>; referenced by url(). */
 const WOOD_FILL = 'url(#tf-wood)';
@@ -694,6 +716,8 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /** Which piece type the operator has "armed" from the toybox, if any. */
   const [armedType, setArmedType] = useState<TrackPieceType | null>(null);
+  /** Livery applied to the next carriage placed (the toybox swatch selection). */
+  const [armedCarriageColor, setArmedCarriageColor] = useState<CarriageColorId>('blue');
   /** The deck the operator is currently authoring on (0 = ground). New pieces
    * land on this layer and snapping is gated to it, so an upper-deck loop can be
    * built directly over the ground loop without the two merging. */
@@ -856,13 +880,16 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
         // Only stamp a layer when authoring above ground. exactOptionalPropertyTypes
         // forbids writing `layer: undefined`, and absent ⇒ ground anyway.
         ...(activeLayer !== 0 ? { layer: activeLayer } : {}),
+        // A carriage carries the armed livery so it stays trackable through a
+        // shunt. Other pieces never get a colorId.
+        ...(pieceType === 'carriage' ? { colorId: armedCarriageColor } : {}),
       };
       setPieces((prev) => [...prev, piece]);
       setSelectedId(piece.id);
       // Stay armed so the operator can drop multiple of the same type without
       // re-clicking the toybox.
     },
-    [armedType, activeLayer],
+    [armedType, activeLayer, armedCarriageColor],
   );
 
   // Reposition an already-placed piece (dragged across the canvas). Snaps +
@@ -1125,7 +1152,12 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       </div>
       {/* The parts shelf sits OFF the table — on the desk below the white card.
           Drag a wooden part up onto the table to place it. */}
-      <Toybox armedType={armedType} onArm={armPieceType} />
+      <Toybox
+        armedType={armedType}
+        onArm={armPieceType}
+        carriageColor={armedCarriageColor}
+        onPickCarriageColor={setArmedCarriageColor}
+      />
     </div>
   );
 }
@@ -1137,9 +1169,11 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
 interface ToyboxProps {
   readonly armedType: TrackPieceType | null;
   readonly onArm: (type: TrackPieceType) => void;
+  readonly carriageColor: CarriageColorId;
+  readonly onPickCarriageColor: (color: CarriageColorId) => void;
 }
 
-function Toybox({ armedType, onArm }: ToyboxProps) {
+function Toybox({ armedType, onArm, carriageColor, onPickCarriageColor }: ToyboxProps) {
   return (
     <div className="tf-toybox" aria-label="Parts tray">
       <ToyboxGroup heading="Track" types={TRACK_PIECE_TYPES} armedType={armedType} onArm={onArm} />
@@ -1149,7 +1183,44 @@ function Toybox({ armedType, onArm }: ToyboxProps) {
         armedType={armedType}
         onArm={onArm}
       />
+      {armedType === 'carriage' && (
+        <CarriageLiveryPicker selected={carriageColor} onPick={onPickCarriageColor} />
+      )}
     </div>
+  );
+}
+
+interface CarriageLiveryPickerProps {
+  readonly selected: CarriageColorId;
+  readonly onPick: (color: CarriageColorId) => void;
+}
+
+/**
+ * Swatch row shown when the carriage tool is armed: pick the livery the next
+ * carriage carries. The colour is intrinsic to the placed wagon, so the
+ * operator can build a same-coloured rake per train (and a wagon stays
+ * recognisable when a railyard shunts it onto a different train).
+ */
+function CarriageLiveryPicker({ selected, onPick }: CarriageLiveryPickerProps) {
+  return (
+    <section className="tf-toybox__group" aria-label="Carriage livery">
+      <h2 className="tf-toybox__heading">Livery</h2>
+      <ul className="tf-toybox__swatches">
+        {CARRIAGE_COLOR_IDS.map((color) => (
+          <li key={color}>
+            <button
+              type="button"
+              className="tf-toybox__swatch"
+              data-testid={`toybox-carriage-color-${color}`}
+              aria-label={color}
+              aria-pressed={selected === color}
+              style={{ background: CARRIAGE_COLORS[color] }}
+              onClick={() => onPick(color)}
+            />
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -1965,9 +2036,15 @@ function PieceRenderer({
   const shape = getPieceShape(piece);
   const isDevice = isDevicePiece(piece.type);
   // Track pieces are filled with the beech-wood gradient + their functional
-  // tint; device pieces (train/gate/carriage) get their own solid colour.
+  // tint; device pieces (train/gate/carriage) get their own solid colour. A
+  // carriage's colour is its intrinsic livery (so a wagon stays trackable as it
+  // is shunted between trains), defaulting to the standard blue.
   const tint = PIECE_TINT[piece.type];
-  const bodyFill = isDevicePiece(piece.type) ? DEVICE_FILL[piece.type] : WOOD_FILL;
+  const bodyFill = isDevice
+    ? piece.type === 'carriage'
+      ? carriageFill(piece)
+      : DEVICE_FILL[piece.type]
+    : WOOD_FILL;
   // Wire devices (train / gate) can be powered off by clicking when live.
   // Carriages are wire-invisible — clicking a live carriage just selects it.
   const isWire = isWireDevice(piece.type);

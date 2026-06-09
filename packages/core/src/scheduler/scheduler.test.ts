@@ -1054,6 +1054,37 @@ describe('Scheduler — zone interior handoff (ADR-027)', () => {
     expect(grantFor(onward, 'T1')).toBeUndefined();
   });
 
+  it('a released train accepts a fresh onward leg and departs (loop continues)', () => {
+    /* The load-bearing seam for a cyclic yard scenario (ADR-027): after the
+     * device hands a suspended train back, core must be able to route it out
+     * again. With the onward block clear, the next leg must produce a real
+     * assign_route + grant_clearance — no stale `in_zone`, clearance limit, or
+     * transit may pin the train at the throat. */
+    const { scheduler } = setup();
+    registerReversibleTrain(scheduler, 'T1');
+    registerRailyard(scheduler, 'YARD-M3');
+    setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0);
+
+    enterZone(scheduler, 'T1'); // T1 suspended at M3, holding no block
+    expect(scheduler.getTrainState('T1')?.in_zone).toBe('M3');
+
+    scheduler.handleEvent({
+      event_type: 'zone_train_released',
+      device_id: 'YARD-M3',
+      payload: { zone_marker_id: 'M3', train_id: 'T1' },
+    });
+
+    // No peer anywhere — the onward block is clear. The next leg must depart.
+    const onward = scheduler.assignSchedule('T1', 'r1b', ['M3', 'M1']);
+    expect(
+      onward.find((e) => e.kind === 'send_command' && e.command_type === 'assign_route'),
+    ).toBeDefined();
+    expect(grantFor(onward, 'T1')).toBeDefined();
+    const t1 = scheduler.getTrainState('T1');
+    expect(t1?.in_zone).toBeUndefined();
+    expect(t1?.transit).toBeDefined(); // routing again, off the throat
+  });
+
   it('rejects a release from a device that does not own the zone', () => {
     const { scheduler } = setup();
     registerReversibleTrain(scheduler, 'T1');
