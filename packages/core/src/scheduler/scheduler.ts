@@ -568,8 +568,21 @@ export class Scheduler {
     if (!train || train.in_zone !== zone_marker_id) return [];
 
     train.in_zone = undefined;
-    // The train is parked at the throat holding no blocks; resume scheduling so
-    // it can be routed onward. retry so any peer waiting on it is reconsidered.
+
+    /* Cyclic resume (ADR-028): if the train is running a schedule whose CURRENT
+     * stop is this yard, the yard was just a stop on its loop — advance the
+     * schedule and plan the onward leg itself, exactly as a station dwell does
+     * on expiry. The train drives out under ordinary clearance (block
+     * exclusivity still holds — the device only released it, it did not move
+     * it). Otherwise this was a one-off route into the yard: leave the train
+     * parked at the throat, reclaimed, awaiting a fresh route. Either branch
+     * retries peers that may have been waiting on the freed throat. */
+    if (
+      train.schedule &&
+      train.schedule.stops[train.schedule.current_stop_index] === zone_marker_id
+    ) {
+      return this.advanceScheduleAndReplan(train);
+    }
     return [...this.retryBlockedClearances()];
   }
 

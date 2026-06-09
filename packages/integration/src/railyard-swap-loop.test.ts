@@ -121,8 +121,11 @@ describe('Railyard carriage-swap loop (ADR-026/027, end-to-end)', () => {
     await harness.testClient.waitForState('railway/state/devices/YARD-1');
 
     // --- T1 (red rake) visits the yard ------------------------------------
+    // One CYCLIC schedule calling at the yard each lap (M1 ↔ M3) — the operator
+    // assigns it once; the scheduler suspends at the throat and resumes the
+    // loop on release itself (ADR-028), no per-lap re-assignment.
     await spawnReversibleTrain('T1', 'red');
-    harness.server.assignSchedule('T1', 't1-in', ['M1', 'M3']);
+    harness.server.assignSchedule('T1', 't1-loop', ['M1', 'M3']);
 
     // It is admitted, pulls into the throat as its terminus, is suspended,
     // swapped, and released — all without us touching the carriages.
@@ -131,22 +134,25 @@ describe('Railyard carriage-swap loop (ADR-026/027, end-to-end)', () => {
     // T1 now leads with the purple spares; its red pair was dropped in the yard.
     expect(liveriesOf('T1').slice(0, 2)).toEqual(['purple', 'purple']);
     expect(liveriesOf('T1')).toContain('red');
+    // The yard keeps T1's red pair as the next spares.
+    expect(yard.getSpares().map((c) => c.colorId)).toEqual(['red', 'red']);
 
-    // Release-then-continue: T1 accepts a fresh onward leg and drives out,
-    // closing its lap back to M1 (the loop's heartbeat).
-    harness.server.assignSchedule('T1', 't1-out', ['M3', 'M1']);
+    // Release-then-resume (ADR-028): with no operator re-assignment, T1 is
+    // routed onward off the throat — it receives a SECOND assign_route (the
+    // resumed leg) and drives out, closing its lap.
     await advanceUntil(
-      () => simulation.getTrain('T1')?.getCurrentEdge()?.to_marker_id === 'M1',
-      'T1 completes its lap back to M1',
+      () =>
+        harness.testClient.commandsFor('T1').filter((c) => c.command_type === 'assign_route')
+          .length >= 2,
+      'the scheduler resumes T1 onward without re-assignment',
     );
 
-    // T1 leaves the table. The yard keeps its red pair as the next spares.
+    // T1 leaves the table so the next train arrives uncontended.
     simulation.despawnTrain('T1');
-    expect(yard.getSpares().map((c) => c.colorId)).toEqual(['red', 'red']);
 
     // --- T2 (green rake) visits the yard ----------------------------------
     await spawnReversibleTrain('T2', 'green');
-    harness.server.assignSchedule('T2', 't2-in', ['M1', 'M3']);
+    harness.server.assignSchedule('T2', 't2-loop', ['M1', 'M3']);
     await advanceUntil(() => released('T2'), 'T2 released from the yard');
 
     // The headline: T2 leaves the yard wearing the RED wagons T1 brought in.
