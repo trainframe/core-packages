@@ -1362,6 +1362,22 @@ export class Scheduler {
   private collectWaitingTrains(): Map<string, EdgeRef> {
     const waiting = new Map<string, EdgeRef>();
     for (const train of this.trains.values()) {
+      /* Cross-feature safety (ADR-019 × ADR-017): a topology-held train is NOT
+       * waiting on clearance contention — it is waiting on operator recovery
+       * (reanchor / confirmNewTrack). It satisfies the structural waiting test
+       * (it has a transit, its progress_index was deliberately NOT advanced by
+       * handleTopologyViolation, and its next edge is uncleared), so without
+       * this guard it would enter the waits-for graph. There it is doubly
+       * dangerous: it could be reported in a spurious deadlock, and — being
+       * pinned at P (last_marker_id) while it holds the phantom guard edge
+       * {P->M} (to_marker_id = M != P) over its uncertain-position region — the
+       * deadlock yield would classify that guard as a releasable hold-ahead
+       * claim and hand the region to a peer, vacating the very block that keeps
+       * the train's unknown position default-safe. Excluding it keeps it out of
+       * the graph entirely: it can never be a yield victim and never produce a
+       * false deadlock. A peer contending for its region stays correctly blocked
+       * (the region is genuinely locked) — just with no false deadlock report. */
+      if (train.block_reason === 'unknown_topology') continue;
       if (!train.transit) continue;
       const nextEdge = train.transit.edges[train.transit.progress_index];
       if (!nextEdge) continue;

@@ -2950,6 +2950,125 @@ describe('Scheduler — topology violation handling (ADR-019)', () => {
     expect(scheduler.getTrainState('T1')?.block_reason).toBeUndefined();
   });
 
+  /*
+   * Cross-feature safety (ADR-019 × ADR-017): a topology-held train must NEVER
+   * be eligible as a deadlock-yield victim. It holds a phantom guard edge
+   * {P->M} (to_marker_id = M) over its uncertain-position region while its head
+   * stays pinned at P (last_marker_id = P). The yield's releasable filter keeps
+   * held edges whose to_marker_id !== occupiedMarker (= P), so it would classify
+   * the {P->M} guard as a "hold-ahead" claim and release it — handing the
+   * uncertain region to a contending peer. That is a safety violation: the
+   * region guards a position we are not sure of. The root fix excludes
+   * unknown_topology trains from collectWaitingTrains, so they never enter the
+   * waits-for graph and can never be picked as a victim. This test drives the
+   * exact configuration that, pre-fix, forms a 2-cycle and yields the guard.
+   */
+  it('(safety) a topology-held train is never yielded as a deadlock victim — its uncertain region stays locked', () => {
+    /* Layout: X->Q and P->Q both feed Q; Q->M continues to a gated station M.
+     * There is NO P->M edge, so a routed train at P reporting M is a topology
+     * violation. M has an incident edge (Q->M) so it is a known marker. */
+    const CROSSING: Layout = {
+      name: 'crossing',
+      markers: [
+        { id: 'P', kind: 'block_boundary' },
+        { id: 'Q', kind: 'block_boundary' },
+        { id: 'X', kind: 'block_boundary' },
+        { id: 'M', kind: 'station_stop' },
+      ],
+      edges: [
+        { from_marker_id: 'X', to_marker_id: 'Q', estimated_length_mm: 200 },
+        { from_marker_id: 'P', to_marker_id: 'Q', estimated_length_mm: 200 },
+        { from_marker_id: 'Q', to_marker_id: 'M', estimated_length_mm: 200 },
+      ],
+      junctions: [],
+    };
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const scheduler = new Scheduler(registry, new LayoutState(CROSSING, { now: () => 0 }), {
+      now: () => 0,
+    });
+    seedIdentityTags(scheduler, ['P', 'Q', 'X', 'M']);
+    registerGate(scheduler, 'GATE-M');
+    scheduler.handleEvent({
+      event_type: 'gate_state_changed',
+      device_id: 'GATE-M',
+      payload: { marker_id: 'M', state: 'withholding', reason: 'held for the test' },
+    });
+
+    /* T-peer registered FIRST (higher rank), T-held SECOND (lowest rank → the
+     * train the yield would pick as victim). Both length-aware so they retain
+     * their tail blocks. */
+    registerLongTrain(scheduler, 'T-peer', 100);
+    registerLongTrain(scheduler, 'T-held', 100);
+
+    /* T-peer routes X->Q->M. It is granted X->Q within the horizon, then on
+     * observing Q its head sits at Q holding X->Q, wanting Q->M — DENIED by the
+     * withholding gate at M. */
+    scheduler.assignSchedule('T-peer', 'r-peer', ['X', 'M']);
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T-peer',
+      payload: { tag_id: 'Q' },
+    });
+    const peerState = scheduler.getTrainState('T-peer');
+    expect(peerState?.cleared_edges).toContainEqual({ from_marker_id: 'X', to_marker_id: 'Q' });
+    expect(peerState?.cleared_edges).not.toContainEqual({ from_marker_id: 'Q', to_marker_id: 'M' });
+
+    /* T-held routes P->Q. With T-peer holding X->Q (lock {X, Q}), T-held's only
+     * leg P->Q is denied at Q → cleared_edges []. Head conceptually at P,
+     * wanting P->Q. */
+    scheduler.assignSchedule('T-held', 'r-held', ['P', 'Q']);
+    expect(scheduler.getTrainState('T-held')?.cleared_edges).toEqual([]);
+
+    /* T-held misreads M (unreachable from P). The topology handler appends the
+     * guard {P->M}, pins it at P, sets block_reason. It does NOT advance
+     * progress_index, so its wanted edge is still P->Q. */
+    observe(scheduler, 'T-held', 'M');
+    const heldAfterViolation = scheduler.getTrainState('T-held');
+    expect(heldAfterViolation?.block_reason).toBe('unknown_topology');
+    expect(heldAfterViolation?.last_marker_id).toBe('P');
+    expect(heldAfterViolation?.cleared_edges).toContainEqual({
+      from_marker_id: 'P',
+      to_marker_id: 'M',
+    });
+
+    /* Release the gate. This drives a retry pass through resolveDeadlockOrEmitState
+     * with skipTrainIds === undefined, so the yield branch is live. WITHOUT the
+     * fix, the waits-for graph contains a 2-cycle: T-held->T-peer (T-peer's X->Q
+     * shares Q with T-held's wanted P->Q) and T-peer->T-held (T-held's guard
+     * {P->M} shares M with T-peer's wanted Q->M). T-held is lowest-ranked → the
+     * victim → its {P->M} guard is released and T-peer is granted Q->M. */
+    const release = scheduler.handleEvent({
+      event_type: 'gate_state_changed',
+      device_id: 'GATE-M',
+      payload: { marker_id: 'M', state: 'granting' },
+    });
+
+    /* SAFETY: the topology-held train is untouched. */
+    const heldFinal = scheduler.getTrainState('T-held');
+    /* It keeps its hold reason — it is awaiting operator recovery, not clearance. */
+    expect(heldFinal?.block_reason).toBe('unknown_topology');
+    /* Its uncertain region {P->M} is NOT vacated. */
+    expect(heldFinal?.cleared_edges).toContainEqual({ from_marker_id: 'P', to_marker_id: 'M' });
+    /* No deadlock-yield revoke was sent to the held train. */
+    const yieldRevoke = release.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' &&
+        e.command_type === 'revoke_clearance' &&
+        e.device_id === 'T-held' &&
+        (e.payload as { reason?: string }).reason === 'deadlock_yield',
+    );
+    expect(yieldRevoke).toBeUndefined();
+    /* The peer is NOT granted the contested region — M is genuinely locked by the
+     * uncertain-position guard, so it stays correctly blocked (no illegitimate
+     * release, and no false deadlock report). */
+    expect(scheduler.getTrainState('T-peer')?.cleared_edges).not.toContainEqual({
+      from_marker_id: 'Q',
+      to_marker_id: 'M',
+    });
+  });
+
   it('clears the hold reason when an operator reassigns or revokes a held train (no stale block_reason on a moving train)', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
