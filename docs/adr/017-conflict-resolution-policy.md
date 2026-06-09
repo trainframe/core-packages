@@ -2,7 +2,11 @@
 
 ## Status
 
-Proposed.
+Accepted — implemented (June 2026). Total order (priority → registration-seq
+FIFO floor → train_id) drives the `retryBlockedClearances` grant path;
+deadlock yields the lowest-ranked train's not-yet-entered blocking edges, a
+closed nose-to-nose standoff is left reported (not falsely revoked). Optional
+additive `priority` on `device_registered`; protocol bumped 0.4.0 → 0.5.0.
 
 Builds on [ADR-002](002-clearance-model.md) (clearance, not commands),
 [ADR-011](011-section-as-edge-plus-boundary-markers.md) (a section is an edge

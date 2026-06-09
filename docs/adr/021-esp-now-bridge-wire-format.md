@@ -2,7 +2,17 @@
 
 ## Status
 
-Proposed.
+Accepted — implemented (June 2026), framework only. Trainframe Compact Frame
+(TCF) codec landed in `packages/protocol/src/tcf/`: epoch-versioned
+append-only registry of 1-byte event-type IDs, 13-byte header, ≤250-byte
+frames, lossless expansion to the canonical JSON envelope (clock/newId
+injected — no wall-clock/RNG), unknown IDs default-safe to `anomaly`.
+Implementation deviations flagged for a future pass: the codec lives in
+`protocol` (not a firmware-support package) under the no-new-package
+constraint and is not yet exported from the package barrel; the per-type byte
+codecs (and thus fitting the UUID-heavy payloads) remain the named deferred
+follow-up — today's generic-JSON carrier overflows those types, asserted as a
+boundary.
 
 Resolves the open design question listed in CLAUDE.md and the protocol spec:
 "the MQTT bridge wire format for ESP-NOW devices (compact event-type IDs vs.

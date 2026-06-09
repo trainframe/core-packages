@@ -2,7 +2,11 @@
 
 ## Status
 
-Proposed.
+Accepted — implemented (June 2026). The veto-on-any-deny fold
+(`anyCapabilityDeniesClearance`) already realised conjunctive AND; this ADR
+ratifies it and adds the n>1 integration test (two gates on one marker → held
+until both release; disconnect drops only the vanished gate's veto). The
+scheduler-side aggregated block-reason view stays deferred, as decided here.
 
 Resolves the open design question from CLAUDE.md: "Multi-gate semantics
 when several `gates_clearance` devices gate the same marker." Builds on

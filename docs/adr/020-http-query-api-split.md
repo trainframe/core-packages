@@ -2,7 +2,12 @@
 
 ## Status
 
-Proposed.
+Accepted — implemented (June 2026). Read-only `GET /api/query/*` family
+(layout, traversal-times, trains(/:id), clearances, tags) added in
+`packages/server` as thin projections of existing Scheduler/LayoutState
+accessors; `/api/state` retained as a deprecated alias. No protocol bump —
+HTTP query is a synchronous read/tooling channel, MQTT stays the application
+transport. Route planning deliberately deferred to a future planner ADR.
 
 Builds on [ADR-003](003-mqtt-transport.md) (MQTT is the application transport)
 and [ADR-008](008-server-admin-api.md) (the server's HTTP admin API for
