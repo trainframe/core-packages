@@ -15,11 +15,11 @@ Source: [`docs/spec/protocol-v0.2.md`](spec/protocol-v0.2.md)
 | Common event envelope                      | shipped | `eventEnvelope(...)`, `commandEnvelope(...)` factories. JSON over MQTT.                        |
 | Topic builders + parser (`topics.ts`)      | shipped | All topic shapes from the spec, plus `parseEventTopic` round-trip.                             |
 | Core event schemas (12 types)              | shipped | `device_registered`, `tag_observed`, `marker_traversed`, `train_status`, clearance \*, `gate_state_changed`, `switch_state_changed`, `aspect_changed`, `tag_assignment`, `anomaly`. |
-| Core command schemas (9 types)             | shipped | `assign_route`, `grant_clearance`, `revoke_clearance`, `begin_exploration`, `set_target_speed`, `emergency_stop`, `set_switch_position`, `set_aspect`, `assign_tag`. |
+| Core command schemas (10 types)            | shipped | `assign_route`, `grant_clearance`, `revoke_clearance`, `begin_exploration`, `set_target_speed`, `emergency_stop`, `set_switch_position`, `set_aspect`, `assign_tag`, `grant_reverse` (ADR-022 bounded backward clearance). |
 | Capability identifiers                     | shipped | `BUILTIN_CAPABILITIES` enum + `CapabilityId` regex.                                            |
 | `DeviceManifest` schema                    | shipped | Used by examples; not yet enforced by anything that loads manifests.                           |
 | Layout schema                              | shipped | Markers, edges, junctions. Optional spatial fields.                                            |
-| `protocol_version` literal                 | shipped | `0.6.0` exported as `PROTOCOL_VERSION` (0.5.0 added optional `priority` on `device_registered`, ADR-017; 0.6.0 added the `topology_violation` event + retained-clearance `block_reason`, ADR-019).              |
+| `protocol_version` literal                 | shipped | `0.7.0` exported as `PROTOCOL_VERSION` (0.5.0 added optional `priority` on `device_registered`, ADR-017; 0.6.0 added the `topology_violation` event + retained-clearance `block_reason`, ADR-019; 0.7.0 added the `grant_reverse` command, ADR-022).              |
 | `hold_gate` / `release_gate` commands      | shipped | Server-side override of local gate logic. `VirtualGate.acceptCommand` honours them and publishes the matching `gate_state_changed`. |
 | `vehicle_identified` event schema          | shipped | `{ vehicle_id, context_device_id }`. The scheduler already derives these from vehicle-tag observations.                                |
 | `begin_exploration` command                | shipped | ADR-015. Open-ended discovery clearance: authorises a train to drive forward across markers indefinitely (following the rails, taking the switched branch at junctions) until `revoke_clearance`. Names no edges — the primitive that bootstraps discovery on an unknown layout. |
@@ -52,7 +52,7 @@ Source: spec §"Capability model", §"Clearance model"; [`ADR-001`](adr/001-capa
 | `LayoutState`                             | shipped | Edges, marker lookup, switch positions, runtime `upsertMarker`, edge inference via `recordTraversal`, inferred→confirmed flip on N traversals (ADR-009), `toLayout()` serialiser for republishing as retained state. |
 | Anomaly emission for unknown tags         | shipped | `tag_observed` against unregistered marker → anomaly event.                                    |
 | Referential validation on broker boundary | shipped | `assignRoute`, `clearance_request`, and `switch_state_changed` reject payloads referencing markers absent from `LayoutState`, emit a warning anomaly, and skip the would-be state mutation. Defence-in-depth against malformed inbound MQTT. |
-| Conflict resolution policy                | shipped | ADR-017. Deterministic total order (priority → registration-seq FIFO floor → train_id) in the grant path; deadlock yields the lowest-ranked train's not-yet-entered blocking edges (closed nose-to-nose standoff left reported, not falsely revoked). |
+| Conflict resolution policy                | shipped | ADR-017 + ADR-022. Deterministic total order (priority → registration-seq FIFO floor → train_id) in the grant path; deadlock first yields the lowest-ranked train's not-yet-entered blocking edges (ADR-017), then — for a closed nose-to-nose standoff where withholding can't help — grants reverse authority to back a train out (ADR-022); only a genuinely unrecoverable standoff is reported. |
 | Multi-gate semantics                      | shipped | ADR-018. Conjunctive AND (`anyCapabilityDeniesClearance` veto-on-any-deny); n>1 integration test locks it. Aggregated block-reason view deferred. |
 | Topology violation handling               | shipped | ADR-019. Expectation-gated: a train under a bounded route reporting an unreachable marker is held default-safe (no phantom edge, region occupied, clearance revoked, `topology_violation` emitted, `block_reason: 'unknown_topology'` on retained clearance state); an open train still learns. Recovery via `reanchorTrain` / `confirmNewTrack`. |
 
@@ -231,17 +231,17 @@ Coverage thresholds: not applicable (Playwright; covered by E2E pass/fail).
 | ADR-014                                        | shipped | Track-learn mode: operator bootstrap gesture for edge-graph discovery; `LearnMode` peer module in `@trainframe/server`; operator surface in `@trainframe/visualiser`. |
 | ADR-015                                        | shipped | Exploration clearance: `begin_exploration` as the discovery-bootstrap primitive ("clearance, not commands" extended to open-ended discovery). Protocol bumped to 0.3.0; LearnMode reworked on top. |
 | ADR-016                                        | shipped | Train consists + length-aware visualisation, implemented. Sim: `VirtualTrain` traversal history + `getTrailingPosition(offset_mm)` multi-edge trailing query. Toy-table: carriages placed from the sim's consist positions (follow the train across edge boundaries). Visualiser: length-aware trains drawn as a swept body along the edge bezier, crossing back over the previous marker while the tail hasn't cleared (`data-tail-on-edge`); `train_length_mm` rides the retained devices state; `marker_traversed` now carries `inferred_edge`. Optional `consist` descriptor (discrete segments on the wire) deferred per the ADR. |
-| ADR-017                                        | shipped | Conflict resolution: deterministic total order (priority → registration-seq FIFO floor → train_id) in the grant path; deadlock yields the lowest-ranked train's not-yet-entered blocking edges. Optional additive `priority` on `device_registered`. Protocol 0.4.0 → 0.5.0. Honest limit: withholding can't vacate an already-occupied block — true nose-to-nose standoff needs a deferred reverse-authority primitive. |
+| ADR-017                                        | shipped | Conflict resolution: deterministic total order (priority → registration-seq FIFO floor → train_id) in the grant path; deadlock yields the lowest-ranked train's not-yet-entered blocking edges. Optional additive `priority` on `device_registered`. Protocol 0.4.0 → 0.5.0. The honest limit it named (withholding can't vacate an occupied block — the closed nose-to-nose standoff) is now cured by ADR-022 reverse authority. |
 | ADR-018                                        | shipped | Multi-gate semantics: conjunctive AND, ratifying the existing veto-on-any-deny fold; n>1 integration test added. Scheduler-side aggregated block-reason view deferred. No production change. |
 | ADR-019                                        | shipped | Topology-violation handling: expectation-gated (bounded route → hold default-safe + `topology_violation` event + `block_reason: 'unknown_topology'` on retained clearance state; open train still learns). Operator recovery via `reanchorTrain` / `confirmNewTrack`. Protocol 0.5.0 → 0.6.0. Cross-feature fix: topology-held trains are excluded from the waits-for graph so ADR-017 deadlock-yield can't vacate their uncertain-region guard (regression-tested). |
 | ADR-020                                        | shipped | HTTP query API split: read-only `GET /api/query/*` (layout, traversal-times, trains(/:id), clearances, tags) projecting existing accessors; `/api/state` kept as deprecated alias. No protocol bump; MQTT stays the app transport. Route planning deferred. |
-| ADR-021                                        | shipped (framework) | ESP-NOW Trainframe Compact Frame codec in `packages/protocol/src/tcf/`: epoch-versioned 1-byte event-type ID registry, 13-byte header, ≤250-byte frames, lossless JSON expansion, unknown-id default-safe. Deferred: per-type byte codecs (UUID-heavy payloads overflow today's generic-JSON carrier, asserted as a boundary); codec placement (protocol vs firmware-support package) and barrel export are flagged for a future pass. |
+| ADR-021                                        | shipped | ESP-NOW Trainframe Compact Frame codec in `packages/protocol/src/tcf/` (barrel-exported from `@trainframe/protocol`): epoch-versioned 1-byte event-type ID registry, 13-byte header, ≤250-byte frames, lossless JSON expansion, unknown-id default-safe. Per-type byte codecs (`tcf/payloads.ts`) landed for the hot UUID-heavy types (`marker_traversed`, `clearance_request`, `clearance_granted`, `grant_clearance`) — UUIDs packed to 16 raw bytes so they round-trip and fit one frame; types without a pinned codec keep the generic-JSON fallback. Deferred: CBOR long-tail carriage, satellite-defined event IDs, Thread/6LoWPAN bridges. |
+| ADR-022                                        | shipped | Reverse authority: new `grant_reverse` command (bounded, signed backward clearance) the scheduler issues to break a closed nose-to-nose standoff — backs the lowest-ranked cycle member out of its occupied block over track it provably holds (`computeReverseTarget` safety walk reusing the ADR-017 total order), freeing the contested block for the peer. `VirtualTrain` enacts it by driving backward to the granted marker (VirtualClock-deterministic). Protocol 0.6.0 → 0.7.0, TCF epoch 1 → 2. Totality finding: under block exclusivity the forward yield (ADR-017) + reverse authority partition and resolve every two-train closed standoff; the null-return guards are defensive. Deferred: operator-initiated reverse + single-pass cascading multi-train retreat. |
 | `docs/research/bridges-and-height-layers.md`   | shipped | Research note on bridges and multiple height layers — groundwork for the editor-layers + ramp work in simulator-ui. |
 | Live clearance overlay                         | shipped | Retained `railway/state/clearance/<train_id>` topic per train; visualiser renders cleared edges with `data-cleared-to` + per-train hue. ADR-011 made it useful; phase 3 made it visible. |
 | Visualiser facelift                            | shipped | Edges as cubic bezier `<path>` arcs with **per-marker tangent continuity** (adjacent edges meeting at a marker share their tangent → smooth flow through the marker, no opposing-curve kinks); 6px → 9px stroke when cleared. Trains as top-down 5-point shapes: rectangular body, smooth rounded nose at the front, rotated to the bezier tangent at their current `t`, filled with `trainColor(train_id)`. All `data-*` attributes preserved for ui-tests + the live-driving doc. |
 | Deadlock detection + UI banner                 | shipped | Scheduler runs a waits-for cycle check on every `retryBlockedClearances` pass. Cycles publish to `railway/state/clearance` (entity `deadlock/active`) carrying the involved train IDs; the visualiser's `DeadlockBanner` shows them in their per-train hues with a recovery hint. Doesn't *resolve* the deadlock — that's an authoring decision (more markers, a passing siding). |
 | `docs/status.md` (this file)                   | shipped | New.                                                                           |
-| ADR for tag→marker resolution registry         | not started | The last open-design-question ADR still unwritten.                            |
 
 ---
 
@@ -250,11 +250,12 @@ Coverage thresholds: not applicable (Playwright; covered by E2E pass/fail).
 Mirrored from [`CLAUDE.md`](../CLAUDE.md). Need ADRs before implementation.
 
 Resolved since: conflict resolution (ADR-017), multi-gate semantics (ADR-018),
-topology violations (ADR-019), ESP-NOW bridge wire format (ADR-021). Still open:
+topology violations (ADR-019), ESP-NOW bridge wire format (ADR-021),
+reverse-authority primitive (ADR-022), tag→marker resolution at runtime
+(ADR-007 — implemented; the simulator drives real `tag_assignment` events, no
+`tag_id == marker_id` shortcut). Still open:
 
 - Coupling/decoupling: trains as multi-vehicle compositions.
-- Tag→marker resolution at runtime (today: simulator uses marker IDs as tag IDs).
-- Reverse-authority primitive to unwind a true nose-to-nose standoff (ADR-017 defers it: withholding clearance can't vacate an already-occupied block).
 
 ---
 
@@ -262,15 +263,14 @@ topology violations (ADR-019), ESP-NOW bridge wire format (ADR-021). Still open:
 
 Ranked by leverage. None are mandatory; this is the recommendation, not the plan.
 
-1. **Tag→marker resolution registry** — the last unwritten open-design-question ADR; today the simulator uses marker IDs as tag IDs.
-2. **Reverse-authority primitive** — ADR-017 deadlock-yield can't unwind a true nose-to-nose standoff because withholding can't vacate an occupied block; needs its own ADR + protocol primitive.
-3. **Finish ADR-021** — per-type byte codecs so UUID-heavy payloads fit ≤250 bytes (today they overflow the generic-JSON carrier, asserted as a boundary), and settle codec placement / barrel export.
+1. **Coupling/decoupling: trains as multi-vehicle compositions** — the last open design question from CLAUDE.md with no ADR. ADR-016 shipped length-aware consist *visualisation*; the logical model for coupling/decoupling at runtime (how two trains become one consist and split again, and what that means for clearance/occupancy) is still undecided. Needs an ADR before implementation.
+2. **Operator-initiated reverse + recovery UI** — ADR-022 reverses a train autonomously to break a deadlock; a manual "back this train out" gesture is a thin wrapper over the same `grant_reverse` + `computeReverseTarget` machinery, alongside the ADR-019 recovery surface (`reanchorTrain` / `confirmNewTrack` exist on the server with no operator surface yet).
+3. **Aggregated multi-gate block-reason view** — deferred in ADR-018; a scheduler-emitted "marker blocked by [reasons]" snapshot so operators see *why* a marker is held when several gates contend.
 
-Recently shipped (were the top priorities): learned traversal times now drive the clearance horizon (constant lead-time, not fixed edge count); `train_status` battery + error_state are surfaced in the visualiser.
+Recently shipped (cleared the previous backlog): conflict resolution (ADR-017), multi-gate test (ADR-018), topology violations (ADR-019), HTTP query API (ADR-020), ESP-NOW codec incl. per-type payloads (ADR-021), reverse authority (ADR-022), tag→marker resolution regression test (ADR-007); learned traversal times now drive the clearance horizon; `train_status` battery + error_state surfaced in the visualiser.
 
 Smaller follow-ups that don't need a major thread:
 
-- Aggregated multi-gate block-reason view (deferred in ADR-018).
-- Scheduler-emitted ADR-018 view + operator UI for ADR-019 recovery gestures (`reanchorTrain` / `confirmNewTrack` exist on the server; no operator surface yet).
+- Per-type-codec field anti-drift guard for TCF (ADR-021): nothing currently ties a per-type codec's fields to its TypeBox schema, so a future field added to e.g. `clearance_request` would be silently dropped.
 - ADR + implementation for missing detection knobs (double-read, spurious read).
 - Per-train spawn config form in simulator-ui (mishap rate knobs from ADR-006).
