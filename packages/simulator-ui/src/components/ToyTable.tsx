@@ -11,9 +11,13 @@ import { type EdgePath, composeEdgePath } from '../track/edge-path.js';
 import { SNAP_DISTANCE, compileLayout } from '../track/layout-from-pieces.js';
 import { detectSameLayerOverlaps } from '../track/overlap.js';
 import {
+  DEVICE_PIECE_TYPES,
+  type DevicePieceType,
+  PIECE_LABELS,
   PIECE_TINT,
   type PieceFeature,
   type RotationDeg,
+  TRACK_PIECE_TYPES,
   TRAIN_LENGTH_MM,
   type TrackPiece,
   type TrackPieceType,
@@ -54,38 +58,13 @@ const TOYBOX_DRAG_MIME = 'application/x-trainframe-toybox-type';
  */
 const GARAGE_DEVICE_ID = 'GARAGE';
 
-const TRACK_PIECE_TYPES = [
-  'straight',
-  'curve',
-  'curve-tight',
-  'junction',
-  'station',
-  'terminus',
-  'crossing',
-  'ramp',
-] as const;
-const DEVICE_PIECE_TYPES = ['train', 'gate', 'carriage'] as const;
-
-const PIECE_LABELS: Record<TrackPieceType, string> = {
-  straight: 'Straight',
-  curve: 'Curve',
-  'curve-tight': 'Tight Curve',
-  junction: 'Junction',
-  station: 'Station',
-  terminus: 'Terminus',
-  crossing: 'Crossing',
-  ramp: 'Ramp',
-  train: 'Train',
-  gate: 'Gate',
-  carriage: 'Carriage',
-};
-
 /**
  * Device body colours (train/gate/carriage are NOT wooden). Track pieces are
  * filled with the beech-wood gradient + their `PIECE_TINT` wash instead, so they
- * have no entry here.
+ * have no entry here. Keyed by the exhaustive `DevicePieceType`, so adding a
+ * device forces a colour here — there is no silent grey fallback.
  */
-const DEVICE_FILL: Partial<Record<TrackPieceType, string>> = {
+const DEVICE_FILL: Record<DevicePieceType, string> = {
   train: '#cf4436',
   carriage: '#3f6fa6',
   gate: '#8a929c',
@@ -1191,7 +1170,7 @@ function PiecePreview({ type }: { type: TrackPieceType }) {
     >
       <PieceBody
         shape={shape}
-        bodyFill={isDevice ? (DEVICE_FILL[type] ?? '#8a929c') : WOOD_FILL}
+        bodyFill={isDevicePiece(type) ? DEVICE_FILL[type] : WOOD_FILL}
         tint={PIECE_TINT[type]}
         isDevice={isDevice}
         dim={1}
@@ -1905,7 +1884,7 @@ function PieceRenderer({
   // Track pieces are filled with the beech-wood gradient + their functional
   // tint; device pieces (train/gate/carriage) get their own solid colour.
   const tint = PIECE_TINT[piece.type];
-  const bodyFill = isDevice ? (DEVICE_FILL[piece.type] ?? '#8a929c') : WOOD_FILL;
+  const bodyFill = isDevicePiece(piece.type) ? DEVICE_FILL[piece.type] : WOOD_FILL;
   // Wire devices (train / gate) can be powered off by clicking when live.
   // Carriages are wire-invisible — clicking a live carriage just selects it.
   const isWire = isWireDevice(piece.type);

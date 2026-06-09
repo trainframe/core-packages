@@ -7,20 +7,47 @@
  *
  * All angles are in degrees, measured clockwise from the positive-x axis
  * (east), consistent with SVG's transform conventions.
+ *
+ * ── How a piece is defined ──────────────────────────────────────────────────
+ * Every piece type has ONE entry in the `PIECES` registry (a
+ * `Record<TrackPieceType, PieceDescriptor>`). Because the record is exhaustive,
+ * the compiler forces every field for every type — there is no switch arm or
+ * parallel list to forget. Each descriptor co-locates a piece's whole spec:
+ *
+ *   - category / label / tint / markerKind  — its metadata
+ *   - endpoints(radiusMm)                    — where its rail ends are
+ *   - centreLine(index, radiusMm)            — the rail a train rides to an end
+ *   - railLines(radiusMm)                    — the rails it DRAWS (grooves come
+ *                                              from offsetting these)
+ *   - body(piece)                            — its wooden/device silhouette
+ *
+ * `TRACK_PIECE_TYPES`, `DEVICE_PIECE_TYPES`, `PIECE_LABELS`, `PIECE_TINT`, and
+ * the `isDevicePiece` / `isWireDevice` / `pieceMarkerKind` predicates are all
+ * DERIVED from the registry, so adding a piece is one entry, not a scavenger
+ * hunt across this file and `ToyTable.tsx`.
  */
 
-export type TrackPieceType =
-  | 'straight'
-  | 'curve'
-  | 'curve-tight'
-  | 'junction'
-  | 'station'
-  | 'terminus'
-  | 'crossing'
-  | 'ramp'
-  | 'train'
-  | 'gate'
-  | 'carriage';
+/**
+ * The single ordered list of every piece type — the source of both the
+ * `TrackPieceType` union and the registry's key set. Track pieces come first
+ * (in tray order), then device pieces; the order here is the order pieces show
+ * in the toybox.
+ */
+const ALL_PIECE_TYPES = [
+  'straight',
+  'curve',
+  'curve-tight',
+  'junction',
+  'station',
+  'terminus',
+  'crossing',
+  'ramp',
+  'train',
+  'gate',
+  'carriage',
+] as const;
+
+export type TrackPieceType = (typeof ALL_PIECE_TYPES)[number];
 
 /**
  * Piece types that represent devices (trains, gates, carriages) rather than
@@ -30,14 +57,10 @@ export type TrackPieceType =
  *
  * Note: carriages are device pieces (no topology) but NOT wire devices — they
  * carry no RFID tag and emit nothing on the MQTT bus. Use `isWireDevice` to
- * distinguish the two.
+ * distinguish the two. (In the registry: carriage is category `'device'`;
+ * train/gate are `'wire-device'`.)
  */
-export const DEVICE_PIECE_TYPES = ['train', 'gate', 'carriage'] as const;
-export type DevicePieceType = (typeof DEVICE_PIECE_TYPES)[number];
-
-export function isDevicePiece(type: TrackPieceType): type is DevicePieceType {
-  return type === 'train' || type === 'gate' || type === 'carriage';
-}
+export type DevicePieceType = 'train' | 'gate' | 'carriage';
 
 /**
  * Wire-visible device types. These are the subset of device pieces that
@@ -47,35 +70,21 @@ export function isDevicePiece(type: TrackPieceType): type is DevicePieceType {
  */
 export type WireDeviceType = 'train' | 'gate';
 
-export function isWireDevice(type: TrackPieceType): type is WireDeviceType {
-  return type === 'train' || type === 'gate';
-}
-
 /**
  * The marker kind a track piece contributes to the layout / scan flow.
  *
  * The scan-box (in `ToyTable`) and the private layout compiler (in
- * `layout-from-pieces`) MUST agree on this mapping; otherwise the server
- * learns one marker kind from the scan and the in-browser sim invents
- * another, and routes can't resolve. Defined here, next to the piece types,
- * to keep the two callers from drifting.
+ * `layout-from-pieces`) MUST agree on this mapping; both read it via
+ * `pieceMarkerKind`, which now resolves through the registry, so they cannot
+ * drift. Device pieces declare `markerKind: null` (they never become markers);
+ * `pieceMarkerKind` maps that to `'block_boundary'` defensively so the function
+ * stays total, but no caller should reach this path for a device.
  *
- * Device pieces (train, gate) never become markers — they're scanned as
- * their own devices, not as topology. We return `'block_boundary'` for them
- * defensively so the function is total, but no caller should reach this path.
+ * A ramp is a `block_boundary` like any straight: its two ends sit on different
+ * layers, but that layer transition is editor-only metadata, never on the wire
+ * (see docs/research/bridges-and-height-layers.md, Option A).
  */
 export type TrackMarkerKind = 'block_boundary' | 'station_stop' | 'junction' | 'terminus';
-export function pieceMarkerKind(type: TrackPieceType): TrackMarkerKind {
-  if (type === 'station') return 'station_stop';
-  if (type === 'junction') return 'junction';
-  if (type === 'terminus') return 'terminus';
-  // A ramp is just a length of track whose two ends sit on different layers —
-  // logically an ordinary block boundary. We deliberately do NOT invent a new
-  // TrackMarkerKind: the scan-box → server mapping and this compiler must stay
-  // in lockstep, and the layer transition is editor-only metadata, never on the
-  // wire (see docs/research/bridges-and-height-layers.md, Option A).
-  return 'block_boundary';
-}
 
 /**
  * Physical length (mm) announced for a virtual train when it goes live, and
@@ -181,10 +190,10 @@ export interface PieceShape {
    */
   readonly svgPath: string;
   /**
-   * Rail-groove polylines, stroked as recessed channels. Derived from the SAME
-   * centre-line a train rides (`getCentreLinePath`), so the routed grooves and
-   * the running rail can never disagree — and so grooves meet cleanly across a
-   * snapped joint. Empty for device pieces.
+   * Rail-groove polylines, stroked as recessed channels. Derived uniformly (for
+   * EVERY piece, no exceptions) by offsetting the piece's `railLines` ±RAIL_GAUGE
+   * — so the routed grooves and the running rail can never disagree, and grooves
+   * meet cleanly across a snapped joint. Empty for device pieces.
    */
   readonly grooves: ReadonlyArray<string>;
   /** Detail overlays painted on top of the body (platform, buffer, windows…). */
@@ -193,35 +202,12 @@ export interface PieceShape {
   readonly height: number;
 }
 
-/**
- * A gentle functional colour wash, layered over the beech wood at low opacity so
- * an operator can still read a piece's role at a glance without abandoning the
- * one-material look (ADR-aesthetic: "wood + function tints").
- *
- * Tints are WARM only, by necessity: a cool wash (blue/teal) over warm beech
- * desaturates to a drab grey rather than reading as colour. So the wash is used
- * where a warm hue both reads and helps — a station (honey), a terminus (brick),
- * a ramp (ochre). The pieces with the most distinctive SILHOUETTES — the Y-fork
- * junction and the plus crossing — carry no tint: their shape already reads, and
- * a grey wash would only muddy the wood. `null` ⇒ plain beech. Device pieces are
- * not wooden and ignore this table; they have their own body colour.
- */
-export const PIECE_TINT: Record<TrackPieceType, string | null> = {
-  straight: null,
-  curve: null,
-  'curve-tight': null,
-  junction: null, // shape (a Y-fork) reads on its own — a cool wash would grey
-  station: '#f0a02f', // warm honey
-  terminus: '#d4513a', // brick-red — the line ends here
-  crossing: null, // shape (a plus) reads on its own
-  ramp: '#e0902a', // ochre — a change of level
-  train: null,
-  gate: null,
-  carriage: null,
-};
+/** A piece body sans grooves — what a descriptor's `body()` returns. Grooves
+ * are added centrally by `getPieceShape` so no piece can hand-author them. */
+type PieceBody = Omit<PieceShape, 'grooves'>;
 
 // ---------------------------------------------------------------------------
-// Geometry helpers
+// Visual + geometry constants
 // ---------------------------------------------------------------------------
 
 /**
@@ -242,13 +228,6 @@ const CURVE_RADIUS_MM = 200;
  */
 const CURVE_TIGHT_RADIUS_MM = 100;
 
-/** The centreline turn radius for a curve piece. An explicit `radiusMm` override
- * (a solved-radius arc) wins; otherwise the type's default. */
-function curveRadiusFor(type: TrackPieceType, radiusOverride?: number): number {
-  if (radiusOverride !== undefined && radiusOverride > 0) return radiusOverride;
-  return type === 'curve-tight' ? CURVE_TIGHT_RADIUS_MM : CURVE_RADIUS_MM;
-}
-
 /**
  * Half-width of a rendered wooden plank, in mm (the plank is 26 mm across).
  * Purely VISUAL — the topology (endpoints, snapping, marker spacing) is unchanged
@@ -265,30 +244,59 @@ const PLANK_HALF_WIDTH = 13;
  */
 const RAIL_GAUGE = 5;
 
-function toRad(deg: number): number {
-  return (deg * Math.PI) / 180;
-}
+const PLANK_CORNER = 5;
 
-// ---------------------------------------------------------------------------
-// Curve geometry (shared by endpoints and shape)
-// ---------------------------------------------------------------------------
-//
 // The arc sweeps 45° about a centre, from `CURVE_ENTRY_ANGLE` to
 // `CURVE_EXIT_ANGLE`. Crucially the piece *origin* is the arc midpoint, so the
 // marker a curve contributes sits ON the rail — a train (or carriage) rendered
 // at the marker rides the track instead of floating ~24 mm inside the bend.
-//
-// The construction is parametrised by radius `R`: arc centre at (−R/2, R) puts
-// the entry endpoint at (−R/2, 0) with a due-west tangent for any R, so both
-// the standard `curve` (R=200) and the `curve-tight` variant (R=100) share one
-// geometry and the same 45° heading lattice. (At R=200 the centre is (−100,
-// 200), recovering the original constants.)
 const CURVE_ENTRY_ANGLE = -90;
 const CURVE_EXIT_ANGLE = -45;
 const CURVE_MID_ANGLE = (CURVE_ENTRY_ANGLE + CURVE_EXIT_ANGLE) / 2;
 
-/** Arc centre for a curve of the given radius (the marker is recentred to the
- * arc midpoint below). */
+// ---------------------------------------------------------------------------
+// Geometry primitives
+// ---------------------------------------------------------------------------
+
+function toRad(deg: number): number {
+  return (deg * Math.PI) / 180;
+}
+
+function normaliseAngle(deg: number): number {
+  return ((deg % 360) + 360) % 360;
+}
+
+/** Euclidean length of a vector. */
+function hypot(x: number, y: number): number {
+  return Math.sqrt(x * x + y * y);
+}
+
+/**
+ * Rotate a point around the origin by `angleDeg` degrees (clockwise) then
+ * translate by `tx, ty`.
+ */
+function transformPoint(
+  lx: number,
+  ly: number,
+  angleDeg: number,
+  tx: number,
+  ty: number,
+): { x: number; y: number } {
+  const rad = toRad(angleDeg);
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  return {
+    x: tx + lx * cos - ly * sin,
+    y: ty + lx * sin + ly * cos,
+  };
+}
+
+// Curve geometry, parametrised by radius `R`: arc centre at (−R/2, R) puts the
+// entry endpoint at (−R/2, 0) with a due-west tangent for any R, so both the
+// standard `curve` (R=200) and the `curve-tight` variant (R=100) share one
+// geometry and the same 45° heading lattice.
+
+/** Arc centre for a curve of the given radius. */
 function curveArcCentre(radius: number): { x: number; y: number } {
   return { x: -radius / 2, y: radius };
 }
@@ -319,154 +327,17 @@ function curvePointR(
   };
 }
 
-/**
- * Rotate a point around the origin by `angleDeg` degrees (clockwise) then
- * translate by `tx, ty`.
- */
-function transformPoint(
-  lx: number,
-  ly: number,
-  angleDeg: number,
-  tx: number,
-  ty: number,
-): { x: number; y: number } {
-  const rad = toRad(angleDeg);
-  const cos = Math.cos(rad);
-  const sin = Math.sin(rad);
-  return {
-    x: tx + lx * cos - ly * sin,
-    y: ty + lx * sin + ly * cos,
-  };
-}
-
-function normaliseAngle(deg: number): number {
-  return ((deg % 360) + 360) % 360;
-}
-
-// ---------------------------------------------------------------------------
-// Local endpoint definitions (before piece rotation)
-// ---------------------------------------------------------------------------
-
-/**
- * Endpoints in piece-local space (piece origin = (0,0), pointing east).
- * The array is ordered by index; callers must preserve order to correctly
- * interpret endpoint roles (e.g. junction trunk = index 0).
- */
-function localEndpoints(
-  type: TrackPieceType,
-  radiusOverride?: number,
-): ReadonlyArray<{ lx: number; ly: number; localAngle: number; layerDelta?: number }> {
-  switch (type) {
-    case 'straight':
-      // Two endpoints 200 mm apart, centred on origin.
-      return [
-        { lx: -100, ly: 0, localAngle: 180 },
-        { lx: 100, ly: 0, localAngle: 0 },
-      ];
-    case 'ramp':
-      // Reuses the straight's 200 mm footprint so snap spacing stays uniform,
-      // but its exit endpoint (index 1) is one layer higher: this single
-      // `layerDelta` IS the entire ramp/layer mechanism. Up vs down is pure
-      // orientation — edges are bidirectional, so a "down ramp" is just a ramp
-      // rotated 180°. Index-keyed delta is automatically flip/rotation-aware
-      // (transforms never reorder endpoints).
-      return [
-        { lx: -100, ly: 0, localAngle: 180 }, // entry, on piece.layer
-        { lx: 100, ly: 0, localAngle: 0, layerDelta: 1 }, // exit, on piece.layer + 1
-      ];
-    case 'curve':
-    case 'curve-tight': {
-      // A true 45° circular arc, entry tangent pointing west (180°) and exit
-      // tangent at 45°, both lying on one consistent arc — so eight curves
-      // snapped end-to-end close into a circle (the old chord-approximation
-      // endpoints did not). Origin is the arc midpoint, so the marker is on the
-      // rail. `curve-tight` is the same arc at half the radius.
-      const r = curveRadiusFor(type, radiusOverride);
-      const entry = curvePointR(r, r, CURVE_ENTRY_ANGLE);
-      const exit = curvePointR(r, r, CURVE_EXIT_ANGLE);
-      return [
-        { lx: entry.x, ly: entry.y, localAngle: 180 },
-        { lx: exit.x, ly: exit.y, localAngle: 45 },
-      ];
-    }
-    case 'junction':
-      // 3 endpoints: trunk (west, index 0), through (east, index 1), branch
-      // (index 2). The branch diverges at 45° with its position and outgoing
-      // tangent consistent (both down-right) and matching the curve's chirality,
-      // so a curve continues it without a kink; Flip mirrors it to divert the
-      // other way. (A fully-arced turnout — a branch radius matching the curve
-      // piece — is a future refinement; the spur is a straight 45° for now.)
-      return [
-        { lx: -100, ly: 0, localAngle: 180 }, // trunk
-        { lx: 100, ly: 0, localAngle: 0 }, // through (main)
-        { lx: 100 * Math.cos(toRad(45)), ly: 100 * Math.sin(toRad(45)), localAngle: 45 }, // branch (divert)
-      ];
-    case 'station':
-      // 220 mm straight with platform — same endpoint logic as straight.
-      return [
-        { lx: -110, ly: 0, localAngle: 180 },
-        { lx: 110, ly: 0, localAngle: 0 },
-      ];
-    case 'terminus':
-      // Single endpoint at the open end (east). Dead-end buffer at west.
-      return [{ lx: 30, ly: 0, localAngle: 0 }];
-    case 'crossing':
-      // Two straights at 90°. Four endpoints: east, north, west, south.
-      return [
-        { lx: 100, ly: 0, localAngle: 0 }, // east
-        { lx: 0, ly: -100, localAngle: 270 }, // north (SVG y-down, so -y = up)
-        { lx: -100, ly: 0, localAngle: 180 }, // west
-        { lx: 0, ly: 100, localAngle: 90 }, // south
-      ];
-    case 'train':
-    case 'gate':
-    case 'carriage':
-      // Devices have no track endpoints — they sit on the table but contribute
-      // no topology. compileLayout() ignores them via the empty-array path.
-      return [];
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-/**
- * World-space endpoints for a placed piece, in the same order as the local
- * endpoint definitions (junction: [trunk, through, branch]; crossing: [east,
- * north, west, south]; all others: [entry, exit]).
- */
-export function getEndpoints(piece: TrackPiece): ReadonlyArray<TrackEndpoint> {
-  const locals = localEndpoints(piece.type, piece.radiusMm);
-  const flip = piece.flipped === true;
-  const baseLayer = layerOf(piece);
-  return locals.map(({ lx, ly, localAngle, layerDelta }) => {
-    // Mirror across the local x-axis first (y and angle negate), then rotate +
-    // translate — matching the SVG `scale(1,-1)` the renderer applies.
-    const ly2 = flip ? -ly : ly;
-    const localAngle2 = flip ? -localAngle : localAngle;
-    const world = transformPoint(lx, ly2, piece.rotationDeg, piece.position.x, piece.position.y);
-    return {
-      x: world.x,
-      y: world.y,
-      outgoingAngleDeg: normaliseAngle(localAngle2 + piece.rotationDeg),
-      // A ramp's exit endpoint carries a +1 layerDelta; every other endpoint
-      // sits on the piece's own layer. This is the only place a single piece
-      // spans two layers.
-      layer: baseLayer + (layerDelta ?? 0),
-    };
-  });
+/** The centreline turn radius for a curve piece. An explicit `radiusMm` override
+ * (a solved-radius arc) wins; otherwise the supplied default. */
+function curveRadiusFor(defaultRadius: number, radiusOverride?: number): number {
+  if (radiusOverride !== undefined && radiusOverride > 0) return radiusOverride;
+  return defaultRadius;
 }
 
 // ---------------------------------------------------------------------------
 // Centre-line sampling — the rail geometry from a piece's centre (its marker)
-// out to one of its endpoints.
+// out to one of its endpoints, sampled by real arc-length.
 // ---------------------------------------------------------------------------
-//
-// `getEndpoints` answers "where are the rail ends?"; the renderer needs the
-// path *between* the marker (piece centre = origin) and an end so a train can
-// be drawn riding the true rail rather than the straight chord between two
-// piece centres. A `CentreLinePath` samples that geometry by real arc-length.
 
 /** A point on a rail with the train's heading there. */
 export interface RailPose {
@@ -477,36 +348,40 @@ export interface RailPose {
 }
 
 /**
- * A sampleable rail segment from a piece's centre out to one endpoint.
- * `length` is the true rail length in mm (arc length for curves, Euclidean for
- * straights). `at(dist)` samples `dist` mm from the centre toward the endpoint;
- * heading points in the centre→endpoint travel direction.
+ * A sampleable rail segment. `length` is the true rail length in mm (arc length
+ * for curves, Euclidean for straights). `at(dist)` samples `dist` mm along it
+ * from the start; heading points in the travel direction.
  */
 export interface CentreLinePath {
   readonly length: number;
-  at(distFromCentre: number): RailPose;
-}
-
-/** Euclidean length of a vector. */
-function hypot(x: number, y: number): number {
-  return Math.sqrt(x * x + y * y);
+  at(distFromStart: number): RailPose;
 }
 
 /**
- * A straight (linear) centre-line from the origin (0,0) out to `(ex, ey)` in
- * piece-local coordinates. Heading is the constant direction origin→endpoint.
+ * A straight (linear) path from `(ax, ay)` to `(bx, by)` in piece-local
+ * coordinates, heading the constant A→B direction. `linearHalfPath` is the
+ * common centre→endpoint case (start at the origin/marker); a general segment
+ * also draws a rail that does NOT start at the marker (the terminus's buffer
+ * stub).
  */
-function linearHalfPath(ex: number, ey: number): CentreLinePath {
-  const length = hypot(ex, ey);
-  const headingDeg = length === 0 ? 0 : (Math.atan2(ey, ex) * 180) / Math.PI;
-  const ux = length === 0 ? 0 : ex / length;
-  const uy = length === 0 ? 0 : ey / length;
+function segmentPath(ax: number, ay: number, bx: number, by: number): CentreLinePath {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const length = hypot(dx, dy);
+  const headingDeg = length === 0 ? 0 : (Math.atan2(dy, dx) * 180) / Math.PI;
+  const ux = length === 0 ? 0 : dx / length;
+  const uy = length === 0 ? 0 : dy / length;
   return {
     length,
-    at(distFromCentre: number): RailPose {
-      return { x: ux * distFromCentre, y: uy * distFromCentre, headingDeg };
+    at(distFromStart: number): RailPose {
+      return { x: ax + ux * distFromStart, y: ay + uy * distFromStart, headingDeg };
     },
   };
+}
+
+/** A straight centre-line from the origin (marker) out to `(ex, ey)`. */
+function linearHalfPath(ex: number, ey: number): CentreLinePath {
+  return segmentPath(0, 0, ex, ey);
 }
 
 /**
@@ -521,8 +396,8 @@ function curveHalfPath(radius: number, endAngleDeg: number): CentreLinePath {
   const length = radius * toRad(Math.abs(endAngleDeg - CURVE_MID_ANGLE));
   return {
     length,
-    at(distFromCentre: number): RailPose {
-      const arcAngle = CURVE_MID_ANGLE + (sweepSign * ((distFromCentre / radius) * 180)) / Math.PI;
+    at(distFromStart: number): RailPose {
+      const arcAngle = CURVE_MID_ANGLE + (sweepSign * ((distFromStart / radius) * 180)) / Math.PI;
       const p = curvePointR(radius, radius, arcAngle);
       return { x: p.x, y: p.y, headingDeg: arcAngle + sweepSign * 90 };
     },
@@ -538,11 +413,6 @@ function curveHalfPath(radius: number, endAngleDeg: number): CentreLinePath {
  * the trunk axis at the centre and to the branch direction at the endpoint
  * turns the train smoothly through the divert — with NO change to the endpoint
  * position, so connectivity and snapping are untouched.
- *
- * Sampling is by an arc-length lookup over a fixed set of parameter samples
- * (the curve is short and gently curved, so a modest sample count is exact to
- * well under a millimetre). Heading is the curve tangent in the travel
- * direction.
  */
 function bezierHalfPath(
   ex: number,
@@ -592,8 +462,8 @@ function bezierHalfPath(
   const length = acc;
   return {
     length,
-    at(distFromCentre: number): RailPose {
-      const target = Math.max(0, Math.min(length, distFromCentre));
+    at(distFromStart: number): RailPose {
+      const target = Math.max(0, Math.min(length, distFromStart));
       // Find the segment containing `target` and lerp within it (position by
       // arc length, heading from the analytic tangent at the lerped parameter).
       let i = 1;
@@ -611,34 +481,6 @@ function bezierHalfPath(
   };
 }
 
-/** The piece-local centre-line half-path for endpoint `index`, or undefined
- * when the index is out of range (e.g. a device piece with no endpoints). */
-function localHalfPath(
-  type: TrackPieceType,
-  index: number,
-  radiusOverride?: number,
-): CentreLinePath | undefined {
-  if (type === 'curve' || type === 'curve-tight') {
-    const endAngle = index === 0 ? CURVE_ENTRY_ANGLE : CURVE_EXIT_ANGLE;
-    if (index !== 0 && index !== 1) return undefined;
-    return curveHalfPath(curveRadiusFor(type, radiusOverride), endAngle);
-  }
-  // Junction BRANCH leg (index 2): a smooth turn from the trunk axis at the
-  // centre to the 45° branch endpoint, so a train diverting through the
-  // junction doesn't snap its heading at the marker. The trunk (0) and through
-  // (1) legs remain straight chords — they're collinear, already continuous.
-  if (type === 'junction' && index === 2) {
-    const branch = localEndpoints(type)[2];
-    if (branch === undefined) return undefined;
-    // Tangent at the centre is the trunk/through axis (0°, east); tangent at the
-    // endpoint is the branch's own outgoing direction.
-    return bezierHalfPath(branch.lx, branch.ly, 0, branch.localAngle);
-  }
-  const local = localEndpoints(type)[index];
-  if (local === undefined) return undefined;
-  return linearHalfPath(local.lx, local.ly);
-}
-
 /**
  * Wrap a piece-local `CentreLinePath` so its samples come out in world space,
  * applying the same mirror→rotate→translate the renderer (and `getEndpoints`)
@@ -648,8 +490,8 @@ function worldHalfPath(piece: TrackPiece, local: CentreLinePath): CentreLinePath
   const flip = piece.flipped === true;
   return {
     length: local.length,
-    at(distFromCentre: number): RailPose {
-      const pose = local.at(distFromCentre);
+    at(distFromStart: number): RailPose {
+      const pose = local.at(distFromStart);
       const ly = flip ? -pose.y : pose.y;
       const heading = flip ? -pose.headingDeg : pose.headingDeg;
       const world = transformPoint(
@@ -664,92 +506,8 @@ function worldHalfPath(piece: TrackPiece, local: CentreLinePath): CentreLinePath
   };
 }
 
-/**
- * World-space centre-line half-path for a placed `piece`, from its centre
- * (marker) out to endpoint `endpointIndex`. Returns `undefined` for an
- * out-of-range index (device pieces have none). Sampling at `length` reproduces
- * `getEndpoints(piece)[endpointIndex]`'s position and `outgoingAngleDeg`.
- */
-export function getCentreLinePath(
-  piece: TrackPiece,
-  endpointIndex: number,
-): CentreLinePath | undefined {
-  const local = localHalfPath(piece.type, endpointIndex, piece.radiusMm);
-  if (local === undefined) return undefined;
-  return worldHalfPath(piece, local);
-}
-
-/**
- * A height cue for a layer group: a drop-shadow offset + blur (and optional
- * opacity) the renderer turns into an SVG `filter`. Pure data, total over the
- * small layer range a Brio table uses; lives next to the piece model so the
- * visual height ramp is defined with the geometry, not buried in JSX.
- *
- * Layer 0 is the ground/baseline (no shadow). Each higher layer floats further
- * "above" the table with a larger, softer offset shadow. Layers beyond 2 clamp
- * to the layer-2 cue (a Brio table rarely stacks deeper).
- */
-export function layerStyle(layer: number): {
-  readonly dx: number;
-  readonly dy: number;
-  readonly blur: number;
-  readonly opacity?: number;
-} {
-  if (layer <= 0) return { dx: 0, dy: 0, blur: 0 };
-  if (layer === 1) return { dx: 0, dy: 6, blur: 4, opacity: 0.35 };
-  return { dx: 0, dy: 12, blur: 8, opacity: 0.45 };
-}
-
-/**
- * The drawable geometry of a piece, in piece-local coordinates (origin = piece
- * centre, pointing east). The consumer applies `transform="translate(x,y)
- * rotate(r)"` around the origin.
- *
- * A track piece is a wooden plank (`svgPath`, the body outline) with two routed
- * rail `grooves` derived from the centre-line a train actually rides, plus any
- * `features` (a station platform, a terminus buffer, ramp chevrons). A device
- * piece (train/gate/carriage) puts its coloured body in `svgPath` and its
- * detail (windows, lamps, the barrier boom) in `features`, with no grooves.
- *
- * The renderer owns the palette: it fills `svgPath` with the beech-wood material
- * (washed by `PIECE_TINT`), strokes `grooves` as recessed channels, and maps
- * each feature `role` to a fill/stroke. Keeping colour out of here leaves this
- * module pure geometry and lets the design gallery and the live `ToyTable` share
- * one source of truth for shape.
- */
-export function getPieceShape(piece: TrackPiece): PieceShape {
-  switch (piece.type) {
-    case 'straight':
-      return plankShape(200, []);
-    case 'ramp':
-      return plankShape(200, rampChevrons());
-    case 'curve':
-      return curveShape('curve', curveRadiusFor('curve', piece.radiusMm), piece.radiusMm);
-    case 'curve-tight':
-      return curveShape(
-        'curve-tight',
-        curveRadiusFor('curve-tight', piece.radiusMm),
-        piece.radiusMm,
-      );
-    case 'junction':
-      return junctionShape();
-    case 'station':
-      return stationShape();
-    case 'terminus':
-      return terminusShape();
-    case 'crossing':
-      return crossingShape();
-    case 'train':
-      return trainShape();
-    case 'gate':
-      return gateShape();
-    case 'carriage':
-      return carriageShape();
-  }
-}
-
 // ---------------------------------------------------------------------------
-// Shape builders (piece-local coordinates, origin at piece centre)
+// SVG path primitives
 // ---------------------------------------------------------------------------
 
 const fmt = (n: number): string => n.toFixed(2);
@@ -776,20 +534,18 @@ function circle(cx: number, cy: number, r: number): string {
   );
 }
 
-const PLANK_CORNER = 5;
-
 /**
- * Sample a piece-local centre-line half-path and return the polyline that runs
+ * Sample a piece-local rail centre-line and return the polyline that runs
  * `sign * RAIL_GAUGE` to one side of it (the routed groove). Sampling the SAME
- * `CentreLinePath` the train rides means the groove can never diverge from the
- * running rail — including through the junction branch, whose centre-line is a
- * bezier, not a straight 45° strip.
+ * path the train rides means the groove can never diverge from the running rail
+ * — including through the junction branch, whose centre-line is a bezier, not a
+ * straight 45° strip.
  */
-function offsetGroove(local: CentreLinePath, sign: number): string {
-  const samples = Math.max(2, Math.ceil(local.length / 8));
+function offsetGroove(rail: CentreLinePath, sign: number): string {
+  const samples = Math.max(2, Math.ceil(rail.length / 8));
   let d = '';
   for (let i = 0; i <= samples; i++) {
-    const pose = local.at((i / samples) * local.length);
+    const pose = rail.at((i / samples) * rail.length);
     const normal = toRad(pose.headingDeg + 90);
     const x = pose.x + sign * RAIL_GAUGE * Math.cos(normal);
     const y = pose.y + sign * RAIL_GAUGE * Math.sin(normal);
@@ -804,12 +560,12 @@ function offsetGroove(local: CentreLinePath, sign: number): string {
  * the other, so the wood sweeps along the very centre-line its grooves (and a
  * train) follow, instead of a straight chord. Used for the junction BRANCH.
  */
-function sweptBandAlong(local: CentreLinePath, halfWidth: number): string {
-  const samples = Math.max(2, Math.ceil(local.length / 6));
+function sweptBandAlong(rail: CentreLinePath, halfWidth: number): string {
+  const samples = Math.max(2, Math.ceil(rail.length / 6));
   const forward: string[] = [];
   const backward: string[] = [];
   for (let i = 0; i <= samples; i++) {
-    const pose = local.at((i / samples) * local.length);
+    const pose = rail.at((i / samples) * rail.length);
     const nx = Math.cos(toRad(pose.headingDeg + 90));
     const ny = Math.sin(toRad(pose.headingDeg + 90));
     forward.push(`${fmt(pose.x + halfWidth * nx)} ${fmt(pose.y + halfWidth * ny)}`);
@@ -822,30 +578,106 @@ function sweptBandAlong(local: CentreLinePath, halfWidth: number): string {
   return `M ${backward.join(' L ')} L ${forward.join(' L ')} Z`;
 }
 
-/**
- * Both routed grooves for every leg of a track piece, derived from its
- * centre-line half-paths. Each leg contributes a groove on each side; collinear
- * legs (a straight's two halves) join into one continuous rail, so the twin
- * channels are continuous through the piece and meet cleanly across a snapped
- * joint. Up to four legs (a crossing's four arms) are sampled.
- */
-function centreLineGrooves(type: TrackPieceType, radiusOverride?: number): string[] {
-  const grooves: string[] = [];
-  for (let i = 0; i < 4; i++) {
-    const local = localHalfPath(type, i, radiusOverride);
-    if (local === undefined) continue;
-    grooves.push(offsetGroove(local, 1), offsetGroove(local, -1));
-  }
-  return grooves;
+// ---------------------------------------------------------------------------
+// Local endpoint + centre-line data (piece-local, origin = centre, facing east)
+// ---------------------------------------------------------------------------
+
+/** A piece-local endpoint, before flip/rotation/translation. */
+interface LocalEndpoint {
+  readonly lx: number;
+  readonly ly: number;
+  /** Outgoing tangent (degrees clockwise from east) in piece-local space. */
+  readonly localAngle: number;
+  /** +1 for the ramp's exit (one layer higher); absent ⇒ same layer. */
+  readonly layerDelta?: number;
 }
 
-/** A straight wooden plank of length `len`, centred on the origin, with its two
- * routed grooves. `features` overlay extra detail (e.g. the ramp chevrons). */
-function plankShape(len: number, features: ReadonlyArray<PieceFeature>): PieceShape {
+const STRAIGHT_ENDPOINTS: readonly LocalEndpoint[] = [
+  { lx: -100, ly: 0, localAngle: 180 },
+  { lx: 100, ly: 0, localAngle: 0 },
+];
+
+// Reuses the straight's 200 mm footprint so snap spacing stays uniform, but its
+// exit endpoint (index 1) is one layer higher: this single `layerDelta` IS the
+// entire ramp/layer mechanism. Up vs down is pure orientation — edges are
+// bidirectional, so a "down ramp" is just a ramp rotated 180°.
+const RAMP_ENDPOINTS: readonly LocalEndpoint[] = [
+  { lx: -100, ly: 0, localAngle: 180 },
+  { lx: 100, ly: 0, localAngle: 0, layerDelta: 1 },
+];
+
+const STATION_ENDPOINTS: readonly LocalEndpoint[] = [
+  { lx: -110, ly: 0, localAngle: 180 },
+  { lx: 110, ly: 0, localAngle: 0 },
+];
+
+// Single endpoint at the open end (east). Dead-end buffer at west.
+const TERMINUS_ENDPOINTS: readonly LocalEndpoint[] = [{ lx: 30, ly: 0, localAngle: 0 }];
+
+// Two straights at 90°. Four endpoints: east, north, west, south (SVG y-down).
+const CROSSING_ENDPOINTS: readonly LocalEndpoint[] = [
+  { lx: 100, ly: 0, localAngle: 0 },
+  { lx: 0, ly: -100, localAngle: 270 },
+  { lx: -100, ly: 0, localAngle: 180 },
+  { lx: 0, ly: 100, localAngle: 90 },
+];
+
+// 3 endpoints: trunk (west, index 0), through (east, index 1), branch (index 2,
+// diverging at 45° with its position and outgoing tangent both down-right and
+// matching the curve's chirality, so a curve continues it without a kink).
+const JUNCTION_ENDPOINTS: readonly LocalEndpoint[] = [
+  { lx: -100, ly: 0, localAngle: 180 },
+  { lx: 100, ly: 0, localAngle: 0 },
+  { lx: 100 * Math.cos(toRad(45)), ly: 100 * Math.sin(toRad(45)), localAngle: 45 },
+];
+
+/** The junction's centre→endpoint half-path for `index`. The branch leg (2) is
+ * a smooth bezier from the trunk axis to the 45° endpoint so a diverting train
+ * doesn't snap its heading at the marker; trunk (0) and through (1) are straight
+ * collinear chords. */
+function junctionCentreLine(index: number): CentreLinePath | undefined {
+  const ep = JUNCTION_ENDPOINTS[index];
+  if (ep === undefined) return undefined;
+  if (index === 2) return bezierHalfPath(ep.lx, ep.ly, 0, ep.localAngle);
+  return linearHalfPath(ep.lx, ep.ly);
+}
+
+/** Endpoints of a 45° arc of the given centreline radius. */
+function curveEndpoints(radius: number): readonly LocalEndpoint[] {
+  const entry = curvePointR(radius, radius, CURVE_ENTRY_ANGLE);
+  const exit = curvePointR(radius, radius, CURVE_EXIT_ANGLE);
+  return [
+    { lx: entry.x, ly: entry.y, localAngle: 180 },
+    { lx: exit.x, ly: exit.y, localAngle: 45 },
+  ];
+}
+
+/** The `endpoints` + `centreLine` pair for a piece whose every leg is a straight
+ * chord from the marker to an endpoint (straight, station, ramp, crossing). */
+function linearLegs(eps: readonly LocalEndpoint[]): {
+  endpoints: () => readonly LocalEndpoint[];
+  centreLine: (index: number) => CentreLinePath | undefined;
+} {
+  return {
+    endpoints: () => eps,
+    centreLine: (index: number) => {
+      const e = eps[index];
+      return e === undefined ? undefined : linearHalfPath(e.lx, e.ly);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Body builders (piece-local coordinates, origin at piece centre). Each returns
+// the silhouette + features WITHOUT grooves; getPieceShape adds grooves.
+// ---------------------------------------------------------------------------
+
+/** A straight wooden plank of length `len`, centred on the origin. `features`
+ * overlay extra detail (e.g. the ramp chevrons). */
+function plankBody(len: number, features: ReadonlyArray<PieceFeature>): PieceBody {
   const half = len / 2;
   return {
     svgPath: roundRect(-half, -PLANK_HALF_WIDTH, len, PLANK_HALF_WIDTH * 2, PLANK_CORNER),
-    grooves: centreLineGrooves('straight'),
     features,
     width: len,
     height: PLANK_HALF_WIDTH * 2,
@@ -866,15 +698,9 @@ function rampChevrons(): ReadonlyArray<PieceFeature> {
   return features;
 }
 
-function curveShape(
-  type: TrackPieceType,
-  radius: number,
-  radiusOverride: number | undefined,
-): PieceShape {
+function curveBody(radius: number): PieceBody {
   // The wooden band of the 45° arc, drawn on exactly the geometry the endpoints
   // use, so the plank connects its own ends instead of floating away from them.
-  // Parametrised by centreline `radius` so the standard `curve` (R=200) and
-  // `curve-tight` (R=100) share one builder.
   const outer = radius + PLANK_HALF_WIDTH;
   const inner = radius - PLANK_HALF_WIDTH;
   const at = (pointRadius: number, deg: number): string => {
@@ -886,37 +712,32 @@ function curveShape(
     `L ${at(inner, CURVE_EXIT_ANGLE)} A ${fmt(inner)} ${fmt(inner)} 0 0 0 ${at(inner, CURVE_ENTRY_ANGLE)} Z`;
   return {
     svgPath: d,
-    grooves: centreLineGrooves(type, radiusOverride),
     features: [],
     width: (180 * radius) / CURVE_RADIUS_MM,
     height: (90 * radius) / CURVE_RADIUS_MM,
   };
 }
 
-function junctionShape(): PieceShape {
+function junctionBody(): PieceBody {
   // A wooden Y: the through plank runs west↔east; the branch plank SWEEPS along
   // the same bezier centre-line its grooves (and a diverting train) follow, so
-  // the branch wood curves WITH its rails instead of running off a straight 45°
-  // chord. With no hard outline + one wood fill, the through plank and the
-  // branch band read as a single forked piece; the diverging V between the legs
-  // is open table, as on a real turnout.
+  // the branch wood curves WITH its rails. With no hard outline + one wood fill,
+  // the through plank and the branch band read as a single forked piece.
   const ph = PLANK_HALF_WIDTH;
   const through = roundRect(-100, -ph, 200, ph * 2, PLANK_CORNER);
-  const branchLocal = localHalfPath('junction', 2);
+  const branchLocal = junctionCentreLine(2);
   const branch = branchLocal === undefined ? '' : sweptBandAlong(branchLocal, ph);
-  // Branch endpoint y (the lowest reach), plus a plank half-width, sets the box.
-  const branchEnd = localEndpoints('junction')[2];
+  const branchEnd = JUNCTION_ENDPOINTS[2];
   const ey = branchEnd?.ly ?? 70.71;
   return {
     svgPath: `${through} ${branch}`,
-    grooves: centreLineGrooves('junction'),
     features: [],
     width: 200,
     height: ph + ey + ph,
   };
 }
 
-function stationShape(): PieceShape {
+function stationBody(): PieceBody {
   // A 220 mm plank with a raised platform deck along its north (upper) edge.
   const ph = PLANK_HALF_WIDTH;
   const platformTop = -(ph + 22);
@@ -925,22 +746,19 @@ function stationShape(): PieceShape {
   const lip: PieceFeature = { role: 'line', width: 2, d: `M -50 ${-ph - 1} H 50` };
   return {
     svgPath: roundRect(-110, -ph, 220, ph * 2, PLANK_CORNER),
-    grooves: centreLineGrooves('station'),
     features: [{ role: 'platform', d: platform }, lip],
     width: 220,
     height: ph - platformTop,
   };
 }
 
-function terminusShape(): PieceShape {
+function terminusBody(): PieceBody {
   // A short plank with a chunky wooden buffer-stop at the dead end (west); the
   // open end is east. Two metal bumper pads face the incoming train.
   const ph = PLANK_HALF_WIDTH;
   const buffer = roundRect(-38, -(ph + 3), 12, (ph + 3) * 2, 3);
   return {
     svgPath: roundRect(-30, -ph, 60, ph * 2, PLANK_CORNER),
-    // Grooves stop short of the buffer; straight pair over the open stub.
-    grooves: [`M -22 ${-RAIL_GAUGE} H 28`, `M -22 ${RAIL_GAUGE} H 28`],
     features: [
       { role: 'dark-wood', d: buffer },
       { role: 'metal', d: circle(-24, -RAIL_GAUGE, 2.6) },
@@ -951,7 +769,7 @@ function terminusShape(): PieceShape {
   };
 }
 
-function crossingShape(): PieceShape {
+function crossingBody(): PieceBody {
   // Two 200 mm planks crossing at 90°. Both rounded rects are wound the same
   // way, so the nonzero fill unions them into a plus with no hole at the centre.
   const ph = PLANK_HALF_WIDTH;
@@ -959,20 +777,18 @@ function crossingShape(): PieceShape {
   const ns = roundRect(-ph, -100, ph * 2, 200, PLANK_CORNER);
   return {
     svgPath: `${ew} ${ns}`,
-    grooves: centreLineGrooves('crossing'),
     features: [],
     width: 200,
     height: 200,
   };
 }
 
-function trainShape(): PieceShape {
+function trainBody(): PieceBody {
   // A friendly top-down loco, nose to the east. Rounded hull tapering to the
   // nose, a dark boiler/roof panel, a windscreen, a funnel and a headlamp.
   const body = 'M -40 -7 Q -40 -13 -34 -13 H 24 L 40 -5 L 40 5 L 24 13 H -34 Q -40 13 -40 7 Z';
   return {
     svgPath: body,
-    grooves: [],
     features: [
       // Boiler / roof panel.
       { role: 'dark-wood', d: roundRect(-34, -9, 46, 18, 5) },
@@ -989,7 +805,7 @@ function trainShape(): PieceShape {
   };
 }
 
-function gateShape(): PieceShape {
+function gateBody(): PieceBody {
   // A lift-barrier straddling the rail: a metal post + counterweight to the
   // west, a red-and-cream boom reaching east. The body silhouette covers post
   // and boom so the selection glow wraps the whole barrier; the coloured boom
@@ -1002,7 +818,6 @@ function gateShape(): PieceShape {
   }
   return {
     svgPath: `${post} ${boomBase}`,
-    grooves: [],
     features: [
       { role: 'danger', d: boomBase },
       ...stripes,
@@ -1014,7 +829,7 @@ function gateShape(): PieceShape {
   };
 }
 
-function carriageShape(): PieceShape {
+function carriageBody(): PieceBody {
   // A passenger carriage: a rounded box, shorter than the loco, with a row of
   // windows and no nose so multiple carriages chain cleanly.
   const w = 60;
@@ -1025,9 +840,328 @@ function carriageShape(): PieceShape {
   }
   return {
     svgPath: roundRect(-w / 2, -ph, w, ph * 2, 6),
-    grooves: [],
     features: [{ role: 'dark-wood', d: roundRect(-26, -ph, 52, 4, 2) }, ...windows],
     width: w,
     height: ph * 2,
   };
+}
+
+// ---------------------------------------------------------------------------
+// The piece registry — one self-contained descriptor per type.
+// ---------------------------------------------------------------------------
+
+/**
+ * `'track'` pieces contribute topology (endpoints/markers). `'wire-device'`
+ * pieces (train, gate) announce on the bus and emit events. `'device'` pieces
+ * (carriage) sit on the table but are invisible to the wire and the graph.
+ */
+type PieceCategory = 'track' | 'device' | 'wire-device';
+
+interface PieceDescriptor {
+  readonly category: PieceCategory;
+  readonly label: string;
+  /** Warm wood wash, or null for plain beech / devices. See PIECE_TINT. */
+  readonly tint: string | null;
+  /** Marker kind contributed to the layout, or null for non-marker (device) pieces. */
+  readonly markerKind: TrackMarkerKind | null;
+  /** Local endpoints, canonical index order (transformed to world by getEndpoints). */
+  endpoints(radiusMm?: number): readonly LocalEndpoint[];
+  /** Centre→endpoint half-path for `index` (the rail a train RIDES). undefined out of range. */
+  centreLine(index: number, radiusMm?: number): CentreLinePath | undefined;
+  /** The rails a piece DRAWS — offset ±RAIL_GAUGE into grooves. Usually the
+   * endpoint centre-lines; a dead-end overrides it (see getRailLines). */
+  railLines(radiusMm?: number): readonly CentreLinePath[];
+  /** Silhouette + feature overlays, sans grooves. */
+  body(piece: TrackPiece): PieceBody;
+}
+
+interface TrackSpec {
+  readonly label: string;
+  readonly tint: string | null;
+  readonly markerKind: TrackMarkerKind;
+  endpoints(radiusMm?: number): readonly LocalEndpoint[];
+  centreLine(index: number, radiusMm?: number): CentreLinePath | undefined;
+  /** Override only when the drawn rail differs from the ridden centre-lines. */
+  railLines?(radiusMm?: number): readonly CentreLinePath[];
+  body(piece: TrackPiece): PieceBody;
+}
+
+/** Build a track descriptor. `railLines` defaults to the piece's endpoint
+ * centre-lines — every leg's rail is the rail a train rides. */
+function trackPiece(spec: TrackSpec): PieceDescriptor {
+  const railLines =
+    spec.railLines ??
+    ((radiusMm?: number): readonly CentreLinePath[] => {
+      const out: CentreLinePath[] = [];
+      const eps = spec.endpoints(radiusMm);
+      for (let i = 0; i < eps.length; i++) {
+        const cl = spec.centreLine(i, radiusMm);
+        if (cl !== undefined) out.push(cl);
+      }
+      return out;
+    });
+  return {
+    category: 'track',
+    label: spec.label,
+    tint: spec.tint,
+    markerKind: spec.markerKind,
+    endpoints: spec.endpoints,
+    centreLine: spec.centreLine,
+    railLines,
+    body: spec.body,
+  };
+}
+
+/** Build a device descriptor: no topology, no markers, no grooves. */
+function devicePiece(
+  category: 'device' | 'wire-device',
+  label: string,
+  body: () => PieceBody,
+): PieceDescriptor {
+  return {
+    category,
+    label,
+    tint: null,
+    markerKind: null,
+    endpoints: () => [],
+    centreLine: () => undefined,
+    railLines: () => [],
+    body,
+  };
+}
+
+/** The `curve` and `curve-tight` variants differ only in default radius. */
+function curveDescriptor(label: string, defaultRadius: number): PieceDescriptor {
+  return trackPiece({
+    label,
+    tint: null, // a 45° band of beech reads fine; a wash would only mute it
+    markerKind: 'block_boundary',
+    endpoints: (radiusMm) => curveEndpoints(curveRadiusFor(defaultRadius, radiusMm)),
+    centreLine: (index, radiusMm) => {
+      const radius = curveRadiusFor(defaultRadius, radiusMm);
+      if (index === 0) return curveHalfPath(radius, CURVE_ENTRY_ANGLE);
+      if (index === 1) return curveHalfPath(radius, CURVE_EXIT_ANGLE);
+      return undefined;
+    },
+    body: (piece) => curveBody(curveRadiusFor(defaultRadius, piece.radiusMm)),
+  });
+}
+
+const PIECES: Record<TrackPieceType, PieceDescriptor> = {
+  straight: trackPiece({
+    label: 'Straight',
+    tint: null,
+    markerKind: 'block_boundary',
+    ...linearLegs(STRAIGHT_ENDPOINTS),
+    body: () => plankBody(200, []),
+  }),
+  curve: curveDescriptor('Curve', CURVE_RADIUS_MM),
+  'curve-tight': curveDescriptor('Tight Curve', CURVE_TIGHT_RADIUS_MM),
+  junction: trackPiece({
+    label: 'Junction',
+    tint: null, // the Y-fork silhouette reads on its own; a cool wash would grey it
+    markerKind: 'junction',
+    endpoints: () => JUNCTION_ENDPOINTS,
+    centreLine: (index) => junctionCentreLine(index),
+    body: junctionBody,
+  }),
+  station: trackPiece({
+    label: 'Station',
+    tint: '#f0a02f', // warm honey
+    markerKind: 'station_stop',
+    ...linearLegs(STATION_ENDPOINTS),
+    body: stationBody,
+  }),
+  terminus: trackPiece({
+    label: 'Terminus',
+    tint: '#d4513a', // brick-red — the line ends here
+    markerKind: 'terminus',
+    ...linearLegs(TERMINUS_ENDPOINTS),
+    // A dead-end rail genuinely extends PAST its single marker toward the buffer,
+    // so its drawn rail (−22→28) is longer than the centre-line a train rides
+    // (0→30, ending at the marker). This is the one piece whose drawn rail and
+    // ridden path legitimately differ — declared here, derived like every other.
+    railLines: () => [segmentPath(-22, 0, 28, 0)],
+    body: terminusBody,
+  }),
+  crossing: trackPiece({
+    label: 'Crossing',
+    tint: null, // the plus silhouette reads on its own
+    markerKind: 'block_boundary',
+    ...linearLegs(CROSSING_ENDPOINTS),
+    body: crossingBody,
+  }),
+  ramp: trackPiece({
+    label: 'Ramp',
+    tint: '#e0902a', // ochre — a change of level
+    markerKind: 'block_boundary',
+    ...linearLegs(RAMP_ENDPOINTS),
+    body: () => plankBody(200, rampChevrons()),
+  }),
+  train: devicePiece('wire-device', 'Train', trainBody),
+  gate: devicePiece('wire-device', 'Gate', gateBody),
+  carriage: devicePiece('device', 'Carriage', carriageBody),
+};
+
+// ---------------------------------------------------------------------------
+// Derived tables and predicates — all sourced from the registry above, so a
+// new piece is a single PIECES entry with nothing to keep in sync by hand.
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a `Record<TrackPieceType, V>` by selecting a field from every
+ * descriptor. The empty seed is the one cast in this module: it is sound
+ * because the loop over the exhaustive `ALL_PIECE_TYPES` assigns every key
+ * before the record is read.
+ */
+function mapPieces<V>(select: (d: PieceDescriptor) => V): Record<TrackPieceType, V> {
+  const out = {} as Record<TrackPieceType, V>;
+  for (const type of ALL_PIECE_TYPES) out[type] = select(PIECES[type]);
+  return out;
+}
+
+/**
+ * A gentle functional colour wash, layered over the beech wood at low opacity so
+ * an operator can read a piece's role at a glance without abandoning the
+ * one-material look. Tints are WARM only: a cool wash over warm beech desaturates
+ * to drab grey, so the wash is used where a warm hue both reads and helps — a
+ * station (honey), a terminus (brick), a ramp (ochre). The most distinctive
+ * SILHOUETTES (junction Y-fork, plus crossing) carry no tint. `null` ⇒ plain
+ * beech. Derived from each descriptor's `tint`.
+ */
+export const PIECE_TINT: Record<TrackPieceType, string | null> = mapPieces((d) => d.tint);
+
+/** Display label for each piece type (the toybox caption). Derived from the registry. */
+export const PIECE_LABELS: Record<TrackPieceType, string> = mapPieces((d) => d.label);
+
+export function isDevicePiece(type: TrackPieceType): type is DevicePieceType {
+  return PIECES[type].category !== 'track';
+}
+
+export function isWireDevice(type: TrackPieceType): type is WireDeviceType {
+  return PIECES[type].category === 'wire-device';
+}
+
+/** Track pieces, in tray order. Derived — the toybox can't fall out of sync. */
+export const TRACK_PIECE_TYPES: readonly TrackPieceType[] = ALL_PIECE_TYPES.filter(
+  (type) => PIECES[type].category === 'track',
+);
+
+/** Device pieces (train, gate, carriage), in tray order. Derived. */
+export const DEVICE_PIECE_TYPES: readonly DevicePieceType[] = ALL_PIECE_TYPES.filter(isDevicePiece);
+
+/**
+ * The marker kind a piece contributes. Devices declare `null` and resolve to
+ * `'block_boundary'` here (defensive/total; no caller should reach it for a
+ * device — they gate on `isDevicePiece`).
+ */
+export function pieceMarkerKind(type: TrackPieceType): TrackMarkerKind {
+  return PIECES[type].markerKind ?? 'block_boundary';
+}
+
+// ---------------------------------------------------------------------------
+// Public geometry API
+// ---------------------------------------------------------------------------
+
+/**
+ * World-space endpoints for a placed piece, in the same order as the local
+ * endpoint definitions (junction: [trunk, through, branch]; crossing: [east,
+ * north, west, south]; all others: [entry, exit]).
+ */
+export function getEndpoints(piece: TrackPiece): ReadonlyArray<TrackEndpoint> {
+  const locals = PIECES[piece.type].endpoints(piece.radiusMm);
+  const flip = piece.flipped === true;
+  const baseLayer = layerOf(piece);
+  return locals.map(({ lx, ly, localAngle, layerDelta }) => {
+    // Mirror across the local x-axis first (y and angle negate), then rotate +
+    // translate — matching the SVG `scale(1,-1)` the renderer applies.
+    const ly2 = flip ? -ly : ly;
+    const localAngle2 = flip ? -localAngle : localAngle;
+    const world = transformPoint(lx, ly2, piece.rotationDeg, piece.position.x, piece.position.y);
+    return {
+      x: world.x,
+      y: world.y,
+      outgoingAngleDeg: normaliseAngle(localAngle2 + piece.rotationDeg),
+      // A ramp's exit endpoint carries a +1 layerDelta; every other endpoint
+      // sits on the piece's own layer. This is the only place a single piece
+      // spans two layers.
+      layer: baseLayer + (layerDelta ?? 0),
+    };
+  });
+}
+
+/**
+ * World-space centre-line half-path for a placed `piece`, from its centre
+ * (marker) out to endpoint `endpointIndex` — the rail a train RIDES. Returns
+ * `undefined` for an out-of-range index (device pieces have none). Sampling at
+ * `length` reproduces `getEndpoints(piece)[endpointIndex]`'s position and
+ * `outgoingAngleDeg`.
+ */
+export function getCentreLinePath(
+  piece: TrackPiece,
+  endpointIndex: number,
+): CentreLinePath | undefined {
+  const local = PIECES[piece.type].centreLine(endpointIndex, piece.radiusMm);
+  if (local === undefined) return undefined;
+  return worldHalfPath(piece, local);
+}
+
+/**
+ * World-space rails a placed `piece` DRAWS — the geometry its grooves are routed
+ * along. For almost every piece these are exactly the endpoint centre-lines
+ * (`getCentreLinePath`), but a dead-end terminus draws a rail that reaches past
+ * its only marker to the buffer, so its drawn rail is longer than the ridden
+ * path. Keep this distinct from `getCentreLinePath`: unifying them would shorten
+ * the terminus rail to the marker and silently break its grooves.
+ */
+export function getRailLines(piece: TrackPiece): ReadonlyArray<CentreLinePath> {
+  return PIECES[piece.type].railLines(piece.radiusMm).map((local) => worldHalfPath(piece, local));
+}
+
+/**
+ * The drawable geometry of a piece, in piece-local coordinates (origin = piece
+ * centre, pointing east). The consumer applies `transform="translate(x,y)
+ * rotate(r)"` around the origin.
+ *
+ * A track piece is a wooden plank (`svgPath`) with twin routed rail `grooves`
+ * — derived here, uniformly for every piece, by offsetting the piece's
+ * `railLines` ±RAIL_GAUGE — plus any `features`. A device piece puts its coloured
+ * body in `svgPath` and its detail in `features`, with no grooves. The renderer
+ * owns the palette (wood fill, tint wash, per-role colours); keeping colour out
+ * of here leaves this module pure geometry.
+ */
+export function getPieceShape(piece: TrackPiece): PieceShape {
+  const descriptor = PIECES[piece.type];
+  const body = descriptor.body(piece);
+  const grooves = descriptor
+    .railLines(piece.radiusMm)
+    .flatMap((rail) => [offsetGroove(rail, 1), offsetGroove(rail, -1)]);
+  return {
+    svgPath: body.svgPath,
+    grooves,
+    features: body.features,
+    width: body.width,
+    height: body.height,
+  };
+}
+
+/**
+ * A height cue for a layer group: a drop-shadow offset + blur (and optional
+ * opacity) the renderer turns into an SVG `filter`. Pure data, total over the
+ * small layer range a Brio table uses; lives next to the piece model so the
+ * visual height ramp is defined with the geometry, not buried in JSX.
+ *
+ * Layer 0 is the ground/baseline (no shadow). Each higher layer floats further
+ * "above" the table with a larger, softer offset shadow. Layers beyond 2 clamp
+ * to the layer-2 cue (a Brio table rarely stacks deeper).
+ */
+export function layerStyle(layer: number): {
+  readonly dx: number;
+  readonly dy: number;
+  readonly blur: number;
+  readonly opacity?: number;
+} {
+  if (layer <= 0) return { dx: 0, dy: 0, blur: 0 };
+  if (layer === 1) return { dx: 0, dy: 6, blur: 4, opacity: 0.35 };
+  return { dx: 0, dy: 12, blur: 8, opacity: 0.45 };
 }

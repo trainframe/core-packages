@@ -1,12 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+  type CentreLinePath,
   PIECE_TINT,
   type RotationDeg,
+  TRACK_PIECE_TYPES,
   type TrackPiece,
   type TrackPieceType,
   getCentreLinePath,
   getEndpoints,
   getPieceShape,
+  getRailLines,
   isDevicePiece,
   isWireDevice,
   layerOf,
@@ -409,6 +412,69 @@ describe('getPieceShape — rail grooves', () => {
     // straight-45°-chord groove would bow away by ~10mm, so 5mm separates them.
     const nearest = Math.min(...verts.map((v) => Math.hypot(v.x - target.x, v.y - target.y)));
     expect(nearest).toBeLessThan(5);
+  });
+});
+
+describe('rail grooves derive uniformly from each piece’s rail lines', () => {
+  // The registry makes grooves a single derived thing — every track piece's
+  // grooves are exactly the ±RAIL_GAUGE offsets of its declared `railLines`, so
+  // no piece can hand-author a groove path that drifts from its rails (the old
+  // terminus did exactly that). This guards the mechanism for every type at once.
+  const RAIL_GAUGE = 5;
+
+  function parseVerts(d: string): Array<{ x: number; y: number }> {
+    return [...d.matchAll(/[ML]\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)/g)].map((m) => ({
+      x: Number(m[1]),
+      y: Number(m[2]),
+    }));
+  }
+
+  /** Min distance from a point to a finely-sampled rail polyline. */
+  function distToRail(v: { x: number; y: number }, rail: CentreLinePath): number {
+    let min = Number.POSITIVE_INFINITY;
+    const N = 120;
+    for (let i = 0; i <= N; i++) {
+      const p = rail.at((i / N) * rail.length);
+      const d = Math.hypot(p.x - v.x, p.y - v.y);
+      if (d < min) min = d;
+    }
+    return min;
+  }
+
+  for (const type of TRACK_PIECE_TYPES) {
+    it(`${type}: two grooves per rail line, each riding exactly RAIL_GAUGE off it`, () => {
+      const piece = makePiece(type);
+      const rails = getRailLines(piece);
+      const grooves = getPieceShape(piece).grooves;
+      expect(rails.length).toBeGreaterThan(0);
+      // Two channels (±gauge) per rail line — no extra, hand-authored grooves.
+      expect(grooves.length).toBe(rails.length * 2);
+      // Every groove vertex sits one gauge off its parent rail (grooves[2i],
+      // grooves[2i+1] are the ± pair for rails[i]).
+      for (let r = 0; r < rails.length; r++) {
+        const rail = must(rails[r]);
+        for (const offset of [0, 1]) {
+          for (const v of parseVerts(must(grooves[r * 2 + offset]))) {
+            expect(Math.abs(distToRail(v, rail) - RAIL_GAUGE)).toBeLessThan(0.8);
+          }
+        }
+      }
+    });
+  }
+
+  it('the terminus rail spans the full plank (buffer stub → open end), past its only marker', () => {
+    // The case that used to be hand-drawn: a dead-end's drawn rail reaches BACK
+    // toward the buffer, past the single marker. Its ridden centre-line stops at
+    // the marker (0→30). Locking this keeps terminus on the same derived path.
+    const [rail] = getRailLines(makePiece('terminus'));
+    const start = must(rail).at(0);
+    const end = must(rail).at(must(rail).length);
+    const minX = Math.min(start.x, end.x);
+    const maxX = Math.max(start.x, end.x);
+    expect(minX).toBeLessThan(-18); // reaches back toward the buffer
+    expect(maxX).toBeGreaterThan(26); // and out to the open end
+    // The ridden centre-line, by contrast, ends at the marker-side endpoint.
+    expect(must(getCentreLinePath(makePiece('terminus'), 0)).length).toBeCloseTo(30, 3);
   });
 });
 
