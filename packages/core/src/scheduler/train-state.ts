@@ -11,6 +11,24 @@ export interface TrainState {
   readonly train_id: string;
 
   /**
+   * Monotonic registration-sequence number, assigned by the scheduler the
+   * first time this train registers (ADR-017). The FIFO-by-arrival floor of
+   * the total order over trains: absent any announced priority, the train that
+   * has been in the system longest wins contended track. Deterministic by
+   * construction — a counter, no clock, no RNG. Lower wins.
+   */
+  readonly registration_seq: number;
+
+  /**
+   * Announced scheduling priority (ADR-017). Higher wins section contention.
+   * Resolved at registration to a concrete number (defaulting to 0 when the
+   * device omits the optional `priority` field), so the comparator never has
+   * to reason about `undefined` and the baseline — every train at 0 — is
+   * exactly the FIFO floor.
+   */
+  readonly priority: number;
+
+  /**
    * Operator-facing intent: an ordered list of stops the train cycles
    * through indefinitely. See ADR-010. `undefined` for trains that have
    * been registered but never given a schedule.
@@ -49,6 +67,18 @@ export interface TrainState {
   /** Edges the train is currently cleared for, in order. */
   cleared_edges: ReadonlyArray<EdgeRef>;
 
+  /**
+   * Why the scheduler is holding this train, when it is held for a reason it
+   * owns (ADR-019). `'unknown_topology'` means the train reported a marker
+   * unreachable from its last certain position while running a bounded route:
+   * its position is uncertain, so it is held and the uncertain region is kept
+   * in `cleared_edges` to deny neighbours under block exclusivity. Surfaced on
+   * the retained clearance state via `clearanceStateEffect`; cleared on any
+   * normal re-grant or on operator recovery. `undefined` when not held for a
+   * scheduler-owned reason.
+   */
+  block_reason?: 'unknown_topology' | undefined;
+
   /** Last marker the train was observed to traverse. */
   last_marker_id?: string;
 
@@ -74,7 +104,13 @@ export interface TrainState {
   dwell_until?: number | undefined;
 }
 
-export const initialTrainState = (trainId: string): TrainState => ({
+export const initialTrainState = (
+  trainId: string,
+  registrationSeq: number,
+  priority = 0,
+): TrainState => ({
   train_id: trainId,
+  registration_seq: registrationSeq,
+  priority,
   cleared_edges: [],
 });

@@ -178,6 +178,28 @@ export class Server {
   }
 
   /**
+   * Recover a topology-held train by RE-ANCHORING it at an operator-confirmed
+   * marker (ADR-019 §6). Mirrors `assignSchedule`: the scheduler decides, the
+   * server enacts. Lifts the `unknown_topology` hold, releases the uncertain
+   * region, and resumes scheduled operation. No phantom edge is learned. The
+   * operator-facing topic/UI for this gesture is deferred (ADR-019 §6); this is
+   * the server-side API the eventual UI drives. No-op if the train isn't held.
+   */
+  reanchorTrain(trainId: string, confirmedMarkerId: string): void {
+    this.dispatchEffects(this.scheduler.reanchor(trainId, confirmedMarkerId));
+  }
+
+  /**
+   * Recover a topology-held train by CONFIRMING the unreachable adjacency is
+   * real new track (ADR-019 §6 — the ADR-014 track-learn bridge). Learns the
+   * edge, re-anchors at the now-confirmed marker, lifts the hold, and resumes.
+   * Server-side API; the operator UI is deferred. No-op if the train isn't held.
+   */
+  confirmNewTrack(trainId: string): void {
+    this.dispatchEffects(this.scheduler.confirmNewTrack(trainId));
+  }
+
+  /**
    * Inject an event into the scheduler exactly as if it had arrived on the
    * wire, then dispatch any effects. Used by the admin HTTP API for things
    * like operator-driven `tag_assignment`. Internal: prefer publishing on

@@ -48,6 +48,13 @@ const registerTrain = (scheduler: Scheduler, trainId: string) =>
     payload: { capabilities: ['core.controls_motion', 'core.accepts_route'] },
   });
 
+const registerTrainWithPriority = (scheduler: Scheduler, trainId: string, priority: number) =>
+  scheduler.handleEvent({
+    event_type: 'device_registered',
+    device_id: trainId,
+    payload: { capabilities: ['core.controls_motion', 'core.accepts_route'], priority },
+  });
+
 const registerLongTrain = (scheduler: Scheduler, trainId: string, lengthMm: number) =>
   scheduler.handleEvent({
     event_type: 'device_registered',
@@ -101,6 +108,86 @@ const seedIdentityTags = (scheduler: Scheduler, markerIds: ReadonlyArray<string>
       device_id: 'GARAGE',
       payload: { tag_id: id, assigned_kind: 'marker', target_id: id },
     });
+  }
+};
+
+/** Two edges conflict when they share any boundary marker (ADR-011). */
+const edgesShareMarker = (
+  a: { from_marker_id: string; to_marker_id: string },
+  b: { from_marker_id: string; to_marker_id: string },
+): boolean =>
+  a.from_marker_id === b.from_marker_id ||
+  a.from_marker_id === b.to_marker_id ||
+  a.to_marker_id === b.from_marker_id ||
+  a.to_marker_id === b.to_marker_id;
+
+/**
+ * ADR-022 CONCERN 2 invariant: no two registered trains simultaneously hold
+ * edges that share a boundary marker (block exclusivity). A violation means a
+ * peer was granted into track another train occupies. Asserts the invariant by
+ * scanning every train pair's held edges.
+ */
+const assertNoSharedOccupancy = (scheduler: Scheduler): void => {
+  const ids = scheduler.getTrainIds();
+  for (let i = 0; i < ids.length; i++) {
+    for (let j = i + 1; j < ids.length; j++) {
+      const aId = ids[i];
+      const bId = ids[j];
+      if (aId === undefined || bId === undefined) continue;
+      const a = scheduler.getTrainState(aId)?.cleared_edges ?? [];
+      const b = scheduler.getTrainState(bId)?.cleared_edges ?? [];
+      for (const ea of a) {
+        const clash = b.find((eb) => edgesShareMarker(ea, eb));
+        expect(
+          clash,
+          `${aId} & ${bId} both hold marker-sharing edges ${ea.from_marker_id}->${ea.to_marker_id} / ${clash?.from_marker_id}->${clash?.to_marker_id}`,
+        ).toBeUndefined();
+      }
+    }
+  }
+};
+
+/**
+ * ADR-022 CONCERN 1 invariant: after a reverse to X, the reverser's body (head
+ * at X, extending back `length_mm` over the rail) must lie entirely within edges
+ * it still HOLDS (tracked occupancy), and none of those edges may be shared with
+ * another train. Walks the held tail backward from X, asserting coverage and
+ * peer-clearness at each step.
+ */
+const assertReverserBodyTracked = (
+  scheduler: Scheduler,
+  reverserId: string,
+  targetMarkerId: string,
+): void => {
+  const reverser = scheduler.getTrainState(reverserId);
+  if (!reverser) throw new Error(`reverser ${reverserId} vanished`);
+  const lengthMm = reverser.length_mm ?? 0;
+  const held = reverser.cleared_edges;
+  let boundary: string = targetMarkerId;
+  let covered = 0;
+  const visited = new Set<string>([boundary]);
+  while (covered < lengthMm) {
+    const block = held.find((e) => e.to_marker_id === boundary);
+    // (a) the body must rest on track the reverser still HOLDS.
+    expect(block, `body extends past held track at ${boundary}`).toBeDefined();
+    if (!block) break;
+    // (b) no peer may hold an edge touching this occupied block.
+    for (const otherId of scheduler.getTrainIds()) {
+      if (otherId === reverserId) continue;
+      const otherEdges = scheduler.getTrainState(otherId)?.cleared_edges ?? [];
+      const clash = otherEdges.some((oe) => edgesShareMarker(oe, block));
+      expect(
+        clash,
+        `peer ${otherId} shares occupied block ${block.from_marker_id}->${block.to_marker_id}`,
+      ).toBe(false);
+    }
+    const edgeLen =
+      scheduler.getLayout().findEdge(block.from_marker_id, block.to_marker_id)
+        ?.estimated_length_mm ?? 200;
+    covered += edgeLen;
+    if (visited.has(block.from_marker_id)) break;
+    visited.add(block.from_marker_id);
+    boundary = block.from_marker_id;
   }
 };
 
@@ -216,6 +303,128 @@ describe('Scheduler — route assignment and clearance extension', () => {
       { from_marker_id: 'N3', to_marker_id: 'N4' },
     ]);
     expect(t1?.clearance_limit_marker_id).toBe('N4');
+  });
+});
+
+describe('Scheduler — learned-time-aware clearance horizon', () => {
+  /**
+   * Drive the scheduler with a MUTABLE clock so learned per-edge traversal
+   * times accrue, and prove the horizon reads them (`getLearnedTraversalMs`)
+   * to extend past the 3-edge floor on a loop the train has learned to cross
+   * quickly. Mirrors the simulator behaviour gate but as a deterministic,
+   * clock-controlled core unit test.
+   */
+  const setupLearningSixLoop = () => {
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    /* Shared mutable clock: both LayoutState (for traversal-time deltas) and the
+     * scheduler read the same `now`. Each marker crossing advances it by a small
+     * amount, teaching short/fast edges. */
+    const clock = { ms: 0 };
+    const now = () => clock.ms;
+    const layout = new LayoutState(SIX_LOOP, { now });
+    const scheduler = new Scheduler(registry, layout, { now });
+    seedIdentityTags(scheduler, ['N1', 'N2', 'N3', 'N4', 'N5', 'N6']);
+    const cross = (markerId: string, stepMs: number): void => {
+      clock.ms += stepMs;
+      scheduler.handleEvent({
+        event_type: 'tag_observed',
+        device_id: 'T1',
+        payload: { tag_id: markerId },
+      });
+    };
+    return { scheduler, layout, cross };
+  };
+
+  it('holds the 3-edge floor before any time is learned', () => {
+    const { scheduler } = setupLearningSixLoop();
+    registerTrain(scheduler, 'T1');
+    // Cold layout, no learned times: the horizon must sit at exactly the floor.
+    scheduler.assignSchedule('T1', 'route-1', ['N1', 'N6']);
+    expect(scheduler.getTrainState('T1')?.cleared_edges).toHaveLength(3);
+  });
+
+  it('extends past the floor once short/fast edge times are learned', () => {
+    const { scheduler, layout, cross } = setupLearningSixLoop();
+    registerTrain(scheduler, 'T1');
+    // Give it a schedule so it has a transit to walk, then drive it around the
+    // ring teaching short/fast (1000 ms) edge times. Cross every marker so every
+    // one of the six edges gets an EWMA, advancing the clock 1000 ms per edge —
+    // well below the 6000 ms lead-time target.
+    scheduler.assignSchedule('T1', 'route-1', ['N1', 'N6']);
+    const ring = ['N1', 'N2', 'N3', 'N4', 'N5', 'N6'];
+    for (let lap = 0; lap < 2; lap++) {
+      for (const marker of ring) cross(marker, 1_000);
+    }
+
+    // The scheduler has learned ~1000 ms per edge.
+    expect(layout.getLearnedTraversalMs('N2', 'N3', 'T1')).toBeLessThan(2_000);
+
+    /* Re-assign a fresh schedule. The initial proactive horizon now reads the
+     * learned times: at ~1000 ms/edge it must pull more than the cold 3-edge
+     * floor forward to reach the 6000 ms lead time (capped by the five-edge leg
+     * and the six-edge ceiling). The cold case in the previous test held exactly
+     * three under the identical assignment — the only difference is the learned
+     * timings. */
+    /* The train is now at N6 (last marker crossed). Plan a leg that runs the
+     * long way round the ring (N6 → N1 → … → N5, five edges) so the horizon,
+     * not the leg length, is what limits clearance. */
+    scheduler.assignSchedule('T1', 'route-2', ['N6', 'N5']);
+    const cleared = scheduler.getTrainState('T1')?.cleared_edges.length ?? 0;
+    expect(cleared).toBeGreaterThan(3);
+  });
+
+  /**
+   * An eight-marker loop, so a single leg can be SEVEN edges long — longer than
+   * the six-edge horizon ceiling. Lets us prove the ceiling caps the horizon
+   * even when very-fast learned edges would otherwise pull more forward.
+   */
+  const EIGHT_LOOP: Layout = {
+    name: 'eight-loop',
+    markers: Array.from({ length: 8 }, (_, i) => ({
+      id: `E${i + 1}`,
+      kind: 'block_boundary' as const,
+    })),
+    edges: Array.from({ length: 8 }, (_, i) => ({
+      from_marker_id: `E${i + 1}`,
+      to_marker_id: `E${((i + 1) % 8) + 1}`,
+      estimated_length_mm: 100,
+    })),
+    junctions: [],
+  };
+
+  it('caps the grown horizon at the over-lock ceiling on a very fast, long leg', () => {
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const clock = { ms: 0 };
+    const now = () => clock.ms;
+    const layout = new LayoutState(EIGHT_LOOP, { now });
+    const scheduler = new Scheduler(registry, layout, { now });
+    const ring = ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7', 'E8'];
+    seedIdentityTags(scheduler, ring);
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-1', ['E1', 'E8']);
+
+    /* Teach VERY fast edges (500 ms each). At 500 ms/edge the 6000 ms lead time
+     * would want twelve edges — but the six-edge ceiling must clamp it. Two laps
+     * populate every edge's EWMA. */
+    for (let lap = 0; lap < 2; lap++) {
+      for (const marker of ring) {
+        clock.ms += 500;
+        scheduler.handleEvent({
+          event_type: 'tag_observed',
+          device_id: 'T1',
+          payload: { tag_id: marker },
+        });
+      }
+    }
+
+    /* Re-assign a seven-edge leg (E8 → E7 the long way round) so neither the leg
+     * length nor the lead-time target binds first — only the ceiling. */
+    scheduler.assignSchedule('T1', 'route-2', ['E8', 'E7']);
+    expect(scheduler.getTrainState('T1')?.cleared_edges).toHaveLength(6);
   });
 });
 
@@ -655,35 +864,44 @@ describe('Scheduler — block exclusivity', () => {
     expect(t2GrantAtM3).toBeDefined();
   });
 
-  it('releases blocks held by a train when it is reassigned to a route not covering them, granting waiting peers', () => {
+  it('releases blocks held by a train when it vacates them, granting a waiting peer in the same call', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
 
-    // T1 takes M1→M2 (with M2→M3 queued in the transit to M3).
+    // T1 takes M1→M2 (with M2→M3 queued in the transit to M3), locking {M1,M2,M3}.
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
-    // T2 is denied the same M1→M2 edge.
+    // T2 is denied M1→M2 (M1 and M2 are both locked by T1).
     const t2Initial = scheduler.assignSchedule('T2', 'route-2', ['M1', 'M2']);
     expect(
       t2Initial.find((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance'),
     ).toBeUndefined();
 
-    // Simulate T1 having reached M3 so its last_marker_id is set there.
-    // This lets the reassignment plan M3→M4, which does not cover M1→M2.
-    scheduler.handleEvent({
+    // T1 crosses M2 legitimately: it releases M1→M2 but still holds M2→M3, so M2
+    // stays locked and T2 remains denied. (Stepping marker-by-marker keeps every
+    // report a real adjacency — a jump M1→M3 would now be an ADR-019 topology
+    // violation under T1's bounded route, not a silent traversal.)
+    const effectsM2 = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+    expect(
+      effectsM2.find(
+        (e) =>
+          e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+      ),
+    ).toBeUndefined();
+
+    // T1 crosses M3: it releases M2→M3, so M2 finally frees. The scheduler must
+    // retry T2's previously-denied clearance in the SAME call and grant it.
+    const effectsM3 = scheduler.handleEvent({
       event_type: 'tag_observed',
       device_id: 'T1',
       payload: { tag_id: 'M3' },
     });
-
-    // Operator reassigns T1 to a yard-style schedule that no longer touches
-    // M1→M2. Because last_marker_id='M3'=stops[0], the planner builds a transit
-    // M3→M4. The wipe of cleared_edges releases T1's hold on M1→M2 and the
-    // scheduler must retry T2's previously-denied clearance in the same call.
-    const reassign = scheduler.assignSchedule('T1', 'route-1b', ['M3', 'M4']);
-
-    const t2Grant = reassign.find(
+    const t2Grant = effectsM3.find(
       (e) =>
         e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
     );
@@ -2354,5 +2572,972 @@ describe('Scheduler — deterministic station dwell', () => {
     });
     // Pointer wrapped back to the first stop (index 0).
     expect(scheduler.getTrainState('T1')?.schedule?.current_stop_index).toBe(0);
+  });
+});
+
+/**
+ * ADR-017: the explicit, deterministic total order over trains
+ * (announced priority → registration-sequence → train_id) replacing the
+ * incidental Map-iteration tiebreak, and the deadlock yield that revokes the
+ * lowest-ranked train in a detected cycle so its peers proceed — but only
+ * while it can still yield (the honest limitation: a withhold cannot vacate a
+ * block a train already physically occupies).
+ */
+describe('Scheduler — conflict resolution policy (ADR-017)', () => {
+  /**
+   * Helper: spawn two trains both blocked at the M2 gate, both wanting M1→M2,
+   * then release the gate so a single ordered retry pass decides the winner.
+   * Returns the winner's id (the one granted M1→M2).
+   */
+  const contendForM2AndReturnWinner = (
+    setupOrder: ReadonlyArray<{ id: string; priority?: number }>,
+  ): string | undefined => {
+    const { scheduler } = setup();
+    for (const t of setupOrder) {
+      if (t.priority === undefined) registerTrain(scheduler, t.id);
+      else registerTrainWithPriority(scheduler, t.id, t.priority);
+    }
+    registerGate(scheduler, 'GATE-M2');
+    scheduler.handleEvent({
+      event_type: 'gate_state_changed',
+      device_id: 'GATE-M2',
+      payload: { marker_id: 'M2', state: 'withholding', reason: 'held for the test' },
+    });
+    // Both trains want M1→M2 as their first leg, gated at M2 → both denied.
+    for (const t of setupOrder) {
+      scheduler.assignSchedule(t.id, `r-${t.id}`, ['M1', 'M2']);
+      expect(scheduler.getTrainState(t.id)?.cleared_edges).toEqual([]);
+    }
+    // Release the gate: one retry pass, iterated in the total order, decides.
+    const release = scheduler.handleEvent({
+      event_type: 'gate_state_changed',
+      device_id: 'GATE-M2',
+      payload: { marker_id: 'M2', state: 'granting' },
+    });
+    const grant = release.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance',
+    );
+    return grant?.device_id;
+  };
+
+  it('FIFO floor: with no priority, the train registered first wins the contended section', () => {
+    // Equal priority → the registration-sequence floor decides. T-early
+    // registered before T-late, so T-early takes M1→M2; T-late waits.
+    const winner = contendForM2AndReturnWinner([{ id: 'T-early' }, { id: 'T-late' }]);
+    expect(winner).toBe('T-early');
+  });
+
+  it('announced priority overrides registration order (express beats the earlier freight)', () => {
+    // T-freight registers FIRST (lower seq) but T-express announces a higher
+    // priority and is registered SECOND. Priority is the first term of the
+    // order, so T-express wins despite arriving later — proving the policy
+    // fires and is not the old incidental Map/spawn order.
+    const winner = contendForM2AndReturnWinner([
+      { id: 'T-freight' },
+      { id: 'T-express', priority: 10 },
+    ]);
+    expect(winner).toBe('T-express');
+  });
+
+  /**
+   * Six-marker loop used to construct genuine waits-for cycles. The trains are
+   * length-aware so they hold their tail blocks across traversals (point trains
+   * would release behind them and dissolve the cycle), letting us position each
+   * train holding a chain of blocks while it waits at its head.
+   */
+  const LOOP6: Layout = {
+    name: 'loop6',
+    markers: [
+      { id: 'A', kind: 'block_boundary' },
+      { id: 'B', kind: 'block_boundary' },
+      { id: 'C', kind: 'block_boundary' },
+      { id: 'D', kind: 'block_boundary' },
+      { id: 'E', kind: 'block_boundary' },
+      { id: 'F', kind: 'block_boundary' },
+    ],
+    edges: [
+      { from_marker_id: 'A', to_marker_id: 'B', estimated_length_mm: 200 },
+      { from_marker_id: 'B', to_marker_id: 'C', estimated_length_mm: 200 },
+      { from_marker_id: 'C', to_marker_id: 'D', estimated_length_mm: 200 },
+      { from_marker_id: 'D', to_marker_id: 'E', estimated_length_mm: 200 },
+      { from_marker_id: 'E', to_marker_id: 'F', estimated_length_mm: 200 },
+      { from_marker_id: 'F', to_marker_id: 'A', estimated_length_mm: 200 },
+    ],
+    junctions: [],
+  };
+
+  const setupLoop6 = () => {
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const scheduler = new Scheduler(registry, new LayoutState(LOOP6, { now: () => 0 }), {
+      now: () => 0,
+    });
+    seedIdentityTags(scheduler, ['A', 'B', 'C', 'D', 'E', 'F']);
+    return scheduler;
+  };
+
+  it('yields the lowest-ranked train when its blocking edge is a deep tail, freeing its peer', () => {
+    // Fill the loop into a closed chase. T2 (registered second → lowest-ranked,
+    // the victim) holds {B->C, C->D} with its head at D and wants D->E. T1 holds
+    // {E->F, F->A} with its head at A and wants A->B. T1 is blocked by T2's DEEP
+    // tail B->C (to=C, not T2's occupied head block C->D); T2 is blocked by T1's
+    // deep tail E->F. Because the victim's blocking edge is a tail it has NOT
+    // entered, the yield can release it and the peer proceeds. (ADR-017 §3.)
+    const scheduler = setupLoop6();
+    registerLongTrain(scheduler, 'T1', 100);
+    registerLongTrain(scheduler, 'T2', 100);
+    const obs = (id: string, m: string) =>
+      scheduler.handleEvent({ event_type: 'tag_observed', device_id: id, payload: { tag_id: m } });
+
+    /* Pre-lock B (T2 holds B->C) so T1's horizon cannot grab A->B; assign T1,
+     * which then holds only E->F, F->A. Re-assigning T2 a full transit re-grabs
+     * B->C, C->D but is denied D->E (T1 locks E). */
+    scheduler.handleEvent({
+      event_type: 'clearance_request',
+      device_id: 'T2',
+      payload: { train_id: 'T2', next_edge: { from_marker_id: 'B', to_marker_id: 'C' } },
+    });
+    scheduler.assignSchedule('T1', 'r1', ['E', 'B']);
+    scheduler.assignSchedule('T2', 'r2', ['B', 'E']);
+    obs('T2', 'C');
+    obs('T2', 'D'); // T2 head at D, holds {B->C, C->D}, wants D->E
+    obs('T1', 'F');
+    const resolved = obs('T1', 'A'); // T1 head at A, holds {E->F, F->A}, wants A->B
+
+    // The victim (T2) is revoked with the deadlock-yield reason...
+    const revoke = resolved.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'revoke_clearance' && e.device_id === 'T2',
+    );
+    expect(revoke).toBeDefined();
+    expect((revoke?.payload as { reason: string }).reason).toBe('deadlock_yield');
+    // ...and the winner (T1) is granted the contested A->B in the same pass.
+    const grant = resolved.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T1',
+    );
+    expect(grant).toBeDefined();
+    expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('B');
+    // The cycle is broken: T1 now holds A->B; T2 released its B->C claim.
+    expect(scheduler.getTrainState('T1')?.cleared_edges).toContainEqual({
+      from_marker_id: 'A',
+      to_marker_id: 'B',
+    });
+    expect(scheduler.getTrainState('T2')?.cleared_edges).not.toContainEqual({
+      from_marker_id: 'B',
+      to_marker_id: 'C',
+    });
+  });
+
+  it('REVERSES the lowest-ranked train to break a closed standoff when it has a safe retreat (ADR-022)', () => {
+    /* The closed nose-to-nose standoff the forward yield (ADR-017 §3) cannot
+     * cure — a train stopped INSIDE the block a peer needs — but where the
+     * victim has clear track BEHIND it to back into. A single-track corridor
+     * between two loops:
+     *   L1-L2-S1-SM-S2-R1-R2, single track S1-SM-S2, return rail S2->SM->S1->L1.
+     * T1 occupies S1->SM (head at SM) holding {L2->S1, S1->SM}, wants SM->S2.
+     * T2 occupies R2->S2 (head at S2), wants S2->SM. Each is blocked by the
+     * OTHER's occupied head block. The forward yield returns null; reverse
+     * authority then backs the lowest-ranked train (T2, registered second) out
+     * of S2 — but T2's retreat (R2->S2 backward to R2, then R1) is clear, so it
+     * reverses, freeing S2 for T1. (ADR-022.) */
+    const CORRIDOR: Layout = {
+      name: 'corridor',
+      markers: [
+        { id: 'L1', kind: 'block_boundary' },
+        { id: 'L2', kind: 'block_boundary' },
+        { id: 'S1', kind: 'block_boundary' },
+        { id: 'SM', kind: 'block_boundary' },
+        { id: 'S2', kind: 'block_boundary' },
+        { id: 'R1', kind: 'block_boundary' },
+        { id: 'R2', kind: 'block_boundary' },
+      ],
+      edges: [
+        { from_marker_id: 'L1', to_marker_id: 'L2', estimated_length_mm: 200 },
+        { from_marker_id: 'L2', to_marker_id: 'S1', estimated_length_mm: 200 },
+        { from_marker_id: 'S1', to_marker_id: 'SM', estimated_length_mm: 200 },
+        { from_marker_id: 'SM', to_marker_id: 'S2', estimated_length_mm: 200 },
+        { from_marker_id: 'S2', to_marker_id: 'R1', estimated_length_mm: 200 },
+        { from_marker_id: 'R1', to_marker_id: 'R2', estimated_length_mm: 200 },
+        { from_marker_id: 'R2', to_marker_id: 'S2', estimated_length_mm: 200 },
+        { from_marker_id: 'S2', to_marker_id: 'SM', estimated_length_mm: 200 },
+        { from_marker_id: 'SM', to_marker_id: 'S1', estimated_length_mm: 200 },
+        { from_marker_id: 'S1', to_marker_id: 'L1', estimated_length_mm: 200 },
+      ],
+      junctions: [],
+    };
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const scheduler = new Scheduler(registry, new LayoutState(CORRIDOR, { now: () => 0 }), {
+      now: () => 0,
+    });
+    seedIdentityTags(scheduler, ['L1', 'L2', 'S1', 'SM', 'S2', 'R1', 'R2']);
+    registerLongTrain(scheduler, 'T1', 100);
+    registerLongTrain(scheduler, 'T2', 100);
+    scheduler.assignSchedule('T1', 'r1', ['L1', 'R1']); // L->R across the single track
+    scheduler.assignSchedule('T2', 'r2', ['R1', 'L1']); // R->L across the single track
+
+    const obs = (id: string, m: string) =>
+      scheduler.handleEvent({
+        event_type: 'tag_observed',
+        device_id: id,
+        payload: { tag_id: m },
+      });
+    obs('T2', 'R2');
+    obs('T2', 'S2'); // T2 occupies head block R2->S2, wants S2->SM
+    obs('T1', 'L2');
+    obs('T1', 'S1');
+    const last = obs('T1', 'SM'); // T1 occupies head block S1->SM, wants SM->S2
+
+    /* The lowest-ranked train (T2) is granted REVERSE authority back to R2 — the
+     * marker behind its head over track it holds (R2->S2) that no peer touches. */
+    const reverse = last.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_reverse' && e.device_id === 'T2',
+    );
+    expect(reverse).toBeDefined();
+    expect((reverse?.payload as { limit_marker_id: string }).limit_marker_id).toBe('R2');
+    expect((reverse?.payload as { reason: string }).reason).toBe('deadlock_reverse');
+    /* Non-vacuity (CONCERN 3a): this is a GENUINELY closed standoff the forward
+     * yield cannot cure — so NO `deadlock_yield` revoke fires. The reverse is doing
+     * the work; the test is not silently passing via the cheaper forward cure (the
+     * yield-handles-it side is pinned by the partition test below). */
+    const yieldRevoke = last.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' &&
+        e.command_type === 'revoke_clearance' &&
+        (e.payload as { reason?: string }).reason === 'deadlock_yield',
+    );
+    expect(yieldRevoke).toBeUndefined();
+    // T2 has backed out of S2: it no longer holds R2->S2, and its head is at R2.
+    expect(scheduler.getTrainState('T2')?.cleared_edges).not.toContainEqual({
+      from_marker_id: 'R2',
+      to_marker_id: 'S2',
+    });
+    expect(scheduler.getTrainState('T2')?.last_marker_id).toBe('R2');
+    // With S2 freed, T1 is granted onward into SM->S2 in the same pass.
+    const grant = last.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T1',
+    );
+    expect(grant).toBeDefined();
+    expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('S2');
+  });
+
+  it('does NOT reverse when the blocking edge is a releasable tail — the forward yield handles it, reverse never fires (ADR-022 partition)', () => {
+    /* The boundary between the two resolvers (ADR-022 totality note): the
+     * forward yield (ADR-017 §3) handles every victim whose blocking edge is a
+     * not-yet-entered / deep-tail claim it can release; reverse authority only
+     * fires for the residual — a victim whose blocking edge is its OCCUPIED head
+     * block. This is the deep-tail closed chase: T2 (lowest-ranked) blocks T1
+     * via its DEEP tail B->C (not its head block C->D), so the forward yield
+     * releases B->C and the cycle breaks WITHOUT any reverse. Asserting no
+     * `grant_reverse` is emitted here pins the partition: reverse never fires
+     * when the cheaper, withhold-only cure suffices, so it never forces motion
+     * it doesn't need to. */
+    const scheduler = setupLoop6();
+    registerLongTrain(scheduler, 'T1', 100);
+    registerLongTrain(scheduler, 'T2', 100);
+    const obs = (id: string, m: string) =>
+      scheduler.handleEvent({ event_type: 'tag_observed', device_id: id, payload: { tag_id: m } });
+
+    scheduler.handleEvent({
+      event_type: 'clearance_request',
+      device_id: 'T2',
+      payload: { train_id: 'T2', next_edge: { from_marker_id: 'B', to_marker_id: 'C' } },
+    });
+    scheduler.assignSchedule('T1', 'r1', ['E', 'B']);
+    scheduler.assignSchedule('T2', 'r2', ['B', 'E']);
+    obs('T2', 'C');
+    obs('T2', 'D'); // T2 head at D, holds {B->C, C->D}, wants D->E
+    obs('T1', 'F');
+    const resolved = obs('T1', 'A'); // T1 head at A, holds {E->F, F->A}, wants A->B
+
+    // The forward yield fires (T2 revoked, deadlock-yield reason)...
+    const revoke = resolved.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'revoke_clearance' && e.device_id === 'T2',
+    );
+    expect(revoke).toBeDefined();
+    expect((revoke?.payload as { reason: string }).reason).toBe('deadlock_yield');
+    // ...and NO reverse is granted — the withhold-only cure was sufficient.
+    const reverse = resolved.find(
+      (e) => e.kind === 'send_command' && e.command_type === 'grant_reverse',
+    );
+    expect(reverse).toBeUndefined();
+  });
+
+  it('reports the deadlock unchanged when neither resolver can break the cycle — never forces an unsafe move (ADR-022)', () => {
+    /* The "report, don't force" guarantee on the residual the reverse walk MUST
+     * guard: a genuine closed nose-to-nose standoff where EVERY candidate's
+     * length-aware body would sweep PAST the track it provably holds (ADR-022
+     * CONCERN 1's conservative-refuse). After CONCERN 1's fix the only 2-train
+     * report case left is exactly this — both candidates refused — because any
+     * standoff whose reverser has a body-covering retreat now reverses.
+     *
+     * The SAME proven corridor as the resolvable-reverse test (single track
+     * S1-SM-S2 between two loops), but BOTH trains are 500mm long over 200mm
+     * edges. T1 occupies S1->SM (head SM), wants SM->S2; T2 occupies R2->S2 (head
+     * S2), wants S2->SM — each blocked by the other's occupied head block, so the
+     * forward yield returns null. Reverse is then tried for both:
+     *   - T2 backs to R2, retaining only R1->R2 (200mm) < 500mm body → REFUSED.
+     *   - T1 backs to S1, retaining L1->L2 + L2->S1 (400mm) < 500mm body → REFUSED.
+     * With every candidate's body sweeping past tracked occupancy, no safe reverse
+     * exists and the deadlock is REPORTED, never half-forced.
+     *
+     * This is the non-vacuous guard: a `tryReverseToBreakStandoff` that skipped
+     * CONCERN 1's coverage check would reverse T2 (its head block alone clears the
+     * contested marker) — this test catches that both by
+     * `expect(reverse).toBeUndefined()` AND by requiring the deadlock to be
+     * reported with both trains. */
+    const CORRIDOR: Layout = {
+      name: 'corridor-report',
+      markers: [
+        { id: 'L1', kind: 'block_boundary' },
+        { id: 'L2', kind: 'block_boundary' },
+        { id: 'S1', kind: 'block_boundary' },
+        { id: 'SM', kind: 'block_boundary' },
+        { id: 'S2', kind: 'block_boundary' },
+        { id: 'R1', kind: 'block_boundary' },
+        { id: 'R2', kind: 'block_boundary' },
+      ],
+      edges: [
+        { from_marker_id: 'L1', to_marker_id: 'L2', estimated_length_mm: 200 },
+        { from_marker_id: 'L2', to_marker_id: 'S1', estimated_length_mm: 200 },
+        { from_marker_id: 'S1', to_marker_id: 'SM', estimated_length_mm: 200 },
+        { from_marker_id: 'SM', to_marker_id: 'S2', estimated_length_mm: 200 },
+        { from_marker_id: 'S2', to_marker_id: 'R1', estimated_length_mm: 200 },
+        { from_marker_id: 'R1', to_marker_id: 'R2', estimated_length_mm: 200 },
+        { from_marker_id: 'R2', to_marker_id: 'S2', estimated_length_mm: 200 },
+        { from_marker_id: 'S2', to_marker_id: 'SM', estimated_length_mm: 200 },
+        { from_marker_id: 'SM', to_marker_id: 'S1', estimated_length_mm: 200 },
+        { from_marker_id: 'S1', to_marker_id: 'L1', estimated_length_mm: 200 },
+      ],
+      junctions: [],
+    };
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const scheduler = new Scheduler(registry, new LayoutState(CORRIDOR, { now: () => 0 }), {
+      now: () => 0,
+    });
+    seedIdentityTags(scheduler, ['L1', 'L2', 'S1', 'SM', 'S2', 'R1', 'R2']);
+    registerLongTrain(scheduler, 'T1', 500);
+    registerLongTrain(scheduler, 'T2', 500);
+    scheduler.assignSchedule('T1', 'r1', ['L1', 'R1']);
+    scheduler.assignSchedule('T2', 'r2', ['R1', 'L1']);
+
+    const deadlockSnapshots: ReadonlyArray<string>[] = [];
+    const collect = (r: ReadonlyArray<SchedulerEffect>) => {
+      for (const e of r) {
+        if (e.kind === 'update_state_snapshot' && e.entity_type === 'deadlock') {
+          deadlockSnapshots.push((e.state as { trains: ReadonlyArray<string> }).trains);
+        }
+      }
+      return r;
+    };
+    const obs = (id: string, m: string) =>
+      collect(
+        scheduler.handleEvent({
+          event_type: 'tag_observed',
+          device_id: id,
+          payload: { tag_id: m },
+        }),
+      );
+    obs('T2', 'R2');
+    obs('T2', 'S2'); // T2 occupies head block R2->S2, wants S2->SM
+    obs('T1', 'L2');
+    obs('T1', 'S1');
+    const last = obs('T1', 'SM'); // T1 occupies head block S1->SM, wants SM->S2
+
+    /* No reverse is forced — backing either train would sweep its 500mm body past
+     * the (< 500mm) track it provably holds behind its reverse target (CONCERN 1). */
+    const reverse = last.find(
+      (e) => e.kind === 'send_command' && e.command_type === 'grant_reverse',
+    );
+    expect(reverse).toBeUndefined();
+    /* And the deadlock IS reported with both trains — the standoff is honestly
+     * surfaced, never silently swallowed or falsely shown as resolved. */
+    expect(deadlockSnapshots.some((s) => [...s].sort().join(',') === 'T1,T2')).toBe(true);
+  });
+
+  /**
+   * CONCERN 2 (multi-train safety). `detectWaitsForCycle` can return cycles of
+   * length >= 3, but `tryReverseToBreakStandoff` resolves ONE train per pass
+   * (ADR-022 defers single-pass cascading retreat). The non-negotiable: a >= 3
+   * train contention must NEVER half-resolve — the resolver must not free a block
+   * for a peer who then advances into a region a THIRD train still contests.
+   *
+   * The guarantee is structural, and this test exercises it end to end: every
+   * grant — including the `retryBlockedClearances` pass run after any reverse —
+   * passes `edgeConflictsWithAnotherTrain` (ADR-011 block exclusivity) BEFORE it
+   * is issued, so a peer can never be granted into track another train holds. As
+   * a consequence the scheduler's own ordered, serialized grants never pack three
+   * trains into a closed mutual cycle in the first place (the highest-ranked
+   * sweeps through; the rest queue behind it, which is contention, not a cycle) —
+   * matching ADR-022's totality argument and its deferred multi-train note.
+   *
+   * Three length-aware trains contend for a single-track triangle (two edges per
+   * leg) from sidings. We drive them interleaved and assert, after EVERY event,
+   * the load-bearing invariant: no two trains ever simultaneously hold edges that
+   * share a boundary marker. If that holds throughout, no peer ever advanced into
+   * a contested block — the outcome is always either safe progress or an honest
+   * deadlock report, never a half-resolved unsafe advance.
+   */
+  it('never half-resolves a 3-train contention into an unsafe advance — exclusivity holds throughout (ADR-022 CONCERN 2)', () => {
+    const TRIANGLE: Layout = {
+      name: 'triangle',
+      markers: [
+        { id: 'JA', kind: 'junction' },
+        { id: 'JB', kind: 'junction' },
+        { id: 'JC', kind: 'junction' },
+        { id: 'MA', kind: 'block_boundary' },
+        { id: 'MB', kind: 'block_boundary' },
+        { id: 'MC', kind: 'block_boundary' },
+        { id: 'SA', kind: 'yard_entry' },
+        { id: 'SB', kind: 'yard_entry' },
+        { id: 'SC', kind: 'yard_entry' },
+      ],
+      edges: [
+        // the single-track triangle, two edges per leg, directed as one cycle
+        { from_marker_id: 'JA', to_marker_id: 'MA', estimated_length_mm: 200 },
+        { from_marker_id: 'MA', to_marker_id: 'JB', estimated_length_mm: 200 },
+        { from_marker_id: 'JB', to_marker_id: 'MB', estimated_length_mm: 200 },
+        { from_marker_id: 'MB', to_marker_id: 'JC', estimated_length_mm: 200 },
+        { from_marker_id: 'JC', to_marker_id: 'MC', estimated_length_mm: 200 },
+        { from_marker_id: 'MC', to_marker_id: 'JA', estimated_length_mm: 200 },
+        // siding approaches, one per junction
+        { from_marker_id: 'SA', to_marker_id: 'JA', estimated_length_mm: 200 },
+        { from_marker_id: 'SB', to_marker_id: 'JB', estimated_length_mm: 200 },
+        { from_marker_id: 'SC', to_marker_id: 'JC', estimated_length_mm: 200 },
+      ],
+      junctions: [],
+    };
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const scheduler = new Scheduler(registry, new LayoutState(TRIANGLE, { now: () => 0 }), {
+      now: () => 0,
+    });
+    seedIdentityTags(scheduler, ['JA', 'JB', 'JC', 'MA', 'MB', 'MC', 'SA', 'SB', 'SC']);
+    registerLongTrain(scheduler, 'T1', 100);
+    registerLongTrain(scheduler, 'T2', 100);
+    registerLongTrain(scheduler, 'T3', 100);
+
+    const obs = (id: string, m: string) => {
+      const r = scheduler.handleEvent({
+        event_type: 'tag_observed',
+        device_id: id,
+        payload: { tag_id: m },
+      });
+      assertNoSharedOccupancy(scheduler);
+      return r;
+    };
+
+    scheduler.assignSchedule('T1', 'r1', ['SA', 'MB']); // SA->JA->MA->JB->MB
+    assertNoSharedOccupancy(scheduler);
+    scheduler.assignSchedule('T2', 'r2', ['SB', 'MC']); // SB->JB->MB->JC->MC
+    assertNoSharedOccupancy(scheduler);
+    scheduler.assignSchedule('T3', 'r3', ['SC', 'MA']); // SC->JC->MC->JA->MA
+    assertNoSharedOccupancy(scheduler);
+
+    /* Drive all three into the triangle, interleaved, contending for the single
+     * track. Whatever the scheduler does — sweep one through, queue the others,
+     * reverse, or report — exclusivity must never be violated. */
+    obs('T1', 'JA');
+    obs('T2', 'JB');
+    obs('T3', 'JC');
+    obs('T1', 'MA');
+    obs('T2', 'MB');
+    const last = obs('T3', 'MC');
+
+    /* Outcome must be EITHER honest progress/report — never an unsafe grant. If a
+     * reverse fired, the reverser's held tail must still respect exclusivity (the
+     * per-event invariant above already proves this). If a deadlock is reported,
+     * that is the honest, safe outcome. Either way the invariant held throughout. */
+    const reverses = last.filter(
+      (e) => e.kind === 'send_command' && e.command_type === 'grant_reverse',
+    );
+    // At most one train is reversed per pass (single-pass cascading retreat is
+    // deferred); the invariant check already guarantees safety regardless.
+    expect(reverses.length).toBeLessThanOrEqual(1);
+  });
+
+  it('is deterministic: the same registration order yields the same winner every run', () => {
+    const results = new Set<string | undefined>();
+    for (let run = 0; run < 5; run++) {
+      results.add(contendForM2AndReturnWinner([{ id: 'T-late' }, { id: 'T-early' }]));
+    }
+    // T-late registered first here, so it wins by the FIFO floor — the same
+    // every run. The set collapses to one value: the order is reproducible.
+    expect(results.size).toBe(1);
+    expect([...results][0]).toBe('T-late');
+  });
+
+  /**
+   * CONCERN 1 (the length/occupancy safety gap). A length-aware reverser backs
+   * its HEAD from H to X; its whole body shifts back by (H minus X), so its TAIL
+   * sweeps back into edges BEHIND the retained run. Those swept edges are
+   * physically occupied AFTER the reverse but, on the buggy code, are not tracked
+   * in `cleared_edges` and are never checked for peer occupancy. A later grant
+   * could then route a peer into a block the reverser still physically sits on.
+   *
+   * The non-negotiable invariant this test locks: AFTER any `grant_reverse`, the
+   * reverser's body (head at X, extending back `length_mm` over the rail) must lie
+   * entirely within edges the reverser still holds, and none of those edges may be
+   * shared with another train. The scheduler must either acquire the swept-behind
+   * region or REFUSE the reverse (report the deadlock), never issue an unsafe one.
+   */
+  it('does NOT issue a reverse whose length-aware body sweeps into untracked track (ADR-022 CONCERN 1)', () => {
+    /* The SAME proven closed standoff as the resolvable-reverse test above (the
+     * corridor L1-L2-S1-SM-S2-R1-R2 with single track S1-SM-S2), but the reverser
+     * T2 is length-aware (100mm over 200mm edges). T2 occupies its head block
+     * R2->S2 (head at S2) and is reversed to R2. Backing its head from S2 to R2
+     * shifts its whole body back by 200mm: its TAIL, which was 100mm inside
+     * R2->S2, sweeps to R2 minus 100mm = 100mm INTO the edge R1->R2 behind R2.
+     * On the buggy code T2 ends holding [] (R2->S2 released, nothing retained) yet
+     * its body physically occupies R1->R2, track the scheduler does not track as
+     * held. That is the untracked-occupancy violation. */
+    const CORRIDOR: Layout = {
+      name: 'corridor-len',
+      markers: [
+        { id: 'L1', kind: 'block_boundary' },
+        { id: 'L2', kind: 'block_boundary' },
+        { id: 'S1', kind: 'block_boundary' },
+        { id: 'SM', kind: 'block_boundary' },
+        { id: 'S2', kind: 'block_boundary' },
+        { id: 'R1', kind: 'block_boundary' },
+        { id: 'R2', kind: 'block_boundary' },
+      ],
+      edges: [
+        { from_marker_id: 'L1', to_marker_id: 'L2', estimated_length_mm: 200 },
+        { from_marker_id: 'L2', to_marker_id: 'S1', estimated_length_mm: 200 },
+        { from_marker_id: 'S1', to_marker_id: 'SM', estimated_length_mm: 200 },
+        { from_marker_id: 'SM', to_marker_id: 'S2', estimated_length_mm: 200 },
+        { from_marker_id: 'S2', to_marker_id: 'R1', estimated_length_mm: 200 },
+        { from_marker_id: 'R1', to_marker_id: 'R2', estimated_length_mm: 200 },
+        { from_marker_id: 'R2', to_marker_id: 'S2', estimated_length_mm: 200 },
+        { from_marker_id: 'S2', to_marker_id: 'SM', estimated_length_mm: 200 },
+        { from_marker_id: 'SM', to_marker_id: 'S1', estimated_length_mm: 200 },
+        { from_marker_id: 'S1', to_marker_id: 'L1', estimated_length_mm: 200 },
+      ],
+      junctions: [],
+    };
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const scheduler = new Scheduler(registry, new LayoutState(CORRIDOR, { now: () => 0 }), {
+      now: () => 0,
+    });
+    seedIdentityTags(scheduler, ['L1', 'L2', 'S1', 'SM', 'S2', 'R1', 'R2']);
+    registerLongTrain(scheduler, 'T1', 100);
+    registerLongTrain(scheduler, 'T2', 100);
+    scheduler.assignSchedule('T1', 'r1', ['L1', 'R1']);
+    /* T2's schedule STARTS at R2 (its anchor), so it holds nothing behind R2 -
+     * R1->R2 is not on its route and is never granted to it. Reversing to R2
+     * therefore retains nothing, and the length-aware body sweeps into the
+     * untracked R1->R2. */
+    scheduler.assignSchedule('T2', 'r2', ['R2', 'L1']);
+
+    const deadlockSnapshots: ReadonlyArray<string>[] = [];
+    const collect = (r: ReadonlyArray<SchedulerEffect>) => {
+      for (const e of r) {
+        if (e.kind === 'update_state_snapshot' && e.entity_type === 'deadlock') {
+          deadlockSnapshots.push((e.state as { trains: ReadonlyArray<string> }).trains);
+        }
+      }
+      return r;
+    };
+    const obs = (id: string, m: string) =>
+      collect(
+        scheduler.handleEvent({
+          event_type: 'tag_observed',
+          device_id: id,
+          payload: { tag_id: m },
+        }),
+      );
+    obs('T2', 'R2');
+    obs('T2', 'S2'); // T2 occupies head block R2->S2, wants S2->SM
+    obs('T1', 'L2');
+    obs('T1', 'S1');
+    const last = obs('T1', 'SM'); // T1 occupies head block S1->SM, wants SM->S2
+
+    /* The invariant binds WHICHEVER train is reversed, not a hard-coded one. When
+     * the lowest-ranked candidate (T2) is correctly refused — its body would sweep
+     * into untracked R1->R2 — the resolver substitutes the next candidate (T1),
+     * whose retained tail covers its body. So we walk whoever actually got the
+     * grant. */
+    const reverse = last.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_reverse',
+    );
+
+    /* SAFETY INVARIANT (non-vacuous): either a reverse fires and the reverser's
+     * whole body lies within held, peer-clear track, OR no reverse fires at all —
+     * in which case the deadlock MUST be reported (report, don't force). An unsafe
+     * reverse, where the body extends into untracked or peer-shared track, fails
+     * the body walk below. */
+    if (!reverse) {
+      // Conservative-refuse path: the deadlock must be honestly reported, never
+      // silently swallowed.
+      expect(deadlockSnapshots.some((s) => s.length >= 2)).toBe(true);
+      return;
+    }
+
+    const reverserId = reverse.device_id;
+    const target = (reverse.payload as { limit_marker_id: string }).limit_marker_id;
+    expect(scheduler.getTrainState(reverserId)?.last_marker_id).toBe(target);
+
+    /* The reverser's whole body must lie within held, peer-clear track — its
+     * tracked occupancy. Fails pre-fix when T2 reverses to R2 holding nothing,
+     * its body sweeping into the untracked R1->R2. */
+    assertReverserBodyTracked(scheduler, reverserId, target);
+  });
+});
+
+/**
+ * ADR-019: topology-violation handling, driven through the real scheduler +
+ * registry + LayoutState (the established no-mock seam for the scheduler's own
+ * decision logic — emergent multi-component behaviour lives in the simulator
+ * suite). The decision is keyed on per-train state the scheduler already holds:
+ * a bounded route (transit) ⇒ EXPECTING, validate; no transit ⇒ OPEN, learn.
+ */
+describe('Scheduler — topology violation handling (ADR-019)', () => {
+  const observe = (scheduler: Scheduler, trainId: string, tagId: string) =>
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: trainId,
+      payload: { tag_id: tagId },
+    });
+
+  const findEvent = (effects: ReadonlyArray<SchedulerEffect>, eventType: string) =>
+    effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
+        e.kind === 'publish_event' && e.event_type === eventType,
+    );
+
+  const findClearanceState = (effects: ReadonlyArray<SchedulerEffect>, trainId: string) =>
+    effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'update_state_snapshot' }> =>
+        e.kind === 'update_state_snapshot' &&
+        e.entity_type === 'clearance' &&
+        e.entity_id === trainId,
+    );
+
+  it('(a) holds a bounded-route train that reports an unreachable marker, marks the region occupied, emits topology_violation, and learns no phantom edge', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    // Bounded route M1→M2→M3: T1 is conceptually at M1 with a transit + clearance.
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    expect(scheduler.getTrainState('T1')?.transit).toBeDefined();
+
+    // T1 now reports M4 — unreachable from M1 (no edge M1→M4). Under a bounded
+    // route this is a topology violation, not a discovery signal.
+    const effects = observe(scheduler, 'T1', 'M4');
+
+    // A topology_violation event is emitted, naming P (M1) and M (M4).
+    const violation = findEvent(effects, 'topology_violation');
+    expect(violation).toBeDefined();
+    expect(violation?.payload).toEqual({
+      train_id: 'T1',
+      last_known_marker_id: 'M1',
+      reported_marker_id: 'M4',
+      suspected_cause: 'sensor_fault', // M4 is a known-but-non-adjacent marker
+      detected_at_ms: 0,
+    });
+
+    // A normal marker_traversed is NOT emitted — the scheduler refuses to vouch
+    // for the position, so it must not imply a legitimate traversal.
+    expect(findEvent(effects, 'marker_traversed')).toBeUndefined();
+
+    // The train is HALTED on the wire (default-safe). Clearance is push, not
+    // poll: pinning the internal limit doesn't retract the M3 grant the train
+    // already holds, so an explicit revoke_clearance must reach it — otherwise
+    // it rolls on into uncertain territory.
+    const stop = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'revoke_clearance' && e.device_id === 'T1',
+    );
+    expect(stop).toBeDefined();
+    expect((stop?.payload as { reason: string }).reason).toBe('unknown_topology');
+
+    // No phantom edge is learned.
+    expect(scheduler.getLayout().findEdge('M1', 'M4')).toBeUndefined();
+
+    const t1 = scheduler.getTrainState('T1');
+    // Position stays pinned at the last CERTAIN marker (M1), not the report.
+    expect(t1?.last_marker_id).toBe('M1');
+    expect(t1?.clearance_limit_marker_id).toBe('M1');
+    // The uncertain region M1→M4 is retained as occupied.
+    expect(t1?.cleared_edges).toContainEqual({ from_marker_id: 'M1', to_marker_id: 'M4' });
+    expect(t1?.block_reason).toBe('unknown_topology');
+
+    // The hold rides the retained clearance state (scheduler-owned), with the
+    // block_reason field set — NOT on any train_status (train-emitted).
+    const clearance = findClearanceState(effects, 'T1');
+    expect(clearance?.state).toMatchObject({ block_reason: 'unknown_topology' });
+
+    // "For free": block exclusivity denies the locked markers to a peer. A
+    // second train routed across M4→M1 (which touches both held markers) is
+    // denied — proving the uncertain region protects neighbours.
+    registerTrain(scheduler, 'T2');
+    scheduler.assignSchedule('T2', 'route-2', ['M4', 'M1']);
+    expect(scheduler.getTrainState('T2')?.cleared_edges).toEqual([]);
+  });
+
+  it('(a-bis) an orphan reported marker (no incident edges) yields suspected_cause "unknown"', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+
+    // Bind a tag to a brand-new marker that the graph knows but that has no
+    // incident edges — an orphan, so the position is genuinely undetermined.
+    scheduler.handleEvent({
+      event_type: 'tag_assignment',
+      device_id: 'GARAGE',
+      payload: { tag_id: 'ORPHAN', assigned_kind: 'marker', target_id: 'ORPHAN' },
+    });
+    const effects = observe(scheduler, 'T1', 'ORPHAN');
+    const violation = findEvent(effects, 'topology_violation');
+    expect(violation?.payload).toMatchObject({
+      reported_marker_id: 'ORPHAN',
+      suspected_cause: 'unknown',
+    });
+    // Even with M wholly off the graph topology, the uncertain region is still
+    // retained as occupied (cleared_edges is a list of EdgeRefs, not graph edges).
+    expect(scheduler.getTrainState('T1')?.cleared_edges).toContainEqual({
+      from_marker_id: 'M1',
+      to_marker_id: 'ORPHAN',
+    });
+  });
+
+  it('(b) the SAME unreachable adjacency is LEARNED, not flagged, when the train is in OPEN mode (no bounded route)', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    // No assignSchedule: the train has no transit. This is OPEN mode — the same
+    // state an exploring (ADR-015) / track-learn (ADR-014) train sits in, since
+    // begin_exploration is issued straight to the device and never sets transit.
+
+    // Anchor at M1, then report M4 (no edge M1→M4 in the graph).
+    observe(scheduler, 'T1', 'M1');
+    const effects = observe(scheduler, 'T1', 'M4');
+
+    // Discovery fires: the edge IS learned, exactly as ADR-009 always did.
+    expect(scheduler.getLayout().findEdge('M1', 'M4')).toBeDefined();
+    // No violation, and a normal marker_traversed is emitted.
+    expect(findEvent(effects, 'topology_violation')).toBeUndefined();
+    expect(findEvent(effects, 'marker_traversed')).toBeDefined();
+
+    const t1 = scheduler.getTrainState('T1');
+    expect(t1?.last_marker_id).toBe('M4'); // position advances normally
+    expect(t1?.block_reason).toBeUndefined();
+  });
+
+  it('(c-reanchor) recovery via re-anchor releases the hold, learns nothing, and resumes scheduled operation', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    observe(scheduler, 'T1', 'M4'); // violation → held
+    expect(scheduler.getTrainState('T1')?.block_reason).toBe('unknown_topology');
+
+    // Operator re-scans T1 at a known marker (M2 — it really is there).
+    const recovery = scheduler.reanchor('T1', 'M2');
+
+    const t1 = scheduler.getTrainState('T1');
+    expect(t1?.block_reason).toBeUndefined();
+    expect(t1?.last_marker_id).toBe('M2');
+    // The phantom edge was never learned.
+    expect(scheduler.getLayout().findEdge('M1', 'M4')).toBeUndefined();
+    // The uncertain region is released; the retained clearance state no longer
+    // carries block_reason.
+    const clearance = findClearanceState(recovery, 'T1');
+    expect((clearance?.state as { block_reason?: string }).block_reason).toBeUndefined();
+    // Scheduled operation resumes: a fresh route is planned from M2 toward M3.
+    const resume = recovery.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'assign_route',
+    );
+    expect(resume).toBeDefined();
+    expect(t1?.transit).toBeDefined();
+  });
+
+  it('(c-confirm) recovery via confirm-new-track learns the edge (the ADR-014 bridge) and resumes', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    observe(scheduler, 'T1', 'M4'); // violation → held
+
+    // Operator confirms M1→M4 is real new track.
+    const recovery = scheduler.confirmNewTrack('T1');
+
+    // The edge is now learned (as inferred, like any discovery).
+    const learned = scheduler.getLayout().findEdge('M1', 'M4');
+    expect(learned).toBeDefined();
+    expect(learned?.inferred).toBe(true);
+
+    const t1 = scheduler.getTrainState('T1');
+    expect(t1?.block_reason).toBeUndefined();
+    expect(t1?.last_marker_id).toBe('M4'); // re-anchored at the now-confirmed M
+    // A fresh layout snapshot is published so subscribers see the new edge.
+    const layoutSnap = recovery.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'update_state_snapshot' }> =>
+        e.kind === 'update_state_snapshot' && e.entity_type === 'layout',
+    );
+    expect(layoutSnap).toBeDefined();
+  });
+
+  it('does not flag a re-read of the current marker as a violation', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    // Re-reading M1 (== last_marker_id) is a no-op, never a violation.
+    const effects = observe(scheduler, 'T1', 'M1');
+    expect(findEvent(effects, 'topology_violation')).toBeUndefined();
+    expect(scheduler.getTrainState('T1')?.block_reason).toBeUndefined();
+  });
+
+  /*
+   * Cross-feature safety (ADR-019 × ADR-017): a topology-held train must NEVER
+   * be eligible as a deadlock-yield victim. It holds a phantom guard edge
+   * {P->M} (to_marker_id = M) over its uncertain-position region while its head
+   * stays pinned at P (last_marker_id = P). The yield's releasable filter keeps
+   * held edges whose to_marker_id !== occupiedMarker (= P), so it would classify
+   * the {P->M} guard as a "hold-ahead" claim and release it — handing the
+   * uncertain region to a contending peer. That is a safety violation: the
+   * region guards a position we are not sure of. The root fix excludes
+   * unknown_topology trains from collectWaitingTrains, so they never enter the
+   * waits-for graph and can never be picked as a victim. This test drives the
+   * exact configuration that, pre-fix, forms a 2-cycle and yields the guard.
+   */
+  it('(safety) a topology-held train is never yielded as a deadlock victim — its uncertain region stays locked', () => {
+    /* Layout: X->Q and P->Q both feed Q; Q->M continues to a gated station M.
+     * There is NO P->M edge, so a routed train at P reporting M is a topology
+     * violation. M has an incident edge (Q->M) so it is a known marker. */
+    const CROSSING: Layout = {
+      name: 'crossing',
+      markers: [
+        { id: 'P', kind: 'block_boundary' },
+        { id: 'Q', kind: 'block_boundary' },
+        { id: 'X', kind: 'block_boundary' },
+        { id: 'M', kind: 'station_stop' },
+      ],
+      edges: [
+        { from_marker_id: 'X', to_marker_id: 'Q', estimated_length_mm: 200 },
+        { from_marker_id: 'P', to_marker_id: 'Q', estimated_length_mm: 200 },
+        { from_marker_id: 'Q', to_marker_id: 'M', estimated_length_mm: 200 },
+      ],
+      junctions: [],
+    };
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const scheduler = new Scheduler(registry, new LayoutState(CROSSING, { now: () => 0 }), {
+      now: () => 0,
+    });
+    seedIdentityTags(scheduler, ['P', 'Q', 'X', 'M']);
+    registerGate(scheduler, 'GATE-M');
+    scheduler.handleEvent({
+      event_type: 'gate_state_changed',
+      device_id: 'GATE-M',
+      payload: { marker_id: 'M', state: 'withholding', reason: 'held for the test' },
+    });
+
+    /* T-peer registered FIRST (higher rank), T-held SECOND (lowest rank → the
+     * train the yield would pick as victim). Both length-aware so they retain
+     * their tail blocks. */
+    registerLongTrain(scheduler, 'T-peer', 100);
+    registerLongTrain(scheduler, 'T-held', 100);
+
+    /* T-peer routes X->Q->M. It is granted X->Q within the horizon, then on
+     * observing Q its head sits at Q holding X->Q, wanting Q->M — DENIED by the
+     * withholding gate at M. */
+    scheduler.assignSchedule('T-peer', 'r-peer', ['X', 'M']);
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T-peer',
+      payload: { tag_id: 'Q' },
+    });
+    const peerState = scheduler.getTrainState('T-peer');
+    expect(peerState?.cleared_edges).toContainEqual({ from_marker_id: 'X', to_marker_id: 'Q' });
+    expect(peerState?.cleared_edges).not.toContainEqual({ from_marker_id: 'Q', to_marker_id: 'M' });
+
+    /* T-held routes P->Q. With T-peer holding X->Q (lock {X, Q}), T-held's only
+     * leg P->Q is denied at Q → cleared_edges []. Head conceptually at P,
+     * wanting P->Q. */
+    scheduler.assignSchedule('T-held', 'r-held', ['P', 'Q']);
+    expect(scheduler.getTrainState('T-held')?.cleared_edges).toEqual([]);
+
+    /* T-held misreads M (unreachable from P). The topology handler appends the
+     * guard {P->M}, pins it at P, sets block_reason. It does NOT advance
+     * progress_index, so its wanted edge is still P->Q. */
+    observe(scheduler, 'T-held', 'M');
+    const heldAfterViolation = scheduler.getTrainState('T-held');
+    expect(heldAfterViolation?.block_reason).toBe('unknown_topology');
+    expect(heldAfterViolation?.last_marker_id).toBe('P');
+    expect(heldAfterViolation?.cleared_edges).toContainEqual({
+      from_marker_id: 'P',
+      to_marker_id: 'M',
+    });
+
+    /* Release the gate. This drives a retry pass through resolveDeadlockOrEmitState
+     * with skipTrainIds === undefined, so the yield branch is live. WITHOUT the
+     * fix, the waits-for graph contains a 2-cycle: T-held->T-peer (T-peer's X->Q
+     * shares Q with T-held's wanted P->Q) and T-peer->T-held (T-held's guard
+     * {P->M} shares M with T-peer's wanted Q->M). T-held is lowest-ranked → the
+     * victim → its {P->M} guard is released and T-peer is granted Q->M. */
+    const release = scheduler.handleEvent({
+      event_type: 'gate_state_changed',
+      device_id: 'GATE-M',
+      payload: { marker_id: 'M', state: 'granting' },
+    });
+
+    /* SAFETY: the topology-held train is untouched. */
+    const heldFinal = scheduler.getTrainState('T-held');
+    /* It keeps its hold reason — it is awaiting operator recovery, not clearance. */
+    expect(heldFinal?.block_reason).toBe('unknown_topology');
+    /* Its uncertain region {P->M} is NOT vacated. */
+    expect(heldFinal?.cleared_edges).toContainEqual({ from_marker_id: 'P', to_marker_id: 'M' });
+    /* No deadlock-yield revoke was sent to the held train. */
+    const yieldRevoke = release.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' &&
+        e.command_type === 'revoke_clearance' &&
+        e.device_id === 'T-held' &&
+        (e.payload as { reason?: string }).reason === 'deadlock_yield',
+    );
+    expect(yieldRevoke).toBeUndefined();
+    /* The peer is NOT granted the contested region — M is genuinely locked by the
+     * uncertain-position guard, so it stays correctly blocked (no illegitimate
+     * release, and no false deadlock report). */
+    expect(scheduler.getTrainState('T-peer')?.cleared_edges).not.toContainEqual({
+      from_marker_id: 'Q',
+      to_marker_id: 'M',
+    });
+  });
+
+  it('clears the hold reason when an operator reassigns or revokes a held train (no stale block_reason on a moving train)', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    observe(scheduler, 'T1', 'M4'); // violation → held
+    expect(scheduler.getTrainState('T1')?.block_reason).toBe('unknown_topology');
+
+    // Reassigning the held train gives it fresh intent: the retained clearance
+    // state must NOT keep reporting it as held once it is cleared and moving.
+    const reassign = scheduler.assignSchedule('T1', 'route-1b', ['M1', 'M2']);
+    expect(scheduler.getTrainState('T1')?.block_reason).toBeUndefined();
+    const reassignClearance = findClearanceState(reassign, 'T1');
+    expect((reassignClearance?.state as { block_reason?: string }).block_reason).toBeUndefined();
+
+    // And a fresh violation followed by an explicit revoke also clears it.
+    observe(scheduler, 'T1', 'M4'); // hold again
+    expect(scheduler.getTrainState('T1')?.block_reason).toBe('unknown_topology');
+    const revoke = scheduler.revokeClearance('T1');
+    expect(scheduler.getTrainState('T1')?.block_reason).toBeUndefined();
+    const revokeClearance = findClearanceState(revoke, 'T1');
+    expect((revokeClearance?.state as { block_reason?: string }).block_reason).toBeUndefined();
   });
 });

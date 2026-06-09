@@ -148,7 +148,7 @@ describe('Admin HTTP API', () => {
     expect((t2Grant.payload as { limit_marker_id: string }).limit_marker_id).toBe('M2');
   });
 
-  it('GET /api/state returns scheduler state', async () => {
+  it('GET /api/state returns scheduler state (deprecated alias)', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
@@ -158,5 +158,217 @@ describe('Admin HTTP API', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { trains: Array<{ train_id: string }> };
     expect(body.trains.find((t) => t.train_id === 'T1')).toBeDefined();
+  });
+});
+
+describe('Query HTTP API (ADR-020)', () => {
+  it('GET /api/query/layout projects the logical graph: markers and edges', async () => {
+    const res = await fetch(`${baseUrl}/api/query/layout`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(/application\/json/);
+    const body = (await res.json()) as {
+      name: string;
+      markers: Array<{ id: string; kind: string; switch_position?: string }>;
+      edges: Array<{ from_marker_id: string; to_marker_id: string; inferred: boolean }>;
+    };
+    expect(body.name).toBe('simple-loop-admin');
+    expect(body.markers.map((m) => m.id).sort()).toEqual(['M1', 'M2', 'M3', 'M4']);
+    expect(body.markers.find((m) => m.id === 'M3')?.kind).toBe('station_stop');
+    expect(body.edges).toContainEqual({
+      from_marker_id: 'M1',
+      to_marker_id: 'M2',
+      inferred: false,
+    });
+    // No spatial coordinates leak into the logical projection (ADR-013).
+    for (const m of body.markers) {
+      expect(m).not.toHaveProperty('position');
+    }
+  });
+
+  it('GET /api/query/traversal-times lists every edge with a sample count', async () => {
+    const res = await fetch(`${baseUrl}/api/query/traversal-times`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      edges: Array<{
+        from_marker_id: string;
+        to_marker_id: string;
+        samples: number;
+        learned_ms?: number;
+      }>;
+    };
+    expect(body.edges).toHaveLength(4);
+    // Untraversed edges still appear, with zero samples and no learned estimate.
+    const m1m2 = body.edges.find((e) => e.from_marker_id === 'M1' && e.to_marker_id === 'M2');
+    expect(m1m2?.samples).toBe(0);
+    expect(m1m2?.learned_ms).toBeUndefined();
+  });
+
+  it('GET /api/query/traversal-times?train_id= echoes the train scope', async () => {
+    const res = await fetch(`${baseUrl}/api/query/traversal-times?train_id=T7`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { train_id?: string; edges: unknown[] };
+    expect(body.train_id).toBe('T7');
+    expect(body.edges).toHaveLength(4);
+  });
+
+  it('GET /api/query/traversal-times surfaces a learned estimate once an edge is run', async () => {
+    await harness.testClient.seedIdentityTags(['M1', 'M2', 'M3']);
+    await harness.testClient.publishEvent('device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    await harness.testClient.waitForState('railway/state/devices/T1');
+
+    /*
+     * Drive the train across M1→M2→M3 via tag observations. The scheduler
+     * records each traversal with a real-clock timestamp; from the second
+     * recorded traversal onward the EWMA has a delta to learn from, so M2→M3
+     * gains a learned estimate while every traversed edge gains a sample count.
+     */
+    const cross = (id: string) =>
+      harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: id });
+    await cross('M1');
+    await cross('M2');
+    await cross('M3');
+
+    await expect
+      .poll(
+        async () => {
+          const res = await fetch(`${baseUrl}/api/query/traversal-times`);
+          const body = (await res.json()) as {
+            edges: Array<{
+              from_marker_id: string;
+              to_marker_id: string;
+              samples: number;
+              learned_ms?: number;
+            }>;
+          };
+          const learned = body.edges.find(
+            (e) => e.from_marker_id === 'M2' && e.to_marker_id === 'M3',
+          );
+          return (
+            learned !== undefined && learned.samples >= 1 && typeof learned.learned_ms === 'number'
+          );
+        },
+        { timeout: 2_000 },
+      )
+      .toBe(true);
+  });
+
+  it('GET /api/query/trains lists all train states', async () => {
+    await harness.testClient.publishEvent('device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    await harness.testClient.waitForState('railway/state/devices/T1');
+    harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    await harness.testClient.waitForCommand('T1', 'grant_clearance');
+
+    const res = await fetch(`${baseUrl}/api/query/trains`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      trains: Array<{ train_id: string; cleared_edges: unknown[] }>;
+    };
+    const t1 = body.trains.find((t) => t.train_id === 'T1');
+    expect(t1).toBeDefined();
+    expect(t1?.cleared_edges).toContainEqual({ from_marker_id: 'M1', to_marker_id: 'M2' });
+  });
+
+  it('GET /api/query/trains/:id returns one train, 404 for unknown', async () => {
+    await harness.testClient.publishEvent('device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    await harness.testClient.waitForState('railway/state/devices/T1');
+
+    const ok = await fetch(`${baseUrl}/api/query/trains/T1`);
+    expect(ok.status).toBe(200);
+    const body = (await ok.json()) as { train_id: string };
+    expect(body.train_id).toBe('T1');
+
+    const missing = await fetch(`${baseUrl}/api/query/trains/NOPE`);
+    expect(missing.status).toBe(404);
+    const err = (await missing.json()) as { error: string; code: string };
+    expect(err.code).toBe('not_found');
+  });
+
+  it('GET /api/query/clearances reports who holds what', async () => {
+    await harness.testClient.publishEvent('device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    await harness.testClient.waitForState('railway/state/devices/T1');
+    harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    await harness.testClient.waitForCommand('T1', 'grant_clearance');
+
+    const res = await fetch(`${baseUrl}/api/query/clearances`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      clearances: Array<{
+        train_id: string;
+        cleared_edges: Array<{ from_marker_id: string; to_marker_id: string }>;
+        clearance_limit_marker_id?: string;
+      }>;
+    };
+    const t1 = body.clearances.find((c) => c.train_id === 'T1');
+    expect(t1?.cleared_edges).toContainEqual({ from_marker_id: 'M1', to_marker_id: 'M2' });
+    expect(t1?.clearance_limit_marker_id).toBeDefined();
+  });
+
+  it('GET /api/query/layout reports the live switch position for junctions', async () => {
+    const junctionLayout: Layout = {
+      name: 'junction-layout',
+      markers: [
+        { id: 'M1', kind: 'block_boundary' },
+        { id: 'J1', kind: 'junction' },
+        { id: 'M2', kind: 'block_boundary' },
+        { id: 'M3', kind: 'block_boundary' },
+      ],
+      edges: [
+        { from_marker_id: 'M1', to_marker_id: 'J1', estimated_length_mm: 200 },
+        {
+          from_marker_id: 'J1',
+          to_marker_id: 'M2',
+          requires_switch_state: 'main',
+          estimated_length_mm: 200,
+        },
+        {
+          from_marker_id: 'J1',
+          to_marker_id: 'M3',
+          requires_switch_state: 'diverge',
+          estimated_length_mm: 200,
+        },
+      ],
+      junctions: [{ marker_id: 'J1', initial_state: 'main' }],
+    };
+    const jHarness = await startHarness({ layout: junctionLayout });
+    const jAdmin = new AdminHttpServer({ server: jHarness.server });
+    const jPort = await jAdmin.listen(0);
+    try {
+      const res = await fetch(`http://127.0.0.1:${jPort}/api/query/layout`);
+      const body = (await res.json()) as {
+        markers: Array<{ id: string; kind: string; switch_position?: string }>;
+        edges: Array<{
+          from_marker_id: string;
+          to_marker_id: string;
+          requires_switch_state?: string;
+        }>;
+      };
+      expect(body.markers.find((m) => m.id === 'J1')?.switch_position).toBe('main');
+      expect(body.markers.find((m) => m.id === 'M1')?.switch_position).toBeUndefined();
+      const diverge = body.edges.find((e) => e.from_marker_id === 'J1' && e.to_marker_id === 'M3');
+      expect(diverge?.requires_switch_state).toBe('diverge');
+    } finally {
+      await jAdmin.close();
+      await jHarness.shutdown();
+    }
+  });
+
+  it('GET /api/query/tags returns current tag bindings', async () => {
+    await post('/api/tags', { tag_id: 'TAG-Q', assigned_kind: 'marker', target_id: 'M2' });
+    await harness.testClient.waitForState('railway/state/tags/TAG-Q');
+
+    const res = await fetch(`${baseUrl}/api/query/tags`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      tags: Array<{ tag_id: string; kind: string; target_id: string }>;
+    };
+    expect(body.tags).toContainEqual({ tag_id: 'TAG-Q', kind: 'marker', target_id: 'M2' });
   });
 });

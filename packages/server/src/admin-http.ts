@@ -5,6 +5,7 @@ import {
   createServer,
 } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import type { TrainState } from '@trainframe/core';
 import type { Server as TrainframeServer } from './server.js';
 
 /**
@@ -78,13 +79,22 @@ export class AdminHttpServer {
       res.writeHead(204).end();
       return;
     }
-    const url = req.url ?? '/';
+    const rawUrl = req.url ?? '/';
     const method = req.method ?? 'GET';
+    /*
+     * Split the path from the query string before matching. Routes match on the
+     * pathname only; query parameters (e.g. `?train_id=` on traversal-times)
+     * are parsed separately by the handler that wants them. `WHATWG URL`
+     * tolerates a dummy origin since we only consume `pathname`/`searchParams`.
+     */
+    const parsed = new URL(rawUrl, 'http://localhost');
+    const pathname = parsed.pathname;
+    const query = parsed.searchParams;
 
     try {
-      const route = this.matchRoute(method, url);
+      const route = this.matchRoute(method, pathname, query);
       if (!route) {
-        json(res, 404, { error: `No route for ${method} ${url}`, code: 'not_found' });
+        json(res, 404, { error: `No route for ${method} ${pathname}`, code: 'not_found' });
         return;
       }
       const body = route.needsBody ? await readJson(req) : undefined;
@@ -98,12 +108,22 @@ export class AdminHttpServer {
   private matchRoute(
     method: string,
     url: string,
+    query: URLSearchParams,
   ): { needsBody: boolean; handler: (body: unknown, res: ServerResponse) => void } | undefined {
     if (method === 'GET' && url === '/api/health') {
       return { needsBody: false, handler: (_b, res) => this.health(res) };
     }
+    /*
+     * Deprecated omnibus read endpoint (ADR-008). Retained as a convenience
+     * alias while callers migrate to the granular `GET /api/query/*` family
+     * (ADR-020); slated for removal once the visualiser/sim-ui first paint move
+     * over.
+     */
     if (method === 'GET' && url === '/api/state') {
       return { needsBody: false, handler: (_b, res) => this.state(res) };
+    }
+    if (method === 'GET') {
+      return this.matchQueryRoute(url, query);
     }
     if (method !== 'POST') return undefined;
 
@@ -153,6 +173,148 @@ export class AdminHttpServer {
         cleared_edges: t.cleared_edges,
       })),
       tags: scheduler.getTagRegistry().entries(),
+    });
+  }
+
+  /*
+   * Read-only query API (ADR-020). Resource-oriented projections of
+   * scheduler/layout state under `GET /api/query/*`. No side effects, no device
+   * impersonation — every handler is a thin projection of facts the existing
+   * public accessors on `Scheduler`/`LayoutState` already expose. No new logic
+   * and no new state live here; query *shaping* is composition/IO and belongs
+   * in the server, never in core or protocol.
+   */
+  private matchQueryRoute(
+    url: string,
+    query: URLSearchParams,
+  ): { needsBody: boolean; handler: (body: unknown, res: ServerResponse) => void } | undefined {
+    if (url === '/api/query/layout') {
+      return { needsBody: false, handler: (_b, res) => this.queryLayout(res) };
+    }
+    if (url === '/api/query/traversal-times') {
+      return { needsBody: false, handler: (_b, res) => this.queryTraversalTimes(query, res) };
+    }
+    if (url === '/api/query/trains') {
+      return { needsBody: false, handler: (_b, res) => this.queryTrains(res) };
+    }
+    const train = url.match(/^\/api\/query\/trains\/([^/]+)$/);
+    if (train?.[1]) {
+      const id = decodeURIComponent(train[1]);
+      return { needsBody: false, handler: (_b, res) => this.queryTrain(id, res) };
+    }
+    if (url === '/api/query/clearances') {
+      return { needsBody: false, handler: (_b, res) => this.queryClearances(res) };
+    }
+    if (url === '/api/query/tags') {
+      return { needsBody: false, handler: (_b, res) => this.queryTags(res) };
+    }
+    return undefined;
+  }
+
+  /**
+   * The logical layout graph: markers (id, kind, and live switch position for
+   * junctions) and edges (with the declared-vs-learned `inferred` flag). The
+   * scheduler's view, not the spatial layout (ADR-013 coordinates are excluded
+   * per the spatial/logical separation commitment).
+   */
+  private queryLayout(res: ServerResponse): void {
+    const layout = this.server.getScheduler().getLayout();
+    const graph = layout.toLayout();
+    const markers = graph.markers.map((m) => {
+      const switchPosition = m.kind === 'junction' ? layout.getSwitchPosition(m.id) : undefined;
+      return {
+        id: m.id,
+        kind: m.kind,
+        ...(switchPosition !== undefined ? { switch_position: switchPosition } : {}),
+      };
+    });
+    const edges = graph.edges.map((e) => ({
+      from_marker_id: e.from_marker_id,
+      to_marker_id: e.to_marker_id,
+      ...(e.requires_switch_state !== undefined
+        ? { requires_switch_state: e.requires_switch_state }
+        : {}),
+      inferred: e.inferred === true,
+    }));
+    json(res, 200, { name: graph.name, markers, edges });
+  }
+
+  /**
+   * Learned per-edge traversal estimates and sample counts. `learned_ms` is
+   * present only once the edge has enough samples for an estimate; `samples`
+   * (the traversal count) is always present so freshly-seen edges still appear.
+   * `?train_id=` selects the per-train estimate (ADR-010), falling back to the
+   * global one.
+   */
+  private queryTraversalTimes(query: URLSearchParams, res: ServerResponse): void {
+    const layout = this.server.getScheduler().getLayout();
+    const trainId = query.get('train_id') ?? undefined;
+    const edges = layout.toLayout().edges.map((e) => {
+      const learnedMs =
+        trainId !== undefined
+          ? layout.getLearnedTraversalMs(e.from_marker_id, e.to_marker_id, trainId)
+          : layout.getLearnedTraversalMs(e.from_marker_id, e.to_marker_id);
+      return {
+        from_marker_id: e.from_marker_id,
+        to_marker_id: e.to_marker_id,
+        samples: layout.traversalCount(e.from_marker_id, e.to_marker_id),
+        ...(learnedMs !== undefined ? { learned_ms: learnedMs } : {}),
+      };
+    });
+    json(res, 200, { ...(trainId !== undefined ? { train_id: trainId } : {}), edges });
+  }
+
+  /** All train states. */
+  private queryTrains(res: ServerResponse): void {
+    const scheduler = this.server.getScheduler();
+    const trains = scheduler
+      .getTrainIds()
+      .map((id) => scheduler.getTrainState(id))
+      .filter((t): t is NonNullable<typeof t> => t !== undefined)
+      .map(projectTrainState);
+    json(res, 200, { trains });
+  }
+
+  /** One train's state, 404 if unknown. */
+  private queryTrain(trainId: string, res: ServerResponse): void {
+    const state = this.server.getScheduler().getTrainState(trainId);
+    if (!state) {
+      json(res, 404, { error: `Unknown train: ${trainId}`, code: 'not_found' });
+      return;
+    }
+    json(res, 200, projectTrainState(state));
+  }
+
+  /**
+   * The current clearance picture derived from train states: which edges each
+   * train holds and each train's clearance limit. The read counterpart to the
+   * grant/revoke commands.
+   */
+  private queryClearances(res: ServerResponse): void {
+    const scheduler = this.server.getScheduler();
+    const clearances = scheduler
+      .getTrainIds()
+      .map((id) => scheduler.getTrainState(id))
+      .filter((t): t is NonNullable<typeof t> => t !== undefined)
+      .map((t) => ({
+        train_id: t.train_id,
+        cleared_edges: t.cleared_edges,
+        ...(t.clearance_limit_marker_id !== undefined
+          ? { clearance_limit_marker_id: t.clearance_limit_marker_id }
+          : {}),
+      }));
+    json(res, 200, { clearances });
+  }
+
+  /** Current tag bindings. */
+  private queryTags(res: ServerResponse): void {
+    const entries = this.server.getScheduler().getTagRegistry().entries();
+    json(res, 200, {
+      tags: entries.map(([tag_id, binding]) => ({
+        tag_id,
+        kind: binding.kind,
+        target_id: binding.target_id,
+      })),
     });
   }
 
@@ -213,6 +375,24 @@ export class AdminHttpServer {
     });
     noContent(res);
   }
+}
+
+/**
+ * Project a scheduler `TrainState` to the JSON shape the query API serves.
+ * Optional fields are omitted (not emitted as `null`) when absent — the shape
+ * mirrors the deprecated `/api/state` train projection plus `last_marker_id`.
+ */
+function projectTrainState(t: TrainState): Record<string, unknown> {
+  return {
+    train_id: t.train_id,
+    ...(t.last_marker_id !== undefined ? { last_marker_id: t.last_marker_id } : {}),
+    ...(t.clearance_limit_marker_id !== undefined
+      ? { clearance_limit_marker_id: t.clearance_limit_marker_id }
+      : {}),
+    cleared_edges: t.cleared_edges,
+    ...(t.transit !== undefined ? { transit: t.transit } : {}),
+    ...(t.schedule !== undefined ? { schedule: t.schedule } : {}),
+  };
 }
 
 function json(res: ServerResponse, status: number, body: unknown): void {

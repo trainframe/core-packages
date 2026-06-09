@@ -106,6 +106,16 @@ export class VirtualTrain {
      markers indefinitely, choosing the next edge from its own layout (the
      physical rails) rather than a route, until released by revoke/emergency. */
   private exploring = false;
+  /* Reverse authority (ADR-022): a bounded backward grant to break a closed
+     standoff. When non-null the train is backing UP along the forward-oriented
+     edges it holds, head-first edge first, to `reverse_target_marker_id`. Each
+     entry is the edge currently being backed over; on reaching its from_marker
+     the train emits a tag_observed and advances to the next backward edge, until
+     the head reaches the target, then stops. Cleared by revoke/emergency or on
+     arrival. Distinct from `exploring`: bounded, signed, scheduler-issued. */
+  private reverse_edges: ReadonlyArray<RouteEdge> = [];
+  private reverse_index = 0;
+  private reverse_target_marker_id: string | null = null;
   /* Power state. A powered-off train is INERT (does not move; ignores
      commands) and SILENT (emits nothing, including any already-scheduled
      detection-latency callbacks). It stays physically on the track — its
@@ -217,19 +227,57 @@ export class VirtualTrain {
         this.target_velocity_mm_s = this.config.max_velocity_mm_s;
         break;
       }
+      case 'grant_reverse': {
+        const { edges, limit_marker_id } = payload as {
+          edges: RouteEdge[];
+          limit_marker_id: string;
+        };
+        this.beginReverse(edges, limit_marker_id);
+        break;
+      }
       case 'revoke_clearance': {
-        // Releases an exploration grant as well as a bounded clearance.
+        // Releases an exploration grant and a reverse grant as well as a bounded
+        // clearance.
         this.exploring = false;
+        this.endReversing();
         this.clearance_limit_marker_id = null;
         this.target_velocity_mm_s = 0;
         break;
       }
       case 'emergency_stop':
         this.exploring = false;
+        this.endReversing();
         this.velocity_mm_s = 0;
         this.target_velocity_mm_s = 0;
         break;
     }
+  }
+
+  /**
+   * Enter the reversing state under a `grant_reverse` (ADR-022). `edges` is the
+   * head-first run of forward-oriented edges to traverse in reverse;
+   * `targetMarkerId` is the backward target X. Snap the head onto the to-marker
+   * end of the first backward edge and drive backward from there. A concrete
+   * reverse supersedes exploration and any forward clearance limit — the train
+   * is giving ground, not advancing. No-op for an empty run.
+   */
+  private beginReverse(edges: ReadonlyArray<RouteEdge>, targetMarkerId: string): void {
+    const first = edges[0];
+    if (first === undefined) return;
+    this.exploring = false;
+    this.clearance_limit_marker_id = null;
+    this.reverse_edges = edges.map((e) => ({
+      from_marker_id: e.from_marker_id,
+      to_marker_id: e.to_marker_id,
+    }));
+    this.reverse_index = 0;
+    this.reverse_target_marker_id = targetMarkerId;
+    this.current_edge = { from_marker_id: first.from_marker_id, to_marker_id: first.to_marker_id };
+    /* Head sits at the to-marker end of the first backward edge; backing
+       decrements distance toward the from-marker. */
+    this.distance_into_edge_mm = this.currentEdgeLength();
+    this.emitted_current_edge_end = false;
+    this.target_velocity_mm_s = this.config.max_velocity_mm_s;
   }
 
   tick(dt_ms: number): void {
@@ -255,6 +303,15 @@ export class VirtualTrain {
     this.adjustVelocity(dt_s);
     if (!this.current_edge) return;
 
+    /* Reverse authority (ADR-022): when backing up, motion runs BACKWARD along
+       the held edges (distance decreases) toward the target marker. Handled on
+       its own path — the forward braking/limit/cross logic does not apply. */
+    if (this.reverse_target_marker_id !== null) {
+      this.tickReverse(dt_s);
+      this.maybeEmitStatus(dt_ms);
+      return;
+    }
+
     this.distance_into_edge_mm += this.velocity_mm_s * dt_s;
     const edge_length_mm = this.currentEdgeLength();
 
@@ -263,6 +320,56 @@ export class VirtualTrain {
     this.maybeCrossEdgeEnd(edge_length_mm);
 
     this.maybeEmitStatus(dt_ms);
+  }
+
+  /**
+   * One tick of BACKWARD motion under a reverse grant (ADR-022). The head moves
+   * from the to-marker end of the current backward edge toward its from-marker
+   * (distance decreases). On reaching the from-marker the train emits a
+   * `tag_observed` for it (so the scheduler tracks the retreat) and advances to
+   * the next backward edge; when the head reaches the target marker it stops and
+   * leaves the reversing state. Deterministic — clock-driven kinematics only.
+   */
+  private tickReverse(dt_s: number): void {
+    if (!this.current_edge) return;
+    this.distance_into_edge_mm -= this.velocity_mm_s * dt_s;
+    if (this.distance_into_edge_mm > 0) return;
+
+    // Reached the from-marker (the near end) of the current backward edge.
+    const reachedMarker = this.current_edge.from_marker_id;
+    this.distance_into_edge_mm = 0;
+    this.emitMarkerObservation(reachedMarker);
+
+    if (reachedMarker === this.reverse_target_marker_id) {
+      // Arrived at the backward target X. Stop and leave the reversing state;
+      // the head now rests at X with the train's tail trailing forward.
+      this.velocity_mm_s = 0;
+      this.target_velocity_mm_s = 0;
+      this.endReversing();
+      return;
+    }
+
+    // Otherwise continue onto the next backward edge, snapping the head to its
+    // to-marker end.
+    this.reverse_index += 1;
+    const next = this.reverse_edges[this.reverse_index];
+    if (next === undefined) {
+      // Ran out of backward edges before reaching the target (should not happen
+      // for a well-formed grant); stop conservatively.
+      this.velocity_mm_s = 0;
+      this.target_velocity_mm_s = 0;
+      this.endReversing();
+      return;
+    }
+    this.current_edge = { from_marker_id: next.from_marker_id, to_marker_id: next.to_marker_id };
+    this.distance_into_edge_mm = this.currentEdgeLength();
+  }
+
+  /** Leave the reversing state (ADR-022). Idempotent. */
+  private endReversing(): void {
+    this.reverse_edges = [];
+    this.reverse_index = 0;
+    this.reverse_target_marker_id = null;
   }
 
   /**

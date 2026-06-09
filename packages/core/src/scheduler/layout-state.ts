@@ -131,6 +131,20 @@ export class LayoutState {
   }
 
   /**
+   * Does the marker have any incident edges (incoming or outgoing)? A marker
+   * unknown to the graph, or known but with no edges at all (an orphan), is not
+   * wired into the topology. Used by ADR-019 to refine the operator-facing
+   * `suspected_cause` hint: a wired-in but non-adjacent marker is more likely a
+   * missed read than brand-new track.
+   */
+  hasIncidentEdges(markerId: string): boolean {
+    return (
+      (this.outgoingEdges.get(markerId)?.length ?? 0) > 0 ||
+      (this.incomingEdges.get(markerId)?.length ?? 0) > 0
+    );
+  }
+
+  /**
    * The currently-active outgoing edge from a marker, considering switch
    * state. Returns the only edge for non-junctions, the switch-selected edge
    * for junctions with a known position, or undefined if the position is
