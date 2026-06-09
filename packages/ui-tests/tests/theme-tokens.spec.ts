@@ -42,7 +42,7 @@ test.describe('Visualiser theme tokens', () => {
     await openThemeTestPage(page);
 
     const markerColor = await getCssVar(page, '--tf-vis-color-marker');
-    // The light theme sets the warm "workshop" marker puck (ADR-017): #fdf6e6.
+    // The light theme sets the warm "workshop" marker puck (ADR-024): #fdf6e6.
     // Chromium normalises hex colours to rgb(...) in getComputedStyle.
     expect(markerColor).toMatch(/^#?fdf6e6$|^rgb\(253,\s*246,\s*230\)$/i);
   });

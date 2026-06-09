@@ -1,4 +1,4 @@
-# ADR-017: Wooden-track aesthetic for the toy table (and a cohesive visualiser theme)
+# ADR-024: Wooden-track aesthetic for the toy table (and a cohesive visualiser theme)
 
 ## Status
 
