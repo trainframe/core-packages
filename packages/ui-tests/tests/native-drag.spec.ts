@@ -42,10 +42,12 @@ test.describe('Native drag-and-drop: toybox → canvas', () => {
 
     // A real pointer drag (mouse.* fires genuine pointer events). The old code
     // relied on HTML5 `draggable`, which Chrome ignores on SVG, so this moved
-    // nothing; pointer-based dragging follows the cursor.
+    // nothing; pointer-based dragging follows the cursor. Drag UP-RIGHT toward
+    // open table — away from the scan zone that floats over the bottom-left
+    // corner (releasing a piece there scans it instead of moving it).
     await sim.mouse.move(fromX, fromY);
     await sim.mouse.down();
-    await sim.mouse.move(fromX - 160, fromY + 120, { steps: 12 });
+    await sim.mouse.move(fromX + 160, fromY - 120, { steps: 12 });
     await sim.mouse.up();
 
     const after = await piece.getAttribute('transform');

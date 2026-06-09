@@ -1,4 +1,3 @@
-import { Panel } from '@trainframe/ui-kit';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useBroker } from '../broker/broker-context.js';
 import type { BrokerClient } from '../broker/client.js';
@@ -92,14 +91,7 @@ const DEVICE_FILL: Partial<Record<TrackPieceType, string>> = {
   gate: '#8a929c',
 };
 
-/** A representative swatch colour for the toybox button border — the device
- * colour for devices, the functional tint (or plain beech) for track. */
-const TOYBOX_SWATCH_WOOD = '#c79a5f';
-function toyboxSwatch(type: TrackPieceType): string {
-  return DEVICE_FILL[type] ?? PIECE_TINT[type] ?? TOYBOX_SWATCH_WOOD;
-}
-
-/* SVG gradient/fill ids defined once in the canvas <defs>; referenced by url(). */
+/* SVG gradient/fill ids defined once in the page <defs>; referenced by url(). */
 const WOOD_FILL = 'url(#tf-wood)';
 
 /** A soft, near-omnidirectional contact shadow under every piece (rotation- and
@@ -1055,52 +1047,59 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
 
   return (
     <div className="tf-toytable">
+      {/* Wood gradients live once here so both the canvas and the parts-tray
+          previews can reference them by id (SVG ids are document-scoped). */}
+      <svg className="tf-toytable__defs" width="0" height="0" aria-hidden="true">
+        <WoodDefs />
+      </svg>
       <header className="tf-toytable__header">
         <h1>Trainframe Toy Table</h1>
         <ConnectionStatus />
         <Settings initialUrl={initialUrl} />
       </header>
-      <div className="tf-toytable__body">
-        <aside className="tf-toytable__sidebar">
-          <Toybox armedType={armedType} onArm={armPieceType} />
+      <ActionBar
+        selectedPiece={selectedPiece}
+        selectedLive={selectedPiece !== null && liveIds.has(selectedPiece.id)}
+        selectedPoweredOff={selectedPiece !== null && poweredOffIds.has(selectedPiece.id)}
+        onRotate={rotateSelected}
+        onFlip={flipSelected}
+        onDelete={deleteSelected}
+        onTogglePower={() => {
+          if (selectedPiece !== null) togglePower(selectedPiece.id);
+        }}
+        armedType={armedType}
+        activeLayer={activeLayer}
+        onActiveLayerChange={setActiveLayer}
+      />
+      {/* The table itself, with the scan zone floating in its bottom-left
+          corner — drag a placed piece onto it to put it on the bus. */}
+      <div className="tf-toytable__stage">
+        <Table
+          pieces={pieces}
+          liveIds={liveIds}
+          poweredOffIds={poweredOffIds}
+          selectedId={selectedId}
+          armedType={armedType}
+          activeLayer={activeLayer}
+          trainTrails={trainTrails}
+          renderPositions={renderPositions}
+          hardware={hardware}
+          onCanvasClick={placePiece}
+          onMovePiece={movePiece}
+          onScanPiece={requestScan}
+          onPieceAction={handlePiecePointerAction}
+        />
+        <div className="tf-toytable__scanzone">
           <ScanBox
             describePiece={describePiece}
             onConfirm={handleScanConfirm}
             onReady={handleScanBoxReady}
           />
-        </aside>
-        <main className="tf-toytable__main">
-          <ActionBar
-            selectedPiece={selectedPiece}
-            selectedLive={selectedPiece !== null && liveIds.has(selectedPiece.id)}
-            selectedPoweredOff={selectedPiece !== null && poweredOffIds.has(selectedPiece.id)}
-            onRotate={rotateSelected}
-            onFlip={flipSelected}
-            onDelete={deleteSelected}
-            onTogglePower={() => {
-              if (selectedPiece !== null) togglePower(selectedPiece.id);
-            }}
-            armedType={armedType}
-            activeLayer={activeLayer}
-            onActiveLayerChange={setActiveLayer}
-          />
-          <Table
-            pieces={pieces}
-            liveIds={liveIds}
-            poweredOffIds={poweredOffIds}
-            selectedId={selectedId}
-            armedType={armedType}
-            activeLayer={activeLayer}
-            trainTrails={trainTrails}
-            renderPositions={renderPositions}
-            hardware={hardware}
-            onCanvasClick={placePiece}
-            onMovePiece={movePiece}
-            onScanPiece={requestScan}
-            onPieceAction={handlePiecePointerAction}
-          />
-        </main>
+        </div>
       </div>
+      {/* The parts tray under the table: actual wooden renders of each piece,
+          dragged onto the table to place them. */}
+      <Toybox armedType={armedType} onArm={armPieceType} />
     </div>
   );
 }
@@ -1116,7 +1115,7 @@ interface ToyboxProps {
 
 function Toybox({ armedType, onArm }: ToyboxProps) {
   return (
-    <Panel label="Toybox" className="tf-toybox">
+    <div className="tf-toybox" aria-label="Parts tray">
       <ToyboxGroup heading="Track" types={TRACK_PIECE_TYPES} armedType={armedType} onArm={onArm} />
       <ToyboxGroup
         heading="Devices"
@@ -1124,7 +1123,42 @@ function Toybox({ armedType, onArm }: ToyboxProps) {
         armedType={armedType}
         onArm={onArm}
       />
-    </Panel>
+    </div>
+  );
+}
+
+/**
+ * A small wooden render of a piece type — the actual shape the operator drags
+ * onto the table, drawn with the same body/groove/feature spec as the live
+ * pieces (referencing the shared wood gradients in the page `<defs>`).
+ */
+function PiecePreview({ type }: { type: TrackPieceType }) {
+  const shape = getPieceShape({
+    id: type,
+    type,
+    position: { x: 0, y: 0 },
+    rotationDeg: 0,
+    tagged: false,
+  });
+  const isDevice = isDevicePiece(type);
+  const pad = 14;
+  const w = shape.width + pad * 2;
+  const h = shape.height + pad * 2;
+  return (
+    <svg
+      className="tf-toybox__preview"
+      viewBox={`${-w / 2} ${-h / 2} ${w} ${h}`}
+      preserveAspectRatio="xMidYMid meet"
+      aria-hidden="true"
+    >
+      <PieceBody
+        shape={shape}
+        bodyFill={isDevice ? (DEVICE_FILL[type] ?? '#8a929c') : WOOD_FILL}
+        tint={PIECE_TINT[type]}
+        isDevice={isDevice}
+        dim={1}
+      />
+    </svg>
   );
 }
 
@@ -1173,10 +1207,11 @@ function ToyboxButton({ type, armed, onArm }: ToyboxButtonProps) {
       onDragStart={handleDragStart}
       draggable
       aria-pressed={armed}
-      style={{ borderColor: toyboxSwatch(type) }}
+      title={`${PIECE_LABELS[type]} — drag onto the table`}
       data-testid={`toybox-${type}`}
     >
-      {PIECE_LABELS[type]}
+      <PiecePreview type={type} />
+      <span className="tf-toybox__label">{PIECE_LABELS[type]}</span>
     </button>
   );
 }
@@ -1654,7 +1689,6 @@ function Table({
         data-viewport-x={viewport.x}
         data-viewport-y={viewport.y}
       >
-        <WoodDefs />
         {/* One group per layer, lowest first, so higher decks paint last and a
           bridge reads as over/under. The drop-shadow height cue is attached to
           this UN-rotated group (never the per-piece rotated/flipped <g>, where a

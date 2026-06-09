@@ -73,24 +73,31 @@ body {
   filter: drop-shadow(0 1px 1px rgba(90, 60, 25, 0.25));
 }
 
-.tf-toytable__body {
-  display: flex;
-  gap: 1.1rem;
-  align-items: flex-start;
+/* Hidden shared SVG defs (wood gradients) — takes no layout space. */
+.tf-toytable__defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
 }
 
-.tf-toytable__sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: 0.85rem;
-  min-width: 168px;
+/* The table stage: the canvas plus the scan zone floating over its corner.
+   Width is capped to the viewport HEIGHT (the canvas keeps its 3:2 ratio) so the
+   table never grows so tall that the parts tray below it falls off-screen. */
+.tf-toytable__stage {
+  position: relative;
+  width: min(100%, 78vh);
+  margin-inline: auto;
 }
 
-.tf-toytable__main {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-  flex: 1;
+/* The garage / scan zone — a floating dashed drop target in the bottom-left
+   corner of the table. Drag a placed piece onto it to put it on the bus. */
+.tf-toytable__scanzone {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  width: 156px;
+  z-index: 2;
 }
 
 /* Action bar */
@@ -178,17 +185,37 @@ body {
   height: auto;
 }
 
-/* Toybox */
+/* Parts tray — actual wooden renders of each piece, sat in a shelf under the
+   table; drag one onto the table to place it. */
+.tf-toybox {
+  display: flex;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  padding: 0.75rem 0.9rem;
+  background: linear-gradient(180deg, #f1e4cb 0%, #e9d8b6 100%);
+  border: 1px solid #ddc79c;
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+.tf-toybox__group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
 .tf-toybox__group + .tf-toybox__group {
-  margin-top: 0.85rem;
+  padding-left: 1.25rem;
+  border-left: 1px solid #ddc79c;
 }
 
 .tf-toybox__heading {
-  font-size: 0.7rem;
+  font-size: 0.68rem;
   text-transform: uppercase;
   letter-spacing: 0.1em;
   color: var(--tf-color-fg-muted);
-  margin: 0 0 0.45rem 0;
+  margin: 0;
 }
 
 .tf-toybox__list {
@@ -196,56 +223,75 @@ body {
   margin: 0;
   padding: 0;
   display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 0.45rem;
 }
 
 .tf-toybox__button {
-  width: 100%;
-  padding: 0.45rem 0.6rem 0.45rem 0.7rem;
-  text-align: left;
-  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  width: 78px;
+  padding: 0.35rem 0.3rem 0.4rem;
+  cursor: grab;
   color: #5e4626;
   background: var(--tf-color-surface);
-  /* The left edge carries the piece's swatch colour (set inline). */
   border: 1px solid #e0cda3;
-  border-left-width: 5px;
-  border-radius: 9px;
+  border-radius: 10px;
   font: inherit;
-  font-size: 0.88rem;
+  font-size: 0.72rem;
   font-weight: 600;
+  box-shadow: 0 1px 1.5px rgba(90, 60, 25, 0.1);
   transition: transform 0.08s ease, box-shadow 0.12s ease, background 0.12s ease;
 }
 
 .tf-toybox__button:hover {
   background: var(--tf-color-surface-hover);
-  transform: translateX(1px);
-  box-shadow: 0 2px 6px rgba(90, 60, 25, 0.12);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 10px rgba(90, 60, 25, 0.16);
+}
+
+.tf-toybox__button:active {
+  cursor: grabbing;
 }
 
 .tf-toybox__button--armed {
   background: var(--tf-color-accent-soft);
-  box-shadow: 0 0 0 2px rgba(224, 144, 42, 0.35);
+  box-shadow: 0 0 0 2px rgba(224, 144, 42, 0.5);
 }
 
-/* Scan box */
+.tf-toybox__preview {
+  width: 64px;
+  height: 38px;
+  pointer-events: none;
+}
+
+.tf-toybox__label {
+  line-height: 1.1;
+}
+
+/* Scan box — compact floating dashed drop zone (sits over the table corner). */
 .tf-scanbox {
   border: 2px dashed var(--tf-color-border);
   border-radius: 12px;
-  padding: 1.1rem 0.6rem;
+  padding: 0.7rem 0.6rem;
   text-align: center;
-  background: var(--tf-color-surface);
+  background: rgba(253, 248, 238, 0.82);
+  backdrop-filter: blur(1px);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.45rem;
-  font-size: 0.85em;
+  gap: 0.3rem;
+  font-size: 0.78em;
   color: var(--tf-color-fg-muted);
   user-select: none;
+  box-shadow: 0 4px 12px rgba(90, 60, 25, 0.14);
 }
 
 .tf-scanbox__icon {
-  font-size: 1.5em;
+  font-size: 1.4em;
 }
 
 .tf-scanbox--hot {
