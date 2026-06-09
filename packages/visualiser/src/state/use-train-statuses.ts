@@ -13,6 +13,10 @@ export interface TrainStatus {
   readonly current_edge?: { from_marker_id: string; to_marker_id: string };
   readonly distance_into_edge_mm?: number;
   readonly speed_normalised: number;
+  /** Battery charge in [0, 1] when the train reports it. */
+  readonly battery_normalised?: number;
+  /** A non-empty firmware-reported fault string when the train is in error. */
+  readonly error_state?: string;
 }
 
 export type TrainStatuses = ReadonlyMap<string, TrainStatus>;
@@ -87,8 +91,29 @@ function parseStatus(payload: Uint8Array): TrainStatus | null {
     ...(typeof obj.estimated_distance_from_edge_start_mm === 'number'
       ? { distance_into_edge_mm: obj.estimated_distance_from_edge_start_mm }
       : {}),
+    ...extractHealth(obj),
   };
   return status;
+}
+
+/**
+ * Pull the optional health fields off a train_status payload. Battery is
+ * surfaced whenever it is a number — including `0`, which is the case the UI
+ * most needs to show — so we test the type, never truthiness. error_state is
+ * surfaced only when it is a non-empty string.
+ */
+function extractHealth(obj: Record<string, unknown>): {
+  battery_normalised?: number;
+  error_state?: string;
+} {
+  const out: { battery_normalised?: number; error_state?: string } = {};
+  if (typeof obj.battery_normalised === 'number') {
+    out.battery_normalised = obj.battery_normalised;
+  }
+  if (typeof obj.error_state === 'string' && obj.error_state.length > 0) {
+    out.error_state = obj.error_state;
+  }
+  return out;
 }
 
 function extractEdge(obj: Record<string, unknown>): {

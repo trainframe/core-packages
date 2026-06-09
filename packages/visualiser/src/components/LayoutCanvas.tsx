@@ -9,7 +9,11 @@ import {
 import { type RegisteredDevices, useRegisteredDevices } from '../state/use-registered-devices.js';
 import { type TrainEdgeHistory, useTrainEdgeHistory } from '../state/use-train-edge-history.js';
 import { type TrainPositions, useTrainPositions } from '../state/use-train-positions.js';
-import { type TrainStatuses, useTrainStatuses } from '../state/use-train-statuses.js';
+import {
+  type TrainStatus,
+  type TrainStatuses,
+  useTrainStatuses,
+} from '../state/use-train-statuses.js';
 import { trainColor, trainHue } from '../train-color.js';
 
 interface Point {
@@ -892,6 +896,93 @@ function trainNoseAndLabel(
   ];
 }
 
+/**
+ * Battery charge at or below this fraction is treated as "low" and tinted
+ * accordingly. Purely a display threshold — no behaviour hangs off it.
+ */
+const LOW_BATTERY_THRESHOLD = 0.2;
+
+/** `data-*` attributes that surface a train's reported health to tests + tooling. */
+function healthDataAttrs(status: TrainStatus | undefined): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  if (status === undefined) return attrs;
+  /* Use `!== undefined` not truthiness: a reported 0 battery must surface. */
+  if (status.battery_normalised !== undefined) {
+    attrs['data-battery'] = String(status.battery_normalised);
+  }
+  if (status.error_state !== undefined) {
+    attrs['data-error-state'] = status.error_state;
+  }
+  return attrs;
+}
+
+/**
+ * Small SVG overlay rendered above the train icon: a battery gauge (when the
+ * train reports charge) and an error glyph (when it reports a fault). Returns
+ * an empty array when the train reports neither, so the common case is free.
+ */
+function healthIndicators(
+  status: TrainStatus | undefined,
+  x: number,
+  y: number,
+  f: number,
+): JSX.Element[] {
+  if (status === undefined) return [];
+  const out: JSX.Element[] = [];
+
+  const battery = status.battery_normalised;
+  if (battery !== undefined) {
+    const gaugeW = TRAIN_HALF_L * 2 * f;
+    const gaugeH = MARKER_RADIUS * 0.35 * f;
+    const gaugeX = x - gaugeW / 2;
+    const gaugeY = y + (TRAIN_HALF_L + MARKER_RADIUS * 0.5) * f;
+    const clamped = Math.min(1, Math.max(0, battery));
+    const low = clamped <= LOW_BATTERY_THRESHOLD;
+    const barFill = low ? 'hsl(0, 75%, 50%)' : 'hsl(125, 60%, 40%)';
+    out.push(
+      <rect
+        key="battery-frame"
+        x={gaugeX}
+        y={gaugeY}
+        width={gaugeW}
+        height={gaugeH}
+        fill="none"
+        stroke="hsl(0, 0%, 35%)"
+        strokeWidth={0.75 * f}
+        rx={1 * f}
+      />,
+      <rect
+        key="battery-fill"
+        x={gaugeX}
+        y={gaugeY}
+        width={gaugeW * clamped}
+        height={gaugeH}
+        fill={barFill}
+        rx={1 * f}
+      />,
+    );
+  }
+
+  if (status.error_state !== undefined) {
+    out.push(
+      <text
+        key="error-glyph"
+        x={x + TRAIN_HALF_L * f}
+        y={y - (TRAIN_HALF_L + MARKER_RADIUS * 0.5) * f}
+        textAnchor="start"
+        fontSize={13 * f}
+        fontFamily="sans-serif"
+        fontWeight="bold"
+        fill="hsl(0, 80%, 45%)"
+      >
+        {'⚠'}
+      </text>,
+    );
+  }
+
+  return out;
+}
+
 function renderTrains(
   trains: TrainPositions,
   statuses: TrainStatuses,
@@ -950,7 +1041,11 @@ function renderOneTrain(
   const fill = trainColor(trainId);
   /* Darker stroke: same hue but much lower lightness. */
   const hue = trainHue(trainId);
-  const stroke = `hsl(${hue}, 70%, 25%)`;
+  const status = statuses.get(trainId);
+  /* An errored train gets a red outline so the fault is visible at a glance. */
+  const stroke = status?.error_state !== undefined ? 'hsl(0, 80%, 40%)' : `hsl(${hue}, 70%, 25%)`;
+  const healthAttrs = healthDataAttrs(status);
+  const indicators = healthIndicators(status, x, y, f);
 
   /* Attempt a swept body when: length known, spatial scale available, and the
    * train is mid-edge (not snapped to a marker). */
@@ -981,6 +1076,7 @@ function renderOneTrain(
           {...(sweptBody.tailOnEdge !== undefined
             ? { 'data-tail-on-edge': sweptBody.tailOnEdge }
             : {})}
+          {...healthAttrs}
         >
           <path
             d={sweptBody.bodyPathD}
@@ -991,6 +1087,7 @@ function renderOneTrain(
             strokeLinejoin="round"
           />
           {...trainNoseAndLabel(trainId, x, y, angleDeg, fill, stroke, f)}
+          {...indicators}
         </g>
       );
     }
@@ -1002,6 +1099,7 @@ function renderOneTrain(
       data-train-id={trainId}
       {...(atMarker ? { 'data-at-marker': atMarker } : {})}
       {...(onEdge ? { 'data-on-edge': onEdge } : {})}
+      {...healthAttrs}
     >
       <path
         d={TRAIN_SHAPE_D}
@@ -1020,6 +1118,7 @@ function renderOneTrain(
       >
         {trainId}
       </text>
+      {...indicators}
     </g>
   );
 }
