@@ -288,7 +288,7 @@ body {
   transform: scale(1.1);
 }
 
-.tf-toybox__swatch[aria-pressed='true'] {
+.tf-toybox__swatch[aria-pressed="true"] {
   border-color: #5e4626;
   transform: scale(1.12);
 }

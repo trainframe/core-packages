@@ -333,9 +333,7 @@ describe('ToyTable — palette and placement', () => {
     await user.click(screen.getByTestId('toybox-carriage-color-purple'));
     await user.click(screen.getByTestId('toy-table-canvas'));
 
-    const placed = document.querySelector(
-      '[data-testid^="piece-carriage-"]',
-    ) as HTMLElement | null;
+    const placed = document.querySelector('[data-testid^="piece-carriage-"]') as HTMLElement | null;
     if (!placed) throw new Error('no carriage placed');
     // The carriage body path is filled with the purple livery, not the default
     // blue — the wagon carries its colour intrinsically so it stays trackable.
