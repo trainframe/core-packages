@@ -199,6 +199,30 @@ with **no occupied block behind the head** — i.e. a train holding only
 forward grant-ahead claims — and *those are exactly the candidates the forward
 yield (ADR-017 §3) already resolves*, because everything they hold is releasable.
 
+**A correction the implementation forced — length is part of the safety walk.**
+The totality argument above reasons about the HEAD's retreat path. But a
+length-aware train (ADR-012/016) is not a point: backing the head from its old
+position to X shifts the whole body back by the same distance, so the TAIL sweeps
+into the track *behind* X. That swept-behind region must be track the victim still
+provably HOLDS, exactly as the head's path must be — otherwise the reverse vacates
+the contested block while leaving the body physically occupying a section the
+scheduler no longer tracks as held (a peer could then be granted into it). The
+length-blind reverse target therefore had a latent occupancy gap for trains whose
+body extended past their retained tail. `computeReverseTarget` now closes it with
+a third condition mirroring ADR-016's conservative tail-release: after finding X
+it walks the retained held edges backward by `train_length_mm` over their
+`estimated_length_mm`, and only grants the reverse if that swept-behind region is
+fully covered by held, known-length track (`reverseBodyCoveredByHeldTail`). If the
+body would extend past tracked occupancy — into edges the victim does not hold, or
+whose length is unknown — the candidate is REFUSED (the same hold-don't-guess
+asymmetry: an over-long hold is safe, an under-tracked reverse is not). A point
+train (`length_mm` 0/undefined) is trivially covered, so the prior behaviour is
+unchanged. The totality result holds *within the length-coverable region*: every
+two-train standoff whose reverser has a body-covering retreat reverses; the only
+2-train case left to *report* is one where every candidate's body would sweep past
+its tracked tail (e.g. a train longer than its whole held approach), which is the
+conservative-refuse path, not an unsafe grant.
+
 So the two resolvers **partition** the cases: the forward yield handles every
 train whose blocking edge is a not-yet-entered claim; reverse authority handles
 every train whose blocking edge is its occupied head block. Together they resolve
@@ -254,8 +278,10 @@ the case ADR-017 could only *report* — is now *resolved*.
   common single-reverse case is what landed and is exercised end to end.
 - **Reverse over learned/inferred edges with unknown length.** The safety walk
   retreats over edges the victim holds; computing how far the *tail* extends
-  past X reuses ADR-016's conservative tail logic. Pathological topologies where
-  the tail length is unknown are held (not reversed), same asymmetry as ADR-016.
+  past X reuses ADR-016's conservative tail logic (`reverseBodyCoveredByHeldTail`,
+  added when the length gap was closed). An edge of unknown `estimated_length_mm`
+  in the swept-behind region stops the coverage walk → the body cannot be proven
+  tracked → the candidate is held (not reversed), the same asymmetry as ADR-016.
 - **Anti-starvation interaction.** Repeatedly choosing the lowest-ranked train
   to give ground could, under static priority, always pick the same victim. This
   is the same starvation trade-off ADR-017 accepted and deferred; unchanged here.

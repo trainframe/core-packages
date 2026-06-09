@@ -1438,10 +1438,76 @@ export class Scheduler {
         (held) => !released.some((r) => edgesEqual(r, held)),
       );
       if (!anyEdgeSharesMarker(remaining, peerWanted)) {
-        return { targetMarkerId: boundary, releasedEdges: released };
+        /* (c) LENGTH SAFETY (ADR-022 + ADR-012/016). Backing the HEAD from its old
+         * position to X shifts the whole body back by the same distance: the TAIL
+         * sweeps into the track BEHIND X. For a point train (length 0) the body is
+         * at X and nothing sweeps. For a length-aware train the body extends
+         * `length_mm` behind X and that swept region must be track the victim still
+         * provably HOLDS (so block exclusivity keeps it locked and no peer is
+         * granted into a block the reverser physically sits on). The scheduler only
+         * knows the occupancy it tracks in `cleared_edges`; if the body would reach
+         * past the retained tail into edges it does NOT hold (or whose length is
+         * unknown), the swept region cannot be proven clear+held, so this candidate
+         * is REFUSED — report, never force an unsafe reverse. Mirrors
+         * `collectTailReleases`' conservative backward length walk and its
+         * hold-don't-guess asymmetry. */
+        if (this.reverseBodyCoveredByHeldTail(victim, boundary, remaining)) {
+          return { targetMarkerId: boundary, releasedEdges: released };
+        }
+        /* The body sweeps past tracked occupancy at this X. A deeper X only puts
+         * the head further back and the tail further still — never better — so no
+         * safe target exists for this victim; refuse and let the caller try the
+         * next candidate. */
+        return undefined;
       }
     }
     return undefined;
+  }
+
+  /**
+   * Length-safety for a reverse to `targetMarkerId` (X). After the reverse the
+   * victim's head sits at X and its body extends `length_mm` BACK along the rail.
+   * That swept-behind region must lie entirely within edges the victim still HOLDS
+   * (`retainedEdges` — its tail), so block exclusivity protects it and no peer is
+   * granted into track the reverser physically occupies.
+   *
+   * Walk backward from X through the retained held edges, chaining `to_marker_id`
+   * links and summing `estimated_length_mm`, until the accumulated distance
+   * reaches `length_mm`. If at any step there is no retained held edge behind the
+   * current boundary, or its length is unknown, the body would extend into track
+   * the scheduler does not track as held / cannot measure → return false (refuse).
+   * A point train (`length_mm` 0/undefined) is trivially covered: nothing sweeps.
+   *
+   * Pure graph + occupancy query; no clock, no RNG. The visited-marker guard plus
+   * the retained-edge-count bound guarantee termination on cyclic topologies.
+   */
+  private reverseBodyCoveredByHeldTail(
+    victim: TrainState,
+    targetMarkerId: string,
+    retainedEdges: ReadonlyArray<EdgeRef>,
+  ): boolean {
+    const lengthMm = victim.length_mm ?? 0;
+    if (lengthMm <= 0) return true; // point train: body is at X, nothing sweeps behind.
+
+    let boundary = targetMarkerId;
+    let covered = 0;
+    const visited = new Set<string>([boundary]);
+    for (let step = 0; step < retainedEdges.length && covered < lengthMm; step++) {
+      const tailEdge = retainedEdges.find((e) => e.to_marker_id === boundary);
+      if (!tailEdge) return false; // body extends past held track — cannot prove occupancy.
+
+      const edgeLength = this.layout.findEdge(
+        tailEdge.from_marker_id,
+        tailEdge.to_marker_id,
+      )?.estimated_length_mm;
+      if (edgeLength === undefined) return false; // unknown length — never guess to grant.
+
+      covered += edgeLength;
+      if (visited.has(tailEdge.from_marker_id)) break; // ring of held edges; bounded above.
+      visited.add(tailEdge.from_marker_id);
+      boundary = tailEdge.from_marker_id;
+    }
+    return covered >= lengthMm;
   }
 
   /** True if any train OTHER than `trainId` holds an edge touching `marker`. */
