@@ -11,6 +11,24 @@ export interface TrainState {
   readonly train_id: string;
 
   /**
+   * Monotonic registration-sequence number, assigned by the scheduler the
+   * first time this train registers (ADR-017). The FIFO-by-arrival floor of
+   * the total order over trains: absent any announced priority, the train that
+   * has been in the system longest wins contended track. Deterministic by
+   * construction — a counter, no clock, no RNG. Lower wins.
+   */
+  readonly registration_seq: number;
+
+  /**
+   * Announced scheduling priority (ADR-017). Higher wins section contention.
+   * Resolved at registration to a concrete number (defaulting to 0 when the
+   * device omits the optional `priority` field), so the comparator never has
+   * to reason about `undefined` and the baseline — every train at 0 — is
+   * exactly the FIFO floor.
+   */
+  readonly priority: number;
+
+  /**
    * Operator-facing intent: an ordered list of stops the train cycles
    * through indefinitely. See ADR-010. `undefined` for trains that have
    * been registered but never given a schedule.
@@ -74,7 +92,13 @@ export interface TrainState {
   dwell_until?: number | undefined;
 }
 
-export const initialTrainState = (trainId: string): TrainState => ({
+export const initialTrainState = (
+  trainId: string,
+  registrationSeq: number,
+  priority = 0,
+): TrainState => ({
   train_id: trainId,
+  registration_seq: registrationSeq,
+  priority,
   cleared_edges: [],
 });

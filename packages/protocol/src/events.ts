@@ -31,6 +31,15 @@ const DeviceRegisteredPayload = Type.Object({
    * meaningful for devices declaring `core.controls_motion`.
    */
   train_length_mm: Type.Optional(Type.Number({ minimum: 0 })),
+  /**
+   * Announced scheduling priority for section contention (ADR-017). Higher
+   * wins when two trains contend for the same free section. OPTIONAL and
+   * additive: when omitted every train is equal-priority and the scheduler's
+   * FIFO-by-registration floor (then `train_id`) decides — the baseline is
+   * fully deterministic without this field. Only meaningful for devices
+   * declaring `core.controls_motion`.
+   */
+  priority: Type.Optional(Type.Number()),
 });
 
 export const DeviceRegistered = eventEnvelope('device_registered', DeviceRegisteredPayload);

@@ -12,5 +12,8 @@
  * 0.4.0 — devices retained state documents { capabilities, train_length_mm? }
  * (ADR-016); multi-edge tail-release in the scheduler (ADR-012 refinement).
  * Backward-compatible addition.
+ * 0.5.0 — optional `priority` on `device_registered` (ADR-017): the announced
+ * term of the scheduler's total order over trains for section contention.
+ * Backward-compatible addition; absent priority reproduces the FIFO floor.
  */
-export const PROTOCOL_VERSION = '0.4.0' as const;
+export const PROTOCOL_VERSION = '0.5.0' as const;

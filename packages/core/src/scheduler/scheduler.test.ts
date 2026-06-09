@@ -48,6 +48,13 @@ const registerTrain = (scheduler: Scheduler, trainId: string) =>
     payload: { capabilities: ['core.controls_motion', 'core.accepts_route'] },
   });
 
+const registerTrainWithPriority = (scheduler: Scheduler, trainId: string, priority: number) =>
+  scheduler.handleEvent({
+    event_type: 'device_registered',
+    device_id: trainId,
+    payload: { capabilities: ['core.controls_motion', 'core.accepts_route'], priority },
+  });
+
 const registerLongTrain = (scheduler: Scheduler, trainId: string, lengthMm: number) =>
   scheduler.handleEvent({
     event_type: 'device_registered',
@@ -2476,5 +2483,259 @@ describe('Scheduler — deterministic station dwell', () => {
     });
     // Pointer wrapped back to the first stop (index 0).
     expect(scheduler.getTrainState('T1')?.schedule?.current_stop_index).toBe(0);
+  });
+});
+
+/**
+ * ADR-017: the explicit, deterministic total order over trains
+ * (announced priority → registration-sequence → train_id) replacing the
+ * incidental Map-iteration tiebreak, and the deadlock yield that revokes the
+ * lowest-ranked train in a detected cycle so its peers proceed — but only
+ * while it can still yield (the honest limitation: a withhold cannot vacate a
+ * block a train already physically occupies).
+ */
+describe('Scheduler — conflict resolution policy (ADR-017)', () => {
+  /**
+   * Helper: spawn two trains both blocked at the M2 gate, both wanting M1→M2,
+   * then release the gate so a single ordered retry pass decides the winner.
+   * Returns the winner's id (the one granted M1→M2).
+   */
+  const contendForM2AndReturnWinner = (
+    setupOrder: ReadonlyArray<{ id: string; priority?: number }>,
+  ): string | undefined => {
+    const { scheduler } = setup();
+    for (const t of setupOrder) {
+      if (t.priority === undefined) registerTrain(scheduler, t.id);
+      else registerTrainWithPriority(scheduler, t.id, t.priority);
+    }
+    registerGate(scheduler, 'GATE-M2');
+    scheduler.handleEvent({
+      event_type: 'gate_state_changed',
+      device_id: 'GATE-M2',
+      payload: { marker_id: 'M2', state: 'withholding', reason: 'held for the test' },
+    });
+    // Both trains want M1→M2 as their first leg, gated at M2 → both denied.
+    for (const t of setupOrder) {
+      scheduler.assignSchedule(t.id, `r-${t.id}`, ['M1', 'M2']);
+      expect(scheduler.getTrainState(t.id)?.cleared_edges).toEqual([]);
+    }
+    // Release the gate: one retry pass, iterated in the total order, decides.
+    const release = scheduler.handleEvent({
+      event_type: 'gate_state_changed',
+      device_id: 'GATE-M2',
+      payload: { marker_id: 'M2', state: 'granting' },
+    });
+    const grant = release.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance',
+    );
+    return grant?.device_id;
+  };
+
+  it('FIFO floor: with no priority, the train registered first wins the contended section', () => {
+    // Equal priority → the registration-sequence floor decides. T-early
+    // registered before T-late, so T-early takes M1→M2; T-late waits.
+    const winner = contendForM2AndReturnWinner([{ id: 'T-early' }, { id: 'T-late' }]);
+    expect(winner).toBe('T-early');
+  });
+
+  it('announced priority overrides registration order (express beats the earlier freight)', () => {
+    // T-freight registers FIRST (lower seq) but T-express announces a higher
+    // priority and is registered SECOND. Priority is the first term of the
+    // order, so T-express wins despite arriving later — proving the policy
+    // fires and is not the old incidental Map/spawn order.
+    const winner = contendForM2AndReturnWinner([
+      { id: 'T-freight' },
+      { id: 'T-express', priority: 10 },
+    ]);
+    expect(winner).toBe('T-express');
+  });
+
+  /**
+   * Six-marker loop used to construct genuine waits-for cycles. The trains are
+   * length-aware so they hold their tail blocks across traversals (point trains
+   * would release behind them and dissolve the cycle), letting us position each
+   * train holding a chain of blocks while it waits at its head.
+   */
+  const LOOP6: Layout = {
+    name: 'loop6',
+    markers: [
+      { id: 'A', kind: 'block_boundary' },
+      { id: 'B', kind: 'block_boundary' },
+      { id: 'C', kind: 'block_boundary' },
+      { id: 'D', kind: 'block_boundary' },
+      { id: 'E', kind: 'block_boundary' },
+      { id: 'F', kind: 'block_boundary' },
+    ],
+    edges: [
+      { from_marker_id: 'A', to_marker_id: 'B', estimated_length_mm: 200 },
+      { from_marker_id: 'B', to_marker_id: 'C', estimated_length_mm: 200 },
+      { from_marker_id: 'C', to_marker_id: 'D', estimated_length_mm: 200 },
+      { from_marker_id: 'D', to_marker_id: 'E', estimated_length_mm: 200 },
+      { from_marker_id: 'E', to_marker_id: 'F', estimated_length_mm: 200 },
+      { from_marker_id: 'F', to_marker_id: 'A', estimated_length_mm: 200 },
+    ],
+    junctions: [],
+  };
+
+  const setupLoop6 = () => {
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const scheduler = new Scheduler(registry, new LayoutState(LOOP6, { now: () => 0 }), {
+      now: () => 0,
+    });
+    seedIdentityTags(scheduler, ['A', 'B', 'C', 'D', 'E', 'F']);
+    return scheduler;
+  };
+
+  it('yields the lowest-ranked train when its blocking edge is a deep tail, freeing its peer', () => {
+    // Fill the loop into a closed chase. T2 (registered second → lowest-ranked,
+    // the victim) holds {B->C, C->D} with its head at D and wants D->E. T1 holds
+    // {E->F, F->A} with its head at A and wants A->B. T1 is blocked by T2's DEEP
+    // tail B->C (to=C, not T2's occupied head block C->D); T2 is blocked by T1's
+    // deep tail E->F. Because the victim's blocking edge is a tail it has NOT
+    // entered, the yield can release it and the peer proceeds. (ADR-017 §3.)
+    const scheduler = setupLoop6();
+    registerLongTrain(scheduler, 'T1', 100);
+    registerLongTrain(scheduler, 'T2', 100);
+    const obs = (id: string, m: string) =>
+      scheduler.handleEvent({ event_type: 'tag_observed', device_id: id, payload: { tag_id: m } });
+
+    /* Pre-lock B (T2 holds B->C) so T1's horizon cannot grab A->B; assign T1,
+     * which then holds only E->F, F->A. Re-assigning T2 a full transit re-grabs
+     * B->C, C->D but is denied D->E (T1 locks E). */
+    scheduler.handleEvent({
+      event_type: 'clearance_request',
+      device_id: 'T2',
+      payload: { train_id: 'T2', next_edge: { from_marker_id: 'B', to_marker_id: 'C' } },
+    });
+    scheduler.assignSchedule('T1', 'r1', ['E', 'B']);
+    scheduler.assignSchedule('T2', 'r2', ['B', 'E']);
+    obs('T2', 'C');
+    obs('T2', 'D'); // T2 head at D, holds {B->C, C->D}, wants D->E
+    obs('T1', 'F');
+    const resolved = obs('T1', 'A'); // T1 head at A, holds {E->F, F->A}, wants A->B
+
+    // The victim (T2) is revoked with the deadlock-yield reason...
+    const revoke = resolved.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'revoke_clearance' && e.device_id === 'T2',
+    );
+    expect(revoke).toBeDefined();
+    expect((revoke?.payload as { reason: string }).reason).toBe('deadlock_yield');
+    // ...and the winner (T1) is granted the contested A->B in the same pass.
+    const grant = resolved.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T1',
+    );
+    expect(grant).toBeDefined();
+    expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('B');
+    // The cycle is broken: T1 now holds A->B; T2 released its B->C claim.
+    expect(scheduler.getTrainState('T1')?.cleared_edges).toContainEqual({
+      from_marker_id: 'A',
+      to_marker_id: 'B',
+    });
+    expect(scheduler.getTrainState('T2')?.cleared_edges).not.toContainEqual({
+      from_marker_id: 'B',
+      to_marker_id: 'C',
+    });
+  });
+
+  it('does NOT yield a closed standoff (victim occupies the contested block) and keeps reporting it', () => {
+    /* The honest limitation (ADR-017 load-bearing constraint): a withhold cannot
+     * vacate a block a train is physically IN. A single-track corridor between
+     * two loops, two trains nose-to-nose at the mouths:
+     *   L1-L2-S1-SM-S2-R1-R2 with a return rail S2->SM->S1.
+     * T1 occupies S1->SM (head at SM) and wants SM->S2. T2 occupies R2->S2 (head
+     * at S2) and wants S2->SM. Each is blocked by the OTHER's occupied head
+     * block, which it cannot release — so the yield must NOT fire and the
+     * deadlock must stay published. */
+    const CORRIDOR: Layout = {
+      name: 'corridor',
+      markers: [
+        { id: 'L1', kind: 'block_boundary' },
+        { id: 'L2', kind: 'block_boundary' },
+        { id: 'S1', kind: 'block_boundary' },
+        { id: 'SM', kind: 'block_boundary' },
+        { id: 'S2', kind: 'block_boundary' },
+        { id: 'R1', kind: 'block_boundary' },
+        { id: 'R2', kind: 'block_boundary' },
+      ],
+      edges: [
+        { from_marker_id: 'L1', to_marker_id: 'L2', estimated_length_mm: 200 },
+        { from_marker_id: 'L2', to_marker_id: 'S1', estimated_length_mm: 200 },
+        { from_marker_id: 'S1', to_marker_id: 'SM', estimated_length_mm: 200 },
+        { from_marker_id: 'SM', to_marker_id: 'S2', estimated_length_mm: 200 },
+        { from_marker_id: 'S2', to_marker_id: 'R1', estimated_length_mm: 200 },
+        { from_marker_id: 'R1', to_marker_id: 'R2', estimated_length_mm: 200 },
+        { from_marker_id: 'R2', to_marker_id: 'S2', estimated_length_mm: 200 },
+        { from_marker_id: 'S2', to_marker_id: 'SM', estimated_length_mm: 200 },
+        { from_marker_id: 'SM', to_marker_id: 'S1', estimated_length_mm: 200 },
+        { from_marker_id: 'S1', to_marker_id: 'L1', estimated_length_mm: 200 },
+      ],
+      junctions: [],
+    };
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const scheduler = new Scheduler(registry, new LayoutState(CORRIDOR, { now: () => 0 }), {
+      now: () => 0,
+    });
+    seedIdentityTags(scheduler, ['L1', 'L2', 'S1', 'SM', 'S2', 'R1', 'R2']);
+    registerLongTrain(scheduler, 'T1', 100);
+    registerLongTrain(scheduler, 'T2', 100);
+    scheduler.assignSchedule('T1', 'r1', ['L1', 'R1']); // L->R across the single track
+    scheduler.assignSchedule('T2', 'r2', ['R1', 'L1']); // R->L across the single track
+
+    const deadlockSnapshots: ReadonlyArray<string>[] = [];
+    const obs = (id: string, m: string) => {
+      const r = scheduler.handleEvent({
+        event_type: 'tag_observed',
+        device_id: id,
+        payload: { tag_id: m },
+      });
+      for (const e of r) {
+        if (e.kind === 'update_state_snapshot' && e.entity_type === 'deadlock') {
+          deadlockSnapshots.push((e.state as { trains: ReadonlyArray<string> }).trains);
+        }
+      }
+      return r;
+    };
+    obs('T2', 'R2');
+    obs('T2', 'S2'); // T2 occupies head block R2->S2, wants S2->SM
+    obs('T1', 'L2');
+    obs('T1', 'S1');
+    const last = obs('T1', 'SM'); // T1 occupies head block S1->SM, wants SM->S2
+
+    // No yield: neither train is revoked, because each blocking edge is the
+    // other's occupied head block, which a withhold cannot vacate.
+    const revoke = last.find(
+      (e) => e.kind === 'send_command' && e.command_type === 'revoke_clearance',
+    );
+    expect(revoke).toBeUndefined();
+    // The deadlock is detected and reported with both trains — detection stays
+    // honest where resolution cannot reach.
+    expect(deadlockSnapshots).toContainEqual(['T1', 'T2']);
+    // Both trains still hold their blocks — the standoff persists.
+    expect(scheduler.getTrainState('T1')?.cleared_edges).toContainEqual({
+      from_marker_id: 'S1',
+      to_marker_id: 'SM',
+    });
+    expect(scheduler.getTrainState('T2')?.cleared_edges).toContainEqual({
+      from_marker_id: 'R2',
+      to_marker_id: 'S2',
+    });
+  });
+
+  it('is deterministic: the same registration order yields the same winner every run', () => {
+    const results = new Set<string | undefined>();
+    for (let run = 0; run < 5; run++) {
+      results.add(contendForM2AndReturnWinner([{ id: 'T-late' }, { id: 'T-early' }]));
+    }
+    // T-late registered first here, so it wins by the FIFO floor — the same
+    // every run. The set collapses to one value: the order is reproducible.
+    expect(results.size).toBe(1);
+    expect([...results][0]).toBe('T-late');
   });
 });

@@ -115,6 +115,14 @@ export class Scheduler {
    * the switch is mid-move. Synced to reality on confirmed `switch_state_changed`.
    */
   private readonly requestedSwitchPositions = new Map<string, string>();
+  /**
+   * Monotonic counter handed to each train the first time it registers, the
+   * source of the FIFO-by-arrival floor in the total order over trains
+   * (ADR-017). Increments per fresh registration; re-registration of an
+   * already-known train does NOT consume a number, so arrival order is stable
+   * across reconnects. Deterministic by construction — no clock, no RNG.
+   */
+  private nextRegistrationSeq = 0;
   private readonly now: () => number;
 
   constructor(
@@ -230,7 +238,11 @@ export class Scheduler {
    */
   private initTrainState(deviceId: string, payload: unknown): void {
     if (!this.trains.has(deviceId)) {
-      this.trains.set(deviceId, initialTrainState(deviceId));
+      /* Assign the registration-sequence number only on FIRST registration, so
+       * a reconnecting train keeps its place in the arrival order. The optional
+       * announced priority is resolved to a concrete number here (default 0). */
+      const priority = (payload as { priority?: number }).priority ?? 0;
+      this.trains.set(deviceId, initialTrainState(deviceId, this.nextRegistrationSeq++, priority));
     }
     const trainLengthMm = (payload as { train_length_mm?: number }).train_length_mm;
     if (trainLengthMm !== undefined && trainLengthMm > 0) {
@@ -986,37 +998,80 @@ export class Scheduler {
     skipTrainIds?: ReadonlySet<string>,
   ): ReadonlyArray<SchedulerEffect> {
     const out: SchedulerEffect[] = [];
-    for (const train of this.trains.values()) {
+    /* Iterate in the explicit total order (ADR-017 §2), NOT Map-insertion
+     * order. When several trains contend for one free section in this pass the
+     * highest-ranked reaches `tryGrantClearance` first and takes it; ADR-011's
+     * conflict check then denies the rest. The grant mechanism is unchanged —
+     * only the order of consideration is now a named policy. */
+    for (const train of this.orderedTrains()) {
       if (skipTrainIds?.has(train.train_id)) continue;
       // Re-run the full horizon walk per train, not just the single next edge:
       // an unblocked train should fill its whole look-ahead in one retry pass,
       // not creep forward one edge per unrelated event.
       out.push(...this.extendClearanceHorizon(train));
     }
-    out.push(...this.maybeEmitDeadlockState());
+    out.push(...this.resolveDeadlockOrEmitState(skipTrainIds));
     return out;
   }
 
   /**
-   * Run a waits-for cycle detection over the trains that currently have a
-   * next-edge they want but haven't been granted. A cycle means two or more
-   * trains are mutually blocking each other under the section-pair rule
-   * (ADR-011): T1 holds an edge that shares a marker with T2's wanted edge,
-   * and T2 holds an edge sharing a marker with T1's wanted edge.
+   * The explicit total order over trains (ADR-017 §1), applied uniformly in
+   * the grant path and to deadlock victim selection. A pure, total comparison:
    *
-   * We don't try to *resolve* the deadlock — the topology change that fixes
-   * it (more markers, an actual passing siding) is an authoring decision.
-   * We just surface the state so the operator sees it on the visualiser.
+   *   1. announced priority, higher first;
+   *   2. registration-sequence number, lower first (the FIFO-by-arrival floor);
+   *   3. `train_id`, lexicographic (final stable tiebreak — total even for two
+   *      trains registered in the same event batch).
    *
-   * Emits an `update_state_snapshot` on `railway/state/deadlock/active`
-   * carrying the sorted list of train IDs in the cycle. When the deadlock
-   * resolves (any train moves and the cycle disappears), publishes an empty
-   * list so the banner clears. Only publishes when the set changes —
-   * `retryBlockedClearances` is called from many event handlers and we don't
-   * want to thrash the topic.
+   * No wall clock, no RNG, no VirtualClock read: a deterministic function of
+   * state the scheduler already holds, so the same event stream produces the
+   * same grants every run. This makes the previously-accidental Map-iteration
+   * tiebreak intentional.
    */
-  private maybeEmitDeadlockState(): ReadonlyArray<SchedulerEffect> {
+  private orderedTrains(): ReadonlyArray<TrainState> {
+    return [...this.trains.values()].sort(compareTrains);
+  }
+
+  /**
+   * Detect a waits-for cycle and, if one exists, try to resolve it by yielding
+   * the lowest-ranked train in the cycle (ADR-017 §3) before publishing the
+   * deadlock state.
+   *
+   * Resolution stays entirely within the clearance model. The victim — the
+   * lowest-ranked train in the cycle under the same total order (§1) — has the
+   * held edge that blocks its higher-ranked cycle peer RELEASED, and the victim
+   * is added to the retry skip set so it cannot immediately re-grab the block
+   * it was just told to release (the same mechanism `revokeClearance` uses).
+   * The higher-ranked peers then proceed and the cycle breaks. The yield runs
+   * ONCE per pass and re-runs only the per-train grant loop (victim skipped),
+   * never re-entering detection, so this cannot recurse.
+   *
+   * Load-bearing honesty (ADR-017): a yield only unwinds the deadlock if the
+   * victim has NOT physically entered the contested block — it is still waiting
+   * at a boundary it merely holds (the passing-loop case). If the victim is
+   * already stopped INSIDE the section the winner needs (a nose-to-nose
+   * standoff), withholding changes nothing and there is no held edge to release
+   * that would free the winner; we do NOT yield, and the deadlock state is
+   * published unchanged. Detection stays honest where resolution cannot reach.
+   */
+  private resolveDeadlockOrEmitState(
+    skipTrainIds?: ReadonlySet<string>,
+  ): ReadonlyArray<SchedulerEffect> {
     const cycle = this.detectWaitsForCycle();
+    if (cycle && skipTrainIds === undefined) {
+      const resolution = this.tryYieldLowestRanked(cycle);
+      if (resolution) return resolution;
+    }
+    return this.emitDeadlockState(cycle);
+  }
+
+  /**
+   * Publish the `railway/state/deadlock/active` retained snapshot, but only
+   * when the deadlock set actually changes — `retryBlockedClearances` fires
+   * from many handlers and we don't want to thrash the topic. An empty list
+   * clears the banner once the cycle is gone.
+   */
+  private emitDeadlockState(cycle: ReadonlyArray<string> | null): ReadonlyArray<SchedulerEffect> {
     const sorted = cycle ? [...cycle].sort() : [];
     if (
       sorted.length === this.currentDeadlock.length &&
@@ -1026,6 +1081,110 @@ export class Scheduler {
     }
     this.currentDeadlock = sorted;
     return [effects.updateState('deadlock', 'active', { trains: sorted })];
+  }
+
+  /**
+   * Pick the lowest-ranked train in the cycle and, if it can still yield,
+   * release the held edge that is blocking its higher-ranked peer, then re-run
+   * the grant loop with the victim skipped so the peer takes the freed block.
+   * Returns the resolving effects, or `null` if no yield is possible (the
+   * nose-to-nose case) — in which case the caller publishes the deadlock state
+   * unchanged.
+   */
+  private tryYieldLowestRanked(
+    cycle: ReadonlyArray<string>,
+  ): ReadonlyArray<SchedulerEffect> | null {
+    const victim = this.lowestRankedInCycle(cycle);
+    if (!victim) return null;
+
+    /* The peer the victim blocks: the next train round the cycle, which wants
+     * an edge the victim currently holds. Find the victim's held edges that
+     * share a marker with that peer's wanted edge — those are what to release.
+     * If the victim has nothing held to release for the peer (it is occupying,
+     * not merely holding-ahead, the contested block) the yield cannot help. */
+    const peerWanted = this.peerWantedEdgeBlockedByVictim(cycle, victim);
+    if (!peerWanted) return null;
+
+    /* The block the victim physically OCCUPIES is the held edge whose
+     * `to_marker_id` is the victim's last reported marker — its head sits at
+     * that marker, tail trailing back along that edge. (NOT `current_edge`,
+     * which is the NEXT, not-yet-entered edge at `progress_index` — for a
+     * waiting train that edge is by definition ungranted, so guarding it is a
+     * no-op.) The occupied block cannot be vacated by a withhold: the train is
+     * sitting on it and our model has no reverse authority to back it out
+     * (ADR-017 load-bearing constraint). Everything ELSE the victim holds
+     * (deeper tail blocks, grant-ahead claims) is clearance it can release. */
+    const occupiedMarker = victim.last_marker_id;
+    const releasable = victim.cleared_edges.filter(
+      (held) => edgeSharesMarker(held, peerWanted) && held.to_marker_id !== occupiedMarker,
+    );
+    if (releasable.length === 0) return null;
+
+    /* Honesty guard (ADR-017): only yield if releasing those blocks would
+     * ACTUALLY free the peer. If, after releasing every block it legally can,
+     * the victim's REMAINING held edges (its occupied head block) still share a
+     * marker with the peer's wanted edge, the peer stays blocked — this is the
+     * physically-closed standoff the clearance model cannot cure. Don't issue a
+     * useless revoke that would falsely look "resolved"; report the deadlock. */
+    const remainingAfterYield = victim.cleared_edges.filter(
+      (held) => !releasable.some((r) => edgesEqual(r, held)),
+    );
+    if (anyEdgeSharesMarker(remainingAfterYield, peerWanted)) return null;
+
+    victim.cleared_edges = remainingAfterYield;
+    if (victim.last_marker_id !== undefined) {
+      victim.clearance_limit_marker_id = victim.last_marker_id;
+    }
+
+    const out: SchedulerEffect[] = [
+      effects.sendCommand(victim.train_id, 'revoke_clearance', {
+        reason: 'deadlock_yield',
+        immediate: true,
+      }),
+      this.clearanceStateEffect(victim),
+    ];
+    /* Re-run the grant loop with the victim skipped so it cannot re-grab the
+     * block it just yielded, letting the higher-ranked peers proceed. This
+     * recurses into retryBlockedClearances exactly once with a non-undefined
+     * skip set, so the yield branch is not re-entered. */
+    out.push(...this.retryBlockedClearances(new Set([victim.train_id])));
+    return out;
+  }
+
+  /** The lowest-ranked train in the cycle under the total order (§1). */
+  private lowestRankedInCycle(cycle: ReadonlyArray<string>): TrainState | undefined {
+    let worst: TrainState | undefined;
+    for (const id of cycle) {
+      const train = this.trains.get(id);
+      if (!train) continue;
+      if (!worst || compareTrains(worst, train) < 0) worst = train;
+    }
+    return worst;
+  }
+
+  /**
+   * The wanted edge of the cycle peer immediately downstream of the victim —
+   * i.e. the train the victim is blocking. In the waits-for cycle order, the
+   * train BEFORE the victim waits-for the victim; that predecessor's wanted
+   * edge is what the victim's held block denies. Returns `undefined` if no such
+   * peer/edge can be resolved.
+   */
+  private peerWantedEdgeBlockedByVictim(
+    cycle: ReadonlyArray<string>,
+    victim: TrainState,
+  ): EdgeRef | undefined {
+    const waiting = this.collectWaitingTrains();
+    const victimIndex = cycle.indexOf(victim.train_id);
+    if (victimIndex === -1) return undefined;
+    /* Whoever in the cycle waits-for the victim: scan all cycle members for one
+     * whose wanted edge shares a marker with an edge the victim holds. */
+    for (const id of cycle) {
+      if (id === victim.train_id) continue;
+      const wanted = waiting.get(id);
+      if (!wanted) continue;
+      if (anyEdgeSharesMarker(victim.cleared_edges, wanted)) return wanted;
+    }
+    return undefined;
   }
 
   /**
@@ -1362,16 +1521,34 @@ function isMarkerKind(value: unknown): value is MarkerKind {
 
 function anyEdgeSharesMarker(held: ReadonlyArray<EdgeRef>, wanted: EdgeRef): boolean {
   for (const e of held) {
-    if (
-      e.from_marker_id === wanted.from_marker_id ||
-      e.from_marker_id === wanted.to_marker_id ||
-      e.to_marker_id === wanted.from_marker_id ||
-      e.to_marker_id === wanted.to_marker_id
-    ) {
-      return true;
-    }
+    if (edgeSharesMarker(e, wanted)) return true;
   }
   return false;
+}
+
+/** Two sections conflict when they share either boundary marker (ADR-011). */
+function edgeSharesMarker(a: EdgeRef, b: EdgeRef): boolean {
+  return (
+    a.from_marker_id === b.from_marker_id ||
+    a.from_marker_id === b.to_marker_id ||
+    a.to_marker_id === b.from_marker_id ||
+    a.to_marker_id === b.to_marker_id
+  );
+}
+
+/**
+ * The total order over trains for section contention and deadlock victim
+ * selection (ADR-017 §1). Pure and total: announced priority desc, then
+ * registration-sequence asc (FIFO floor), then `train_id` lexicographic.
+ * Negative when `a` ranks ahead of (is preferred over) `b`. No clock, no RNG —
+ * deterministic given the event stream.
+ */
+function compareTrains(a: TrainState, b: TrainState): number {
+  if (a.priority !== b.priority) return b.priority - a.priority;
+  if (a.registration_seq !== b.registration_seq) {
+    return a.registration_seq - b.registration_seq;
+  }
+  return a.train_id < b.train_id ? -1 : a.train_id > b.train_id ? 1 : 0;
 }
 
 /**
