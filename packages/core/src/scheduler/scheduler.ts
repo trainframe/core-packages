@@ -30,8 +30,46 @@ export const STATION_DWELL_MS = 2500;
  * longer look-ahead can never flip points out from under a peer that already
  * holds a junction. If a future topology deadlocks under N=3, lower it — it is a
  * tuning floor, not a contract.
+ *
+ * This is the FLOOR of the horizon. When learned per-edge traversal times are
+ * available (`LayoutState.getLearnedTraversalMs`), the horizon grows ABOVE this
+ * floor so that the cleared-ahead edges cover at least `CLEARANCE_LEAD_TIME_MS`
+ * of learned transit (see `extendClearanceHorizon`) — never shrinking below the
+ * floor, never exceeding `CLEARANCE_HORIZON_MAX_EDGES`.
  */
 export const CLEARANCE_HORIZON_EDGES = 3;
+
+/**
+ * Target LEAD TIME, in milliseconds, the clearance horizon aims to keep granted
+ * ahead of a moving train once learned per-edge traversal times exist. The
+ * horizon walks forward granting edges until the cumulative learned traversal
+ * time of the cleared-ahead edges meets this target (or the edge-count
+ * `CLEARANCE_HORIZON_MAX_EDGES` ceiling is hit).
+ *
+ * Why time, not edge count: a fixed edge count gives wildly different lead
+ * *time* on a layout of mixed edge speeds. A handful of short/fast edges may be
+ * a second of warning; the same count of long/slow edges may be many. Pinning
+ * the horizon to a lead TIME makes the train carry a consistent reaction buffer
+ * regardless of the physical block sizes — fast/short edges pull MORE blocks of
+ * clearance forward (so the train still has the same seconds of room), and the
+ * train learns to clear earlier on the parts of the layout that historically
+ * move quickly. The slow/long edges that prompted this feature already carry
+ * enough lead time in a single block, so the horizon does not over-extend there.
+ *
+ * Set to 6000 ms: comfortably above the simulator's per-edge transit on the demo
+ * loops at the floor of 3 edges (so short layouts behave exactly as before until
+ * learning kicks in), while bounded by the edge ceiling so it can never
+ * over-lock.
+ */
+export const CLEARANCE_LEAD_TIME_MS = 6_000;
+
+/**
+ * Hard ceiling on the clearance horizon, in edges. The time-aware horizon
+ * (`CLEARANCE_LEAD_TIME_MS`) can pull more than `CLEARANCE_HORIZON_EDGES` blocks
+ * forward on fast/short edges, but never more than this — a longer look-ahead
+ * risks over-locking a small loop (the same concern that fixes the floor at 3).
+ */
+export const CLEARANCE_HORIZON_MAX_EDGES = 6;
 
 export interface SchedulerOptions {
   /**
@@ -482,15 +520,33 @@ export class Scheduler {
   }
 
   /**
-   * Grant clearance PROACTIVELY to a horizon of `CLEARANCE_HORIZON_EDGES` edges
-   * ahead of the edge the train is currently on. Walks forward from
-   * `transit.progress_index`, granting any edge not yet held, until either the
-   * horizon is full or an edge can't be granted.
+   * Grant clearance PROACTIVELY ahead of the edge the train is currently on.
+   * Walks forward from `transit.progress_index`, granting any edge not yet
+   * held, until the horizon is satisfied or an edge can't be granted.
+   *
+   * The horizon is LEARNED-TIME-AWARE. The naive model held a fixed
+   * `CLEARANCE_HORIZON_EDGES` blocks regardless of how long each block takes to
+   * traverse, which gives inconsistent lead *time* across a layout of mixed edge
+   * speeds. Here, once `LayoutState.getLearnedTraversalMs` has accumulated a
+   * per-edge EWMA, we keep granting until the cleared-ahead edges cover at least
+   * `CLEARANCE_LEAD_TIME_MS` of learned transit — clamped to never grant fewer
+   * than `CLEARANCE_HORIZON_EDGES` (the floor that the existing braking-distance
+   * behaviour depends on) nor more than `CLEARANCE_HORIZON_MAX_EDGES` (the
+   * over-lock ceiling). See `horizonSatisfied`.
+   *
+   * Net effect: on a stretch the train has learned to cross quickly, the horizon
+   * pulls more blocks forward so the train still carries the same seconds of
+   * room and starts clearing earlier; on a long/slow edge a single block already
+   * covers the lead time, so the horizon stays at the floor. Edges with NO
+   * learned time yet are treated as covering the full lead time (a conservative
+   * default — we never speculatively over-extend into territory whose transit we
+   * have not measured), so an un-learned layout behaves exactly like the old
+   * fixed-floor horizon until trains have actually run and learned the timings.
    *
    * Counting rule: edges already in `cleared_edges` count toward the horizon
    * (they're clearance the train still holds ahead of it) but are skipped, not
-   * re-granted. We stop as soon as the count of cleared-ahead edges reaches the
-   * horizon.
+   * re-granted, and their learned time still accumulates toward the lead-time
+   * target.
    *
    * STOP-ON-GAP (load-bearing): if `tryGrantClearance` returns no grant for an
    * edge — a peer-held conflict (ADR-011), a gate denial, or a switch that must
@@ -505,16 +561,27 @@ export class Scheduler {
     if (!train.transit) return [];
     const out: SchedulerEffect[] = [];
     let granted = 0;
+    let accumulatedMs = 0;
     for (
       let i = train.transit.progress_index;
-      i < train.transit.edges.length && granted < CLEARANCE_HORIZON_EDGES;
+      i < train.transit.edges.length && !this.horizonSatisfied(granted, accumulatedMs);
       i++
     ) {
       const edge = train.transit.edges[i];
       if (!edge) break;
+      /* Unknown traversal time → treat the edge as covering the FULL lead time.
+       * The horizon then only extends past the floor when learned-fast edges
+       * keep the running total below the target; an un-measured edge is assumed
+       * to carry enough lead time on its own, so we never over-extend into
+       * territory we have not learned. */
+      const learnedMs =
+        this.layout.getLearnedTraversalMs(edge.from_marker_id, edge.to_marker_id, train.train_id) ??
+        CLEARANCE_LEAD_TIME_MS;
       if (train.cleared_edges.some((e) => edgesEqual(e, edge))) {
-        // Already held — counts toward the horizon, no re-grant.
+        // Already held — counts toward the horizon (count and learned time), no
+        // re-grant.
         granted++;
+        accumulatedMs += learnedMs;
         continue;
       }
       const effects = this.tryGrantClearance(train, edge);
@@ -526,8 +593,33 @@ export class Scheduler {
         break;
       }
       granted++;
+      accumulatedMs += learnedMs;
     }
     return out;
+  }
+
+  /**
+   * Has the clearance horizon been satisfied after granting `granted` edges
+   * ahead, covering `accumulatedMs` of learned transit?
+   *
+   * Floor: never satisfied below `CLEARANCE_HORIZON_EDGES` edges — the existing
+   * braking-distance behaviour relies on always carrying at least that many
+   * blocks. On a cold layout every edge is un-learned and so counted at the full
+   * `CLEARANCE_LEAD_TIME_MS` (see `extendClearanceHorizon`), so the lead-time
+   * target is met the moment the floor is reached and the horizon stops exactly
+   * there — identical to the old fixed-count behaviour.
+   *
+   * Ceiling: always satisfied at `CLEARANCE_HORIZON_MAX_EDGES` edges, regardless
+   * of accumulated time — the over-lock guard.
+   *
+   * Between floor and ceiling: satisfied once the learned lead time meets
+   * `CLEARANCE_LEAD_TIME_MS`. A fast/short stretch (small per-edge ms) keeps
+   * pulling blocks forward until the seconds-of-room target is met.
+   */
+  private horizonSatisfied(granted: number, accumulatedMs: number): boolean {
+    if (granted < CLEARANCE_HORIZON_EDGES) return false;
+    if (granted >= CLEARANCE_HORIZON_MAX_EDGES) return true;
+    return accumulatedMs >= CLEARANCE_LEAD_TIME_MS;
   }
 
   // ---------- clearance request handling ----------

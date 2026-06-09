@@ -219,6 +219,128 @@ describe('Scheduler — route assignment and clearance extension', () => {
   });
 });
 
+describe('Scheduler — learned-time-aware clearance horizon', () => {
+  /**
+   * Drive the scheduler with a MUTABLE clock so learned per-edge traversal
+   * times accrue, and prove the horizon reads them (`getLearnedTraversalMs`)
+   * to extend past the 3-edge floor on a loop the train has learned to cross
+   * quickly. Mirrors the simulator behaviour gate but as a deterministic,
+   * clock-controlled core unit test.
+   */
+  const setupLearningSixLoop = () => {
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    /* Shared mutable clock: both LayoutState (for traversal-time deltas) and the
+     * scheduler read the same `now`. Each marker crossing advances it by a small
+     * amount, teaching short/fast edges. */
+    const clock = { ms: 0 };
+    const now = () => clock.ms;
+    const layout = new LayoutState(SIX_LOOP, { now });
+    const scheduler = new Scheduler(registry, layout, { now });
+    seedIdentityTags(scheduler, ['N1', 'N2', 'N3', 'N4', 'N5', 'N6']);
+    const cross = (markerId: string, stepMs: number): void => {
+      clock.ms += stepMs;
+      scheduler.handleEvent({
+        event_type: 'tag_observed',
+        device_id: 'T1',
+        payload: { tag_id: markerId },
+      });
+    };
+    return { scheduler, layout, cross };
+  };
+
+  it('holds the 3-edge floor before any time is learned', () => {
+    const { scheduler } = setupLearningSixLoop();
+    registerTrain(scheduler, 'T1');
+    // Cold layout, no learned times: the horizon must sit at exactly the floor.
+    scheduler.assignSchedule('T1', 'route-1', ['N1', 'N6']);
+    expect(scheduler.getTrainState('T1')?.cleared_edges).toHaveLength(3);
+  });
+
+  it('extends past the floor once short/fast edge times are learned', () => {
+    const { scheduler, layout, cross } = setupLearningSixLoop();
+    registerTrain(scheduler, 'T1');
+    // Give it a schedule so it has a transit to walk, then drive it around the
+    // ring teaching short/fast (1000 ms) edge times. Cross every marker so every
+    // one of the six edges gets an EWMA, advancing the clock 1000 ms per edge —
+    // well below the 6000 ms lead-time target.
+    scheduler.assignSchedule('T1', 'route-1', ['N1', 'N6']);
+    const ring = ['N1', 'N2', 'N3', 'N4', 'N5', 'N6'];
+    for (let lap = 0; lap < 2; lap++) {
+      for (const marker of ring) cross(marker, 1_000);
+    }
+
+    // The scheduler has learned ~1000 ms per edge.
+    expect(layout.getLearnedTraversalMs('N2', 'N3', 'T1')).toBeLessThan(2_000);
+
+    /* Re-assign a fresh schedule. The initial proactive horizon now reads the
+     * learned times: at ~1000 ms/edge it must pull more than the cold 3-edge
+     * floor forward to reach the 6000 ms lead time (capped by the five-edge leg
+     * and the six-edge ceiling). The cold case in the previous test held exactly
+     * three under the identical assignment — the only difference is the learned
+     * timings. */
+    /* The train is now at N6 (last marker crossed). Plan a leg that runs the
+     * long way round the ring (N6 → N1 → … → N5, five edges) so the horizon,
+     * not the leg length, is what limits clearance. */
+    scheduler.assignSchedule('T1', 'route-2', ['N6', 'N5']);
+    const cleared = scheduler.getTrainState('T1')?.cleared_edges.length ?? 0;
+    expect(cleared).toBeGreaterThan(3);
+  });
+
+  /**
+   * An eight-marker loop, so a single leg can be SEVEN edges long — longer than
+   * the six-edge horizon ceiling. Lets us prove the ceiling caps the horizon
+   * even when very-fast learned edges would otherwise pull more forward.
+   */
+  const EIGHT_LOOP: Layout = {
+    name: 'eight-loop',
+    markers: Array.from({ length: 8 }, (_, i) => ({
+      id: `E${i + 1}`,
+      kind: 'block_boundary' as const,
+    })),
+    edges: Array.from({ length: 8 }, (_, i) => ({
+      from_marker_id: `E${i + 1}`,
+      to_marker_id: `E${((i + 1) % 8) + 1}`,
+      estimated_length_mm: 100,
+    })),
+    junctions: [],
+  };
+
+  it('caps the grown horizon at the over-lock ceiling on a very fast, long leg', () => {
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const clock = { ms: 0 };
+    const now = () => clock.ms;
+    const layout = new LayoutState(EIGHT_LOOP, { now });
+    const scheduler = new Scheduler(registry, layout, { now });
+    const ring = ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7', 'E8'];
+    seedIdentityTags(scheduler, ring);
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-1', ['E1', 'E8']);
+
+    /* Teach VERY fast edges (500 ms each). At 500 ms/edge the 6000 ms lead time
+     * would want twelve edges — but the six-edge ceiling must clamp it. Two laps
+     * populate every edge's EWMA. */
+    for (let lap = 0; lap < 2; lap++) {
+      for (const marker of ring) {
+        clock.ms += 500;
+        scheduler.handleEvent({
+          event_type: 'tag_observed',
+          device_id: 'T1',
+          payload: { tag_id: marker },
+        });
+      }
+    }
+
+    /* Re-assign a seven-edge leg (E8 → E7 the long way round) so neither the leg
+     * length nor the lead-time target binds first — only the ceiling. */
+    scheduler.assignSchedule('T1', 'route-2', ['E8', 'E7']);
+    expect(scheduler.getTrainState('T1')?.cleared_edges).toHaveLength(6);
+  });
+});
+
 describe('Scheduler — section-as-edge-plus-boundary-markers (ADR-011)', () => {
   it('blocks a chaser at the leader`s lock-set boundary on a single loop', () => {
     // Same loop, both trains. T1 spawned at M1 heading to M3; T2 at M1 also
