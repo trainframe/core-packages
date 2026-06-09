@@ -10,6 +10,17 @@ interface RailyardEvent {
 const SWAP_PAIR_SIZE = 2;
 
 /**
+ * Ticks a train must sit parked at the throat before the yard services it. The
+ * train parks physically the instant it reaches the throat, but the scheduler
+ * only suspends it (ADR-027 `in_zone`) once it has processed the bridged
+ * marker read — a few ticks later. Releasing before that suspend lands would be
+ * dropped by the scheduler (it checks `in_zone`), stranding the train. The
+ * dwell lets the suspend settle first. It also reads as the yard "working" the
+ * consist for a beat rather than teleporting it.
+ */
+const DWELL_TICKS = 4;
+
+/**
  * A virtual railyard: a `core.gates_zone` device owning a capacity-limited
  * territory behind a single boundary marker (the throat). It admits trains by
  * its OWN asserted occupancy — a slot may be filled by a parked consist OR by a
@@ -44,6 +55,9 @@ export class VirtualRailyard {
   /** Trains serviced since their current arrival (so we swap once per visit),
    *  mapped to the slot they occupy while inside; cleared when they depart. */
   private readonly servicing = new Map<string, number>();
+  /** Consecutive ticks a not-yet-serviced train has been parked at the throat.
+   *  We wait a short dwell before acting (see DWELL_TICKS). */
+  private readonly parkedTicks = new Map<string, number>();
 
   constructor(
     private readonly device_id: string,
@@ -114,15 +128,7 @@ export class VirtualRailyard {
     const present = new Set<string>();
     for (const [trainId, train] of entries) {
       present.add(trainId);
-      const parked = train.isParkedAt(this.zone_marker_id);
-      if (parked && !this.servicing.has(trainId)) {
-        this.swapLeadingPair(train);
-        const slot = this.occupy(trainId);
-        this.servicing.set(trainId, slot);
-        this.releaseTrain(trainId);
-      } else if (!parked && this.servicing.has(trainId)) {
-        this.departTrain(trainId);
-      }
+      this.serviceTrain(trainId, train);
     }
     // A train that vanished entirely (despawned) also frees its slot.
     for (const trainId of [...this.servicing.keys()]) {
@@ -130,10 +136,34 @@ export class VirtualRailyard {
     }
   }
 
+  /** Service one train: dwell while it parks, swap+release once, free on exit. */
+  private serviceTrain(trainId: string, train: VirtualTrain): void {
+    const parked = train.isParkedAt(this.zone_marker_id);
+    if (this.servicing.has(trainId)) {
+      if (!parked) this.departTrain(trainId); // it has pulled out — re-arm
+      return;
+    }
+    if (!parked) {
+      this.parkedTicks.delete(trainId);
+      return;
+    }
+    const ticks = (this.parkedTicks.get(trainId) ?? 0) + 1;
+    if (ticks < DWELL_TICKS) {
+      this.parkedTicks.set(trainId, ticks);
+      return;
+    }
+    // Dwell satisfied: rearrange the consist and hand the train back to core.
+    this.parkedTicks.delete(trainId);
+    this.swapLeadingPair(train);
+    this.servicing.set(trainId, this.occupy(trainId));
+    this.releaseTrain(trainId);
+  }
+
   /** Free the slot a departed/vanished train held and re-arm it for next lap. */
   private departTrain(trainId: string): void {
     const slot = this.servicing.get(trainId);
     this.servicing.delete(trainId);
+    this.parkedTicks.delete(trainId);
     if (slot !== undefined && slot >= 0) this.vacate(slot);
   }
 
