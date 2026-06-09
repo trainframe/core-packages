@@ -12,6 +12,8 @@ import { type EdgePath, composeEdgePath } from '../track/edge-path.js';
 import { SNAP_DISTANCE, compileLayout } from '../track/layout-from-pieces.js';
 import { detectSameLayerOverlaps } from '../track/overlap.js';
 import {
+  PIECE_TINT,
+  type PieceFeature,
   type RotationDeg,
   TRAIN_LENGTH_MM,
   type TrackPiece,
@@ -79,19 +81,166 @@ const PIECE_LABELS: Record<TrackPieceType, string> = {
   carriage: 'Carriage',
 };
 
-const PIECE_FILL: Record<TrackPieceType, string> = {
-  straight: '#7b8eac',
-  curve: '#7b9cac',
-  'curve-tight': '#6b9cbc',
-  junction: '#8c7bac',
-  station: '#ac9b7b',
-  terminus: '#ac7b7b',
-  crossing: '#7bac8a',
-  ramp: '#ac8a7b',
-  train: '#1f6feb',
-  gate: '#d97706',
-  carriage: '#6b7fa8',
+/**
+ * Device body colours (train/gate/carriage are NOT wooden). Track pieces are
+ * filled with the beech-wood gradient + their `PIECE_TINT` wash instead, so they
+ * have no entry here.
+ */
+const DEVICE_FILL: Partial<Record<TrackPieceType, string>> = {
+  train: '#cf4436',
+  carriage: '#3f6fa6',
+  gate: '#8a929c',
 };
+
+/** A representative swatch colour for the toybox button border — the device
+ * colour for devices, the functional tint (or plain beech) for track. */
+const TOYBOX_SWATCH_WOOD = '#c79a5f';
+function toyboxSwatch(type: TrackPieceType): string {
+  return DEVICE_FILL[type] ?? PIECE_TINT[type] ?? TOYBOX_SWATCH_WOOD;
+}
+
+/* SVG gradient/fill ids defined once in the canvas <defs>; referenced by url(). */
+const WOOD_FILL = 'url(#tf-wood)';
+
+/** A soft, near-omnidirectional contact shadow under every piece (rotation- and
+ * flip-invariant: the offset is tiny so a rotated plank's shadow never swings
+ * out). Composed with the selection/overlap glow into one CSS `filter`. */
+const CONTACT_SHADOW = 'drop-shadow(0 1px 1.4px rgba(63,43,19,0.34))';
+
+/** The composed CSS `filter` for a piece group: contact shadow, plus a coloured
+ * glow for an invalid same-layer overlap (red, wins) or selection (blue). A glow
+ * — not a stroke — so multi-plank pieces (junction, crossing) never show an
+ * internal seam where their sub-paths meet. */
+function pieceFilter(invalidOverlap: boolean, selected: boolean): string {
+  if (invalidOverlap) {
+    return `${CONTACT_SHADOW} drop-shadow(0 0 1px #dc2626) drop-shadow(0 0 4px #dc2626)`;
+  }
+  if (selected) {
+    return `${CONTACT_SHADOW} drop-shadow(0 0 1px #2563eb) drop-shadow(0 0 4px #2563eb)`;
+  }
+  return CONTACT_SHADOW;
+}
+
+/** Render one piece feature (platform, buffer, window, lamp, boom, chevron) by
+ * its semantic role. The palette lives here, with the rest of the wood theme. */
+function Feature({ feature }: { feature: PieceFeature }) {
+  switch (feature.role) {
+    case 'platform':
+      return <path d={feature.d} fill="url(#tf-platwood)" stroke="#b08c54" strokeWidth={0.8} />;
+    case 'dark-wood':
+      return <path d={feature.d} fill="#6b4a2a" />;
+    case 'glass':
+      return (
+        <path d={feature.d} fill="#bcdcea" fillOpacity={0.9} stroke="#5d7f8e" strokeWidth={0.8} />
+      );
+    case 'metal':
+      return <path d={feature.d} fill="#aab2bc" stroke="#717a85" strokeWidth={0.6} />;
+    case 'pop':
+      return <path d={feature.d} fill="#ffd24a" stroke="#caa033" strokeWidth={0.6} />;
+    case 'danger':
+      return <path d={feature.d} fill="#d8413a" />;
+    case 'line':
+      return (
+        <path
+          d={feature.d}
+          fill="none"
+          stroke="#4a3216"
+          strokeWidth={feature.width ?? 2}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      );
+  }
+}
+
+/** The two routed rail grooves: a lighter wall stroke over a deep centre
+ * channel, so each groove reads as recessed into the plank. */
+function Groove({ d }: { d: string }) {
+  return (
+    <>
+      <path
+        d={d}
+        fill="none"
+        stroke="#6f4c28"
+        strokeWidth={2.8}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d={d}
+        fill="none"
+        stroke="#3a2611"
+        strokeWidth={1.1}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </>
+  );
+}
+
+/**
+ * The painted body of a piece: the wooden plank (or coloured device body), its
+ * functional tint wash, a soft rim light, the routed rail grooves, and any
+ * feature overlays — dimmed together when the piece is an inert device. The
+ * power dot is rendered by the parent OUTSIDE this group so it keeps its status
+ * colour. Extracted so `PieceRenderer` stays under the complexity budget.
+ */
+function PieceBody({
+  shape,
+  bodyFill,
+  tint,
+  isDevice,
+  dim,
+}: {
+  readonly shape: ReturnType<typeof getPieceShape>;
+  readonly bodyFill: string;
+  readonly tint: string | null;
+  readonly isDevice: boolean;
+  readonly dim: number;
+}) {
+  return (
+    <g opacity={dim}>
+      {/* Wooden plank (or device body). */}
+      <path d={shape.svgPath} fill={bodyFill} />
+      {/* Gentle functional colour wash over the wood (track pieces only). */}
+      {!isDevice && tint !== null && <path d={shape.svgPath} fill={tint} fillOpacity={0.22} />}
+      {/* Soft rim light for a bevelled, raised feel. */}
+      <path
+        d={shape.svgPath}
+        fill="none"
+        stroke={isDevice ? '#ffffff' : '#f6e8c9'}
+        strokeOpacity={isDevice ? 0.3 : 0.5}
+        strokeWidth={1}
+      />
+      {/* Routed rail grooves, derived from the rail a train rides. */}
+      {shape.grooves.map((g) => (
+        <Groove key={g} d={g} />
+      ))}
+      {/* Detail overlays (platform, buffer, windows, lamps, boom…). */}
+      {shape.features.map((f) => (
+        <Feature key={f.d} feature={f} />
+      ))}
+    </g>
+  );
+}
+
+/** Shared SVG defs (wood gradients) for the canvas. The contact/selection
+ * shadows are CSS `filter`s, so the only defs needed are the fill gradients. */
+function WoodDefs() {
+  return (
+    <defs>
+      <linearGradient id="tf-wood" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stopColor="#e7c084" />
+        <stop offset="0.5" stopColor="#d2a45e" />
+        <stop offset="1" stopColor="#b07e3c" />
+      </linearGradient>
+      <linearGradient id="tf-platwood" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stopColor="#eed7a8" />
+        <stop offset="1" stopColor="#cda878" />
+      </linearGradient>
+    </defs>
+  );
+}
 
 const POWER_DOT_RADIUS = 6;
 
@@ -1009,7 +1158,7 @@ function ToyboxButton({ type, armed, onArm }: ToyboxButtonProps) {
       onDragStart={handleDragStart}
       draggable
       aria-pressed={armed}
-      style={{ borderColor: PIECE_FILL[type] }}
+      style={{ borderColor: toyboxSwatch(type) }}
       data-testid={`toybox-${type}`}
     >
       {PIECE_LABELS[type]}
@@ -1490,6 +1639,7 @@ function Table({
         data-viewport-x={viewport.x}
         data-viewport-y={viewport.y}
       >
+        <WoodDefs />
         {/* One group per layer, lowest first, so higher decks paint last and a
           bridge reads as over/under. The drop-shadow height cue is attached to
           this UN-rotated group (never the per-piece rotated/flipped <g>, where a
@@ -1650,17 +1800,6 @@ function powerLabelSuffix(live: boolean, powered: boolean): string {
   return powered ? ' (powered on)' : ' (powered off)';
 }
 
-/** The outline overlay drawn behind a piece body, or null for none. An invalid
- * same-layer overlap (red error) wins over selection (blue). Pure. */
-function pieceOutline(
-  invalidOverlap: boolean,
-  selected: boolean,
-): { stroke: string; strokeWidth: number; strokeOpacity: number } | null {
-  if (invalidOverlap) return { stroke: '#dc2626', strokeWidth: 5, strokeOpacity: 0.9 };
-  if (selected) return { stroke: '#2563eb', strokeWidth: 6, strokeOpacity: 0.4 };
-  return null;
-}
-
 function PieceRenderer({
   piece,
   selected,
@@ -1676,8 +1815,11 @@ function PieceRenderer({
   onDragEnd,
 }: PieceRendererProps) {
   const shape = getPieceShape(piece);
-  const fill = PIECE_FILL[piece.type];
   const isDevice = isDevicePiece(piece.type);
+  // Track pieces are filled with the beech-wood gradient + their functional
+  // tint; device pieces (train/gate/carriage) get their own solid colour.
+  const tint = PIECE_TINT[piece.type];
+  const bodyFill = isDevice ? (DEVICE_FILL[piece.type] ?? '#8a929c') : WOOD_FILL;
   // Wire devices (train / gate) can be powered off by clicking when live.
   // Carriages are wire-invisible — clicking a live carriage just selects it.
   const isWire = isWireDevice(piece.type);
@@ -1777,11 +1919,13 @@ function PieceRenderer({
   // exactly what release commits; otherwise follow the sim, then placement.
   const rotationDeg = dragOverride?.rotationDeg ?? renderPosition?.rotationDeg ?? piece.rotationDeg;
 
-  // A single outline overlay: red for an invalid same-layer overlap (error,
-  // takes priority), else blue for selection, else none. Computed in a helper
-  // so the JSX stays flat.
-  const outline = pieceOutline(invalidOverlap, selected);
+  // Contact shadow always, with a blue (selection) or red (invalid overlap) glow
+  // layered on top — a glow not a stroke, so a multi-plank piece (junction,
+  // crossing) never shows a seam where its sub-paths meet.
+  const filter = pieceFilter(invalidOverlap, selected);
   const cursorStyle = pieceCursor(armedType !== null);
+  // A device that is not under power dims to read as inert / off-bus.
+  const dim = isDevice && !powered ? 0.5 : 1;
   // A powered-off train is on the bus but inert: label it distinctly so the
   // a11y tree and screenshots can tell "powered off in place" from "off the
   // bus" and from "driven".
@@ -1795,7 +1939,7 @@ function PieceRenderer({
       onPointerUp={handlePointerUp}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
-      style={{ cursor: cursorStyle, touchAction: 'none' }}
+      style={{ cursor: cursorStyle, touchAction: 'none', filter }}
       data-testid={`piece-${piece.id}`}
       data-piece-id={piece.id}
       data-live={live ? 'true' : 'false'}
@@ -1804,25 +1948,7 @@ function PieceRenderer({
       data-invalid-overlap={invalidOverlap ? 'true' : undefined}
       aria-label={ariaLabel}
     >
-      {outline !== null && (
-        <path
-          d={shape.svgPath}
-          fill="none"
-          stroke={outline.stroke}
-          strokeWidth={outline.strokeWidth}
-          strokeOpacity={outline.strokeOpacity}
-        />
-      )}
-      <path
-        d={shape.svgPath}
-        fill={fill}
-        stroke="#333"
-        strokeWidth={1.5}
-        // A device dims when it is not under power: either off the bus
-        // (unscanned) or a train powered off in place. A powered-off train
-        // therefore reads dark/inert at its frozen sim position.
-        fillOpacity={isDevice && !powered ? 0.4 : 1}
-      />
+      <PieceBody shape={shape} bodyFill={bodyFill} tint={tint} isDevice={isDevice} dim={dim} />
       {/* Power dot for wire-visible devices only (train / gate): green when
           powered, grey when inert/off-bus. Carriages have no wire identity —
           no dot. Clicking the dot of an on-track train toggles its power in

@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  PIECE_TINT,
   type RotationDeg,
   type TrackPiece,
+  type TrackPieceType,
   getCentreLinePath,
   getEndpoints,
   getPieceShape,
@@ -315,12 +317,13 @@ describe('getPieceShape', () => {
     expect(getPieceShape(makePiece('terminus')).width).toBe(60);
   });
 
-  it('junction branch rail is the same width as the through rail (16mm)', () => {
-    // The branch band must be RAIL_HALF_WIDTH (8mm) on EACH side of its 45°
-    // centre-line — a full 16mm across, matching the through rail. A naive
-    // vertical ±8 offset would make the perpendicular width only 16·cos45 ≈
-    // 11.3mm (visibly thinner); this test guards against that regression.
-    const RAIL_HALF_WIDTH = 8;
+  it('junction branch plank is the same width as the through plank', () => {
+    // The branch plank must be PLANK_HALF_WIDTH on EACH side of its 45°
+    // centre-line — the same width as the through plank. A naive vertical ±13
+    // offset would make the perpendicular width only 26·cos45 ≈ 18.4mm (visibly
+    // thinner); this test guards against that regression by checking the branch
+    // quad's corners sit a full half-width perpendicular from the 45° axis.
+    const PLANK_HALF_WIDTH = 13;
     const path = getPieceShape(makePiece('junction')).svgPath;
 
     // Pull every "x y" coordinate pair out of the path.
@@ -343,10 +346,120 @@ describe('getPieceShape', () => {
     // from the axis, with a positive along-axis component (they're on the branch,
     // not the through rail's far-left corners). There must be at least two such
     // corners (origin-side and endpoint-side) on each flank.
-    const branchCorners = coords.filter((p) => along(p) > 1 && approx(perp(p), RAIL_HALF_WIDTH));
+    const branchCorners = coords.filter((p) => along(p) > 1 && approx(perp(p), PLANK_HALF_WIDTH));
     expect(branchCorners.length).toBeGreaterThanOrEqual(2);
     for (const c of branchCorners) {
-      expect(perp(c)).toBeCloseTo(RAIL_HALF_WIDTH, 1);
+      expect(perp(c)).toBeCloseTo(PLANK_HALF_WIDTH, 1);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wooden-material decor: rail grooves, feature overlays, functional tints.
+// ---------------------------------------------------------------------------
+
+describe('getPieceShape — rail grooves', () => {
+  const TRACK_TYPES: TrackPieceType[] = [
+    'straight',
+    'curve',
+    'curve-tight',
+    'junction',
+    'station',
+    'terminus',
+    'crossing',
+    'ramp',
+  ];
+
+  for (const type of TRACK_TYPES) {
+    it(`${type} has at least two routed grooves`, () => {
+      // Every track piece carries twin rail channels (one pair per leg).
+      expect(getPieceShape(makePiece(type)).grooves.length).toBeGreaterThanOrEqual(2);
+    });
+  }
+
+  for (const type of ['train', 'gate', 'carriage'] as TrackPieceType[]) {
+    it(`${type} (a device) has no grooves`, () => {
+      expect(getPieceShape(makePiece(type)).grooves).toHaveLength(0);
+    });
+  }
+
+  it('a straight piece routes its grooves at ±RAIL_GAUGE about the rail', () => {
+    // The grooves are offset from the centre-line a train rides; for a straight
+    // that centre-line is the x-axis, so every groove vertex sits at |y| ≈ gauge.
+    const RAIL_GAUGE = 5;
+    const grooves = getPieceShape(makePiece('straight')).grooves;
+    const ys = grooves.flatMap((g) =>
+      [...g.matchAll(/[ML]\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)/g)].map((m) => Number(m[2])),
+    );
+    expect(ys.length).toBeGreaterThan(0);
+    for (const y of ys) expect(Math.abs(y)).toBeCloseTo(RAIL_GAUGE, 1);
+  });
+
+  it('the junction branch groove follows the bezier centre-line a train rides', () => {
+    // The branch leg's groove must track its (curved) centre-line, not a straight
+    // 45° chord — otherwise a diverting train bows off its own rail. Sample the
+    // branch centre-line, offset it by the gauge, and check a matching groove
+    // vertex exists for an interior point.
+    const RAIL_GAUGE = 5;
+    const branch = must(getCentreLinePath(makePiece('junction'), 2));
+    const mid = branch.at(branch.length / 2);
+    const normal = ((mid.headingDeg + 90) * Math.PI) / 180;
+    const target = {
+      x: mid.x + RAIL_GAUGE * Math.cos(normal),
+      y: mid.y + RAIL_GAUGE * Math.sin(normal),
+    };
+    const verts = getPieceShape(makePiece('junction')).grooves.flatMap((g) =>
+      [...g.matchAll(/[ML]\s*(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)/g)].map((m) => ({
+        x: Number(m[1]),
+        y: Number(m[2]),
+      })),
+    );
+    // Nearest groove vertex to the curved rail's offset midpoint. A correct
+    // (bezier-following) groove lands within a groove-sample step (~4mm); a wrong
+    // straight-45°-chord groove would bow away by ~10mm, so 5mm separates them.
+    const nearest = Math.min(...verts.map((v) => Math.hypot(v.x - target.x, v.y - target.y)));
+    expect(nearest).toBeLessThan(5);
+  });
+});
+
+describe('getPieceShape — feature overlays', () => {
+  const has = (type: TrackPieceType, role: string): boolean =>
+    getPieceShape(makePiece(type)).features.some((f) => f.role === role);
+
+  it('a station has a raised platform', () => expect(has('station', 'platform')).toBe(true));
+  it('a terminus has a dark-wood buffer', () => expect(has('terminus', 'dark-wood')).toBe(true));
+  it('a ramp has chevron lines', () => expect(has('ramp', 'line')).toBe(true));
+  it('a loco has glass and a lamp', () => {
+    expect(has('train', 'glass')).toBe(true);
+    expect(has('train', 'pop')).toBe(true);
+  });
+  it('a gate has a danger boom', () => expect(has('gate', 'danger')).toBe(true));
+  it('a plain straight has no features', () =>
+    expect(getPieceShape(makePiece('straight')).features).toHaveLength(0));
+});
+
+describe('PIECE_TINT — functional colour wash', () => {
+  it('the warm-tinted role pieces carry a tint', () => {
+    // Only warm hues read over beech, so the wash is used where it both reads
+    // and helps: station, terminus, ramp.
+    for (const type of ['station', 'terminus', 'ramp'] as TrackPieceType[]) {
+      expect(PIECE_TINT[type]).not.toBeNull();
+    }
+  });
+  it('plain track, distinctively-shaped pieces, and devices carry no tint', () => {
+    // junction (Y-fork) and crossing (plus) read from their silhouette; a cool
+    // wash would only grey the wood.
+    for (const type of [
+      'straight',
+      'curve',
+      'curve-tight',
+      'junction',
+      'crossing',
+      'train',
+      'gate',
+      'carriage',
+    ] as TrackPieceType[]) {
+      expect(PIECE_TINT[type]).toBeNull();
     }
   });
 });
@@ -551,10 +664,12 @@ describe('pieceMarkerKind — ramp', () => {
 });
 
 describe('getPieceShape — ramp', () => {
-  it('returns a 200×16 band matching the straight footprint', () => {
+  it('returns a 200×26 plank matching the straight footprint', () => {
     const shape = getPieceShape(makePiece('ramp'));
     expect(shape.width).toBe(200);
-    expect(shape.height).toBe(16);
+    // Same footprint as a straight plank (the two snap and tile interchangeably).
+    expect(shape.height).toBe(getPieceShape(makePiece('straight')).height);
+    expect(shape.height).toBe(26);
     expect(shape.svgPath.length).toBeGreaterThan(0);
   });
 });

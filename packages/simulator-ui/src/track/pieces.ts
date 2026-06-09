@@ -150,11 +150,75 @@ export interface TrackEndpoint {
   readonly layer: number;
 }
 
+/**
+ * A drawable detail layered on top of a piece's wooden body — the platform of a
+ * station, the buffer of a terminus, the windows and roof of a loco. The `role`
+ * is semantic, not a colour: the renderer (and the design gallery) own the
+ * palette and map each role to a fill/stroke, so the wood theme lives in one
+ * place and pieces.ts stays pure geometry. `width` is the stroke width for the
+ * stroked roles (`line`); ignored by filled roles.
+ */
+export type PieceFeatureRole =
+  | 'platform' // raised, lighter-wood block (station platform)
+  | 'dark-wood' // darker wood detail (terminus buffer, loco/carriage roof)
+  | 'glass' // a window
+  | 'metal' // grey metal fitting (gate post, buffer bumpers)
+  | 'pop' // bright warm accent (headlight, chimney cap)
+  | 'danger' // a red warning surface (the gate's barrier boom)
+  | 'line'; // a stroked detail line (ramp chevrons, gate stripes)
+
+export interface PieceFeature {
+  readonly d: string;
+  readonly role: PieceFeatureRole;
+  readonly width?: number;
+}
+
 export interface PieceShape {
+  /**
+   * Outline of the piece's wooden body — filled with the wood/​tint material by
+   * the renderer, and re-used as the selection/overlap highlight silhouette. For
+   * device pieces (train/gate/carriage) this is the device's coloured body.
+   */
   readonly svgPath: string;
+  /**
+   * Rail-groove polylines, stroked as recessed channels. Derived from the SAME
+   * centre-line a train rides (`getCentreLinePath`), so the routed grooves and
+   * the running rail can never disagree — and so grooves meet cleanly across a
+   * snapped joint. Empty for device pieces.
+   */
+  readonly grooves: ReadonlyArray<string>;
+  /** Detail overlays painted on top of the body (platform, buffer, windows…). */
+  readonly features: ReadonlyArray<PieceFeature>;
   readonly width: number;
   readonly height: number;
 }
+
+/**
+ * A gentle functional colour wash, layered over the beech wood at low opacity so
+ * an operator can still read a piece's role at a glance without abandoning the
+ * one-material look (ADR-aesthetic: "wood + function tints").
+ *
+ * Tints are WARM only, by necessity: a cool wash (blue/teal) over warm beech
+ * desaturates to a drab grey rather than reading as colour. So the wash is used
+ * where a warm hue both reads and helps — a station (honey), a terminus (brick),
+ * a ramp (ochre). The pieces with the most distinctive SILHOUETTES — the Y-fork
+ * junction and the plus crossing — carry no tint: their shape already reads, and
+ * a grey wash would only muddy the wood. `null` ⇒ plain beech. Device pieces are
+ * not wooden and ignore this table; they have their own body colour.
+ */
+export const PIECE_TINT: Record<TrackPieceType, string | null> = {
+  straight: null,
+  curve: null,
+  'curve-tight': null,
+  junction: null, // shape (a Y-fork) reads on its own — a cool wash would grey
+  station: '#f0a02f', // warm honey
+  terminus: '#d4513a', // brick-red — the line ends here
+  crossing: null, // shape (a plus) reads on its own
+  ramp: '#e0902a', // ochre — a change of level
+  train: null,
+  gate: null,
+  carriage: null,
+};
 
 // ---------------------------------------------------------------------------
 // Geometry helpers
@@ -185,8 +249,21 @@ function curveRadiusFor(type: TrackPieceType, radiusOverride?: number): number {
   return type === 'curve-tight' ? CURVE_TIGHT_RADIUS_MM : CURVE_RADIUS_MM;
 }
 
-/** Half-width of a rendered rail band, in mm (band is 16 mm across). */
-const RAIL_HALF_WIDTH = 8;
+/**
+ * Half-width of a rendered wooden plank, in mm (the plank is 26 mm across).
+ * Purely VISUAL — the topology (endpoints, snapping, marker spacing) is unchanged
+ * by how wide we draw the wood. Every body builder reads this one constant so
+ * planks can never drift to different widths and mis-meet at a joint.
+ */
+const PLANK_HALF_WIDTH = 13;
+
+/**
+ * Distance (mm) of each routed rail groove from the piece centre-line — half the
+ * track gauge. The two grooves sit at ±RAIL_GAUGE either side of the rail a train
+ * actually rides. Single source of truth shared by every groove, so the twin
+ * channels line up across a snapped joint.
+ */
+const RAIL_GAUGE = 5;
 
 function toRad(deg: number): number {
   return (deg * Math.PI) / 180;
@@ -624,26 +701,36 @@ export function layerStyle(layer: number): {
 }
 
 /**
- * SVG path string (and bounding box) for a piece, in piece-local coordinates.
- * The consumer is expected to apply an SVG `transform="translate(x,y) rotate(r)"`
- * around the piece origin.
+ * The drawable geometry of a piece, in piece-local coordinates (origin = piece
+ * centre, pointing east). The consumer applies `transform="translate(x,y)
+ * rotate(r)"` around the origin.
  *
- * Shapes are intentionally simple but recognisable:
- * - straight: fat rectangle with sleeper lines
- * - curve: arc arc with sleeper marks
- * - junction: Y-fork with two rail lines
- * - station: straight + platform rectangle
- * - terminus: stub with buffer-stop bar
- * - crossing: two crossing rectangles
+ * A track piece is a wooden plank (`svgPath`, the body outline) with two routed
+ * rail `grooves` derived from the centre-line a train actually rides, plus any
+ * `features` (a station platform, a terminus buffer, ramp chevrons). A device
+ * piece (train/gate/carriage) puts its coloured body in `svgPath` and its
+ * detail (windows, lamps, the barrier boom) in `features`, with no grooves.
+ *
+ * The renderer owns the palette: it fills `svgPath` with the beech-wood material
+ * (washed by `PIECE_TINT`), strokes `grooves` as recessed channels, and maps
+ * each feature `role` to a fill/stroke. Keeping colour out of here leaves this
+ * module pure geometry and lets the design gallery and the live `ToyTable` share
+ * one source of truth for shape.
  */
 export function getPieceShape(piece: TrackPiece): PieceShape {
   switch (piece.type) {
     case 'straight':
-      return straightShape();
+      return plankShape(200, []);
+    case 'ramp':
+      return plankShape(200, rampChevrons());
     case 'curve':
-      return curveShape(curveRadiusFor('curve', piece.radiusMm));
+      return curveShape('curve', curveRadiusFor('curve', piece.radiusMm), piece.radiusMm);
     case 'curve-tight':
-      return curveShape(curveRadiusFor('curve-tight', piece.radiusMm));
+      return curveShape(
+        'curve-tight',
+        curveRadiusFor('curve-tight', piece.radiusMm),
+        piece.radiusMm,
+      );
     case 'junction':
       return junctionShape();
     case 'station':
@@ -652,8 +739,6 @@ export function getPieceShape(piece: TrackPiece): PieceShape {
       return terminusShape();
     case 'crossing':
       return crossingShape();
-    case 'ramp':
-      return rampShape();
     case 'train':
       return trainShape();
     case 'gate':
@@ -667,161 +752,263 @@ export function getPieceShape(piece: TrackPiece): PieceShape {
 // Shape builders (piece-local coordinates, origin at piece centre)
 // ---------------------------------------------------------------------------
 
-function straightShape(): PieceShape {
-  // 200×16 rectangle with 5 sleeper lines.
-  const w = 200;
-  const h = 16;
-  const half = w / 2;
-  const halfH = h / 2;
+const fmt = (n: number): string => n.toFixed(2);
 
-  let d = `M ${-half} ${-halfH} H ${half} V ${halfH} H ${-half} Z`;
-
-  // Sleepers: 5 vertical lines spaced 40 mm apart
-  for (let i = -2; i <= 2; i++) {
-    const x = i * 40;
-    d += ` M ${x} ${-halfH} V ${halfH}`;
-  }
-
-  return { svgPath: d, width: w, height: h };
+/** A rounded-rectangle path, clockwise from the top-left, corner radius `r`. The
+ * single rounded-plank primitive every straight-bodied piece is built from. */
+function roundRect(x: number, y: number, w: number, h: number, r: number): string {
+  const x2 = x + w;
+  const y2 = y + h;
+  const rr = Math.min(r, w / 2, h / 2);
+  return (
+    `M ${fmt(x + rr)} ${fmt(y)} H ${fmt(x2 - rr)} A ${fmt(rr)} ${fmt(rr)} 0 0 1 ${fmt(x2)} ${fmt(y + rr)} ` +
+    `V ${fmt(y2 - rr)} A ${fmt(rr)} ${fmt(rr)} 0 0 1 ${fmt(x2 - rr)} ${fmt(y2)} ` +
+    `H ${fmt(x + rr)} A ${fmt(rr)} ${fmt(rr)} 0 0 1 ${fmt(x)} ${fmt(y2 - rr)} ` +
+    `V ${fmt(y + rr)} A ${fmt(rr)} ${fmt(rr)} 0 0 1 ${fmt(x + rr)} ${fmt(y)} Z`
+  );
 }
 
-function curveShape(radius: number): PieceShape {
-  // The rail band of the 45° arc, drawn on exactly the same geometry (and
-  // origin) the endpoints use, so the band connects its own endpoint dots
-  // instead of floating away from them. Parametrised by centreline `radius` so
-  // the standard `curve` (R=200) and `curve-tight` (R=100) share one builder.
-  const outer = radius + RAIL_HALF_WIDTH;
-  const inner = radius - RAIL_HALF_WIDTH;
+/** A small circle as a closed path (used for lamps, funnels, bumpers). */
+function circle(cx: number, cy: number, r: number): string {
+  return (
+    `M ${fmt(cx - r)} ${fmt(cy)} a ${fmt(r)} ${fmt(r)} 0 1 0 ${fmt(r * 2)} 0 ` +
+    `a ${fmt(r)} ${fmt(r)} 0 1 0 ${fmt(-r * 2)} 0 Z`
+  );
+}
+
+const PLANK_CORNER = 5;
+
+/**
+ * Sample a piece-local centre-line half-path and return the polyline that runs
+ * `sign * RAIL_GAUGE` to one side of it (the routed groove). Sampling the SAME
+ * `CentreLinePath` the train rides means the groove can never diverge from the
+ * running rail — including through the junction branch, whose centre-line is a
+ * bezier, not a straight 45° strip.
+ */
+function offsetGroove(local: CentreLinePath, sign: number): string {
+  const samples = Math.max(2, Math.ceil(local.length / 8));
+  let d = '';
+  for (let i = 0; i <= samples; i++) {
+    const pose = local.at((i / samples) * local.length);
+    const normal = toRad(pose.headingDeg + 90);
+    const x = pose.x + sign * RAIL_GAUGE * Math.cos(normal);
+    const y = pose.y + sign * RAIL_GAUGE * Math.sin(normal);
+    d += `${i === 0 ? 'M' : 'L'} ${fmt(x)} ${fmt(y)} `;
+  }
+  return d.trimEnd();
+}
+
+/**
+ * Both routed grooves for every leg of a track piece, derived from its
+ * centre-line half-paths. Each leg contributes a groove on each side; collinear
+ * legs (a straight's two halves) join into one continuous rail, so the twin
+ * channels are continuous through the piece and meet cleanly across a snapped
+ * joint. Up to four legs (a crossing's four arms) are sampled.
+ */
+function centreLineGrooves(type: TrackPieceType, radiusOverride?: number): string[] {
+  const grooves: string[] = [];
+  for (let i = 0; i < 4; i++) {
+    const local = localHalfPath(type, i, radiusOverride);
+    if (local === undefined) continue;
+    grooves.push(offsetGroove(local, 1), offsetGroove(local, -1));
+  }
+  return grooves;
+}
+
+/** A straight wooden plank of length `len`, centred on the origin, with its two
+ * routed grooves. `features` overlay extra detail (e.g. the ramp chevrons). */
+function plankShape(len: number, features: ReadonlyArray<PieceFeature>): PieceShape {
+  const half = len / 2;
+  return {
+    svgPath: roundRect(-half, -PLANK_HALF_WIDTH, len, PLANK_HALF_WIDTH * 2, PLANK_CORNER),
+    grooves: centreLineGrooves('straight'),
+    features,
+    width: len,
+    height: PLANK_HALF_WIDTH * 2,
+  };
+}
+
+/** Three uphill chevrons pointing toward the exit (east), read as the rising
+ * deck of a ramp. Drawn as stroked detail lines over the wood. */
+function rampChevrons(): ReadonlyArray<PieceFeature> {
+  const features: PieceFeature[] = [];
+  for (const cx of [-45, 0, 45]) {
+    features.push({
+      role: 'line',
+      width: 3,
+      d: `M ${cx - 12} -7.5 L ${cx} 0 L ${cx - 12} 7.5`,
+    });
+  }
+  return features;
+}
+
+function curveShape(
+  type: TrackPieceType,
+  radius: number,
+  radiusOverride: number | undefined,
+): PieceShape {
+  // The wooden band of the 45° arc, drawn on exactly the geometry the endpoints
+  // use, so the plank connects its own ends instead of floating away from them.
+  // Parametrised by centreline `radius` so the standard `curve` (R=200) and
+  // `curve-tight` (R=100) share one builder.
+  const outer = radius + PLANK_HALF_WIDTH;
+  const inner = radius - PLANK_HALF_WIDTH;
   const at = (pointRadius: number, deg: number): string => {
     const p = curvePointR(radius, pointRadius, deg);
-    return `${p.x.toFixed(2)} ${p.y.toFixed(2)}`;
+    return `${fmt(p.x)} ${fmt(p.y)}`;
   };
-
-  // Outer arc entry→exit (sweep-flag 1 = the minor arc on screen), straight
-  // across the band, inner arc back (sweep-flag 0), close.
-  let d =
-    `M ${at(outer, CURVE_ENTRY_ANGLE)} A ${outer} ${outer} 0 0 1 ${at(outer, CURVE_EXIT_ANGLE)} ` +
-    `L ${at(inner, CURVE_EXIT_ANGLE)} A ${inner} ${inner} 0 0 0 ${at(inner, CURVE_ENTRY_ANGLE)} Z`;
-
-  // Three sleeper ticks spread evenly across the 45° span.
-  for (const deg of [-78.75, -67.5, -56.25]) {
-    d += ` M ${at(inner, deg)} L ${at(outer, deg)}`;
-  }
-
-  // Bounding box scales with radius (the R=200 curve was 160×80).
+  const d =
+    `M ${at(outer, CURVE_ENTRY_ANGLE)} A ${fmt(outer)} ${fmt(outer)} 0 0 1 ${at(outer, CURVE_EXIT_ANGLE)} ` +
+    `L ${at(inner, CURVE_EXIT_ANGLE)} A ${fmt(inner)} ${fmt(inner)} 0 0 0 ${at(inner, CURVE_ENTRY_ANGLE)} Z`;
   return {
     svgPath: d,
-    width: (160 * radius) / CURVE_RADIUS_MM,
-    height: (80 * radius) / CURVE_RADIUS_MM,
+    grooves: centreLineGrooves(type, radiusOverride),
+    features: [],
+    width: (180 * radius) / CURVE_RADIUS_MM,
+    height: (90 * radius) / CURVE_RADIUS_MM,
   };
 }
 
 function junctionShape(): PieceShape {
-  // Y-shape: trunk on left, straight through on right, branch diverging at 45°
-  // down-right (matching the branch endpoint). Both the through rail and the
-  // branch rail are RAIL_HALF_WIDTH (8 mm) half-width — i.e. 16 mm across.
-  //
-  // The branch band must be offset PERPENDICULAR to its own 45° axis, not
-  // vertically: a vertical ±8 offset on a 45° rail yields an effective width of
-  // only 16·cos45 ≈ 11.3 mm, visibly thinner than the through rail. We build the
-  // branch quad from its centre-line (origin → branch endpoint at 45°) offset by
-  // ±RAIL_HALF_WIDTH along the axis normal.
-  const hw = RAIL_HALF_WIDTH;
+  // A wooden Y: the through plank runs west↔east, the branch plank diverges at
+  // 45° down-right to the branch endpoint. Both are PLANK_HALF_WIDTH wide. The
+  // branch quad is offset PERPENDICULAR to its own 45° axis (a vertical offset
+  // would make it visibly thinner), and is wound the same way as the through
+  // plank so the nonzero fill UNIONs them with no hole at the throat. With no
+  // hard outline + one wood fill, the two planks read as a single forked piece;
+  // the diverging V between the legs is open table, as on a real turnout.
+  const ph = PLANK_HALF_WIDTH;
   const a = toRad(45);
-  // Branch endpoint (centre-line), matching the index-2 endpoint geometry.
   const ex = 100 * Math.cos(a);
   const ey = 100 * Math.sin(a);
-  // Unit normal to the 45° branch axis (rotate the axis direction +90°).
   const nx = -Math.sin(a);
   const ny = Math.cos(a);
-  const pt = (px: number, py: number): string => `${px.toFixed(2)} ${py.toFixed(2)}`;
-  // Branch band: origin±normal → endpoint±normal, a true 16 mm-wide strip.
+  const pt = (px: number, py: number): string => `${fmt(px)} ${fmt(py)}`;
+  const through = roundRect(-100, -ph, 200, ph * 2, PLANK_CORNER);
   const branch =
-    `M ${pt(hw * nx, hw * ny)} L ${pt(ex + hw * nx, ey + hw * ny)} ` +
-    `L ${pt(ex - hw * nx, ey - hw * ny)} L ${pt(-hw * nx, -hw * ny)} Z`;
-  const through = `M -100 ${-hw} H 100 V ${hw} H -100 Z`;
-  const d = `${through} ${branch}`;
-
-  return { svgPath: d, width: 200, height: 80 };
+    `M ${pt(-ph * nx, -ph * ny)} L ${pt(ex - ph * nx, ey - ph * ny)} ` +
+    `L ${pt(ex + ph * nx, ey + ph * ny)} L ${pt(ph * nx, ph * ny)} Z`;
+  return {
+    svgPath: `${through} ${branch}`,
+    grooves: centreLineGrooves('junction'),
+    features: [],
+    width: 200,
+    height: ph + ey + ph,
+  };
 }
 
 function stationShape(): PieceShape {
-  // 220 mm straight rail + 60×20 platform rectangle above it.
-  const w = 220;
-  const half = w / 2;
-  // Rail band + platform above rail (60 mm wide, centred) + sleepers
-  const d = `M ${-half} -8 H ${half} V 8 H ${-half} Z M -30 -28 H 30 V -8 H -30 Z M -80 -8 V 8 M 0 -8 V 8 M 80 -8 V 8`;
-
-  return { svgPath: d, width: w, height: 36 };
+  // A 220 mm plank with a raised platform deck along its north (upper) edge.
+  const ph = PLANK_HALF_WIDTH;
+  const platformTop = -(ph + 22);
+  const platform = roundRect(-52, platformTop, 104, 24, 4);
+  // A thin platform-edge line gives the deck a lip facing the rail.
+  const lip: PieceFeature = { role: 'line', width: 2, d: `M -50 ${-ph - 1} H 50` };
+  return {
+    svgPath: roundRect(-110, -ph, 220, ph * 2, PLANK_CORNER),
+    grooves: centreLineGrooves('station'),
+    features: [{ role: 'platform', d: platform }, lip],
+    width: 220,
+    height: ph - platformTop,
+  };
 }
 
 function terminusShape(): PieceShape {
-  // 60 mm stub with buffer-stop bar at the dead end (west).
-  // Open end at east (+30), buffer at west (-30).
-  // Rail band + buffer bar at west end
-  const d = 'M -30 -8 H 30 V 8 H -30 Z M -30 -16 V 16 M -28 -16 H -30 M -28 16 H -30';
-
-  return { svgPath: d, width: 60, height: 32 };
+  // A short plank with a chunky wooden buffer-stop at the dead end (west); the
+  // open end is east. Two metal bumper pads face the incoming train.
+  const ph = PLANK_HALF_WIDTH;
+  const buffer = roundRect(-38, -(ph + 3), 12, (ph + 3) * 2, 3);
+  return {
+    svgPath: roundRect(-30, -ph, 60, ph * 2, PLANK_CORNER),
+    // Grooves stop short of the buffer; straight pair over the open stub.
+    grooves: [`M -22 ${-RAIL_GAUGE} H 28`, `M -22 ${RAIL_GAUGE} H 28`],
+    features: [
+      { role: 'dark-wood', d: buffer },
+      { role: 'metal', d: circle(-24, -RAIL_GAUGE, 2.6) },
+      { role: 'metal', d: circle(-24, RAIL_GAUGE, 2.6) },
+    ],
+    width: 60,
+    height: (ph + 3) * 2,
+  };
 }
 
 function crossingShape(): PieceShape {
-  // Two 200 mm straights crossing at 90°.
-  const half = 100;
-  const hw = 8;
-  // East-west rail + north-south rail
-  const d = `M ${-half} ${-hw} H ${half} V ${hw} H ${-half} Z M ${-hw} ${-half} V ${half} H ${hw} V ${-half} Z`;
-
-  return { svgPath: d, width: 200, height: 200 };
-}
-
-function rampShape(): PieceShape {
-  // Same 200×16 rail band as a straight, plus three uphill chevrons pointing
-  // toward the exit (east, the higher end) so the operator can read which way
-  // the deck rises. The band is identical to the straight so the two snap and
-  // tile interchangeably.
-  const w = 200;
-  const h = 16;
-  const half = w / 2;
-  const halfH = h / 2;
-  let d = `M ${-half} ${-halfH} H ${half} V ${halfH} H ${-half} Z`;
-  // Three chevrons (V opening downhill, apex uphill/east) spaced along the band.
-  for (const cx of [-50, 0, 50]) {
-    d += ` M ${cx - 14} ${-halfH} L ${cx} 0 L ${cx - 14} ${halfH}`;
-  }
-  return { svgPath: d, width: w, height: h };
+  // Two 200 mm planks crossing at 90°. Both rounded rects are wound the same
+  // way, so the nonzero fill unions them into a plus with no hole at the centre.
+  const ph = PLANK_HALF_WIDTH;
+  const ew = roundRect(-100, -ph, 200, ph * 2, PLANK_CORNER);
+  const ns = roundRect(-ph, -100, ph * 2, 200, PLANK_CORNER);
+  return {
+    svgPath: `${ew} ${ns}`,
+    grooves: centreLineGrooves('crossing'),
+    features: [],
+    width: 200,
+    height: 200,
+  };
 }
 
 function trainShape(): PieceShape {
-  // Small loco silhouette sized to ride on a rail (rail band is 16 mm wide).
-  // 80 mm long, 24 mm wide, nose at east.
-  const d = 'M -40 -12 H 24 L 40 0 L 24 12 H -40 Z';
-
-  return { svgPath: d, width: 80, height: 24 };
+  // A friendly top-down loco, nose to the east. Rounded hull tapering to the
+  // nose, a dark boiler/roof panel, a windscreen, a funnel and a headlamp.
+  const body = 'M -40 -7 Q -40 -13 -34 -13 H 24 L 40 -5 L 40 5 L 24 13 H -34 Q -40 13 -40 7 Z';
+  return {
+    svgPath: body,
+    grooves: [],
+    features: [
+      // Boiler / roof panel.
+      { role: 'dark-wood', d: roundRect(-34, -9, 46, 18, 5) },
+      // Funnel (dark ring + bright cap).
+      { role: 'dark-wood', d: circle(2, 0, 5.5) },
+      { role: 'pop', d: circle(2, 0, 2.4) },
+      // Windscreen toward the nose.
+      { role: 'glass', d: roundRect(16, -6, 9, 12, 2) },
+      // Headlamp at the nose tip.
+      { role: 'pop', d: circle(34, 0, 2.6) },
+    ],
+    width: 80,
+    height: 26,
+  };
 }
 
 function gateShape(): PieceShape {
-  // Stylised lift-barrier sized to straddle a rail. Short post on the west,
-  // horizontal arm to east, with three diagonal stripes. 80 mm wide, 22 mm tall.
-  const d =
-    'M -40 -6 H -32 V 11 H -40 Z M -32 -1 H 40 V 5 H -32 Z M -18 -1 L -10 5 M -2 -1 L 6 5 M 14 -1 L 22 5';
-
-  return { svgPath: d, width: 80, height: 22 };
+  // A lift-barrier straddling the rail: a metal post + counterweight to the
+  // west, a red-and-cream boom reaching east. The body silhouette covers post
+  // and boom so the selection glow wraps the whole barrier; the coloured boom
+  // and stripes are painted on top.
+  const post = roundRect(-40, -12, 11, 24, 2);
+  const boomBase = roundRect(-29, -3.5, 67, 7, 3);
+  const stripes: PieceFeature[] = [];
+  for (const sx of [-14, 6, 26]) {
+    stripes.push({ role: 'platform', d: roundRect(sx, -3.5, 7, 7, 1) });
+  }
+  return {
+    svgPath: `${post} ${boomBase}`,
+    grooves: [],
+    features: [
+      { role: 'danger', d: boomBase },
+      ...stripes,
+      // Counterweight on the post.
+      { role: 'metal', d: circle(-34.5, 8, 3.5) },
+    ],
+    width: 80,
+    height: 24,
+  };
 }
 
 function carriageShape(): PieceShape {
-  // Passenger carriage: 60 mm long, 24 mm wide. Smaller and boxier than the
-  // loco (which is 80×24 with a pointed nose). Rounded corners via arc
-  // segments; no nose — both ends are flat so multiple carriages chain cleanly.
+  // A passenger carriage: a rounded box, shorter than the loco, with a row of
+  // windows and no nose so multiple carriages chain cleanly.
   const w = 60;
-  const h = 24;
-  const hw = w / 2; // 30
-  const hh = h / 2; // 12
-  const r = 4; // corner radius
-  // Rounded rectangle in SVG path notation.
-  const d =
-    `M ${-hw + r} ${-hh} H ${hw - r} A ${r} ${r} 0 0 1 ${hw} ${-hh + r} ` +
-    `V ${hh - r} A ${r} ${r} 0 0 1 ${hw - r} ${hh} H ${-hw + r} ` +
-    `A ${r} ${r} 0 0 1 ${-hw} ${hh - r} V ${-hh + r} A ${r} ${r} 0 0 1 ${-hw + r} ${-hh} Z`;
-
-  return { svgPath: d, width: w, height: h };
+  const ph = 13;
+  const windows: PieceFeature[] = [];
+  for (const cx of [-18, -6, 6, 18]) {
+    windows.push({ role: 'glass', d: roundRect(cx - 4, -5, 8, 10, 1.5) });
+  }
+  return {
+    svgPath: roundRect(-w / 2, -ph, w, ph * 2, 6),
+    grooves: [],
+    features: [{ role: 'dark-wood', d: roundRect(-26, -ph, 52, 4, 2) }, ...windows],
+    width: w,
+    height: ph * 2,
+  };
 }
