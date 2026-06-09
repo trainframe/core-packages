@@ -9,7 +9,10 @@ marked occupied, clearance revoked, non-retained `topology_violation`
 emitted, `block_reason: 'unknown_topology'` on the scheduler-owned retained
 clearance state); an open (exploring/track-learn) train still learns the
 adjacency. Operator recovery via `reanchorTrain` / `confirmNewTrack`.
-Protocol bumped 0.5.0 → 0.6.0.
+Protocol bumped 0.5.0 → 0.6.0. Cross-feature guard (× ADR-017): a
+topology-held train is excluded from the waits-for graph
+(`collectWaitingTrains`) so deadlock-yield can never select it as a victim
+and release the phantom `{P→M}` edge guarding its uncertain region.
 
 Refines [ADR-009](009-discovery-mode.md) (always-on discovery) and
 relates to [ADR-014](014-track-learn-mode.md) (track-learn) and
