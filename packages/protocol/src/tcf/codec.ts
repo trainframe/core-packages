@@ -7,16 +7,18 @@
  * generates UUIDs of its own — both are injected, so the codec is fully
  * deterministic (ADR-021 §6/§7; CLAUDE.md determinism rule).
  *
- * Scope of *this* implementation (ADR-021 "Deferred follow-ups"):
+ * Scope of *this* implementation:
  *   - Header codec (13 bytes), the versioned compact-ID registry, envelope
  *     synthesis, and the seq <-> command_id / event_id correlation are the
- *     "framework" this ADR fixes and are implemented here.
- *   - The per-type hand-binarised payload codecs and CBOR are *named deferred
- *     follow-ups* in the ADR ("the byte-level layout of each event's payload
- *     is mechanical follow-up, to land with the firmware-support package").
- *     Until they land, every type's pinned payload codec is the generic one:
- *     UTF-8 JSON of the canonical payload object. `flags.payload_is_cbor`
- *     stays reserved (always 0) exactly as the ADR specifies, ready for CBOR.
+ *     "framework" this ADR fixes (ADR-021 §1–§3, §5–§7).
+ *   - Per-type compact payload codecs (ADR-021 §4) pack the hot, UUID-heavy
+ *     types (`marker_traversed`, `clearance_request`, `clearance_granted`, and
+ *     the `grant_clearance` command) down to fixed-width binary fields so they
+ *     fit one 250-byte frame and round-trip losslessly. See payloads.ts. Types
+ *     with no pinned codec fall back to the generic UTF-8-JSON carrier here.
+ *   - `flags.payload_is_cbor` stays reserved (always 0) exactly as the ADR
+ *     specifies, ready for CBOR as the documented escape hatch for genuinely
+ *     variable/rare payloads.
  *
  * Frame layout (ADR-021 §2):
  *   byte 0:      version_epoch  (uint8)
@@ -28,6 +30,7 @@
  *   bytes 13..N: payload bytes
  */
 
+import { type PayloadCodec, commandPayloadCodec, eventPayloadCodec } from './payloads.js';
 import {
   TCF_REGISTRY_EPOCH,
   commandTypeToId,
@@ -162,20 +165,47 @@ export function readFrame(bytes: Uint8Array): TcfFrame {
   const deviceRef = view.getUint32(3, false);
   const seq = view.getUint16(7, false);
   const uptimeMs = view.getUint32(9, false);
+  const isCommand = (flags & TCF_FLAG_IS_COMMAND) !== 0;
 
   const payloadBytes = bytes.subarray(TCF_HEADER_BYTES);
-  const payload = payloadBytes.length === 0 ? {} : decodeJsonPayload(payloadBytes);
+  const payload = decodePayload(payloadBytes, typeId, isCommand);
 
   return {
     versionEpoch,
     typeId,
-    isCommand: (flags & TCF_FLAG_IS_COMMAND) !== 0,
+    isCommand,
     payloadIsCbor: (flags & TCF_FLAG_PAYLOAD_IS_CBOR) !== 0,
     deviceRef,
     seq,
     uptimeMs,
     payload,
   };
+}
+
+/**
+ * Select the per-type payload codec for a `(typeId, isCommand)` pair, or
+ * `undefined` to use the generic JSON carrier (ADR-021 §4). Resolving the type
+ * string keeps the codec table keyed by name (it cannot drift from the
+ * registry), and an unknown `typeId` simply has no codec — the generic carrier
+ * carries the default-safe anomaly path.
+ */
+function payloadCodecFor(typeId: number, isCommand: boolean): PayloadCodec | undefined {
+  if (isCommand) {
+    const commandType = idToCommandType(typeId);
+    return commandType === undefined ? undefined : commandPayloadCodec(commandType);
+  }
+  const eventType = idToEventType(typeId);
+  return eventType === undefined ? undefined : eventPayloadCodec(eventType);
+}
+
+/**
+ * Decode the payload region using the type's per-type codec when one is pinned,
+ * else the generic UTF-8-JSON carrier. An empty region is the empty object.
+ */
+function decodePayload(payloadBytes: Uint8Array, typeId: number, isCommand: boolean): unknown {
+  const codec = payloadCodecFor(typeId, isCommand);
+  if (codec !== undefined) return codec.decode(payloadBytes);
+  return payloadBytes.length === 0 ? {} : decodeJsonPayload(payloadBytes);
 }
 
 function decodeJsonPayload(bytes: Uint8Array): unknown {
@@ -353,6 +383,7 @@ export function encodeEvent(
     seq: corr.seq,
     uptimeMs: corr.uptimeMs,
     payload: envelope.payload,
+    codec: eventPayloadCodec(envelope.event_type),
   });
 }
 
@@ -375,6 +406,7 @@ export function encodeCommand(
     seq: corr.seq,
     uptimeMs: corr.uptimeMs,
     payload: envelope.payload,
+    codec: commandPayloadCodec(envelope.command_type),
   });
 }
 
@@ -422,6 +454,8 @@ interface FrameFields {
   readonly seq: number;
   readonly uptimeMs: number;
   readonly payload: unknown;
+  /** Per-type payload codec, or `undefined` for the generic JSON carrier. */
+  readonly codec: PayloadCodec | undefined;
 }
 
 function writeFrame(fields: FrameFields): Uint8Array {
@@ -432,7 +466,10 @@ function writeFrame(fields: FrameFields): Uint8Array {
   assertUint(fields.seq, MAX_UINT16, 'seq');
   assertUint(fields.uptimeMs, MAX_UINT32, 'uptime_ms');
 
-  const payloadBytes = encodeJsonPayload(fields.payload);
+  const payloadBytes =
+    fields.codec !== undefined
+      ? fields.codec.encode(fields.payload)
+      : encodeJsonPayload(fields.payload);
   if (payloadBytes.length > TCF_MAX_PAYLOAD_BYTES) {
     throw new RangeError(
       `TCF payload ${payloadBytes.length} bytes exceeds ${TCF_MAX_PAYLOAD_BYTES} (frame limit ${ESP_NOW_MAX_FRAME_BYTES}); needs a fixed per-type codec or out-of-band path (ADR-021 deferred follow-ups)`,

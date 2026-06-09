@@ -9,3 +9,4 @@
  */
 export * from './registry.js';
 export * from './codec.js';
+export * from './payloads.js';
