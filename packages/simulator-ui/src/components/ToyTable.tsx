@@ -637,11 +637,46 @@ function clientToMm(
   if (rect.width <= 0 || rect.height <= 0) {
     return { x: CANVAS_W_MM / 2, y: CANVAS_H_MM / 2 };
   }
+  // The visible world WIDTH is fixed (CANVAS_W_MM at zoom 1); the visible HEIGHT
+  // follows the canvas's actual aspect ratio, so the table can fill a box of any
+  // shape without distorting the rails. (A 3:2 rect recovers the old 900×600.)
   const worldW = CANVAS_W_MM / viewport.zoom;
-  const worldH = CANVAS_H_MM / viewport.zoom;
+  const worldH = worldW * (rect.height / rect.width);
   const xMm = viewport.x + ((clientX - rect.left) / rect.width) * worldW;
   const yMm = viewport.y + ((clientY - rect.top) / rect.height) * worldH;
   return { x: xMm, y: yMm };
+}
+
+/** The world-window height (mm) visible at `zoom`, given the canvas box aspect
+ * (height/width). Mirrors `clientToMm`'s rule so the viewBox and the pointer
+ * mapping always agree. */
+function worldHeightMm(zoom: number, aspect: number): number {
+  return (CANVAS_W_MM / zoom) * aspect;
+}
+
+/** A wheel-zoom step that keeps the world point under the cursor fixed. Pure;
+ * returns the new viewport (or `prev` if the rect has no size). Extracted so the
+ * wheel listener stays trivial and under the complexity budget. */
+function zoomAtCursor(
+  prev: Viewport,
+  rect: DOMRect,
+  clientX: number,
+  clientY: number,
+  deltaY: number,
+): Viewport {
+  const worldPos = clientToMm(rect, clientX, clientY, prev);
+  const zoomFactor = deltaY < 0 ? 1.15 : 1 / 1.15;
+  const newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, prev.zoom * zoomFactor));
+  const worldW = CANVAS_W_MM / newZoom;
+  // With a measured rect the world height follows the box aspect; without one
+  // (jsdom) fall back to the default aspect and anchor the zoom at the centre.
+  const hasRect = rect.width > 0 && rect.height > 0;
+  const worldH = hasRect
+    ? worldW * (rect.height / rect.width)
+    : worldHeightMm(newZoom, CANVAS_H_MM / CANVAS_W_MM);
+  const fracX = hasRect ? (clientX - rect.left) / rect.width : 0.5;
+  const fracY = hasRect ? (clientY - rect.top) / rect.height : 0.5;
+  return { x: worldPos.x - fracX * worldW, y: worldPos.y - fracY * worldH, zoom: newZoom };
 }
 
 /**
@@ -1412,6 +1447,22 @@ function Table({
   }
   const [viewport, setViewport] = useState<Viewport>({ x: 0, y: 0, zoom: 1 });
 
+  /** Canvas box aspect (height ÷ width). Tracks the rendered `<svg>` so the
+   * world window (viewBox) matches the box and the table fills it without
+   * distorting the rails. Defaults to the legacy 3:2; the ResizeObserver is
+   * skipped where unavailable (jsdom), keeping tests on the fixed 900×600 world. */
+  const [boxAspect, setBoxAspect] = useState(CANVAS_H_MM / CANVAS_W_MM);
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (svg === null || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => {
+      const r = svg.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) setBoxAspect(r.height / r.width);
+    });
+    ro.observe(svg);
+    return () => ro.disconnect();
+  }, []);
+
   /** The open endpoint a dragged toybox piece will snap onto, highlighted
    * during dragover. */
   const [snapHighlight, setSnapHighlight] = useState<SnapTarget | null>(null);
@@ -1430,28 +1481,11 @@ function Table({
   useEffect(() => {
     const svg = svgRef.current;
     if (svg === null) return;
-
     function onWheel(e: WheelEvent) {
       e.preventDefault();
       const rect = svg?.getBoundingClientRect() ?? new DOMRect();
-      setViewport((prev) => {
-        // Where the cursor is in world space (mm) before the zoom.
-        const worldPos = clientToMm(rect, e.clientX, e.clientY, prev);
-        const zoomFactor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-        const newZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, prev.zoom * zoomFactor));
-        // Adjust origin so the cursor stays at the same world position.
-        const worldW = CANVAS_W_MM / newZoom;
-        const worldH = CANVAS_H_MM / newZoom;
-        const fracX = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5;
-        const fracY = rect.height > 0 ? (e.clientY - rect.top) / rect.height : 0.5;
-        return {
-          x: worldPos.x - fracX * worldW,
-          y: worldPos.y - fracY * worldH,
-          zoom: newZoom,
-        };
-      });
+      setViewport((prev) => zoomAtCursor(prev, rect, e.clientX, e.clientY, e.deltaY));
     }
-
     svg.addEventListener('wheel', onWheel, { passive: false });
     return () => svg.removeEventListener('wheel', onWheel);
   }, []);
@@ -1492,7 +1526,7 @@ function Table({
 
     const rect = getRect();
     const worldW = CANVAS_W_MM / panStartViewportRef.current.zoom;
-    const worldH = CANVAS_H_MM / panStartViewportRef.current.zoom;
+    const worldH = rect.width > 0 ? worldW * (rect.height / rect.width) : CANVAS_H_MM;
     const dxMm = rect.width > 0 ? -(dx / rect.width) * worldW : 0;
     const dyMm = rect.height > 0 ? -(dy / rect.height) * worldH : 0;
 
@@ -1635,7 +1669,7 @@ function Table({
   // Cursor logic: crosshair when armed, grabbing while panning, default otherwise.
   const cursor = armedType !== null ? 'crosshair' : isPanningRef.current ? 'grabbing' : 'default';
 
-  const viewBox = `${viewport.x} ${viewport.y} ${CANVAS_W_MM / viewport.zoom} ${CANVAS_H_MM / viewport.zoom}`;
+  const viewBox = `${viewport.x} ${viewport.y} ${CANVAS_W_MM / viewport.zoom} ${worldHeightMm(viewport.zoom, boxAspect)}`;
 
   // Bucket pieces by their *effective* layer so lower decks paint first and the
   // upper deck (and any train crossing it) paints last — giving free occlusion
