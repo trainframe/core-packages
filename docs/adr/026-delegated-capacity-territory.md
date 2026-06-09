@@ -164,21 +164,24 @@ contradict: ADR-023 forbids shunting *in core*; ADR-026 puts it *in a device*.
   and reports a train out at a new length; the scheduler updates it. Proven
   end-to-end in `zone-admission.test.ts`.
 
-**Designed here, not yet in core (future work):**
+**Built since, in [ADR-027](027-zone-interior-handoff.md):**
 
-- The full **opaque-interior transit handoff** — core formally suspending its
-  management of a *tracked* train while it is inside, and the device issuing that
-  train's interior movement authority (reverse/creep). The current device models
-  the interior in the simulator without handing core-tracked trains the
-  authority, sufficient to prove the admission + length-reconcile seams
-  end-to-end.
-- The topology-violation **exemption** for interior markers (needed only once
-  core-tracked trains drive interior markers core knows about — coupled with the
-  handoff above).
+- The **opaque-interior transit handoff** — core formally suspending its
+  management of a *tracked* train when it reaches the boundary as a route
+  terminus (`in_zone`), and reclaiming it only on a device-asserted
+  `zone_train_released` followed by a core-cleared departure. Admission now also
+  gates on `core.can_reverse` (protocol 0.10.0), since interior shunting needs
+  reversing. The device still owns the literal interior choreography (which
+  carriage moves where); core simply stops routing the train until handed it
+  back.
+- The topology-violation **exemption** was **dropped**, not deferred: with core
+  suspended on entry it never routes a suspended train across interior markers,
+  so there is no traversal to exempt. The need evaporated rather than moving
+  downstream.
 
-This staging matches the house pattern: prove the load-bearing seam first; the
-experimental device ([006](../experimental/006-railyard.md)) is its end-to-end
-proof.
+This staging matched the house pattern: prove the load-bearing seam first (this
+ADR), then the handoff (ADR-027). The experimental device
+([006](../experimental/006-railyard.md)) is the end-to-end proof of both.
 
 ## Consequences
 
