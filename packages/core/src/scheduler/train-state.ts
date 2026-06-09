@@ -67,6 +67,18 @@ export interface TrainState {
   /** Edges the train is currently cleared for, in order. */
   cleared_edges: ReadonlyArray<EdgeRef>;
 
+  /**
+   * Why the scheduler is holding this train, when it is held for a reason it
+   * owns (ADR-019). `'unknown_topology'` means the train reported a marker
+   * unreachable from its last certain position while running a bounded route:
+   * its position is uncertain, so it is held and the uncertain region is kept
+   * in `cleared_edges` to deny neighbours under block exclusivity. Surfaced on
+   * the retained clearance state via `clearanceStateEffect`; cleared on any
+   * normal re-grant or on operator recovery. `undefined` when not held for a
+   * scheduler-owned reason.
+   */
+  block_reason?: 'unknown_topology' | undefined;
+
   /** Last marker the train was observed to traverse. */
   last_marker_id?: string;
 

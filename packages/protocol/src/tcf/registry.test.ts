@@ -43,6 +43,7 @@ describe('TCF registry anti-drift', () => {
       'aspect_changed',
       'tag_assignment',
       'anomaly',
+      'topology_violation',
     ]);
   });
 

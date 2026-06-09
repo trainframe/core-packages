@@ -69,6 +69,47 @@ const MarkerTraversedPayload = Type.Object({
 export const MarkerTraversed = eventEnvelope('marker_traversed', MarkerTraversedPayload);
 export type MarkerTraversed = Static<typeof MarkerTraversed>;
 
+// ---------- topology_violation (server-derived) ----------
+
+/**
+ * Server-derived (ADR-019). Emitted by the scheduler when a train running a
+ * bounded route + clearance reports a marker that is unreachable from its last
+ * known position — an adjacency the logical graph does not contain. Under a
+ * bounded route the scheduler does NOT auto-learn the phantom edge (that is
+ * always-on discovery's job, and only while the train is *open* to it —
+ * exploring per ADR-015 or under track-learn per ADR-014). Instead it declares
+ * the train's position uncertain, holds it, and flags it here.
+ *
+ * Non-retained: a one-shot operator/visualiser notification. The durable
+ * "this train is held, and why" signal rides the retained clearance state's
+ * `block_reason: 'unknown_topology'` field (the scheduler-owned producer); the
+ * train MAY independently echo the matching `train_status.clearance_block_reason`.
+ *
+ * `suspected_cause` is a HINT for the operator UI only. The three real causes
+ * (sensor fault / genuine new edge / lifted-and-replaced train) cannot be told
+ * apart from a single event, so the automatic action never branches on it; the
+ * scheduler defaults it to `'unknown'` with at most a coarse refinement when
+ * `M` is a known-but-non-adjacent marker (more likely a missed read than a
+ * brand-new edge).
+ */
+const TopologyViolationPayload = Type.Object({
+  train_id: Uuid,
+  /** P — the last position the scheduler is certain of. */
+  last_known_marker_id: Uuid,
+  /** M — the unreachable marker just reported. */
+  reported_marker_id: Uuid,
+  suspected_cause: Type.Union([
+    Type.Literal('sensor_fault'),
+    Type.Literal('unknown_edge'),
+    Type.Literal('lifted_train'),
+    Type.Literal('unknown'),
+  ]),
+  detected_at_ms: Type.Number(),
+});
+
+export const TopologyViolation = eventEnvelope('topology_violation', TopologyViolationPayload);
+export type TopologyViolation = Static<typeof TopologyViolation>;
+
 // ---------- vehicle_identified (server-derived) ----------
 
 /**
@@ -218,6 +259,7 @@ export const CoreEvent = Type.Union([
   DeviceRegistered,
   TagObserved,
   MarkerTraversed,
+  TopologyViolation,
   VehicleIdentified,
   TrainStatus,
   ClearanceRequest,
@@ -239,6 +281,7 @@ export const CORE_EVENT_SCHEMAS = {
   device_registered: DeviceRegistered,
   tag_observed: TagObserved,
   marker_traversed: MarkerTraversed,
+  topology_violation: TopologyViolation,
   vehicle_identified: VehicleIdentified,
   train_status: TrainStatus,
   clearance_request: ClearanceRequest,
@@ -272,3 +315,31 @@ export const DeviceRetainedState = Type.Object({
   train_length_mm: Type.Optional(Type.Number({ minimum: 0, exclusiveMinimum: 0 })),
 });
 export type DeviceRetainedState = Static<typeof DeviceRetainedState>;
+
+// ---------- retained clearance state (railway/state/clearance/{train_id}) ----------
+
+/**
+ * Retained state the scheduler publishes to `railway/state/clearance/{train_id}`
+ * on every clearance mutation (grant, release, revoke, disconnect). The
+ * visualiser reads it to render which edges a train currently holds.
+ *
+ * `cleared_edges` — the edges the train is cleared for, in order. An empty
+ *   array clears the train's overlay.
+ * `block_reason` — present only when the scheduler is *holding* the train and
+ *   why (ADR-019). `'unknown_topology'` means the train reported a marker
+ *   unreachable from its last certain position under a bounded route: its
+ *   position is uncertain, it is held, and the uncertain region is retained in
+ *   `cleared_edges` so ADR-002 block exclusivity denies neighbours. This is the
+ *   SCHEDULER-OWNED producer of the hold signal — distinct from the
+ *   train-emitted `train_status.clearance_block_reason`, which a train MAY
+ *   independently echo. Absent on a normally-cleared or freely-moving train.
+ *
+ * Added 0.6.0 (ADR-019): documents the previously-implicit retained payload
+ * shape and adds the optional `block_reason` field.
+ */
+export const ClearanceRetainedState = Type.Object({
+  train_id: Uuid,
+  cleared_edges: Type.Array(EdgeRef),
+  block_reason: Type.Optional(Type.Literal('unknown_topology')),
+});
+export type ClearanceRetainedState = Static<typeof ClearanceRetainedState>;

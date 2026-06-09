@@ -15,5 +15,10 @@
  * 0.5.0 — optional `priority` on `device_registered` (ADR-017): the announced
  * term of the scheduler's total order over trains for section contention.
  * Backward-compatible addition; absent priority reproduces the FIFO floor.
+ * 0.6.0 — new `topology_violation` event + optional `block_reason` field on the
+ * retained clearance state (ADR-019): the scheduler-owned producer of the
+ * pre-existing `'unknown_topology'` reason, surfaced when a bounded-route train
+ * reports an unreachable marker. Backward-compatible additions; consumers that
+ * don't understand either ignore it.
  */
-export const PROTOCOL_VERSION = '0.5.0' as const;
+export const PROTOCOL_VERSION = '0.6.0' as const;

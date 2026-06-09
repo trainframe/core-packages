@@ -784,35 +784,44 @@ describe('Scheduler — block exclusivity', () => {
     expect(t2GrantAtM3).toBeDefined();
   });
 
-  it('releases blocks held by a train when it is reassigned to a route not covering them, granting waiting peers', () => {
+  it('releases blocks held by a train when it vacates them, granting a waiting peer in the same call', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
 
-    // T1 takes M1→M2 (with M2→M3 queued in the transit to M3).
+    // T1 takes M1→M2 (with M2→M3 queued in the transit to M3), locking {M1,M2,M3}.
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
-    // T2 is denied the same M1→M2 edge.
+    // T2 is denied M1→M2 (M1 and M2 are both locked by T1).
     const t2Initial = scheduler.assignSchedule('T2', 'route-2', ['M1', 'M2']);
     expect(
       t2Initial.find((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance'),
     ).toBeUndefined();
 
-    // Simulate T1 having reached M3 so its last_marker_id is set there.
-    // This lets the reassignment plan M3→M4, which does not cover M1→M2.
-    scheduler.handleEvent({
+    // T1 crosses M2 legitimately: it releases M1→M2 but still holds M2→M3, so M2
+    // stays locked and T2 remains denied. (Stepping marker-by-marker keeps every
+    // report a real adjacency — a jump M1→M3 would now be an ADR-019 topology
+    // violation under T1's bounded route, not a silent traversal.)
+    const effectsM2 = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M2' },
+    });
+    expect(
+      effectsM2.find(
+        (e) =>
+          e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+      ),
+    ).toBeUndefined();
+
+    // T1 crosses M3: it releases M2→M3, so M2 finally frees. The scheduler must
+    // retry T2's previously-denied clearance in the SAME call and grant it.
+    const effectsM3 = scheduler.handleEvent({
       event_type: 'tag_observed',
       device_id: 'T1',
       payload: { tag_id: 'M3' },
     });
-
-    // Operator reassigns T1 to a yard-style schedule that no longer touches
-    // M1→M2. Because last_marker_id='M3'=stops[0], the planner builds a transit
-    // M3→M4. The wipe of cleared_edges releases T1's hold on M1→M2 and the
-    // scheduler must retry T2's previously-denied clearance in the same call.
-    const reassign = scheduler.assignSchedule('T1', 'route-1b', ['M3', 'M4']);
-
-    const t2Grant = reassign.find(
+    const t2Grant = effectsM3.find(
       (e) =>
         e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
     );
@@ -2737,5 +2746,230 @@ describe('Scheduler — conflict resolution policy (ADR-017)', () => {
     // every run. The set collapses to one value: the order is reproducible.
     expect(results.size).toBe(1);
     expect([...results][0]).toBe('T-late');
+  });
+});
+
+/**
+ * ADR-019: topology-violation handling, driven through the real scheduler +
+ * registry + LayoutState (the established no-mock seam for the scheduler's own
+ * decision logic — emergent multi-component behaviour lives in the simulator
+ * suite). The decision is keyed on per-train state the scheduler already holds:
+ * a bounded route (transit) ⇒ EXPECTING, validate; no transit ⇒ OPEN, learn.
+ */
+describe('Scheduler — topology violation handling (ADR-019)', () => {
+  const observe = (scheduler: Scheduler, trainId: string, tagId: string) =>
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: trainId,
+      payload: { tag_id: tagId },
+    });
+
+  const findEvent = (effects: ReadonlyArray<SchedulerEffect>, eventType: string) =>
+    effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
+        e.kind === 'publish_event' && e.event_type === eventType,
+    );
+
+  const findClearanceState = (effects: ReadonlyArray<SchedulerEffect>, trainId: string) =>
+    effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'update_state_snapshot' }> =>
+        e.kind === 'update_state_snapshot' &&
+        e.entity_type === 'clearance' &&
+        e.entity_id === trainId,
+    );
+
+  it('(a) holds a bounded-route train that reports an unreachable marker, marks the region occupied, emits topology_violation, and learns no phantom edge', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    // Bounded route M1→M2→M3: T1 is conceptually at M1 with a transit + clearance.
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    expect(scheduler.getTrainState('T1')?.transit).toBeDefined();
+
+    // T1 now reports M4 — unreachable from M1 (no edge M1→M4). Under a bounded
+    // route this is a topology violation, not a discovery signal.
+    const effects = observe(scheduler, 'T1', 'M4');
+
+    // A topology_violation event is emitted, naming P (M1) and M (M4).
+    const violation = findEvent(effects, 'topology_violation');
+    expect(violation).toBeDefined();
+    expect(violation?.payload).toEqual({
+      train_id: 'T1',
+      last_known_marker_id: 'M1',
+      reported_marker_id: 'M4',
+      suspected_cause: 'sensor_fault', // M4 is a known-but-non-adjacent marker
+      detected_at_ms: 0,
+    });
+
+    // A normal marker_traversed is NOT emitted — the scheduler refuses to vouch
+    // for the position, so it must not imply a legitimate traversal.
+    expect(findEvent(effects, 'marker_traversed')).toBeUndefined();
+
+    // The train is HALTED on the wire (default-safe). Clearance is push, not
+    // poll: pinning the internal limit doesn't retract the M3 grant the train
+    // already holds, so an explicit revoke_clearance must reach it — otherwise
+    // it rolls on into uncertain territory.
+    const stop = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'revoke_clearance' && e.device_id === 'T1',
+    );
+    expect(stop).toBeDefined();
+    expect((stop?.payload as { reason: string }).reason).toBe('unknown_topology');
+
+    // No phantom edge is learned.
+    expect(scheduler.getLayout().findEdge('M1', 'M4')).toBeUndefined();
+
+    const t1 = scheduler.getTrainState('T1');
+    // Position stays pinned at the last CERTAIN marker (M1), not the report.
+    expect(t1?.last_marker_id).toBe('M1');
+    expect(t1?.clearance_limit_marker_id).toBe('M1');
+    // The uncertain region M1→M4 is retained as occupied.
+    expect(t1?.cleared_edges).toContainEqual({ from_marker_id: 'M1', to_marker_id: 'M4' });
+    expect(t1?.block_reason).toBe('unknown_topology');
+
+    // The hold rides the retained clearance state (scheduler-owned), with the
+    // block_reason field set — NOT on any train_status (train-emitted).
+    const clearance = findClearanceState(effects, 'T1');
+    expect(clearance?.state).toMatchObject({ block_reason: 'unknown_topology' });
+
+    // "For free": block exclusivity denies the locked markers to a peer. A
+    // second train routed across M4→M1 (which touches both held markers) is
+    // denied — proving the uncertain region protects neighbours.
+    registerTrain(scheduler, 'T2');
+    scheduler.assignSchedule('T2', 'route-2', ['M4', 'M1']);
+    expect(scheduler.getTrainState('T2')?.cleared_edges).toEqual([]);
+  });
+
+  it('(a-bis) an orphan reported marker (no incident edges) yields suspected_cause "unknown"', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+
+    // Bind a tag to a brand-new marker that the graph knows but that has no
+    // incident edges — an orphan, so the position is genuinely undetermined.
+    scheduler.handleEvent({
+      event_type: 'tag_assignment',
+      device_id: 'GARAGE',
+      payload: { tag_id: 'ORPHAN', assigned_kind: 'marker', target_id: 'ORPHAN' },
+    });
+    const effects = observe(scheduler, 'T1', 'ORPHAN');
+    const violation = findEvent(effects, 'topology_violation');
+    expect(violation?.payload).toMatchObject({
+      reported_marker_id: 'ORPHAN',
+      suspected_cause: 'unknown',
+    });
+    // Even with M wholly off the graph topology, the uncertain region is still
+    // retained as occupied (cleared_edges is a list of EdgeRefs, not graph edges).
+    expect(scheduler.getTrainState('T1')?.cleared_edges).toContainEqual({
+      from_marker_id: 'M1',
+      to_marker_id: 'ORPHAN',
+    });
+  });
+
+  it('(b) the SAME unreachable adjacency is LEARNED, not flagged, when the train is in OPEN mode (no bounded route)', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    // No assignSchedule: the train has no transit. This is OPEN mode — the same
+    // state an exploring (ADR-015) / track-learn (ADR-014) train sits in, since
+    // begin_exploration is issued straight to the device and never sets transit.
+
+    // Anchor at M1, then report M4 (no edge M1→M4 in the graph).
+    observe(scheduler, 'T1', 'M1');
+    const effects = observe(scheduler, 'T1', 'M4');
+
+    // Discovery fires: the edge IS learned, exactly as ADR-009 always did.
+    expect(scheduler.getLayout().findEdge('M1', 'M4')).toBeDefined();
+    // No violation, and a normal marker_traversed is emitted.
+    expect(findEvent(effects, 'topology_violation')).toBeUndefined();
+    expect(findEvent(effects, 'marker_traversed')).toBeDefined();
+
+    const t1 = scheduler.getTrainState('T1');
+    expect(t1?.last_marker_id).toBe('M4'); // position advances normally
+    expect(t1?.block_reason).toBeUndefined();
+  });
+
+  it('(c-reanchor) recovery via re-anchor releases the hold, learns nothing, and resumes scheduled operation', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    observe(scheduler, 'T1', 'M4'); // violation → held
+    expect(scheduler.getTrainState('T1')?.block_reason).toBe('unknown_topology');
+
+    // Operator re-scans T1 at a known marker (M2 — it really is there).
+    const recovery = scheduler.reanchor('T1', 'M2');
+
+    const t1 = scheduler.getTrainState('T1');
+    expect(t1?.block_reason).toBeUndefined();
+    expect(t1?.last_marker_id).toBe('M2');
+    // The phantom edge was never learned.
+    expect(scheduler.getLayout().findEdge('M1', 'M4')).toBeUndefined();
+    // The uncertain region is released; the retained clearance state no longer
+    // carries block_reason.
+    const clearance = findClearanceState(recovery, 'T1');
+    expect((clearance?.state as { block_reason?: string }).block_reason).toBeUndefined();
+    // Scheduled operation resumes: a fresh route is planned from M2 toward M3.
+    const resume = recovery.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'assign_route',
+    );
+    expect(resume).toBeDefined();
+    expect(t1?.transit).toBeDefined();
+  });
+
+  it('(c-confirm) recovery via confirm-new-track learns the edge (the ADR-014 bridge) and resumes', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    observe(scheduler, 'T1', 'M4'); // violation → held
+
+    // Operator confirms M1→M4 is real new track.
+    const recovery = scheduler.confirmNewTrack('T1');
+
+    // The edge is now learned (as inferred, like any discovery).
+    const learned = scheduler.getLayout().findEdge('M1', 'M4');
+    expect(learned).toBeDefined();
+    expect(learned?.inferred).toBe(true);
+
+    const t1 = scheduler.getTrainState('T1');
+    expect(t1?.block_reason).toBeUndefined();
+    expect(t1?.last_marker_id).toBe('M4'); // re-anchored at the now-confirmed M
+    // A fresh layout snapshot is published so subscribers see the new edge.
+    const layoutSnap = recovery.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'update_state_snapshot' }> =>
+        e.kind === 'update_state_snapshot' && e.entity_type === 'layout',
+    );
+    expect(layoutSnap).toBeDefined();
+  });
+
+  it('does not flag a re-read of the current marker as a violation', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    // Re-reading M1 (== last_marker_id) is a no-op, never a violation.
+    const effects = observe(scheduler, 'T1', 'M1');
+    expect(findEvent(effects, 'topology_violation')).toBeUndefined();
+    expect(scheduler.getTrainState('T1')?.block_reason).toBeUndefined();
+  });
+
+  it('clears the hold reason when an operator reassigns or revokes a held train (no stale block_reason on a moving train)', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    observe(scheduler, 'T1', 'M4'); // violation → held
+    expect(scheduler.getTrainState('T1')?.block_reason).toBe('unknown_topology');
+
+    // Reassigning the held train gives it fresh intent: the retained clearance
+    // state must NOT keep reporting it as held once it is cleared and moving.
+    const reassign = scheduler.assignSchedule('T1', 'route-1b', ['M1', 'M2']);
+    expect(scheduler.getTrainState('T1')?.block_reason).toBeUndefined();
+    const reassignClearance = findClearanceState(reassign, 'T1');
+    expect((reassignClearance?.state as { block_reason?: string }).block_reason).toBeUndefined();
+
+    // And a fresh violation followed by an explicit revoke also clears it.
+    observe(scheduler, 'T1', 'M4'); // hold again
+    expect(scheduler.getTrainState('T1')?.block_reason).toBe('unknown_topology');
+    const revoke = scheduler.revokeClearance('T1');
+    expect(scheduler.getTrainState('T1')?.block_reason).toBeUndefined();
+    const revokeClearance = findClearanceState(revoke, 'T1');
+    expect((revokeClearance?.state as { block_reason?: string }).block_reason).toBeUndefined();
   });
 });

@@ -47,6 +47,7 @@ export const EVENT_TYPE_ORDER = [
   'aspect_changed',
   'tag_assignment',
   'anomaly',
+  'topology_violation',
 ] as const;
 
 /**
