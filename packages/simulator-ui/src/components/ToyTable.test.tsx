@@ -1047,6 +1047,28 @@ describe('ToyTable — flip (mirror)', () => {
     fireEvent.keyDown(window, { key: 'f' });
     expect(piece.getAttribute('transform')).toContain('scale(1, 1)');
   });
+
+  it('reverses a ramp via Flip — a 180° rotation in place, not a mirror', async () => {
+    // A ramp is symmetric across its length, so a mirror-flip is a no-op. Its
+    // meaningful "flip" is reversing the incline: a 180° rotation (the endpoints
+    // swap world positions, so a connected ramp stays joined). Flip must NOT just
+    // toggle the scale-mirror, which would leave the ramp looking unchanged.
+    renderToyTable();
+    const pieceId = await placeArmedPiece('ramp');
+    const piece = document.querySelector(`[data-piece-id="${pieceId}"]`) as SVGGElement | null;
+    if (piece === null) throw new Error('no ramp placed');
+    expect(piece.getAttribute('transform')).toMatch(/rotate\(0\)/);
+    expect(piece.getAttribute('transform')).toContain('scale(1, 1)');
+
+    fireEvent.click(screen.getByRole('button', { name: /flip/i }));
+    expect(piece.getAttribute('transform')).toMatch(/rotate\(180\)/);
+    // Still un-mirrored — the reversal is the rotation, not a scale flip.
+    expect(piece.getAttribute('transform')).toContain('scale(1, 1)');
+
+    // F flips it back to the original incline.
+    fireEvent.keyDown(window, { key: 'f' });
+    expect(piece.getAttribute('transform')).toMatch(/rotate\(0\)/);
+  });
 });
 
 describe('ToyTable — run-flow guidance', () => {

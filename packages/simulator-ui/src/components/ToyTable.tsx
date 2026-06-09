@@ -896,6 +896,19 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     setPieces((prev) => {
       const target = prev.find((p) => p.id === selectedId);
       if (target === undefined) return prev;
+      // A ramp has no left/right-hand variant — it's symmetric across its length,
+      // so a mirror-flip would change nothing. Its only meaningful "mirror" is
+      // reversing the incline, which for this centred, collinear piece is a 180°
+      // rotation in place: the two endpoints swap world positions (so a connected
+      // ramp stays joined) and the higher end — and the uphill chevrons — point
+      // the other way. So Flip on a ramp reverses its slope.
+      if (target.type === 'ramp') {
+        return prev.map((p) =>
+          p.id === selectedId
+            ? { ...p, rotationDeg: ((p.rotationDeg + 180) % 360) as RotationDeg }
+            : p,
+        );
+      }
       const flipped = !(target.flipped === true);
       const others = prev.filter((p) => p.id !== selectedId);
       const entry = getEndpoints(target)[0];
