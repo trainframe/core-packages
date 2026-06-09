@@ -46,6 +46,11 @@ const ALL_PIECE_TYPES = [
   'gate',
   'carriage',
   'railyard',
+  'vision-station',
+  'turntable',
+  'crane-station',
+  'decoupler',
+  'lift-bridge',
 ] as const;
 
 export type TrackPieceType = (typeof ALL_PIECE_TYPES)[number];
@@ -61,7 +66,7 @@ export type TrackPieceType = (typeof ALL_PIECE_TYPES)[number];
  * distinguish the two. (In the registry: carriage is category `'device'`;
  * train/gate are `'wire-device'`.)
  */
-export type DevicePieceType = 'train' | 'gate' | 'carriage' | 'railyard';
+export type DevicePieceType = 'train' | 'gate' | 'carriage' | 'railyard' | 'decoupler';
 
 /**
  * Wire-visible device types. These are the subset of device pieces that
@@ -69,7 +74,19 @@ export type DevicePieceType = 'train' | 'gate' | 'carriage' | 'railyard';
  * Carriages are intentionally excluded — they are physical wagons with no
  * RFID tag; the system has no awareness of them on the wire.
  */
-export type WireDeviceType = 'train' | 'gate' | 'railyard';
+export type WireDeviceType = 'train' | 'gate' | 'railyard' | 'decoupler';
+
+/**
+ * The toybox tray a piece is presented in. `'track'` and `'devices'` are the
+ * staples an ordinary layout uses; `'experiments'` is the shared home for the
+ * speculative viability-test devices of `docs/experimental/` (001–005), kept
+ * visually and organisationally apart so an operator reaching for one knows
+ * they are picking up a stress-test, not a standard part. Presentation-only:
+ * a piece's CATEGORY (track topology vs device) is orthogonal — the
+ * Experiments tray holds both track-like pieces (turntable, lift bridge) and
+ * a wire device (decoupler).
+ */
+export type ToyboxTray = 'track' | 'devices' | 'experiments';
 
 /**
  * A carriage's livery. A carriage carries an intrinsic colour so a particular
@@ -898,6 +915,259 @@ function railyardBody(): PieceBody {
 }
 
 // ---------------------------------------------------------------------------
+// Experimental pieces (docs/experimental/ 001–005) — the "Experiments" tray.
+// Each is the toy-box element of a speculative viability-test device: the
+// geometry here is the agreed piece shape; the wire behaviour each one proves
+// lives in the scan flow (ToyTable) and the in-browser sim (ToyHardware).
+// ---------------------------------------------------------------------------
+
+/** Local position of the vision station's detection LED (on the sensor mast,
+ * near the rail). The static body draws its dark metal housing; the renderer
+ * lights a `pop` dot here while a train is under the sensor — the device's
+ * only "motion" (experimental 001 is defined by stillness). */
+export const VISION_LED = { x: 62.5, y: -16 } as const;
+
+/** Range (mm, from the piece origin) within which a train counts as "under
+ * the sensor" — being measured — so the LED lights. Visual only. */
+export const VISION_SENSOR_RANGE_MM = 55;
+
+function visionStationBody(): PieceBody {
+  // An ordinary station plank + platform (shifted west to make room), with the
+  // one manufactured addition: a thin grey camera mast beside the platform — a
+  // lens fitting at the top, the detection LED housing near the rail.
+  const ph = PLANK_HALF_WIDTH;
+  const platformTop = -(ph + 22);
+  return {
+    svgPath: roundRect(-110, -ph, 220, ph * 2, PLANK_CORNER),
+    features: [
+      { role: 'platform', d: roundRect(-60, platformTop, 104, 24, 4) },
+      { role: 'line', width: 2, d: `M -58 ${-ph - 1} H 46` },
+      { role: 'metal', d: roundRect(60, -34, 5, 20, 2) },
+      { role: 'glass', d: circle(62.5, -30, 3) },
+      { role: 'metal', d: circle(VISION_LED.x, VISION_LED.y, 2.8) },
+    ],
+    width: 220,
+    height: ph - platformTop,
+  };
+}
+
+/** Radius of the turntable's circular body. Endpoints sit ON the rim, so the
+ * disc spans 200 mm — the footprint of a junction. */
+export const TURNTABLE_RADIUS_MM = 100;
+
+/** The deck positions a turntable confirms — one per exit stub, in endpoint
+ * order [1, 2, 3]. Three position strings on ONE junction marker is the whole
+ * point of experimental 002: the switch seam is already N-way. */
+export type TurntablePosition = 'stub-a' | 'stub-b' | 'stub-c';
+export const TURNTABLE_POSITIONS: readonly TurntablePosition[] = ['stub-a', 'stub-b', 'stub-c'];
+
+/** Deck angle (deg, about the disc centre) for each confirmed position — the
+ * branch choice as a visible angle. */
+export const TURNTABLE_POSITION_ANGLE_DEG: Record<TurntablePosition, number> = {
+  'stub-a': 0,
+  'stub-b': 45,
+  'stub-c': -45,
+};
+
+/** Length of the fixed routed stubs at each rim exit. */
+const TURNTABLE_STUB_LEN = 22;
+
+// Trunk (west, index 0) + three exit stubs: east, and ±45° — all on the 45°
+// heading lattice so the disc snaps like any other piece.
+const TURNTABLE_ENDPOINTS: readonly LocalEndpoint[] = [
+  { lx: -TURNTABLE_RADIUS_MM, ly: 0, localAngle: 180 },
+  { lx: TURNTABLE_RADIUS_MM, ly: 0, localAngle: 0 },
+  {
+    lx: TURNTABLE_RADIUS_MM * Math.cos(toRad(45)),
+    ly: TURNTABLE_RADIUS_MM * Math.sin(toRad(45)),
+    localAngle: 45,
+  },
+  {
+    lx: TURNTABLE_RADIUS_MM * Math.cos(toRad(45)),
+    ly: -TURNTABLE_RADIUS_MM * Math.sin(toRad(45)),
+    localAngle: -45,
+  },
+];
+
+/** Trunk and east stub are straight chords through the centre; the ±45° stubs
+ * are smooth beziers like the junction branch, so a diverting train turns
+ * through the disc instead of snapping its heading at the marker. */
+function turntableCentreLine(index: number): CentreLinePath | undefined {
+  const ep = TURNTABLE_ENDPOINTS[index];
+  if (ep === undefined) return undefined;
+  if (index >= 2) return bezierHalfPath(ep.lx, ep.ly, 0, ep.localAngle);
+  return linearHalfPath(ep.lx, ep.ly);
+}
+
+/** Only the short FIXED rim stubs are routed into the static body. The
+ * full-diameter bridge grooves belong to the ROTATING deck (`turntableDeck`),
+ * drawn live by the renderer at the confirmed switch angle — the one piece
+ * whose decoration moves relative to its body. */
+function turntableRailLines(): readonly CentreLinePath[] {
+  return TURNTABLE_ENDPOINTS.map((ep) => {
+    const ux = Math.cos(toRad(ep.localAngle));
+    const uy = Math.sin(toRad(ep.localAngle));
+    return segmentPath(
+      ep.lx - ux * TURNTABLE_STUB_LEN,
+      ep.ly - uy * TURNTABLE_STUB_LEN,
+      ep.lx,
+      ep.ly,
+    );
+  });
+}
+
+function turntableBody(): PieceBody {
+  // A beech disc — not the Y-fork silhouette. The round body is its own
+  // read (no tint, ADR-024 §3); a faint rim ring marks the fixed outer body
+  // so the rotation of the inner bridge is legible against it.
+  const r = TURNTABLE_RADIUS_MM;
+  return {
+    svgPath: circle(0, 0, r),
+    features: [{ role: 'line', width: 2, d: circle(0, 0, r - 7) }],
+    width: r * 2,
+    height: r * 2,
+  };
+}
+
+/**
+ * The turntable's rotating bridge deck, in piece-local coordinates: a wooden
+ * band across the disc with its own twin grooves and a metal pivot hub. The
+ * renderer rotates this whole sub-shape about the origin to the confirmed
+ * switch position's angle (`TURNTABLE_POSITION_ANGLE_DEG`) — it is never part
+ * of the static body, so the grooves a train sees always match the deck angle.
+ */
+export function turntableDeck(): {
+  readonly svgPath: string;
+  readonly grooves: ReadonlyArray<string>;
+  readonly features: ReadonlyArray<PieceFeature>;
+} {
+  const len = TURNTABLE_RADIUS_MM - 8;
+  const rail = segmentPath(-len, 0, len, 0);
+  return {
+    svgPath: roundRect(-len, -PLANK_HALF_WIDTH, len * 2, PLANK_HALF_WIDTH * 2, PLANK_CORNER),
+    grooves: [offsetGroove(rail, 1), offsetGroove(rail, -1)],
+    features: [
+      { role: 'metal', d: circle(0, 0, 6) },
+      { role: 'pop', d: circle(0, 0, 2.2) },
+    ],
+  };
+}
+
+function craneStationBody(): PieceBody {
+  // A station plank with the platform shifted west; a manufactured grey gantry
+  // (two uprights + a cross-beam, drawn top-down) straddles the track to the
+  // east, with the trolley + hook on the beam and a stack of warm-accent
+  // crates on the trackside (experimental 003).
+  const ph = PLANK_HALF_WIDTH;
+  const platformTop = -(ph + 22);
+  return {
+    svgPath: roundRect(-110, -ph, 220, ph * 2, PLANK_CORNER),
+    features: [
+      { role: 'platform', d: roundRect(-95, platformTop, 80, 24, 4) },
+      { role: 'line', width: 2, d: `M -93 ${-ph - 1} H -17` },
+      { role: 'metal', d: roundRect(38, -ph - 13, 14, 10, 2) },
+      { role: 'metal', d: roundRect(38, ph + 3, 14, 10, 2) },
+      { role: 'metal', d: roundRect(42, -ph - 13, 6, ph * 2 + 26, 2) },
+      { role: 'dark-wood', d: roundRect(40, -8, 10, 9, 2) },
+      { role: 'pop', d: circle(45, 4.5, 2) },
+      { role: 'pop', d: roundRect(58, 16, 9, 9, 1.5) },
+      { role: 'pop', d: roundRect(69, 16, 9, 9, 1.5) },
+      { role: 'pop', d: roundRect(63.5, 6, 9, 9, 1.5) },
+    ],
+    width: 220,
+    height: ph + 25 - platformTop,
+  };
+}
+
+function decouplerBody(): PieceBody {
+  // A low manufactured housing straddling one track band — smaller than a
+  // station; reads as a gadget, not a stop. A slot runs down the rail centre
+  // with the retractable wedge parked in it (experimental 004).
+  const w = 44;
+  const h = 34;
+  return {
+    svgPath: roundRect(-w / 2, -h / 2, w, h, 4),
+    features: [
+      { role: 'line', width: 3, d: 'M -15 0 H 15' },
+      { role: 'pop', d: 'M -5 5 L 0 -6 L 5 5 Z' },
+      { role: 'metal', d: circle(-17, -12, 1.8) },
+      { role: 'metal', d: circle(17, -12, 1.8) },
+      { role: 'metal', d: circle(-17, 12, 1.8) },
+      { role: 'metal', d: circle(17, 12, 1.8) },
+    ],
+    width: w,
+    height: h,
+  };
+}
+
+/** Half-length of the lift bridge's hinged span. The fixed approaches end
+ * 4 mm short of it, so the deck visibly PARTS from its neighbours. */
+export const LIFT_BRIDGE_SPAN_HALF_MM = 68;
+const LIFT_BRIDGE_APPROACH_LEN = 28;
+
+/** Local pivot the raised span hinges about (the deck's west end, where the
+ * metal pivot fitting sits). */
+export const LIFT_BRIDGE_PIVOT = { x: -LIFT_BRIDGE_SPAN_HALF_MM, y: 0 } as const;
+
+/** How far (deg) the span swings about its pivot when raised — the top-down
+ * fake of a tilting deck. */
+export const LIFT_BRIDGE_RAISE_DEG = -18;
+
+function liftBridgeBody(): PieceBody {
+  // Only the two FIXED approach stubs: the hinged span itself is a separate
+  // sub-shape (`liftBridgeSpan`) the renderer draws over the gap and tilts
+  // when raised. It is track, so everything stays wooden (ADR-024 §4).
+  const ph = PLANK_HALF_WIDTH;
+  const west = roundRect(-100, -ph, LIFT_BRIDGE_APPROACH_LEN, ph * 2, PLANK_CORNER);
+  const east = roundRect(
+    100 - LIFT_BRIDGE_APPROACH_LEN,
+    -ph,
+    LIFT_BRIDGE_APPROACH_LEN,
+    ph * 2,
+    PLANK_CORNER,
+  );
+  return {
+    svgPath: `${west} ${east}`,
+    features: [],
+    width: 200,
+    height: ph * 2,
+  };
+}
+
+/**
+ * The lift bridge's hinged SPAN, in piece-local coordinates: a beech deck with
+ * its own grooves and a metal pivot fitting at the west end. The renderer
+ * draws it across the gap (angle 0 when seated) and rotates it about
+ * `LIFT_BRIDGE_PIVOT` by `LIFT_BRIDGE_RAISE_DEG` while raised — never part of
+ * the static body, so the rail visibly breaks when the track "is not there".
+ */
+export function liftBridgeSpan(): {
+  readonly svgPath: string;
+  readonly grooves: ReadonlyArray<string>;
+  readonly features: ReadonlyArray<PieceFeature>;
+} {
+  const half = LIFT_BRIDGE_SPAN_HALF_MM;
+  const rail = segmentPath(-half, 0, half, 0);
+  return {
+    svgPath: roundRect(-half, -PLANK_HALF_WIDTH, half * 2, PLANK_HALF_WIDTH * 2, PLANK_CORNER),
+    grooves: [offsetGroove(rail, 1), offsetGroove(rail, -1)],
+    features: [{ role: 'metal', d: circle(-half + 7, 0, 3.5) }],
+  };
+}
+
+/** The dark void revealed under a raised span — the renderer fades it in
+ * beneath the tilting deck so the missing rail reads as a real gap. */
+export function liftBridgeGap(): string {
+  return roundRect(
+    -LIFT_BRIDGE_SPAN_HALF_MM,
+    -PLANK_HALF_WIDTH + 3,
+    LIFT_BRIDGE_SPAN_HALF_MM * 2,
+    PLANK_HALF_WIDTH * 2 - 6,
+    3,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // The piece registry — one self-contained descriptor per type.
 // ---------------------------------------------------------------------------
 
@@ -910,6 +1180,8 @@ type PieceCategory = 'track' | 'device' | 'wire-device';
 
 interface PieceDescriptor {
   readonly category: PieceCategory;
+  /** Which toybox tray presents this piece (see `ToyboxTray`). */
+  readonly tray: ToyboxTray;
   readonly label: string;
   /** Warm wood wash, or null for plain beech / devices. See PIECE_TINT. */
   readonly tint: string | null;
@@ -928,6 +1200,8 @@ interface PieceDescriptor {
 
 interface TrackSpec {
   readonly label: string;
+  /** Tray override — the experimental track pieces declare 'experiments'. */
+  readonly tray?: ToyboxTray;
   readonly tint: string | null;
   readonly markerKind: TrackMarkerKind;
   endpoints(radiusMm?: number): readonly LocalEndpoint[];
@@ -953,6 +1227,7 @@ function trackPiece(spec: TrackSpec): PieceDescriptor {
     });
   return {
     category: 'track',
+    tray: spec.tray ?? 'track',
     label: spec.label,
     tint: spec.tint,
     markerKind: spec.markerKind,
@@ -968,9 +1243,11 @@ function devicePiece(
   category: 'device' | 'wire-device',
   label: string,
   body: () => PieceBody,
+  tray: ToyboxTray = 'devices',
 ): PieceDescriptor {
   return {
     category,
+    tray,
     label,
     tint: null,
     markerKind: null,
@@ -1053,6 +1330,50 @@ const PIECES: Record<TrackPieceType, PieceDescriptor> = {
   gate: devicePiece('wire-device', 'Gate', gateBody),
   carriage: devicePiece('device', 'Carriage', carriageBody),
   railyard: devicePiece('wire-device', 'Railyard', railyardBody),
+  // The Experiments tray (docs/experimental/ 001–005). Real track / device
+  // pieces with real wire identities; the speculative part is the hardware
+  // each one pretends to be, never what it puts on the bus.
+  'vision-station': trackPiece({
+    label: 'Vision Station',
+    tray: 'experiments',
+    tint: '#f0a02f', // it IS a station — same warm honey
+    markerKind: 'station_stop',
+    ...linearLegs(STATION_ENDPOINTS),
+    body: visionStationBody,
+  }),
+  turntable: trackPiece({
+    label: 'Turntable',
+    tray: 'experiments',
+    tint: null, // the round disc silhouette reads on its own (ADR-024 §3)
+    markerKind: 'junction',
+    endpoints: () => TURNTABLE_ENDPOINTS,
+    centreLine: (index) => turntableCentreLine(index),
+    // Fixed rim stubs only — the bridge grooves ride the rotating deck.
+    railLines: turntableRailLines,
+    body: turntableBody,
+  }),
+  'crane-station': trackPiece({
+    label: 'Crane',
+    tray: 'experiments',
+    tint: '#f0a02f', // a station underneath — same warm honey
+    markerKind: 'station_stop',
+    ...linearLegs(STATION_ENDPOINTS),
+    body: craneStationBody,
+  }),
+  decoupler: devicePiece('wire-device', 'Decoupler', decouplerBody, 'experiments'),
+  'lift-bridge': trackPiece({
+    label: 'Lift Bridge',
+    tray: 'experiments',
+    tint: '#c97b4a', // warm copper — track that comes and goes
+    markerKind: 'block_boundary',
+    ...linearLegs(STRAIGHT_ENDPOINTS),
+    // The drawn rail is the two fixed approach stubs; the span's grooves ride
+    // the hinged deck (`liftBridgeSpan`), which is sometimes not there. The
+    // ridden centre-line stays the full chord (the rail a crossing train rides
+    // when the span is seated).
+    railLines: () => [segmentPath(-100, 0, -72, 0), segmentPath(72, 0, 100, 0)],
+    body: liftBridgeBody,
+  }),
 };
 
 // ---------------------------------------------------------------------------
@@ -1094,13 +1415,36 @@ export function isWireDevice(type: TrackPieceType): type is WireDeviceType {
   return PIECES[type].category === 'wire-device';
 }
 
-/** Track pieces, in tray order. Derived — the toybox can't fall out of sync. */
+/** Every track-CATEGORY piece (contributes topology), in declaration order —
+ * includes the experimental track pieces. Semantic, not a tray: the toybox
+ * presents pieces via `TOYBOX_TRAYS`. Derived. */
 export const TRACK_PIECE_TYPES: readonly TrackPieceType[] = ALL_PIECE_TYPES.filter(
   (type) => PIECES[type].category === 'track',
 );
 
-/** Device pieces (train, gate, carriage), in tray order. Derived. */
+/** Every device-CATEGORY piece (no topology), in declaration order — includes
+ * the experimental decoupler. Semantic, not a tray. Derived. */
 export const DEVICE_PIECE_TYPES: readonly DevicePieceType[] = ALL_PIECE_TYPES.filter(isDevicePiece);
+
+/** Pieces in the toybox "Experiments" tray, in declaration (doc-number) order. */
+export const EXPERIMENT_PIECE_TYPES: readonly TrackPieceType[] = ALL_PIECE_TYPES.filter(
+  (type) => PIECES[type].tray === 'experiments',
+);
+
+/**
+ * The toybox tray groups, in display order — Track and Devices staples first,
+ * then the Experiments box of viability-test pieces. Derived from each
+ * descriptor's `tray`, so a new piece lands in the right box by declaration
+ * and the toybox can't fall out of sync.
+ */
+export const TOYBOX_TRAYS: ReadonlyArray<{
+  readonly heading: string;
+  readonly types: ReadonlyArray<TrackPieceType>;
+}> = [
+  { heading: 'Track', types: ALL_PIECE_TYPES.filter((type) => PIECES[type].tray === 'track') },
+  { heading: 'Devices', types: ALL_PIECE_TYPES.filter((type) => PIECES[type].tray === 'devices') },
+  { heading: 'Experiments', types: EXPERIMENT_PIECE_TYPES },
+];
 
 /**
  * The marker kind a piece contributes. Devices declare `null` and resolve to

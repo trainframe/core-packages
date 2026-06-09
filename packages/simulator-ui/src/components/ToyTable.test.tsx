@@ -1665,3 +1665,185 @@ describe('effectiveLayer — live-train draw layer across a bridge', () => {
     expect(effectiveLayer(groundPiece, simOnRampToUpper(), new Map(), piecesById)).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Experiments tray (docs/experimental 001–005)
+// ---------------------------------------------------------------------------
+
+describe('ToyTable — Experiments tray', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  /** device_registered envelopes published for `deviceId`, scan flow and sim
+   * bridge alike, decoded. */
+  function registrationsFor(
+    client: InMemoryBrokerClient,
+    deviceId: string,
+  ): Array<{ capabilities?: string[]; controls_marker_id?: string }> {
+    return client.published
+      .filter((m) => m.topic === `railway/events/device_registered/${deviceId}`)
+      .map((m) => decodeEnvelope(m.payload).payload as { capabilities?: string[] });
+  }
+
+  it('shows the Experiments box as a third tray group with the five viability-test pieces', () => {
+    renderToyTable();
+    const tray = screen.getByLabelText('Experiments');
+    for (const type of [
+      'vision-station',
+      'turntable',
+      'crane-station',
+      'decoupler',
+      'lift-bridge',
+    ]) {
+      const button = screen.getByTestId(`toybox-${type}`);
+      expect(button).toBeInTheDocument();
+      expect(tray.contains(button)).toBe(true);
+    }
+  });
+
+  it('scanning a vision station binds a station_stop marker and registers VLS- with core.reports_length', async () => {
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('vision-station');
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+
+    const assign = filterScanFlowAssignments(client).find(
+      (a) => a.payload.target_id === `M-${pieceId}`,
+    );
+    expect(assign?.payload.marker_kind).toBe('station_stop');
+
+    const regs = registrationsFor(client, `VLS-${pieceId}`);
+    expect(regs.length).toBeGreaterThanOrEqual(1);
+    expect(regs[0]?.capabilities).toEqual(['core.reports_length']);
+  });
+
+  it('scanning crane and lift bridge registers their clearance-gating identities', async () => {
+    const { client } = renderToyTable();
+    for (const [type, prefix] of [
+      ['crane-station', 'CRANE-'],
+      ['lift-bridge', 'BRIDGE-'],
+    ] as const) {
+      const pieceId = await placeArmedPiece(type);
+      dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+      const regs = registrationsFor(client, `${prefix}${pieceId}`);
+      expect(regs.length).toBeGreaterThanOrEqual(1);
+      expect(regs.some((r) => r.capabilities?.includes('core.gates_clearance'))).toBe(true);
+    }
+  });
+
+  it('scanning a turntable binds a junction marker and registers a SWITCH- motor for it', async () => {
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('turntable');
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+
+    const assign = filterScanFlowAssignments(client).find(
+      (a) => a.payload.target_id === `M-${pieceId}`,
+    );
+    expect(assign?.payload.marker_kind).toBe('junction');
+
+    const regs = registrationsFor(client, `SWITCH-${pieceId}`);
+    expect(regs.length).toBeGreaterThanOrEqual(1);
+    expect(regs[0]?.capabilities).toEqual(['core.controls_switch']);
+    expect(
+      (regs[0] as { controls_marker_id?: string }).controls_marker_id ??
+        (regs.find((r) => 'controls_marker_id' in r) as { controls_marker_id?: string })
+          ?.controls_marker_id,
+    ).toBe(`M-${pieceId}`);
+  });
+
+  it('scanning a decoupler registers DEC- with reports_length + gates_clearance', async () => {
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('decoupler');
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+
+    const regs = registrationsFor(client, `DEC-${pieceId}`);
+    expect(
+      regs.some(
+        (r) =>
+          r.capabilities?.includes('core.reports_length') === true &&
+          r.capabilities?.includes('core.gates_clearance') === true,
+      ),
+    ).toBe(true);
+    // Wire-faithful: no tag binding — the decoupler is a device, not a marker.
+    const assigns = filterScanFlowAssignments(client).filter(
+      (a) => a.payload.target_id === `M-${pieceId}`,
+    );
+    expect(assigns).toHaveLength(0);
+  });
+
+  it('Raise span withholds the bridge marker and tilts the deck; Lower seats and grants', async () => {
+    const user = userEvent.setup();
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('lift-bridge');
+
+    // A freshly placed bridge is seated: span down, no gap.
+    const span = screen.getByTestId(`bridge-span-${pieceId}`);
+    expect(span.getAttribute('data-raised')).toBe('false');
+
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+    await user.click(screen.getByTestId('toybox-lift-bridge')); // disarm
+    fireEvent.click(screen.getByTestId(`piece-${pieceId}`)); // select
+
+    await user.click(screen.getByTestId('action-raise-span'));
+    expect(span.getAttribute('data-raised')).toBe('true');
+    // The raise is a real clearance withhold across the bridge's own marker —
+    // "the track is physically not there right now" (experimental 005).
+    const gateTopic = `railway/events/gate_state_changed/BRIDGE-${pieceId}`;
+    const states = client.published
+      .filter((m) => m.topic === gateTopic)
+      .map((m) => decodeEnvelope(m.payload).payload as { marker_id: string; state: string });
+    expect(states).toEqual([
+      { marker_id: `M-${pieceId}`, state: 'withholding', reason: 'span raised' },
+    ]);
+
+    await user.click(screen.getByTestId('action-lower-span'));
+    expect(span.getAttribute('data-raised')).toBe('false');
+    const after = client.published.filter((m) => m.topic === gateTopic);
+    expect(after).toHaveLength(2);
+    expect(
+      (decodeEnvelope(after[1]?.payload ?? new Uint8Array()).payload as { state: string }).state,
+    ).toBe('granting');
+  });
+
+  it('Spin deck swings the turntable bridge to the next stub and confirms it on the bus', async () => {
+    const user = userEvent.setup();
+    const { client } = renderToyTable();
+    const pieceId = await placeArmedPiece('turntable');
+
+    // Resting deck: east alignment (stub-a, 0°).
+    const deck = screen.getByTestId(`turntable-deck-${pieceId}`);
+    expect(deck.getAttribute('data-angle')).toBe('0');
+
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
+    await user.click(screen.getByTestId('toybox-turntable')); // disarm
+    fireEvent.click(screen.getByTestId(`piece-${pieceId}`)); // select
+
+    await user.click(screen.getByTestId('action-spin-deck'));
+    expect(deck.getAttribute('data-angle')).toBe('45'); // stub-b
+    const changed = client.published
+      .filter((m) => m.topic === `railway/events/switch_state_changed/SWITCH-${pieceId}`)
+      .map((m) => decodeEnvelope(m.payload).payload as { position: string; confirmed: boolean });
+    expect(changed).toEqual([
+      { junction_marker_id: `M-${pieceId}`, position: 'stub-b', confirmed: true },
+    ]);
+
+    await user.click(screen.getByTestId('action-spin-deck'));
+    expect(deck.getAttribute('data-angle')).toBe('-45'); // stub-c
+  });
+
+  it('the vision station LED lights while a live train sits under the sensor', async () => {
+    renderToyTable();
+    const stationId = await placeArmedPiece('vision-station');
+
+    // Dark while nothing is being measured.
+    const led = screen.getByTestId(`vision-led-${stationId}`);
+    expect(led.getAttribute('data-lit')).toBe('false');
+
+    // A live train parked on the station (same canvas-centre drop point) is
+    // within sensor range — the LED lights. Stillness otherwise: no sweep, no
+    // moving parts (experimental 001).
+    const trainId = await placeArmedPiece('train');
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), trainId);
+    expect(screen.getByTestId(`vision-led-${stationId}`).getAttribute('data-lit')).toBe('true');
+  });
+});

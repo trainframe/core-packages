@@ -38,10 +38,19 @@ shared home for speculative, viability-test pieces, kept visually and
 organisationally apart from the staples an ordinary layout uses, so an operator
 reaching for one knows they are picking up a stress-test, not a standard part.
 
-This is a **documented design concept, not built**: none of 002–005 has agreed
-piece geometry, and they are explicitly viability tests, so they are not yet real
-`TrackPieceType`s in `ToyTable.tsx`. Each entry's *Toy-box element & animation*
-section describes how its tray piece would look and move when it lands.
+The box is **built** (June 2026): all five of 001–005 are real `TrackPieceType`s
+in the ADR-024 workshop style, presented in an "Experiments" tray group derived
+from the piece registry (`TOYBOX_TRAYS` in
+`packages/simulator-ui/src/track/pieces.ts`). Each piece carries the wire
+identity its entry declares — and nothing else — and the three with moving
+parts move on the table: the lift bridge's span tilts as its gate withholds,
+the turntable's deck swings to the confirmed switch position, the vision
+station's LED lights while a train is measured (and its `VLS-` identity really
+asserts `train_length_changed` from the consist it observes). What stays
+unbuilt is exactly what each entry hand-waves: the crane's cargo slots and the
+decoupler's length-decrease + shunting orchestration are still documented
+design, not code. Per-entry build status is noted under each doc's **Status**
+line.
 
 ## What every entry must cover
 

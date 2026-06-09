@@ -3,7 +3,15 @@
 **Status:** speculative viability test. NOT normative; not expected in a typical
 setup.
 
-**Proves:** that the switch seam is **already N-way** and a junction is not
+**Built (June 2026):** toy-table piece in the Experiments tray (`turntable` in
+`pieces.ts`) — a beech disc with a trunk + three rim stubs on the 45° lattice
+(the spatial open question answered: endpoints sit on the same heading lattice
+as every other piece, so the disc snaps normally). `compileLayout` emits one
+junction marker with `valid_positions ['stub-a','stub-b','stub-c']` and three
+switched outbound edges — the N-way claim, compiled by the unchanged junction
+machinery. The deck is a separate rotating sub-shape drawn at the confirmed
+`VirtualSwitch` position (eased), and a "Spin deck" affordance models a hand on
+the toy: the device seats and confirms exactly as for `set_switch_position`. that the switch seam is **already N-way** and a junction is not
 limited to two exits. A rotating turntable that aligns its single bridge rail to
 any one of three (or more) radiating tracks is, to the scheduler, *just a switch
 with more position strings*. If a train can route through it end-to-end, the

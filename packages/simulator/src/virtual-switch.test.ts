@@ -157,3 +157,32 @@ describe('Simulation.handleCommand — no switch registered', () => {
     expect(sim.getEventsOfType('switch_state_changed')).toHaveLength(0);
   });
 });
+
+describe('VirtualSwitch — position state (turntables and other N-way decks)', () => {
+  it('tracks the last confirmed position; undefined before the first set', () => {
+    const events: Array<{ event_type: string; payload: unknown }> = [];
+    const sw = new VirtualSwitch('SWITCH-tt-1', 'M-tt-1', (e) => events.push(e));
+    expect(sw.getPosition()).toBeUndefined();
+
+    // A physical act (a hand-spun deck) and a wire command confirm identically.
+    sw.setPosition('stub-b');
+    expect(sw.getPosition()).toBe('stub-b');
+    const ev = events[0];
+    expect(ev?.event_type).toBe('switch_state_changed');
+    const p = ev?.payload as { junction_marker_id: string; position: string; confirmed: boolean };
+    expect(p).toEqual({ junction_marker_id: 'M-tt-1', position: 'stub-b', confirmed: true });
+
+    sw.acceptCommand('set_switch_position', { position: 'stub-c' });
+    expect(sw.getPosition()).toBe('stub-c');
+  });
+
+  it('Simulation.getSwitch exposes the spawned motor; unknown ids are undefined', () => {
+    const sim = new Simulation({
+      layout: { name: 'test', markers: [], edges: [], junctions: [] },
+      seed: 1,
+    });
+    const sw = sim.spawnSwitch('SWITCH-tt-1', 'M-tt-1');
+    expect(sim.getSwitch('SWITCH-tt-1')).toBe(sw);
+    expect(sim.getSwitch('SWITCH-nope')).toBeUndefined();
+  });
+});

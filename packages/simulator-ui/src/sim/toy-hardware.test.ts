@@ -421,3 +421,156 @@ describe('ToyHardware — railyard + carriage consists', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// Experimental devices (docs/experimental 001–005) — wire-faithful seams
+// ---------------------------------------------------------------------------
+
+/** Decode a published wire envelope back to its JSON payload. */
+function decodeEnvelope(m: { payload: Uint8Array }): {
+  device_id: string;
+  payload: { train_id?: string; train_length_mm?: number };
+} {
+  return JSON.parse(new TextDecoder().decode(m.payload));
+}
+
+describe('ToyHardware — experimental devices', () => {
+  it('a live lift bridge carries a BRIDGE- gate; raising the span withholds its own marker', () => {
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId });
+    try {
+      const bridge = piece('lift-bridge', 100, 100);
+      hardware.syncLayout([bridge]);
+      hardware.syncLive([bridge], new Set([bridge.id]));
+
+      const gate = hardware.getSimulation().getGate(`BRIDGE-${bridge.id}`);
+      expect(gate).toBeDefined();
+      if (gate === undefined) throw new Error('unreachable');
+
+      // The physical act: span up ⇒ withhold clearance across the span marker.
+      gate.withhold(`M-${bridge.id}`, 'span raised');
+      expect(gate.isWithholding(`M-${bridge.id}`)).toBe(true);
+      const topic = `railway/events/gate_state_changed/BRIDGE-${bridge.id}`;
+      expect(client.published.filter((m) => m.topic === topic)).toHaveLength(1);
+
+      // Lower and seat ⇒ grant. Same machinery as a level-crossing gate.
+      gate.release(`M-${bridge.id}`);
+      expect(gate.isWithholding(`M-${bridge.id}`)).toBe(false);
+      expect(client.published.filter((m) => m.topic === topic)).toHaveLength(2);
+    } finally {
+      hardware.dispose();
+    }
+  });
+
+  it('a live crane station carries a CRANE- gate (to pin a dwelling train, never a dwell timer)', () => {
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId });
+    try {
+      const crane = piece('crane-station', 100, 100);
+      hardware.syncLayout([crane]);
+      hardware.syncLive([crane], new Set([crane.id]));
+      expect(hardware.getSimulation().getGate(`CRANE-${crane.id}`)).toBeDefined();
+    } finally {
+      hardware.dispose();
+    }
+  });
+
+  it('a live turntable carries a SWITCH- motor that confirms three distinct positions', () => {
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId });
+    try {
+      const t = piece('turntable', 100, 100);
+      hardware.syncLayout([t]);
+      hardware.syncLive([t], new Set([t.id]));
+
+      const sw = hardware.getSimulation().getSwitch(`SWITCH-${t.id}`);
+      expect(sw).toBeDefined();
+      if (sw === undefined) throw new Error('unreachable');
+      expect(sw.getPosition()).toBeUndefined();
+
+      // A hand-spun deck seats and confirms exactly like a commanded one.
+      sw.setPosition('stub-b');
+      expect(sw.getPosition()).toBe('stub-b');
+      const topic = `railway/events/switch_state_changed/SWITCH-${t.id}`;
+      const published = client.published.filter((m) => m.topic === topic);
+      expect(published).toHaveLength(1);
+    } finally {
+      hardware.dispose();
+    }
+  });
+
+  it('a scanned decoupler registers DEC- with a gate behind it, and disconnects on delete', () => {
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId });
+    try {
+      const dec = piece('decoupler', 100, 100);
+      hardware.syncLayout([dec]);
+      hardware.syncLive([dec], new Set([dec.id]));
+      expect(hardware.getSimulation().getGate(`DEC-${dec.id}`)).toBeDefined();
+      const regTopic = `railway/events/device_registered/DEC-${dec.id}`;
+      expect(client.published.find((m) => m.topic === regTopic)).toBeDefined();
+
+      hardware.syncLive([dec], new Set());
+      const offTopic = `railway/events/device_disconnected/DEC-${dec.id}`;
+      expect(client.published.find((m) => m.topic === offTopic)).toBeDefined();
+    } finally {
+      hardware.dispose();
+    }
+  });
+
+  it('a vision station asserts a passing train’s length from ITS OWN identity (ADR-023)', () => {
+    /* The 001 proof, end-to-end: a train towing two wagons explores across the
+     * station's marker; the station (not the train) emits train_length_changed
+     * with the measured nose-to-tail length, and hysteresis keeps it from
+     * re-reporting an unchanged estimate. */
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId });
+    try {
+      const s1 = piece('straight', 100, 100);
+      const vs = piece('vision-station', 310, 100); // endpoints meet at x=200
+      const train = piece('train', 110, 100);
+      const red1 = carriage(60, 100, 'red');
+      const red2 = carriage(10, 100, 'red');
+      const pieces = [s1, vs, train, red1, red2];
+      const live = new Set(pieces.map((p) => p.id));
+      hardware.syncLayout(pieces);
+      hardware.syncLive(pieces, live);
+
+      // Drive the train across the station marker (exploration needs no server).
+      hardware.getSimulation().handleCommand(`T-${train.id}`, 'begin_exploration', {});
+      for (let i = 0; i < 150; i++) hardware.tick(200);
+
+      const topic = `railway/events/train_length_changed/VLS-${vs.id}`;
+      const reports = client.published.filter((m) => m.topic === topic);
+      expect(reports).toHaveLength(1);
+      const envelope = decodeEnvelope(reports[0] ?? { payload: new Uint8Array() });
+      expect(envelope.device_id).toBe(`VLS-${vs.id}`);
+      expect(envelope.payload.train_id).toBe(`T-${train.id}`);
+      // 60 mm loco + 2 × 50 mm carriage spacing — measured, not configured.
+      expect(envelope.payload.train_length_mm).toBe(160);
+    } finally {
+      hardware.dispose();
+    }
+  });
+
+  it('a vision station stays silent for trains that never cross its marker', () => {
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId });
+    try {
+      const vs = piece('vision-station', 310, 100);
+      hardware.syncLayout([vs]);
+      hardware.syncLive([vs], new Set([vs.id]));
+      for (let i = 0; i < 20; i++) hardware.tick(200);
+      const topic = `railway/events/train_length_changed/VLS-${vs.id}`;
+      expect(client.published.filter((m) => m.topic === topic)).toHaveLength(0);
+    } finally {
+      hardware.dispose();
+    }
+  });
+});

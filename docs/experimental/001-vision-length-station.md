@@ -3,6 +3,15 @@
 **Status:** speculative viability test. NOT normative; not expected in a typical
 setup.
 
+**Built (June 2026):** toy-table piece in the Experiments tray (`vision-station`
+in `pieces.ts`) — station plank + grey sensor mast, with the detection LED lit
+while a live train is under the sensor. The proof itself runs: scanning
+registers `VLS-{piece.id}` with `core.reports_length`, and
+`ToyHardware.reportVisionLengths` watches `tag_observed` at the station's
+marker, measures the observed train from its sim consist (the camera
+hand-wave), and asserts `train_length_changed` with hysteresis — a device that
+is not the train, changing the length on the wire, end-to-end.
+
 **Proves:** that a train's length can be *reported and changed at runtime by a
 device that is not the train* — the seam [ADR-023](../adr/023-coupling-and-decoupling.md)
 opened (`train_length_changed` event + `core.reports_length` capability). If this

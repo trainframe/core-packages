@@ -2,7 +2,11 @@ import type { Layout } from '@trainframe/protocol';
 import { BrokerBridge, Simulation, type VirtualCarriage } from '@trainframe/simulator';
 import type { BrokerClient } from '../broker/client.js';
 import { encodeDeviceEvent } from '../broker/encode-event.js';
-import { COUPLING_DISTANCE_MM, computeTrainTrails } from '../track/coupling.js';
+import {
+  CARRIAGE_SPACING_MM,
+  COUPLING_DISTANCE_MM,
+  computeTrainTrails,
+} from '../track/coupling.js';
 import { compileLayout } from '../track/layout-from-pieces.js';
 import { TRAIN_LENGTH_MM, type TrackPiece, isDevicePiece, layerOf } from '../track/pieces.js';
 import { nearestMarkerId, nearestStartEdge } from './nearest-edge.js';
@@ -15,6 +19,7 @@ function deviceIdForDevicePiece(piece: TrackPiece): string {
   if (piece.type === 'train') return `T-${piece.id}`;
   if (piece.type === 'gate') return `GATE-${piece.id}`;
   if (piece.type === 'railyard') return `YARD-${piece.id}`;
+  if (piece.type === 'decoupler') return `DEC-${piece.id}`;
   throw new Error(`deviceIdForDevicePiece called on non-device piece ${piece.type}`);
 }
 
@@ -139,6 +144,16 @@ export class ToyHardware {
   // consists from. Reseeding only when this changes keeps a railyard's swapped
   // consist alive across frames (a swap doesn't change the pieces).
   private lastComposition = '';
+  /* Live vision stations (experimental 001), keyed by the tag id their sensor
+   * watches (in the toy-table, tag ids ARE marker ids) → the station's VLS-
+   * device id. Rebuilt on every syncLive. */
+  private visionStations: ReadonlyMap<string, string> = new Map();
+  // Cursor into the sim's tag_observed stream, so each tick only examines new
+  // observations. Reset when the sim is rebuilt (the stream starts over).
+  private visionCursor = 0;
+  // Last length each station asserted per train — the hysteresis band that
+  // keeps a station from re-emitting an unchanged estimate on every lap.
+  private readonly visionReported = new Map<string, number>();
 
   constructor(options: ToyHardwareOptions) {
     this.client = options.client;
@@ -178,6 +193,10 @@ export class ToyHardware {
     this.lastPoweredOff = new Set();
     // The new Simulation has empty consists; force a reseed on the next syncLive.
     this.lastComposition = '';
+    // The new Simulation's event stream starts over; restart the vision
+    // stations' observation cursor and their per-train hysteresis with it.
+    this.visionCursor = 0;
+    this.visionReported.clear();
   }
 
   /**
@@ -233,6 +252,7 @@ export class ToyHardware {
 
     this.lastLive = new Set(liveIds);
     this.lastPieces = piecesById;
+    this.indexVisionStations(pieces, liveIds);
 
     // Re-seed sim consists + yard spares from proximity whenever the COMPOSITION
     // changes (a carriage/train/railyard added, removed, or repositioned) — not
@@ -244,6 +264,21 @@ export class ToyHardware {
       this.lastComposition = composition;
       this.reseedConsists(pieces, liveIds);
     }
+  }
+
+  /** Index the live vision stations by the tag id their sensor watches, so
+   * the per-tick observation scan is a map lookup, not a piece search. */
+  private indexVisionStations(
+    pieces: ReadonlyArray<TrackPiece>,
+    liveIds: ReadonlySet<string>,
+  ): void {
+    const vision = new Map<string, string>();
+    for (const p of pieces) {
+      if (p.type === 'vision-station' && liveIds.has(p.id)) {
+        vision.set(`M-${p.id}`, `VLS-${p.id}`);
+      }
+    }
+    this.visionStations = vision;
   }
 
   /**
@@ -331,6 +366,14 @@ export class ToyHardware {
       this.simulation.spawnGate(deviceIdForDevicePiece(piece));
       return;
     }
+    if (piece.type === 'decoupler') {
+      // A wedge decoupler (experimental 004) pins a dwelling train via
+      // core.gates_clearance while the wedge is up — gate machinery, reused.
+      // Its core.reports_length emission (the shorter train) stays unbuilt:
+      // the docs park the shunting orchestration as a separate question.
+      this.simulation.spawnGate(deviceIdForDevicePiece(piece));
+      return;
+    }
     if (piece.type === 'railyard') {
       // A railyard gates the nearest marker (its throat). `nearestMarkerId`
       // already returns the compiled `M-…` id. Defer if no track has been placed
@@ -358,9 +401,24 @@ export class ToyHardware {
     // server can build the marker → device pairing. LearnMode then addresses
     // `set_switch_position` commands to the device id (looked up via
     // LayoutState.switchDeviceForMarker), not directly to the marker id.
-    if (piece.type === 'junction') {
+    // A turntable (experimental 002) is the same declaration with more
+    // position strings — the device timing differs, never the mechanism.
+    if (piece.type === 'junction' || piece.type === 'turntable') {
       this.simulation.spawnSwitch(`SWITCH-${piece.id}`, markerId);
     }
+    // Track pieces that gate clearance across their own marker (experimental
+    // 003/005) carry a companion VirtualGate: a crane pins a dwelling train
+    // during a lift; a lift bridge withholds while its span is raised. Same
+    // machinery as a level-crossing gate, pointed at the piece's own marker.
+    if (piece.type === 'crane-station') {
+      this.simulation.spawnGate(`CRANE-${piece.id}`);
+    }
+    if (piece.type === 'lift-bridge') {
+      this.simulation.spawnGate(`BRIDGE-${piece.id}`);
+    }
+    // A vision station (experimental 001) needs no sim entity: it is a passive
+    // observer whose length reports are emitted from `reportVisionLengths` as
+    // trains cross its marker.
   }
 
   private despawnPiece(piece: TrackPiece): void {
@@ -385,7 +443,7 @@ export class ToyHardware {
       this.client.publish(topic, payload);
       return;
     }
-    if (piece.type === 'gate') {
+    if (piece.type === 'gate' || piece.type === 'decoupler') {
       this.simulation.despawnGate(deviceIdForDevicePiece(piece));
       return;
     }
@@ -398,8 +456,14 @@ export class ToyHardware {
       // reseed drops it from any consist/spares it was part of.
       return;
     }
-    if (piece.type === 'junction') {
+    if (piece.type === 'junction' || piece.type === 'turntable') {
       this.simulation.despawnSwitch(`SWITCH-${piece.id}`);
+    }
+    if (piece.type === 'crane-station') {
+      this.simulation.despawnGate(`CRANE-${piece.id}`);
+    }
+    if (piece.type === 'lift-bridge') {
+      this.simulation.despawnGate(`BRIDGE-${piece.id}`);
     }
   }
 
@@ -411,6 +475,45 @@ export class ToyHardware {
     if (realElapsedMs <= 0) return;
     const capped = Math.min(realElapsedMs, this.maxTickMs);
     this.simulation.advance(capped);
+    this.reportVisionLengths();
+  }
+
+  /**
+   * Experimental 001 — the vision length station's measure-on-visit loop.
+   * Scans the sim's new `tag_observed` events for trains crossing a live
+   * vision station's marker, estimates the observed train's nose-to-tail
+   * length from its consist (the simulator's stand-in for the hand-waved
+   * camera — exactly what a calibrated sensor would read off the physical
+   * train), and asserts `train_length_changed` from the STATION's own VLS-
+   * identity. Emits only when the estimate differs from the station's last
+   * report for that train (the hysteresis the design doc asks for). The
+   * producer is a device that is not the train — the seam ADR-023 opened,
+   * closed end-to-end: a railyard swaps carriages, the train visits the
+   * station, its tail-clearance occupancy self-corrects.
+   */
+  private reportVisionLengths(): void {
+    if (this.visionStations.size === 0) return;
+    const observations = this.simulation.getEventsOfType('tag_observed');
+    for (; this.visionCursor < observations.length; this.visionCursor++) {
+      const ev = observations[this.visionCursor];
+      if (ev === undefined) continue;
+      const { tag_id } = ev.payload as { tag_id?: unknown };
+      if (typeof tag_id !== 'string') continue;
+      const stationId = this.visionStations.get(tag_id);
+      if (stationId === undefined) continue;
+      const train = this.simulation.getTrain(ev.device_id);
+      if (train === undefined) continue;
+      const train_length_mm = TRAIN_LENGTH_MM + train.getConsist().length * CARRIAGE_SPACING_MM;
+      if (this.visionReported.get(ev.device_id) === train_length_mm) continue;
+      this.visionReported.set(ev.device_id, train_length_mm);
+      const { topic, payload } = encodeDeviceEvent(
+        'train_length_changed',
+        stationId,
+        { train_id: ev.device_id, train_length_mm },
+        { newId: this.newId },
+      );
+      this.client.publish(topic, payload);
+    }
   }
 
   /** Stop the bridge and detach. Idempotent. */

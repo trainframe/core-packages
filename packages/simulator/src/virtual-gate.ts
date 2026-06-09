@@ -36,6 +36,13 @@ export class VirtualGate {
     });
   }
 
+  /** Public observer: is this gate currently withholding `marker_id`? Lets a
+   * renderer draw the device's true mechanical state (e.g. a lift bridge's
+   * raised span) without parsing the event stream. */
+  isWithholding(marker_id: string): boolean {
+    return this.withheld.has(marker_id);
+  }
+
   release(marker_id: string): void {
     if (!this.withheld.has(marker_id)) return;
     this.withheld.delete(marker_id);

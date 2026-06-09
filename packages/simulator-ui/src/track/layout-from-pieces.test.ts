@@ -347,3 +347,72 @@ describe('compileLayout — layers and bridges', () => {
     expect(hasEdge(layout, 'U', 'G')).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Turntable (experimental 002) — the N-way proof. A junction marker with
+// THREE position strings and three switched outbound edges, compiled by the
+// same machinery as the two-way junction. No new event, capability, or
+// scheduler branch — only more labels.
+// ---------------------------------------------------------------------------
+
+describe('compileLayout — turntable is an N-way junction', () => {
+  /** A turntable at the origin with a straight snapped onto every endpoint
+   * (trunk west; stubs east, +45°, −45°). */
+  function turntableFan() {
+    const t = piece('turntable', 0, 0);
+    const eps = getEndpoints(t);
+    const [trunkEp, aEp, bEp, cEp] = eps;
+    if (trunkEp === undefined || aEp === undefined || bEp === undefined || cEp === undefined) {
+      throw new Error('turntable must expose 4 endpoints');
+    }
+    // Each neighbour is a straight whose west endpoint (local (-100,0)) lands
+    // on the turntable endpoint, rotated to continue the stub's heading.
+    const trunkNbr = piece('straight', trunkEp.x - 100, trunkEp.y);
+    const aNbr = piece('straight', aEp.x + 100, aEp.y);
+    const bNbr = piece(
+      'straight',
+      bEp.x + 100 * Math.cos(Math.PI / 4),
+      bEp.y + 100 * Math.sin(Math.PI / 4),
+      45,
+    );
+    const cNbr = piece(
+      'straight',
+      cEp.x + 100 * Math.cos(Math.PI / 4),
+      cEp.y - 100 * Math.sin(Math.PI / 4),
+      315,
+    );
+    return { t, trunkNbr, aNbr, bNbr, cNbr };
+  }
+
+  it('declares ONE junction marker with three valid positions', () => {
+    const { t } = turntableFan();
+    const layout = compileLayout([t], 'turntable');
+    expect(layout.markers).toHaveLength(1);
+    expect(layout.markers[0]?.kind).toBe('junction');
+    expect(layout.junctions).toHaveLength(1);
+    expect(layout.junctions[0]?.marker_id).toBe(`M-${t.id}`);
+    expect(layout.junctions[0]?.valid_positions).toEqual(['stub-a', 'stub-b', 'stub-c']);
+  });
+
+  it('outbound edges carry one distinct switch state per stub; the trunk none', () => {
+    const { t, trunkNbr, aNbr, bNbr, cNbr } = turntableFan();
+    const layout = compileLayout([t, trunkNbr, aNbr, bNbr, cNbr], 'turntable-fan');
+    const tId = `M-${t.id}`;
+    const outbound = (toId: string) =>
+      layout.edges.find((e) => e.from_marker_id === tId && e.to_marker_id === `M-${toId}`);
+    expect(outbound(trunkNbr.id)?.requires_switch_state).toBeUndefined();
+    expect(outbound(aNbr.id)?.requires_switch_state).toBe('stub-a');
+    expect(outbound(bNbr.id)?.requires_switch_state).toBe('stub-b');
+    expect(outbound(cNbr.id)?.requires_switch_state).toBe('stub-c');
+  });
+
+  it('inbound edges (neighbour → turntable) carry no switch state', () => {
+    const { t, aNbr } = turntableFan();
+    const layout = compileLayout([t, aNbr], 'turntable-in');
+    const inbound = layout.edges.find(
+      (e) => e.from_marker_id === `M-${aNbr.id}` && e.to_marker_id === `M-${t.id}`,
+    );
+    expect(inbound).toBeDefined();
+    expect(inbound?.requires_switch_state).toBeUndefined();
+  });
+});

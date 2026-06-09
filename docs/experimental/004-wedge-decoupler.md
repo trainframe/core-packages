@@ -3,7 +3,12 @@
 **Status:** speculative viability test. NOT normative; not expected in a typical
 setup.
 
-**Proves:** the **decrease direction** of [ADR-023](../adr/023-coupling-and-decoupling.md).
+**Built (June 2026):** toy-table piece in the Experiments tray (`decoupler` in
+`pieces.ts`) — a low graphite housing straddling the track band, wedge parked
+in its slot. It is a wire device: scanning registers `DEC-{piece.id}` declaring
+`core.reports_length` + `core.gates_clearance`, gate-backed in the sim. The
+wedge does not yet fire: the length-decrease emission and everything downstream
+of it is the shunting-orchestration question this entry deliberately parks. the **decrease direction** of [ADR-023](../adr/023-coupling-and-decoupling.md).
 A trackside device physically separates a carriage from a dwelling train and
 emits `train_length_changed` with the *shorter* length; the detached carriage
 simply **leaves core's awareness** — no composition model, no lone-carriage

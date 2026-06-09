@@ -18,6 +18,9 @@ interface SwitchEvent {
  * `junction_marker_id` so the scheduler can update its switch-position map.
  */
 export class VirtualSwitch {
+  /** Last confirmed position; undefined until the first set. */
+  private position: string | undefined;
+
   constructor(
     private readonly device_id: string,
     private readonly junction_marker_id: string,
@@ -41,14 +44,15 @@ export class VirtualSwitch {
   }
 
   /**
-   * Accept a `set_switch_position` command and echo back `switch_state_changed`
-   * with `confirmed: true`. The server's scheduler calls
-   * `LayoutState.setSwitchPosition` on `confirmed` events, enabling clearance
-   * re-evaluation for edges that `requires_switch_state`.
+   * Seat the blade/deck at `position` and confirm it on the bus. The one entry
+   * point for a position change, whether driven by a wire command
+   * (`acceptCommand`) or a physical act on the device itself (the toy-table
+   * operator spinning a turntable deck by hand) — either way the device's
+   * honesty contract is the same: a `switch_state_changed` with
+   * `confirmed: true` only once seated.
    */
-  acceptCommand(command_type: string, payload: unknown): void {
-    if (command_type !== 'set_switch_position') return;
-    const { position } = payload as { position: string };
+  setPosition(position: string): void {
+    this.position = position;
     this.emit({
       event_type: 'switch_state_changed',
       device_id: this.device_id,
@@ -58,5 +62,24 @@ export class VirtualSwitch {
         confirmed: true,
       },
     });
+  }
+
+  /** The last confirmed position, or undefined before the first set. Lets a
+   * renderer draw the device at its true mechanical state (e.g. a turntable
+   * deck's angle) without parsing the event stream. */
+  getPosition(): string | undefined {
+    return this.position;
+  }
+
+  /**
+   * Accept a `set_switch_position` command and echo back `switch_state_changed`
+   * with `confirmed: true`. The server's scheduler calls
+   * `LayoutState.setSwitchPosition` on `confirmed` events, enabling clearance
+   * re-evaluation for edges that `requires_switch_state`.
+   */
+  acceptCommand(command_type: string, payload: unknown): void {
+    if (command_type !== 'set_switch_position') return;
+    const { position } = payload as { position: string };
+    this.setPosition(position);
   }
 }

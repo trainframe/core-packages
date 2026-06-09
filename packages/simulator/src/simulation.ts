@@ -375,6 +375,20 @@ export class Simulation {
     return this.railyards.get(id);
   }
 
+  /** Public observer for a spawned gate — the same seam tests and the
+   * toy-table's physical affordances (e.g. raising a lift-bridge span, which
+   * withholds clearance across its marker) use to reach the device. */
+  getGate(id: string): VirtualGate | undefined {
+    return this.gates.get(id);
+  }
+
+  /** Public observer for a spawned switch motor — lets a renderer read the
+   * confirmed position (a turntable deck's angle) and a physical affordance
+   * drive `setPosition` without parsing the event stream. */
+  getSwitch(id: string): VirtualSwitch | undefined {
+    return this.switches.get(id);
+  }
+
   /**
    * Couple a consist onto a train (head-first order). Carriages are physical
    * wagons invisible to core (ADR-016) — this never touches the wire. Used by

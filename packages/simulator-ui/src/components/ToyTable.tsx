@@ -13,25 +13,33 @@ import { detectSameLayerOverlaps, pierSuppressed } from '../track/overlap.js';
 import {
   CARRIAGE_COLOR_IDS,
   type CarriageColorId,
-  DEVICE_PIECE_TYPES,
   type DevicePieceType,
+  LIFT_BRIDGE_PIVOT,
+  LIFT_BRIDGE_RAISE_DEG,
   PIECE_LABELS,
   PIECE_TINT,
   type PieceFeature,
   type RotationDeg,
   type SupportColumn,
-  TRACK_PIECE_TYPES,
+  TOYBOX_TRAYS,
   TRAIN_LENGTH_MM,
+  TURNTABLE_POSITIONS,
+  TURNTABLE_POSITION_ANGLE_DEG,
   type TrackPiece,
   type TrackPieceType,
+  VISION_LED,
+  VISION_SENSOR_RANGE_MM,
   getEndpoints,
   getPieceShape,
   isDevicePiece,
   isWireDevice,
   layerOf,
   layerStyle,
+  liftBridgeGap,
+  liftBridgeSpan,
   pieceMarkerKind,
   supportColumn,
+  turntableDeck,
 } from '../track/pieces.js';
 import {
   computeMovePlacement,
@@ -73,6 +81,7 @@ const DEVICE_FILL: Record<DevicePieceType, string> = {
   carriage: '#3f6fa6',
   gate: '#8a929c',
   railyard: '#5b7b6a',
+  decoupler: '#5f6770', // graphite housing — a gadget, darker than the gate
 };
 
 /**
@@ -175,6 +184,130 @@ function Groove({ d }: { d: string }) {
 }
 
 /**
+ * Live visual state for an experimental piece's MOVING parts (docs/experimental
+ * 001–005). Derived from the simulation each render — the sim is the single
+ * source of truth (a switch's confirmed position, a gate's withhold), so the
+ * drawn state can never lie about the wire state.
+ */
+type ExperimentVisual =
+  | { readonly kind: 'turntable'; readonly angleDeg: number }
+  | { readonly kind: 'lift-bridge'; readonly raised: boolean }
+  | { readonly kind: 'vision-station'; readonly lit: boolean };
+
+/** Rest-state visual for a piece type — what a tray preview or an un-scanned
+ * piece shows: deck east, span seated, LED dark. Undefined for pieces with no
+ * moving parts. */
+function restingExperimentVisual(type: TrackPieceType): ExperimentVisual | undefined {
+  if (type === 'turntable') return { kind: 'turntable', angleDeg: 0 };
+  if (type === 'lift-bridge') return { kind: 'lift-bridge', raised: false };
+  if (type === 'vision-station') return { kind: 'vision-station', lit: false };
+  return undefined;
+}
+
+/** A wooden moving sub-shape (turntable deck, bridge span): rim light behind
+ * the wood fill (matching PieceBody), optional tint wash, grooves, features. */
+function MovingWood({
+  shape,
+  tint,
+}: {
+  readonly shape: {
+    readonly svgPath: string;
+    readonly grooves: ReadonlyArray<string>;
+    readonly features: ReadonlyArray<PieceFeature>;
+  };
+  readonly tint: string | null;
+}) {
+  return (
+    <>
+      <path d={shape.svgPath} fill="none" stroke="#f6e8c9" strokeOpacity={0.55} strokeWidth={2} />
+      <path d={shape.svgPath} fill={WOOD_FILL} />
+      {tint !== null && <path d={shape.svgPath} fill={tint} fillOpacity={0.22} />}
+      {shape.grooves.map((g) => (
+        <Groove key={g} d={g} />
+      ))}
+      {shape.features.map((f) => (
+        <Feature key={f.d} feature={f} />
+      ))}
+    </>
+  );
+}
+
+/**
+ * The moving / lit parts of an experimental piece, drawn OVER its static body
+ * inside the piece's transformed group (so they rotate/flip with it):
+ *  - turntable: the bridge deck swings to the confirmed stub angle — the
+ *    branch choice as a visible angle, eased like a deck seating.
+ *  - lift bridge: the hinged span tilts about its pivot and a dark gap fades
+ *    in beneath — "there is literally no rail here right now".
+ *  - vision station: the detection LED lights while a train is under the
+ *    sensor; this device is defined by stillness, so that is its only motion.
+ */
+function ExperimentParts({
+  pieceId,
+  visual,
+}: {
+  pieceId: string;
+  visual: ExperimentVisual | undefined;
+}) {
+  if (visual === undefined) return null; // not an experimental piece
+  switch (visual.kind) {
+    case 'turntable':
+      return (
+        <g
+          data-testid={`turntable-deck-${pieceId}`}
+          data-angle={visual.angleDeg}
+          style={{
+            transform: `rotate(${visual.angleDeg}deg)`,
+            transition: 'transform 900ms ease-in-out',
+          }}
+        >
+          <MovingWood shape={turntableDeck()} tint={null} />
+        </g>
+      );
+    case 'lift-bridge':
+      return (
+        <g data-testid={`bridge-span-${pieceId}`} data-raised={visual.raised ? 'true' : 'false'}>
+          {/* The void under the span — the groove-channel dark, faded in while
+              the deck is up so the missing rail reads as a real gap. */}
+          <path
+            d={liftBridgeGap()}
+            fill="#3a2611"
+            opacity={visual.raised ? 0.8 : 0}
+            style={{ transition: 'opacity 600ms ease' }}
+          />
+          <g
+            style={{
+              transform: `rotate(${visual.raised ? LIFT_BRIDGE_RAISE_DEG : 0}deg)`,
+              transformOrigin: `${LIFT_BRIDGE_PIVOT.x}px ${LIFT_BRIDGE_PIVOT.y}px`,
+              transition: 'transform 900ms ease-in-out',
+            }}
+          >
+            <MovingWood shape={liftBridgeSpan()} tint={PIECE_TINT['lift-bridge']} />
+          </g>
+        </g>
+      );
+    case 'vision-station':
+      return (
+        <g data-testid={`vision-led-${pieceId}`} data-lit={visual.lit ? 'true' : 'false'}>
+          {visual.lit && (
+            <>
+              <circle cx={VISION_LED.x} cy={VISION_LED.y} r={5} fill="#ffd24a" opacity={0.35} />
+              <circle
+                cx={VISION_LED.x}
+                cy={VISION_LED.y}
+                r={2.2}
+                fill="#ffd24a"
+                stroke="#caa033"
+                strokeWidth={0.6}
+              />
+            </>
+          )}
+        </g>
+      );
+  }
+}
+
+/**
  * The painted body of a piece: the wooden plank (or coloured device body), its
  * functional tint wash, a soft rim light, the routed rail grooves, and any
  * feature overlays — dimmed together when the piece is an inert device. The
@@ -266,6 +399,7 @@ function deviceIdForDevicePiece(piece: TrackPiece): string {
   if (piece.type === 'train') return `T-${piece.id}`;
   if (piece.type === 'gate') return `GATE-${piece.id}`;
   if (piece.type === 'railyard') return `YARD-${piece.id}`;
+  if (piece.type === 'decoupler') return `DEC-${piece.id}`;
   // Unreachable: callers gate on isWireDevice. Keeping the throw makes the
   // contract explicit for future maintainers.
   throw new Error(`deviceIdForDevicePiece called on non-wire-device piece ${piece.type}`);
@@ -585,6 +719,85 @@ function computeRenderPositions(
   return result;
 }
 
+/** Angle for a turntable's confirmed switch position; unknown or not-yet-set
+ * reads as the resting east alignment (stub-a, 0°). */
+function turntableAngleFor(position: string | undefined): number {
+  const match = TURNTABLE_POSITIONS.find((p) => p === position);
+  return match === undefined ? 0 : TURNTABLE_POSITION_ANGLE_DEG[match];
+}
+
+/** True when any live train currently renders within the station's sensor
+ * range — "a train is under the sensor, being measured". Visual only; the
+ * wire-real measurement is ToyHardware's `reportVisionLengths`. */
+function trainUnderSensor(
+  station: TrackPiece,
+  pieces: ReadonlyArray<TrackPiece>,
+  liveIds: ReadonlySet<string>,
+  renderPositions: ReadonlyMap<string, WorldPosition>,
+): boolean {
+  for (const p of pieces) {
+    if (p.type !== 'train' || !liveIds.has(p.id)) continue;
+    const pos = renderPositions.get(p.id) ?? p.position;
+    const d = Math.hypot(pos.x - station.position.x, pos.y - station.position.y);
+    if (d <= VISION_SENSOR_RANGE_MM) return true;
+  }
+  return false;
+}
+
+/**
+ * Per-piece live visuals for the experimental pieces' moving parts, read off
+ * the SIMULATION (switch position, gate withhold) and the rendered train
+ * positions — never duplicated into React state, so the drawn deck angle and
+ * span state can't drift from the wire state. Un-scanned pieces read as their
+ * resting pose. @pure
+ */
+function computeExperimentVisuals(
+  pieces: ReadonlyArray<TrackPiece>,
+  liveIds: ReadonlySet<string>,
+  renderPositions: ReadonlyMap<string, WorldPosition>,
+  hardware: ToyHardware | null,
+): Map<string, ExperimentVisual> {
+  const result = new Map<string, ExperimentVisual>();
+  const sim = hardware?.getSimulation();
+  for (const p of pieces) {
+    if (p.type === 'turntable') {
+      const pos = liveIds.has(p.id) ? sim?.getSwitch(`SWITCH-${p.id}`)?.getPosition() : undefined;
+      result.set(p.id, { kind: 'turntable', angleDeg: turntableAngleFor(pos) });
+    } else if (p.type === 'lift-bridge') {
+      const raised =
+        liveIds.has(p.id) && sim?.getGate(`BRIDGE-${p.id}`)?.isWithholding(`M-${p.id}`) === true;
+      result.set(p.id, { kind: 'lift-bridge', raised });
+    } else if (p.type === 'vision-station') {
+      result.set(p.id, {
+        kind: 'vision-station',
+        lit: trainUnderSensor(p, pieces, liveIds, renderPositions),
+      });
+    }
+  }
+  return result;
+}
+
+/** Signature of the sim-owned experimental state (deck positions, span
+ * withholds), so the RAF tick can trigger a re-render when a command moves a
+ * part while no train is moving — e.g. LearnMode throwing the turntable. */
+function experimentSimSignature(
+  hardware: ToyHardware,
+  pieces: ReadonlyArray<TrackPiece>,
+  liveIds: ReadonlySet<string>,
+): string {
+  const sim = hardware.getSimulation();
+  const parts: string[] = [];
+  for (const p of pieces) {
+    if (!liveIds.has(p.id)) continue;
+    if (p.type === 'turntable') {
+      parts.push(`${p.id}:${sim.getSwitch(`SWITCH-${p.id}`)?.getPosition() ?? ''}`);
+    } else if (p.type === 'lift-bridge') {
+      parts.push(`${p.id}:${sim.getGate(`BRIDGE-${p.id}`)?.isWithholding(`M-${p.id}`) === true}`);
+    }
+  }
+  return parts.join('|');
+}
+
 /**
  * The height layer a piece should be DRAWN on this frame — which determines its
  * draw order (occlusion) and its drop-shadow group. This is render-only; it
@@ -816,6 +1029,9 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   // exists) so idle/empty tables don't churn.
   const [_tickCount, setTickCount] = useState(0);
   const trainTrailsRef = useRef<ReadonlyMap<string, string[]>>(new Map());
+  /** Last seen sim-owned experimental state (deck angles, span withholds), so
+   * the tick loop re-renders when a part moves while no train is. */
+  const experimentSigRef = useRef('');
 
   // Stand up an in-browser physics simulation wired to the broker. It hosts
   // the virtual trains and gates the operator scans onto the bus, and reacts
@@ -833,6 +1049,17 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       // a live train under power, or any coupled-carriage trail. Idle tables
       // (nothing scanned, or a parked train) don't churn.
       const hw = hardwareRef.current;
+      if (hw !== null) {
+        // The experimental moving parts (turntable deck, bridge span) follow
+        // SIM state, not React state — re-render when a command moved one even
+        // though no train is rolling (e.g. LearnMode throwing the deck).
+        const sig = experimentSimSignature(hw, piecesRef.current, liveIdsRef.current);
+        if (sig !== experimentSigRef.current) {
+          experimentSigRef.current = sig;
+          setTickCount((n) => n + 1);
+          return;
+        }
+      }
       const moving = hw !== null && anyLiveTrainMoving(hw, piecesRef.current, liveIdsRef.current);
       if (moving || trainTrailsRef.current.size > 0) {
         setTickCount((n) => n + 1);
@@ -1121,6 +1348,50 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     });
   }, []);
 
+  // Raise / lower a live lift bridge's span (experimental 005). The span's
+  // gate withholds clearance across the bridge's own marker the INSTANT a
+  // raise is requested, and grants again on lowering — `core.gates_clearance`
+  // carrying "the track is physically not there right now". The design doc's
+  // confirmed-clear-before-raising check is its open question; the toy span
+  // raises regardless, and the clearance model keeps approaching trains out.
+  const toggleBridgeSpan = useCallback(
+    (pieceId: string) => {
+      const piece = piecesRef.current.find((p) => p.id === pieceId);
+      if (piece === undefined || piece.type !== 'lift-bridge') return;
+      if (!liveIdsRef.current.has(pieceId)) return;
+      const gate = hardwareRef.current?.getSimulation().getGate(`BRIDGE-${pieceId}`);
+      if (gate === undefined) return;
+      const markerId = `M-${pieceId}`;
+      if (gate.isWithholding(markerId)) gate.release(markerId);
+      else gate.withhold(markerId, 'span raised');
+      // Visuals follow the sim; nudge a re-render so the tilt starts now.
+      setTickCount((n) => n + 1);
+    },
+    [hardwareRef],
+  );
+
+  // Spin a live turntable's deck to its next stub — the toy-table equivalent
+  // of a child turning the deck by hand. The device seats and CONFIRMS the new
+  // position on the bus (`switch_state_changed`, confirmed: true) exactly as
+  // it would answering a `set_switch_position` command.
+  const spinTurntable = useCallback(
+    (pieceId: string) => {
+      if (!liveIdsRef.current.has(pieceId)) return;
+      const sw = hardwareRef.current?.getSimulation().getSwitch(`SWITCH-${pieceId}`);
+      if (sw === undefined) return;
+      // An unset deck rests at stub-a's angle, so the first spin moves on to
+      // stub-b — findIndex's -1 and stub-a both advance from index 0.
+      const idx = Math.max(
+        TURNTABLE_POSITIONS.findIndex((p) => p === sw.getPosition()),
+        0,
+      );
+      const next = TURNTABLE_POSITIONS[(idx + 1) % TURNTABLE_POSITIONS.length];
+      if (next !== undefined) sw.setPosition(next);
+      setTickCount((n) => n + 1);
+    },
+    [hardwareRef],
+  );
+
   // Route a piece's pointer action: a body click selects; the power dot raises
   // an explicit `power-toggle`. Selecting a live train does NOT power it off and
   // does NOT teleport it — it keeps rendering at its simulated edge position.
@@ -1154,6 +1425,11 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       ? computeRenderPositions(pieces, liveIds, trainTrails, hardware)
       : new Map<string, WorldPosition>();
 
+  // Live state for the experimental pieces' moving parts, read off the sim.
+  const experimentVisuals = computeExperimentVisuals(pieces, liveIds, renderPositions, hardware);
+  const selectedVisual =
+    selectedPiece !== null ? experimentVisuals.get(selectedPiece.id) : undefined;
+
   return (
     <div className="tf-toytable-page">
       {/* Wood gradients live once here so both the canvas and the parts-tray
@@ -1178,6 +1454,13 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
           onTogglePower={() => {
             if (selectedPiece !== null) togglePower(selectedPiece.id);
           }}
+          selectedBridgeRaised={selectedVisual?.kind === 'lift-bridge' && selectedVisual.raised}
+          onToggleBridgeSpan={() => {
+            if (selectedPiece !== null) toggleBridgeSpan(selectedPiece.id);
+          }}
+          onSpinDeck={() => {
+            if (selectedPiece !== null) spinTurntable(selectedPiece.id);
+          }}
           armedType={armedType}
           activeLayer={activeLayer}
           maxLevel={pieces.reduce((m, p) => Math.max(m, layerOf(p)), activeLayer)}
@@ -1195,6 +1478,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
             activeLayer={activeLayer}
             trainTrails={trainTrails}
             renderPositions={renderPositions}
+            experimentVisuals={experimentVisuals}
             hardware={hardware}
             onCanvasClick={placePiece}
             onMovePiece={movePiece}
@@ -1234,15 +1518,21 @@ interface ToyboxProps {
 }
 
 function Toybox({ armedType, onArm, carriageColor, onPickCarriageColor }: ToyboxProps) {
+  // Tray groups come straight from the registry (TOYBOX_TRAYS): the Track and
+  // Devices staples, then the "Experiments" box — the shared home for the
+  // docs/experimental viability-test pieces, kept apart so an operator
+  // reaching for one knows they are picking up a stress-test.
   return (
     <div className="tf-toybox" aria-label="Parts tray">
-      <ToyboxGroup heading="Track" types={TRACK_PIECE_TYPES} armedType={armedType} onArm={onArm} />
-      <ToyboxGroup
-        heading="Devices"
-        types={DEVICE_PIECE_TYPES}
-        armedType={armedType}
-        onArm={onArm}
-      />
+      {TOYBOX_TRAYS.map((tray) => (
+        <ToyboxGroup
+          key={tray.heading}
+          heading={tray.heading}
+          types={tray.types}
+          armedType={armedType}
+          onArm={onArm}
+        />
+      ))}
       {armedType === 'carriage' && (
         <CarriageLiveryPicker selected={carriageColor} onPick={onPickCarriageColor} />
       )}
@@ -1298,6 +1588,9 @@ function PiecePreview({ type }: { type: TrackPieceType }) {
     tagged: false,
   });
   const isDevice = isDevicePiece(type);
+  // An experimental piece's moving parts (deck, span) are not in the static
+  // body — preview them at their resting pose so the tray shows the whole toy.
+  const restingVisual = restingExperimentVisual(type);
   const pad = 14;
   const w = shape.width + pad * 2;
   const h = shape.height + pad * 2;
@@ -1315,6 +1608,7 @@ function PiecePreview({ type }: { type: TrackPieceType }) {
         isDevice={isDevice}
         dim={1}
       />
+      <ExperimentParts pieceId={`preview-${type}`} visual={restingVisual} />
     </svg>
   );
 }
@@ -1389,6 +1683,12 @@ interface ActionBarProps {
   /** Toggle the selected train's power in place (off↔on). Shown only for a
    * live train; never despawns or disconnects it. */
   readonly onTogglePower: () => void;
+  /** Whether the selected (live) lift bridge's span is currently raised. */
+  readonly selectedBridgeRaised: boolean;
+  /** Raise/lower the selected live lift bridge's span (experimental 005). */
+  readonly onToggleBridgeSpan: () => void;
+  /** Spin the selected live turntable's deck to its next stub (experimental 002). */
+  readonly onSpinDeck: () => void;
   readonly armedType: TrackPieceType | null;
   /** The deck new pieces land on (0 = ground). */
   readonly activeLayer: number;
@@ -1440,6 +1740,9 @@ function ActionBar({
   onFlip,
   onDelete,
   onTogglePower,
+  selectedBridgeRaised,
+  onToggleBridgeSpan,
+  onSpinDeck,
   armedType,
   activeLayer,
   maxLevel,
@@ -1450,6 +1753,12 @@ function ActionBar({
   // button is how the operator toggles its power. It toggles in place — never
   // despawns the train or publishes `device_disconnected`.
   const canTogglePower = selectedPiece !== null && selectedLive && selectedPiece.type === 'train';
+  // Physical affordances on the live experimental devices: raising a bridge
+  // span / spinning a turntable deck is the operator acting ON the device (a
+  // hand on the toy), not driving the system — driving stays in the visualiser.
+  const canToggleSpan =
+    selectedPiece !== null && selectedLive && selectedPiece.type === 'lift-bridge';
+  const canSpinDeck = selectedPiece !== null && selectedLive && selectedPiece.type === 'turntable';
   return (
     <div className="tf-toytable__actions">
       <button type="button" onClick={onRotate} disabled={selectedPiece === null}>
@@ -1468,6 +1777,20 @@ function ActionBar({
           data-testid={selectedPoweredOff ? 'action-power-on' : 'action-power-off'}
         >
           {selectedPoweredOff ? 'Power on' : 'Power off'}
+        </button>
+      )}
+      {canToggleSpan && (
+        <button
+          type="button"
+          onClick={onToggleBridgeSpan}
+          data-testid={selectedBridgeRaised ? 'action-lower-span' : 'action-raise-span'}
+        >
+          {selectedBridgeRaised ? 'Lower span' : 'Raise span'}
+        </button>
+      )}
+      {canSpinDeck && (
+        <button type="button" onClick={onSpinDeck} data-testid="action-spin-deck">
+          Spin deck
         </button>
       )}
       {/* Deck selector. Grows with the layout: one button per deck from Ground
@@ -1532,6 +1855,8 @@ interface TableProps {
    * `piece.position` (carriages not yet coupled / train deferred).
    */
   readonly renderPositions: ReadonlyMap<string, WorldPosition>;
+  /** Live moving-part state for the experimental pieces, read off the sim. */
+  readonly experimentVisuals: ReadonlyMap<string, ExperimentVisual>;
   readonly onCanvasClick: (
     xMm: number,
     yMm: number,
@@ -1555,6 +1880,7 @@ function Table({
   hardware,
   trainTrails,
   renderPositions,
+  experimentVisuals,
   onCanvasClick,
   onMovePiece,
   onScanPiece,
@@ -1907,6 +2233,7 @@ function Table({
               invalidOverlap={overlapIds.has(p.id)}
               coupledToTrainId={carriageCoupledTo.get(p.id)}
               renderPosition={renderPositions.get(p.id)}
+              experimentVisual={experimentVisuals.get(p.id)}
               onAction={(action) => onPieceAction(p.id, action)}
               dragOverride={
                 pieceDragPreview?.id === p.id
@@ -2049,6 +2376,9 @@ interface PieceRendererProps {
    * (uncoupled or deferred pieces sit at their placement coordinates).
    */
   readonly renderPosition: WorldPosition | undefined;
+  /** Live moving-part state for an experimental piece (deck angle, span
+   * raised, LED lit); undefined for pieces with no moving parts. */
+  readonly experimentVisual: ExperimentVisual | undefined;
   readonly onAction: (action: 'select' | PowerToggleAction) => void;
   /**
    * While a pointer-drag of this piece is in progress, the live world position
@@ -2088,6 +2418,7 @@ function PieceRenderer({
   invalidOverlap,
   coupledToTrainId,
   renderPosition,
+  experimentVisual,
   onAction,
   dragOverride,
   onDragMove,
@@ -2234,6 +2565,9 @@ function PieceRenderer({
       aria-label={ariaLabel}
     >
       <PieceBody shape={shape} bodyFill={bodyFill} tint={tint} isDevice={isDevice} dim={dim} />
+      {/* The moving / lit parts of an experimental piece ride inside the same
+          transformed group, over the static body (null for ordinary pieces). */}
+      <ExperimentParts pieceId={piece.id} visual={experimentVisual} />
       {/* Power dot for wire-visible devices only (train / gate): green when
           powered, grey when inert/off-bus. Carriages have no wire identity —
           no dot. Clicking the dot of an on-track train toggles its power in
@@ -2365,6 +2699,18 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
     client.publish(reg.topic, reg.payload);
     return false;
   }
+  if (piece.type === 'decoupler') {
+    // A wedge decoupler (experimental 004): reports_length to assert the
+    // shorter train after a split, gates_clearance to pin the train while the
+    // wedge is engaged. Its entire protocol identity — no "decoupled" event,
+    // no carriage id; the detached carriage leaves core's awareness.
+    const device_id = deviceIdForDevicePiece(piece);
+    const reg = encodeDeviceEvent('device_registered', device_id, {
+      capabilities: ['core.reports_length', 'core.gates_clearance'],
+    });
+    client.publish(reg.topic, reg.payload);
+    return false;
+  }
   if (piece.type === 'railyard') {
     // A railyard announces gates_zone (admission) + reports_length (it may
     // reconcile a train's length on the way out, ADR-023). Its zone capacity +
@@ -2394,19 +2740,47 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
   });
   client.publish(assignment.topic, assignment.payload);
 
-  // Junction pieces also need a switch-motor device so LearnMode can send
-  // `set_switch_position` commands to it. The motor registers under
-  // `SWITCH-{piece.id}` and declares `controls_marker_id` so the server can
-  // build the marker → device pairing. LearnMode then looks up the device id
-  // via LayoutState.switchDeviceForMarker and targets the device directly.
-  if (piece.type === 'junction') {
-    const switchDeviceId = `SWITCH-${piece.id}`;
-    const switchReg = encodeDeviceEvent('device_registered', switchDeviceId, {
-      capabilities: ['core.controls_switch'],
-      controls_marker_id: markerId,
+  // Some track pieces carry a companion device that registers alongside the
+  // marker binding (see TRACK_COMPANION_DEVICES) — a junction's switch motor,
+  // or an experimental piece's trackside identity.
+  const companion = TRACK_COMPANION_DEVICES[piece.type];
+  if (companion !== undefined) {
+    const reg = encodeDeviceEvent('device_registered', `${companion.prefix}${piece.id}`, {
+      capabilities: [...companion.capabilities],
+      ...(companion.controlsMarker === true ? { controls_marker_id: markerId } : {}),
     });
-    client.publish(switchReg.topic, switchReg.payload);
+    client.publish(reg.topic, reg.payload);
   }
 
   return announced;
 }
+
+/**
+ * Companion device a track piece registers when scanned, alongside its marker
+ * tag binding. A junction (and a turntable — experimental 002, the N-way
+ * junction) carries a switch motor under `SWITCH-{piece.id}`, declaring
+ * `controls_marker_id` so the server can pair marker → device and LearnMode
+ * can address `set_switch_position` to the device directly. The experimental
+ * pieces carry the device identity their design doc declares — and nothing
+ * else: every capability here is an existing public seam.
+ */
+const TRACK_COMPANION_DEVICES: Partial<
+  Record<
+    TrackPieceType,
+    {
+      readonly prefix: string;
+      readonly capabilities: ReadonlyArray<string>;
+      /** Declare `controls_marker_id` (switch motors only). */
+      readonly controlsMarker?: boolean;
+    }
+  >
+> = {
+  junction: { prefix: 'SWITCH-', capabilities: ['core.controls_switch'], controlsMarker: true },
+  turntable: { prefix: 'SWITCH-', capabilities: ['core.controls_switch'], controlsMarker: true },
+  // Experimental 001: the authority to assert a train_length_mm (ADR-023).
+  'vision-station': { prefix: 'VLS-', capabilities: ['core.reports_length'] },
+  // Experimental 003: pin a dwelling train during a lift — never a dwell timer.
+  'crane-station': { prefix: 'CRANE-', capabilities: ['core.gates_clearance'] },
+  // Experimental 005: clearance as physical track availability — span up ⇒ withhold.
+  'lift-bridge': { prefix: 'BRIDGE-', capabilities: ['core.gates_clearance'] },
+};

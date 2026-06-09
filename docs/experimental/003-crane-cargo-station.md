@@ -3,7 +3,13 @@
 **Status:** speculative viability test. NOT normative; not expected in a typical
 setup.
 
-**Proves:** that a device can perform a **meaningful physical manipulation of a
+**Built (June 2026):** toy-table piece in the Experiments tray (`crane-station`
+in `pieces.ts`) — a station plank with a grey gantry, trolley + hook, and a
+warm-accent crate stack. Scanning registers `CRANE-{piece.id}` with
+`core.gates_clearance`, backed by a real `VirtualGate` (the hold-the-train
+seam). The cargo itself stays as documented design: the carriage cargo slot and
+the trolley/crate animation are NOT built — they wait on the simulator change
+this entry describes below. that a device can perform a **meaningful physical manipulation of a
 train's payload** — lifting a crate off, or placing one on, a carriage — using
 only the seams that already exist: scheduled **dwell**, **tag identity**
 ([ADR-007](../adr/007-tag-resolution-registry.md)), and **clearance**. The crate,

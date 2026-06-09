@@ -3,7 +3,15 @@
 **Status:** speculative viability test. NOT normative; not expected in a typical
 setup.
 
-**Proves:** that `core.gates_clearance` carries a **"the track is physically not
+**Built (June 2026):** toy-table piece in the Experiments tray (`lift-bridge`
+in `pieces.ts`) — two fixed wooden approaches with a visible seam, and the
+hinged span as a separate sub-shape that tilts about its pivot over a dark gap
+while raised. The proof runs: scanning registers `BRIDGE-{piece.id}` with
+`core.gates_clearance` (a real `VirtualGate`); the "Raise span" affordance
+withholds clearance across the bridge's own marker the instant it is pressed,
+and "Lower span" grants it — the drawn deck state is read off the gate, so the
+picture can never disagree with the wire. Confirmed-clear-before-raising
+remains the open question below. that `core.gates_clearance` carries a **"the track is physically not
 there right now"** fact for a reason the core never models — and that this needs
 no new seam. A bascule/lift bridge that raises a span to let something pass
 *underneath* withholds clearance across its marker while raised, and grants it

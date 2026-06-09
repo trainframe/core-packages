@@ -1,10 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   type CentreLinePath,
+  EXPERIMENT_PIECE_TYPES,
   PIECE_TINT,
   type RotationDeg,
   SUPPORT_COLUMN_WIDTH_MM,
+  TOYBOX_TRAYS,
   TRACK_PIECE_TYPES,
+  TURNTABLE_POSITIONS,
+  TURNTABLE_POSITION_ANGLE_DEG,
+  TURNTABLE_RADIUS_MM,
   type TrackPiece,
   type TrackPieceType,
   getCentreLinePath,
@@ -15,8 +20,11 @@ import {
   isWireDevice,
   layerOf,
   layerStyle,
+  liftBridgeGap,
+  liftBridgeSpan,
   pieceMarkerKind,
   supportColumn,
+  turntableDeck,
 } from './pieces.js';
 
 function makePiece(type: TrackPiece['type'], rotationDeg: RotationDeg = 0): TrackPiece {
@@ -803,5 +811,157 @@ describe('supportColumn — pier under a raised piece', () => {
     const l1 = supportColumn(raised(1), layerStyle(1).dy);
     const l3 = supportColumn(raised(3), layerStyle(3).dy);
     expect((l3?.height ?? 0) > (l1?.height ?? 0)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Experimental pieces (docs/experimental 001–005) — the "Experiments" tray
+// ---------------------------------------------------------------------------
+
+describe('getEndpoints — turntable (experimental 002)', () => {
+  it('returns 4 endpoints: trunk west + three exit stubs on the 45° lattice', () => {
+    const eps = getEndpoints(makePiece('turntable'));
+    expect(eps).toHaveLength(4);
+    const [trunk, a, b, c] = eps;
+    expect(approx(must(trunk).x, -100) && approx(must(trunk).y, 0)).toBe(true);
+    expect(must(trunk).outgoingAngleDeg).toBe(180);
+    expect(approx(must(a).x, 100) && approx(must(a).y, 0)).toBe(true);
+    expect(must(a).outgoingAngleDeg).toBe(0);
+    expect(approx(must(b).x, 70.71) && approx(must(b).y, 70.71)).toBe(true);
+    expect(must(b).outgoingAngleDeg).toBe(45);
+    expect(approx(must(c).x, 70.71) && approx(must(c).y, -70.71)).toBe(true);
+    expect(must(c).outgoingAngleDeg).toBe(315);
+  });
+
+  it('every endpoint sits exactly on the disc rim (TURNTABLE_RADIUS_MM)', () => {
+    for (const ep of getEndpoints(makePiece('turntable'))) {
+      expect(approx(Math.hypot(ep.x, ep.y), TURNTABLE_RADIUS_MM)).toBe(true);
+    }
+  });
+
+  it('the ±45° stub centre-lines turn smoothly: 0° at the marker, stub angle at the rim', () => {
+    const p = makePiece('turntable');
+    for (const [index, endAngle] of [
+      [2, 45],
+      [3, 315],
+    ] as const) {
+      const path = must(getCentreLinePath(p, index));
+      expect(approx(path.at(0).headingDeg, 0) || approx(path.at(0).headingDeg, 360)).toBe(true);
+      expect(approx(path.at(path.length).headingDeg, endAngle)).toBe(true);
+    }
+  });
+
+  it('is a junction marker with no tint (the disc silhouette reads on its own)', () => {
+    expect(pieceMarkerKind('turntable')).toBe('junction');
+    expect(PIECE_TINT.turntable).toBeNull();
+  });
+
+  it('routes grooves only at the fixed rim stubs; the bridge grooves ride the deck', () => {
+    // 4 stubs × 2 grooves. The rotating deck (turntableDeck) carries its own.
+    const shape = getPieceShape(makePiece('turntable'));
+    expect(shape.grooves).toHaveLength(8);
+    const deck = turntableDeck();
+    expect(deck.grooves).toHaveLength(2);
+    expect(deck.svgPath.length).toBeGreaterThan(0);
+  });
+
+  it('declares one deck angle per confirmed position', () => {
+    expect(TURNTABLE_POSITIONS).toEqual(['stub-a', 'stub-b', 'stub-c']);
+    expect(TURNTABLE_POSITION_ANGLE_DEG['stub-a']).toBe(0);
+    expect(TURNTABLE_POSITION_ANGLE_DEG['stub-b']).toBe(45);
+    expect(TURNTABLE_POSITION_ANGLE_DEG['stub-c']).toBe(-45);
+  });
+});
+
+describe('vision station + crane (experimental 001 / 003) — stations underneath', () => {
+  for (const type of ['vision-station', 'crane-station'] as const) {
+    it(`${type} has the station footprint, marker kind and honey tint`, () => {
+      const eps = getEndpoints(makePiece(type));
+      expect(eps).toHaveLength(2);
+      expect(approx(must(eps[0]).x, -110) && approx(must(eps[1]).x, 110)).toBe(true);
+      expect(pieceMarkerKind(type)).toBe('station_stop');
+      expect(PIECE_TINT[type]).toBe(PIECE_TINT.station);
+    });
+  }
+
+  it('the vision station carries a metal sensor mast with a glass lens (and no extra motion)', () => {
+    const shape = getPieceShape(makePiece('vision-station'));
+    expect(shape.features.some((f) => f.role === 'metal')).toBe(true);
+    expect(shape.features.some((f) => f.role === 'glass')).toBe(true);
+  });
+
+  it('the crane carries a metal gantry and warm-accent (pop) crates', () => {
+    const shape = getPieceShape(makePiece('crane-station'));
+    expect(shape.features.filter((f) => f.role === 'metal').length).toBeGreaterThanOrEqual(3);
+    expect(shape.features.filter((f) => f.role === 'pop').length).toBeGreaterThanOrEqual(3);
+  });
+});
+
+describe('lift bridge (experimental 005) — a hinged wooden span', () => {
+  it('has the straight footprint and a block_boundary marker', () => {
+    const eps = getEndpoints(makePiece('lift-bridge'));
+    expect(eps).toHaveLength(2);
+    expect(approx(must(eps[0]).x, -100) && approx(must(eps[1]).x, 100)).toBe(true);
+    expect(pieceMarkerKind('lift-bridge')).toBe('block_boundary');
+  });
+
+  it('draws grooves only over the fixed approaches; the span carries its own', () => {
+    // 2 approach rails × 2 grooves; the hinged deck's grooves tilt with it.
+    const shape = getPieceShape(makePiece('lift-bridge'));
+    expect(shape.grooves).toHaveLength(4);
+    const span = liftBridgeSpan();
+    expect(span.grooves).toHaveLength(2);
+    // The pivot fitting is the span's metal feature.
+    expect(span.features.some((f) => f.role === 'metal')).toBe(true);
+    expect(liftBridgeGap().length).toBeGreaterThan(0);
+  });
+
+  it('the ridden centre-line still spans marker → endpoint (the rail when seated)', () => {
+    const path = must(getCentreLinePath(makePiece('lift-bridge'), 1));
+    expect(approx(path.length, 100)).toBe(true);
+  });
+});
+
+describe('decoupler (experimental 004) — a wire device, not track', () => {
+  it('has no endpoints, no grooves, and a wire identity', () => {
+    expect(getEndpoints(makePiece('decoupler'))).toHaveLength(0);
+    expect(getPieceShape(makePiece('decoupler')).grooves).toHaveLength(0);
+    expect(isDevicePiece('decoupler')).toBe(true);
+    expect(isWireDevice('decoupler')).toBe(true);
+  });
+
+  it('shows the wedge as a pop accent in its slot', () => {
+    const shape = getPieceShape(makePiece('decoupler'));
+    expect(shape.features.some((f) => f.role === 'pop')).toBe(true);
+    expect(shape.features.some((f) => f.role === 'line')).toBe(true);
+  });
+});
+
+describe('the Experiments toybox tray', () => {
+  it('groups the five experimental pieces, in design-doc order, apart from the staples', () => {
+    const trays = new Map(TOYBOX_TRAYS.map((t) => [t.heading, t.types]));
+    expect([...trays.keys()]).toEqual(['Track', 'Devices', 'Experiments']);
+    expect(trays.get('Experiments')).toEqual([
+      'vision-station',
+      'turntable',
+      'crane-station',
+      'decoupler',
+      'lift-bridge',
+    ]);
+    expect(trays.get('Experiments')).toEqual(EXPERIMENT_PIECE_TYPES);
+    // The staple trays don't re-list the experiments.
+    for (const heading of ['Track', 'Devices'] as const) {
+      for (const type of trays.get(heading) ?? []) {
+        expect(EXPERIMENT_PIECE_TYPES).not.toContain(type);
+      }
+    }
+    expect(trays.get('Devices')).not.toContain('decoupler');
+  });
+
+  it('experimental TRACK pieces still register as track topology (semantic lists unchanged)', () => {
+    for (const type of ['vision-station', 'turntable', 'crane-station', 'lift-bridge'] as const) {
+      expect(TRACK_PIECE_TYPES).toContain(type);
+      expect(isDevicePiece(type)).toBe(false);
+    }
   });
 });

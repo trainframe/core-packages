@@ -1,5 +1,5 @@
 import type { Layout, LayoutEdge, LayoutJunction, LayoutMarker } from '@trainframe/protocol';
-import { getEndpoints, pieceMarkerKind } from './pieces.js';
+import { TURNTABLE_POSITIONS, getEndpoints, pieceMarkerKind } from './pieces.js';
 import type { TrackPiece } from './pieces.js';
 
 /**
@@ -112,6 +112,25 @@ function switchStateForJunctionEndpoint(endpointIdx: number): string | undefined
   return undefined;
 }
 
+/**
+ * A turntable (experimental 002) is, to the compiler, a junction with MORE
+ * position strings: trunk at 0, then one position per exit stub. This is the
+ * N-way door `LayoutJunction.valid_positions` was designed to leave open — no
+ * new event, capability, or scheduler branch; only more labels.
+ */
+function switchStateForTurntableEndpoint(endpointIdx: number): string | undefined {
+  if (endpointIdx === 0) return undefined; // trunk — always reachable
+  return TURNTABLE_POSITIONS[endpointIdx - 1];
+}
+
+/** The switch state an edge leaving `from` via `fromEndpointIdx` requires,
+ * or undefined for non-switched pieces / the trunk approach. */
+function switchStateForEndpoint(from: TrackPiece, fromEndpointIdx: number): string | undefined {
+  if (from.type === 'junction') return switchStateForJunctionEndpoint(fromEndpointIdx);
+  if (from.type === 'turntable') return switchStateForTurntableEndpoint(fromEndpointIdx);
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Step 4 — emit edges from adjacency
 // ---------------------------------------------------------------------------
@@ -167,10 +186,8 @@ function emitDirectedEdge(
     to_marker_id: markerIdForPiece(to),
     estimated_length_mm: Math.round(pieceCenterDistance(from, to)),
   };
-  if (from.type === 'junction') {
-    const state = switchStateForJunctionEndpoint(fromEndpointIdx);
-    if (state !== undefined) return { ...edge, requires_switch_state: state };
-  }
+  const state = switchStateForEndpoint(from, fromEndpointIdx);
+  if (state !== undefined) return { ...edge, requires_switch_state: state };
   return edge;
 }
 
@@ -214,11 +231,19 @@ function emitEdgesForClusters(
 function emitJunctions(pieces: ReadonlyArray<TrackPiece>): LayoutJunction[] {
   const junctions: LayoutJunction[] = [];
   for (const piece of pieces) {
-    if (piece.type !== 'junction') continue;
-    junctions.push({
-      marker_id: markerIdForPiece(piece),
-      valid_positions: ['main', 'divert'],
-    });
+    if (piece.type === 'junction') {
+      junctions.push({
+        marker_id: markerIdForPiece(piece),
+        valid_positions: ['main', 'divert'],
+      });
+    } else if (piece.type === 'turntable') {
+      // Three positions on one junction marker — the N-way proof of
+      // experimental 002, carried by the existing schema unchanged.
+      junctions.push({
+        marker_id: markerIdForPiece(piece),
+        valid_positions: [...TURNTABLE_POSITIONS],
+      });
+    }
   }
   return junctions;
 }
