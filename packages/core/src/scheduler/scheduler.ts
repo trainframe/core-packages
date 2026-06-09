@@ -1209,8 +1209,19 @@ export class Scheduler {
   ): ReadonlyArray<SchedulerEffect> {
     const cycle = this.detectWaitsForCycle();
     if (cycle && skipTrainIds === undefined) {
-      const resolution = this.tryYieldLowestRanked(cycle);
-      if (resolution) return resolution;
+      /* First try the FORWARD cure (ADR-017 §3): withhold the lowest-ranked
+       * victim's not-yet-entered claims so a peer takes the freed block. That
+       * reaches every standoff EXCEPT the physically-closed one — a train
+       * stopped INSIDE the block a peer needs, which a withhold cannot vacate. */
+      const yielded = this.tryYieldLowestRanked(cycle);
+      if (yielded) return yielded;
+      /* The forward cure could not fire: this is a closed nose-to-nose standoff.
+       * Try REVERSE authority (ADR-022) — back the lowest-ranked train that has
+       * a safe retreat out of the occupied block so the peer can proceed. If no
+       * cycle member can safely reverse, this returns null and the deadlock is
+       * reported unchanged, exactly as before. */
+      const reversed = this.tryReverseToBreakStandoff(cycle);
+      if (reversed) return reversed;
     }
     return this.emitDeadlockState(cycle);
   }
@@ -1335,6 +1346,143 @@ export class Scheduler {
       if (anyEdgeSharesMarker(victim.cleared_edges, wanted)) return wanted;
     }
     return undefined;
+  }
+
+  /**
+   * ADR-022 — REVERSE authority. The closed nose-to-nose standoff the forward
+   * yield (ADR-017 §3) cannot cure: a train stopped INSIDE the block a peer
+   * needs. Withholding does nothing; the only cure is to back the train OUT.
+   *
+   * Walk the cycle members in the SAME total order (§1), lowest-ranked first —
+   * the lowest-ranked train gives ground, exactly as it is the one withheld in
+   * the forward case. For each candidate compute a safe backward target X
+   * (`computeReverseTarget`): the first marker behind its head reached only over
+   * track it provably holds, at which its remaining occupancy no longer shares
+   * with the peer's wanted edge. The first candidate with such an X is the
+   * reverser; if none has one (no safe retreat for anyone — a buffer behind
+   * every head, or every retreat still contests), return null and the caller
+   * reports the deadlock unchanged. Deterministic: order + graph query only.
+   */
+  private tryReverseToBreakStandoff(
+    cycle: ReadonlyArray<string>,
+  ): ReadonlyArray<SchedulerEffect> | null {
+    /* Candidates in the total order, lowest-ranked first (the inverse of
+     * `orderedTrains`' preferred-first sort): the train that should give ground. */
+    const candidates = cycle
+      .map((id) => this.trains.get(id))
+      .filter((t): t is TrainState => t !== undefined)
+      .sort((a, b) => compareTrains(b, a));
+
+    for (const victim of candidates) {
+      const peerWanted = this.peerWantedEdgeBlockedByVictim(cycle, victim);
+      if (!peerWanted) continue;
+      const plan = this.computeReverseTarget(victim, peerWanted);
+      if (!plan) continue;
+      return this.enactReverse(victim, plan);
+    }
+    return null;
+  }
+
+  /**
+   * The safety check and the "how far back" computation, as one walk (ADR-022
+   * §3). For `victim` blocking `peerWanted`, walk backward from the head over
+   * the edges the victim HOLDS, looking for a target marker X such that:
+   *   (a) every edge backed over is one the victim holds (so no peer can be
+   *       inside it — block exclusivity guarantees that) AND the new-head marker
+   *       it lands on is shared by no OTHER train's held edges (provably clear);
+   *   (b) once the head sits at X, the victim's REMAINING held edges (those from
+   *       X backward — its tail) no longer share a marker with `peerWanted`.
+   * Returns the target marker and the ordered run of held edges to release (the
+   * blocks vacated, head-first), or `undefined` if no safe X exists (a buffer
+   * behind the head, or every retreat still contests the peer's marker).
+   *
+   * Pure graph + occupancy query over scheduler-held state; no clock, no RNG.
+   */
+  private computeReverseTarget(
+    victim: TrainState,
+    peerWanted: EdgeRef,
+  ): { targetMarkerId: string; releasedEdges: ReadonlyArray<EdgeRef> } | undefined {
+    const head = victim.last_marker_id;
+    if (head === undefined) return undefined;
+
+    const released: EdgeRef[] = [];
+    const visited = new Set<string>([head]);
+    let boundary = head;
+
+    /* Bounded by the number of held edges — the train can retreat at most over
+     * every block it holds; the visited-marker guard prevents looping on cyclic
+     * topologies where the held edges form a ring. */
+    for (let step = 0; step < victim.cleared_edges.length; step++) {
+      /* The block the head currently sits at the END of: the held edge whose
+       * to_marker is the current boundary. Backing over it retreats the head to
+       * that edge's from_marker. */
+      const headBlock = victim.cleared_edges.find((e) => e.to_marker_id === boundary);
+      if (!headBlock) break; // buffer / terminus: no held edge behind the head.
+
+      const nextMarker = headBlock.from_marker_id;
+      if (visited.has(nextMarker)) break; // would loop; stop conservatively.
+
+      /* (a) the marker we'd back onto must be provably clear — no OTHER train
+       * holds an edge touching it. (Backing over `headBlock` itself is safe by
+       * exclusivity: the victim holds it, so no peer is inside it.) */
+      if (this.markerHeldByAnotherTrain(victim.train_id, nextMarker)) break;
+
+      released.push(headBlock);
+      visited.add(nextMarker);
+      boundary = nextMarker;
+
+      /* (b) after retreating to `boundary`, do the victim's REMAINING held edges
+       * still contest the peer's wanted edge? Remaining = everything not yet
+       * released. The first boundary at which they no longer share is X. */
+      const remaining = victim.cleared_edges.filter(
+        (held) => !released.some((r) => edgesEqual(r, held)),
+      );
+      if (!anyEdgeSharesMarker(remaining, peerWanted)) {
+        return { targetMarkerId: boundary, releasedEdges: released };
+      }
+    }
+    return undefined;
+  }
+
+  /** True if any train OTHER than `trainId` holds an edge touching `marker`. */
+  private markerHeldByAnotherTrain(trainId: string, marker: string): boolean {
+    for (const [otherId, other] of this.trains) {
+      if (otherId === trainId) continue;
+      for (const held of other.cleared_edges) {
+        if (held.from_marker_id === marker || held.to_marker_id === marker) return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Enact a reverse grant (ADR-022 §4). Release the vacated blocks from the
+   * victim's `cleared_edges` (retaining the edges from X backward it still sits
+   * on — its tail), re-anchor its head and clearance limit at X, emit the
+   * `grant_reverse` command + clearance snapshot, then re-run the grant loop
+   * with the victim skipped so the now-freed block lets the peer proceed and
+   * the victim cannot immediately re-grab what it just vacated.
+   */
+  private enactReverse(
+    victim: TrainState,
+    plan: { targetMarkerId: string; releasedEdges: ReadonlyArray<EdgeRef> },
+  ): ReadonlyArray<SchedulerEffect> {
+    victim.cleared_edges = victim.cleared_edges.filter(
+      (held) => !plan.releasedEdges.some((r) => edgesEqual(r, held)),
+    );
+    victim.last_marker_id = plan.targetMarkerId;
+    victim.clearance_limit_marker_id = plan.targetMarkerId;
+
+    const out: SchedulerEffect[] = [
+      effects.sendCommand(victim.train_id, 'grant_reverse', {
+        limit_marker_id: plan.targetMarkerId,
+        edges: plan.releasedEdges,
+        reason: 'deadlock_reverse',
+      }),
+      this.clearanceStateEffect(victim),
+    ];
+    out.push(...this.retryBlockedClearances(new Set([victim.train_id])));
+    return out;
   }
 
   /**

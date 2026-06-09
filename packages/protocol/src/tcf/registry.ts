@@ -27,7 +27,7 @@
  * bridge serving mixed-firmware devices can decode each frame against the
  * right table and detect a stale device on its first frame.
  */
-export const TCF_REGISTRY_EPOCH = 1 as const;
+export const TCF_REGISTRY_EPOCH = 2 as const;
 
 /**
  * Event types in compact-ID order. Index === compact `type_id`. APPEND-ONLY:
@@ -66,6 +66,7 @@ export const COMMAND_TYPE_ORDER = [
   'hold_gate',
   'release_gate',
   'assign_tag',
+  'grant_reverse',
 ] as const;
 
 export type CompactEventType = (typeof EVENT_TYPE_ORDER)[number];

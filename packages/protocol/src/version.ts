@@ -20,5 +20,11 @@
  * pre-existing `'unknown_topology'` reason, surfaced when a bounded-route train
  * reports an unreachable marker. Backward-compatible additions; consumers that
  * don't understand either ignore it.
+ * 0.7.0 — new `grant_reverse` command (ADR-022): a bounded, signed (backward)
+ * clearance the scheduler issues to break an otherwise-unresolvable closed
+ * nose-to-nose standoff by backing one train out of an occupied block into
+ * track it provably holds. TCF registry epoch bumped 1 → 2 (command appended).
+ * Backward-compatible addition; devices that don't understand it ignore it and
+ * simply never reverse (default-stopped/safe).
  */
-export const PROTOCOL_VERSION = '0.6.0' as const;
+export const PROTOCOL_VERSION = '0.7.0' as const;

@@ -60,6 +60,7 @@ describe('TCF registry anti-drift', () => {
       'hold_gate',
       'release_gate',
       'assign_tag',
+      'grant_reverse',
     ]);
   });
 

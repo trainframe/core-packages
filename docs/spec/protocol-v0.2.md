@@ -184,6 +184,8 @@ Commands flow from server to devices via `railway/commands/{device_id}`. Same en
 
 `begin_exploration` *(added 0.3.0; [ADR-015](../adr/015-exploration-clearance.md))*: to a `controls_motion` device. Optional `reason`. An **open-ended** clearance — the train drives forward across markers indefinitely, following the physical rails (taking the switched branch at junctions), reporting each marker, until released by `revoke_clearance`. It names no edges and no limit. This is the primitive that bootstraps discovery on a layout whose edges aren't yet known; "clearance, not commands" still holds (the train stays stopped until this grant arrives).
 
+`grant_reverse` *(added 0.7.0; [ADR-022](../adr/022-reverse-authority.md))*: to a `controls_motion` device. Payload: `limit_marker_id` (the backward target the train may reverse *to*, now BEHIND the head), `edges` (the ordered run of held, forward-oriented edges the train backs along, head-first edge first; traversed in reverse), optional `reason`. A **signed** (backward) clearance the scheduler issues ONLY to break an otherwise-unresolvable closed nose-to-nose standoff: it backs one train out of a block it physically occupies — over track it provably holds / that is clear behind it, never reversing into another train — so a peer can proceed. Bounded and revocable like every clearance (released by `revoke_clearance` / `emergency_stop`); "clearance, not commands" holds (absent the grant the train never reverses).
+
 `set_target_speed`: to a `controls_motion` device. Payload: speed (0.0–1.0 normalised; the device decides physical mapping).
 
 `emergency_stop`: to a `controls_motion` device. No payload. Stop as fast as physically possible.
@@ -276,4 +278,10 @@ The split between MQTT pub/sub and HTTP query API is currently informal; some qu
 
 **Changes in 0.4.0:** documents `railway/state/devices/{device_id}` retained payload shape; adds optional `train_length_mm` field (ADR-016). Multi-edge tail-release now supported in the scheduler (ADR-012 refinement — trains spanning more than one edge are correctly handled).
 
-*End of v0.2 (current protocol 0.4.0).*
+**Changes in 0.5.0:** optional `priority` on `device_registered` (ADR-017) — the announced term of the scheduler's total order over trains for section contention.
+
+**Changes in 0.6.0:** new `topology_violation` event + optional `block_reason` on the retained clearance state (ADR-019).
+
+**Changes in 0.7.0:** new `grant_reverse` command (ADR-022) — a bounded, signed (backward) clearance the scheduler issues to break an otherwise-unresolvable closed nose-to-nose standoff by backing one train out of an occupied block into track it provably holds. TCF registry epoch 1 → 2.
+
+*End of v0.2 (current protocol 0.7.0).*

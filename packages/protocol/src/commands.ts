@@ -40,6 +40,30 @@ const RevokeClearancePayload = Type.Object({
 export const RevokeClearance = commandEnvelope('revoke_clearance', RevokeClearancePayload);
 export type RevokeClearance = Static<typeof RevokeClearance>;
 
+// ---------- grant_reverse ----------
+
+/**
+ * Bounded REVERSE clearance (ADR-022). A signed grant: it authorises the train
+ * to back UP to an earlier marker, `limit_marker_id`, rather than forward to a
+ * limit ahead. Issued by the scheduler ONLY to break an otherwise-unresolvable
+ * closed nose-to-nose standoff (ADR-017's named follow-up): the train vacates a
+ * block it physically occupies so a peer can proceed, retreating only over
+ * track it provably holds / that is clear behind it — never reversing into
+ * another train. `edges` is the ordered run of held, forward-oriented edges the
+ * train backs along, head-first edge first; the train traverses each in
+ * reverse. Like every clearance it is bounded and revocable — released by the
+ * existing `revoke_clearance` / `emergency_stop`. "Clearance, not commands"
+ * holds: absent this grant the train never reverses.
+ */
+const GrantReversePayload = Type.Object({
+  limit_marker_id: Uuid,
+  edges: Type.Array(EdgeRef, { minItems: 1 }),
+  reason: Type.Optional(Type.String()),
+});
+
+export const GrantReverse = commandEnvelope('grant_reverse', GrantReversePayload);
+export type GrantReverse = Static<typeof GrantReverse>;
+
 // ---------- begin_exploration ----------
 
 /**
@@ -135,6 +159,7 @@ export const CoreCommand = Type.Union([
   AssignRoute,
   GrantClearance,
   RevokeClearance,
+  GrantReverse,
   BeginExploration,
   SetTargetSpeed,
   EmergencyStop,
@@ -150,6 +175,7 @@ export const CORE_COMMAND_SCHEMAS = {
   assign_route: AssignRoute,
   grant_clearance: GrantClearance,
   revoke_clearance: RevokeClearance,
+  grant_reverse: GrantReverse,
   begin_exploration: BeginExploration,
   set_target_speed: SetTargetSpeed,
   emergency_stop: EmergencyStop,

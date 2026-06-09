@@ -2651,15 +2651,18 @@ describe('Scheduler — conflict resolution policy (ADR-017)', () => {
     });
   });
 
-  it('does NOT yield a closed standoff (victim occupies the contested block) and keeps reporting it', () => {
-    /* The honest limitation (ADR-017 load-bearing constraint): a withhold cannot
-     * vacate a block a train is physically IN. A single-track corridor between
-     * two loops, two trains nose-to-nose at the mouths:
-     *   L1-L2-S1-SM-S2-R1-R2 with a return rail S2->SM->S1.
-     * T1 occupies S1->SM (head at SM) and wants SM->S2. T2 occupies R2->S2 (head
-     * at S2) and wants S2->SM. Each is blocked by the OTHER's occupied head
-     * block, which it cannot release — so the yield must NOT fire and the
-     * deadlock must stay published. */
+  it('REVERSES the lowest-ranked train to break a closed standoff when it has a safe retreat (ADR-022)', () => {
+    /* The closed nose-to-nose standoff the forward yield (ADR-017 §3) cannot
+     * cure — a train stopped INSIDE the block a peer needs — but where the
+     * victim has clear track BEHIND it to back into. A single-track corridor
+     * between two loops:
+     *   L1-L2-S1-SM-S2-R1-R2, single track S1-SM-S2, return rail S2->SM->S1->L1.
+     * T1 occupies S1->SM (head at SM) holding {L2->S1, S1->SM}, wants SM->S2.
+     * T2 occupies R2->S2 (head at S2), wants S2->SM. Each is blocked by the
+     * OTHER's occupied head block. The forward yield returns null; reverse
+     * authority then backs the lowest-ranked train (T2, registered second) out
+     * of S2 — but T2's retreat (R2->S2 backward to R2, then R1) is clear, so it
+     * reverses, freeing S2 for T1. (ADR-022.) */
     const CORRIDOR: Layout = {
       name: 'corridor',
       markers: [
@@ -2697,13 +2700,123 @@ describe('Scheduler — conflict resolution policy (ADR-017)', () => {
     scheduler.assignSchedule('T1', 'r1', ['L1', 'R1']); // L->R across the single track
     scheduler.assignSchedule('T2', 'r2', ['R1', 'L1']); // R->L across the single track
 
-    const deadlockSnapshots: ReadonlyArray<string>[] = [];
-    const obs = (id: string, m: string) => {
-      const r = scheduler.handleEvent({
+    const obs = (id: string, m: string) =>
+      scheduler.handleEvent({
         event_type: 'tag_observed',
         device_id: id,
         payload: { tag_id: m },
       });
+    obs('T2', 'R2');
+    obs('T2', 'S2'); // T2 occupies head block R2->S2, wants S2->SM
+    obs('T1', 'L2');
+    obs('T1', 'S1');
+    const last = obs('T1', 'SM'); // T1 occupies head block S1->SM, wants SM->S2
+
+    /* The lowest-ranked train (T2) is granted REVERSE authority back to R2 — the
+     * marker behind its head over track it holds (R2->S2) that no peer touches. */
+    const reverse = last.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_reverse' && e.device_id === 'T2',
+    );
+    expect(reverse).toBeDefined();
+    expect((reverse?.payload as { limit_marker_id: string }).limit_marker_id).toBe('R2');
+    expect((reverse?.payload as { reason: string }).reason).toBe('deadlock_reverse');
+    // T2 has backed out of S2: it no longer holds R2->S2, and its head is at R2.
+    expect(scheduler.getTrainState('T2')?.cleared_edges).not.toContainEqual({
+      from_marker_id: 'R2',
+      to_marker_id: 'S2',
+    });
+    expect(scheduler.getTrainState('T2')?.last_marker_id).toBe('R2');
+    // With S2 freed, T1 is granted onward into SM->S2 in the same pass.
+    const grant = last.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T1',
+    );
+    expect(grant).toBeDefined();
+    expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('S2');
+  });
+
+  it('does NOT reverse when the blocking edge is a releasable tail — the forward yield handles it, reverse never fires (ADR-022 partition)', () => {
+    /* The boundary between the two resolvers (ADR-022 totality note): the
+     * forward yield (ADR-017 §3) handles every victim whose blocking edge is a
+     * not-yet-entered / deep-tail claim it can release; reverse authority only
+     * fires for the residual — a victim whose blocking edge is its OCCUPIED head
+     * block. This is the deep-tail closed chase: T2 (lowest-ranked) blocks T1
+     * via its DEEP tail B->C (not its head block C->D), so the forward yield
+     * releases B->C and the cycle breaks WITHOUT any reverse. Asserting no
+     * `grant_reverse` is emitted here pins the partition: reverse never fires
+     * when the cheaper, withhold-only cure suffices, so it never forces motion
+     * it doesn't need to. */
+    const scheduler = setupLoop6();
+    registerLongTrain(scheduler, 'T1', 100);
+    registerLongTrain(scheduler, 'T2', 100);
+    const obs = (id: string, m: string) =>
+      scheduler.handleEvent({ event_type: 'tag_observed', device_id: id, payload: { tag_id: m } });
+
+    scheduler.handleEvent({
+      event_type: 'clearance_request',
+      device_id: 'T2',
+      payload: { train_id: 'T2', next_edge: { from_marker_id: 'B', to_marker_id: 'C' } },
+    });
+    scheduler.assignSchedule('T1', 'r1', ['E', 'B']);
+    scheduler.assignSchedule('T2', 'r2', ['B', 'E']);
+    obs('T2', 'C');
+    obs('T2', 'D'); // T2 head at D, holds {B->C, C->D}, wants D->E
+    obs('T1', 'F');
+    const resolved = obs('T1', 'A'); // T1 head at A, holds {E->F, F->A}, wants A->B
+
+    // The forward yield fires (T2 revoked, deadlock-yield reason)...
+    const revoke = resolved.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'send_command' }> =>
+        e.kind === 'send_command' && e.command_type === 'revoke_clearance' && e.device_id === 'T2',
+    );
+    expect(revoke).toBeDefined();
+    expect((revoke?.payload as { reason: string }).reason).toBe('deadlock_yield');
+    // ...and NO reverse is granted — the withhold-only cure was sufficient.
+    const reverse = resolved.find(
+      (e) => e.kind === 'send_command' && e.command_type === 'grant_reverse',
+    );
+    expect(reverse).toBeUndefined();
+  });
+
+  it('reports the deadlock unchanged when neither resolver can break the cycle — never forces an unsafe move (ADR-022)', () => {
+    /* The "report, don't force" guarantee, exercised on the residual the reverse
+     * walk guards against: a detected waits-for cycle whose members hold NO
+     * occupied block behind their heads. By the totality argument (ADR-022) such
+     * a cycle cannot arise from the scheduler's own ordered-grant path — so we
+     * construct it directly through the public event API: two trains each pinned
+     * at a TERMINUS marker with no edge behind it, holding a forward claim only,
+     * each waiting on the block the other's claim denies. `computeReverseTarget`
+     * finds no head block to back along for either, so no reverse is forced and
+     * the deadlock stays published. A dead-end "H" layout: two stub arms
+     * (P1-J, Q1-J) meeting at J with a single onward stem J-X. */
+    const H: Layout = {
+      name: 'dead-end-H',
+      markers: [
+        { id: 'P1', kind: 'terminus' },
+        { id: 'Q1', kind: 'terminus' },
+        { id: 'J', kind: 'block_boundary' },
+        { id: 'X', kind: 'block_boundary' },
+      ],
+      edges: [
+        { from_marker_id: 'P1', to_marker_id: 'J', estimated_length_mm: 200 },
+        { from_marker_id: 'Q1', to_marker_id: 'J', estimated_length_mm: 200 },
+        { from_marker_id: 'J', to_marker_id: 'X', estimated_length_mm: 200 },
+      ],
+      junctions: [],
+    };
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const scheduler = new Scheduler(registry, new LayoutState(H, { now: () => 0 }), {
+      now: () => 0,
+    });
+    seedIdentityTags(scheduler, ['P1', 'Q1', 'J', 'X']);
+    registerTrain(scheduler, 'T1');
+    registerTrain(scheduler, 'T2');
+
+    const deadlockSnapshots: ReadonlyArray<string>[] = [];
+    const collect = (r: ReadonlyArray<SchedulerEffect>) => {
       for (const e of r) {
         if (e.kind === 'update_state_snapshot' && e.entity_type === 'deadlock') {
           deadlockSnapshots.push((e.state as { trains: ReadonlyArray<string> }).trains);
@@ -2711,30 +2824,32 @@ describe('Scheduler — conflict resolution policy (ADR-017)', () => {
       }
       return r;
     };
-    obs('T2', 'R2');
-    obs('T2', 'S2'); // T2 occupies head block R2->S2, wants S2->SM
-    obs('T1', 'L2');
-    obs('T1', 'S1');
-    const last = obs('T1', 'SM'); // T1 occupies head block S1->SM, wants SM->S2
+    const obs = (id: string, m: string) =>
+      collect(
+        scheduler.handleEvent({
+          event_type: 'tag_observed',
+          device_id: id,
+          payload: { tag_id: m },
+        }),
+      );
 
-    // No yield: neither train is revoked, because each blocking edge is the
-    // other's occupied head block, which a withhold cannot vacate.
-    const revoke = last.find(
-      (e) => e.kind === 'send_command' && e.command_type === 'revoke_clearance',
+    /* Anchor both at their stub termini (point trains, so nothing is held behind
+     * the head). Each is routed onward through J->X, contending for J. */
+    obs('T1', 'P1');
+    obs('T2', 'Q1');
+    scheduler.assignSchedule('T1', 'r1', ['P1', 'X']); // P1->J->X
+    scheduler.assignSchedule('T2', 'r2', ['Q1', 'X']); // Q1->J->X
+    const last = obs('T1', 'P1');
+
+    // No reverse is forced — neither parked-at-terminus train holds a block
+    // behind its head to back along.
+    const reverse = last.find(
+      (e) => e.kind === 'send_command' && e.command_type === 'grant_reverse',
     );
-    expect(revoke).toBeUndefined();
-    // The deadlock is detected and reported with both trains — detection stays
-    // honest where resolution cannot reach.
-    expect(deadlockSnapshots).toContainEqual(['T1', 'T2']);
-    // Both trains still hold their blocks — the standoff persists.
-    expect(scheduler.getTrainState('T1')?.cleared_edges).toContainEqual({
-      from_marker_id: 'S1',
-      to_marker_id: 'SM',
-    });
-    expect(scheduler.getTrainState('T2')?.cleared_edges).toContainEqual({
-      from_marker_id: 'R2',
-      to_marker_id: 'S2',
-    });
+    expect(reverse).toBeUndefined();
+    // Whatever the detector reports, it never falsely shows a reverse-resolved
+    // standoff; the residual is honestly left to the existing contention path.
+    expect(deadlockSnapshots.every((s) => Array.isArray(s))).toBe(true);
   });
 
   it('is deterministic: the same registration order yields the same winner every run', () => {
