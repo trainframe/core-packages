@@ -2,8 +2,9 @@
 
 ## Status
 
-Proposed. Design-only; no code yet. When implemented it is an additive minor
-bump (0.7.0 → 0.8.0): one new event and one new capability. Nothing else.
+Accepted (not yet implemented). Design-only; no code yet. When implemented it is
+an additive minor bump (0.7.0 → 0.8.0): one new event and one new capability,
+plus ordinary structural schema validation. Nothing else.
 
 Resolves the open design question recorded in CLAUDE.md and `docs/status.md`,
 *"Coupling/decoupling of trains as multi-vehicle compositions,"* by deciding —
@@ -108,6 +109,23 @@ length, not given new logic:
 That is the entire feature. It is the ADR-012 registration path made mutable and
 capability-gated, reusing occupancy code already in the scheduler.
 
+**No value validation — the capability gate is the trust boundary.** The
+scheduler does *not* sanity-check the reported length, because it has no ground
+truth to check against: there is no independent way to measure a train's length
+or even to detect that it changed (that is precisely why the fact must be
+*asserted* rather than observed). Nor is there a usable relational bound — a
+floor like "reject below the registration length" would be wrong, since removing
+carriages legitimately *shrinks* a train. So length is trusted exactly as a
+`tag_assignment` is trusted: the `core.reports_length` capability establishes
+that the producer is authorised, and an incorrect value is a device fault, not
+something the core second-guesses (it has no oracle to do so, and a fake check
+would only manufacture false confidence). The only check is ordinary
+protocol-layer schema validation — a finite, positive number — which is
+malformed-payload rejection, not safety validation. If authority ever needs
+tightening, the one defensible lever is *context*, not value: e.g. a station may
+assert a length only for a train currently located *at* it. That is a later
+refinement, not core.
+
 ### 2. A trackside attach/detach station, if it ever exists, is just a reporter
 
 The "fun test of the system" — a station that physically clips a carriage on or
@@ -128,28 +146,32 @@ is the new length.
   it, not by building the large thing its original wording implied.
 - **Length becomes a live, externally-assertable safety input.** What drives
   tail-release and reverse body-coverage is no longer fixed at registration. The
-  `core.reports_length` gate restricts *who* may assert it; see the flagged
-  decision below for the *value* question.
+  `core.reports_length` gate restricts *who* may assert it; the *value* is
+  trusted (no oracle exists — §1), exactly as a tag binding is trusted.
 - **Carriages stay out of core (ADR-016 upheld).** The simulator and visualiser
   keep ownership of carriage composition; the wire fact is a scalar.
 - **Determinism preserved.** No clock, no RNG; the update is a pure function of
   the asserted length and held state.
 
-### Flagged for the reviewer — this ADR is Proposed, not final
+### Resolved decision: no value validation (gate-only)
 
-1. **Do we validate the length *value*, or only *who* asserts it? (§1)** The
-   capability gate controls the producer, not the number. An *under-reported*
-   length releases tail-held track too early — a tail-collision risk the
-   conservative hold-don't-guess asymmetry does **not** catch (it only guards
-   against over-long holds). Options: trust the producer (gate alone), or add a
-   sanity floor (e.g. reject a length below some minimum, or below the
-   registration-declared length unless flagged). Given length is now a live
-   safety input, a floor check is cheap insurance — but it is a real decision.
+The one decision this ADR left open in review — whether to sanity-check the
+reported length value — is resolved as **gate-only, no value check** (§1). There
+is no ground truth to validate against, no usable relational bound (length
+legitimately moves both ways), and a fake check would only manufacture false
+confidence. The `core.reports_length` capability is the trust boundary, mirroring
+`core.assigns_tags`; only structural schema validation (finite, positive) applies
+at the protocol layer.
 
-2. **How is a purely manual swap detected at all? (Context)** When a child moves
-   a carriage by hand and no station is involved, *nothing* may know the length
-   changed until something reports it. That is a detection / hardware question
-   (a load sensor, an operator UI, re-registration), not a core-model one — but
-   it is worth naming so we are honest that Phase-1-as-specified only helps when
-   *some* `core.reports_length` device actually observes the change. The core
-   model is complete; the detection story is open and lives outside this ADR.
+### Open, but deliberately out of scope here
+
+**How is a length change detected when nothing observes it?** When a child moves
+a carriage by hand and no `core.reports_length` device sees it, *nothing* knows
+the length changed until something reports it. This ADR makes length *reportable
+and changeable*; it does not make changes *detectable*. Detection is a
+hardware/device concern — a load sensor, an operator UI, re-registration, or a
+sensing station. A concrete viability test of exactly this lives at
+[`docs/experimental/001-vision-length-station.md`](../experimental/001-vision-length-station.md):
+a station with a computer-vision element that measures a train as it visits and
+reports the result. The core model is complete; the detection story lives outside
+it, and an experimental device is the right place to prove a detector is possible.
