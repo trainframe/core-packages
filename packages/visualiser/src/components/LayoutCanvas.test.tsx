@@ -946,4 +946,94 @@ describe('LayoutCanvas — length-aware (ADR-016) rendering', () => {
     /* No swept body path. */
     expect(trainGroup?.querySelector('path[fill="none"]')).toBeNull();
   });
+
+  it('surfaces battery and error_state from train_status as data-* on the fixed icon', () => {
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/spatial-loop', SPATIAL_LOOP_LAYOUT));
+    act(() =>
+      deliverEvent(client, 'railway/events/train_status/T1', {
+        train_id: 'T1',
+        current_edge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+        estimated_distance_from_edge_start_mm: 100,
+        speed_normalised: 0.5,
+        battery_normalised: 0.15,
+        error_state: 'derailed',
+      }),
+    );
+
+    const trainGroup = screen.getByTestId('trains').querySelector('[data-train-id="T1"]');
+    expect(trainGroup?.getAttribute('data-battery')).toBe('0.15');
+    expect(trainGroup?.getAttribute('data-error-state')).toBe('derailed');
+    /* A battery gauge (two rects) is drawn for the reported charge. */
+    expect(trainGroup?.querySelectorAll('rect').length).toBe(2);
+  });
+
+  it('surfaces a reported battery of 0 (falsy value must not be dropped)', () => {
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/spatial-loop', SPATIAL_LOOP_LAYOUT));
+    act(() =>
+      deliverEvent(client, 'railway/events/train_status/T1', {
+        train_id: 'T1',
+        current_edge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+        estimated_distance_from_edge_start_mm: 100,
+        speed_normalised: 0,
+        battery_normalised: 0,
+      }),
+    );
+
+    const trainGroup = screen.getByTestId('trains').querySelector('[data-train-id="T1"]');
+    expect(trainGroup?.getAttribute('data-battery')).toBe('0');
+    /* No error reported → no error attribute. */
+    expect(trainGroup?.hasAttribute('data-error-state')).toBe(false);
+  });
+
+  it('omits health data-* when battery is absent and error_state is empty', () => {
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/spatial-loop', SPATIAL_LOOP_LAYOUT));
+    act(() =>
+      deliverEvent(client, 'railway/events/train_status/T1', {
+        train_id: 'T1',
+        current_edge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+        estimated_distance_from_edge_start_mm: 100,
+        speed_normalised: 0.5,
+        /* error_state is an empty string → treated as "no error". */
+        error_state: '',
+      }),
+    );
+
+    const trainGroup = screen.getByTestId('trains').querySelector('[data-train-id="T1"]');
+    expect(trainGroup?.hasAttribute('data-battery')).toBe(false);
+    expect(trainGroup?.hasAttribute('data-error-state')).toBe(false);
+    expect(trainGroup?.querySelectorAll('rect').length).toBe(0);
+  });
+
+  it('surfaces battery and error_state on the swept-body (length-aware) train too', () => {
+    const { client } = renderCanvas();
+    act(() => deliverState(client, 'railway/state/layout/spatial-loop', SPATIAL_LOOP_LAYOUT));
+    act(() =>
+      deliverState(client, 'railway/state/devices/T1', {
+        capabilities: ['core.controls_motion'],
+        train_length_mm: 120,
+      }),
+    );
+    act(() =>
+      deliverEvent(client, 'railway/events/train_status/T1', {
+        train_id: 'T1',
+        current_edge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+        estimated_distance_from_edge_start_mm: 150,
+        speed_normalised: 0.5,
+        battery_normalised: 0.8,
+        error_state: 'comms_lost',
+      }),
+    );
+
+    const trainGroup = screen.getByTestId('trains').querySelector('[data-train-id="T1"]');
+    /* Confirm we are on the swept path, not the fixed one. */
+    expect(trainGroup?.getAttribute('data-train-length-mm')).toBe('120');
+    expect(trainGroup?.getAttribute('data-battery')).toBe('0.8');
+    expect(trainGroup?.getAttribute('data-error-state')).toBe('comms_lost');
+    /* An error glyph (a <text> that isn't the train label) is present. */
+    const texts = Array.from(trainGroup?.querySelectorAll('text') ?? []);
+    expect(texts.some((t) => t.textContent === '⚠')).toBe(true);
+  });
 });
