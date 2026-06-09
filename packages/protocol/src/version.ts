@@ -40,5 +40,11 @@
  * `length_mm`, and re-derives tail-clearance occupancy on the next
  * `train_status`. TCF registry epoch bumped 3 → 4 (event appended).
  * Backward-compatible additions.
+ * 0.10.0 — new `core.can_reverse` capability + `zone_train_released` event
+ * (ADR-027): the zone interior handoff. A train is admitted to a zone only if it
+ * declared `core.can_reverse` (interior shunting needs reversing); the device
+ * releases a held train back to core authority with `zone_train_released`, and
+ * the train departs only under ordinary clearance. TCF registry epoch bumped
+ * 4 → 5 (event appended). Backward-compatible additions.
  */
-export const PROTOCOL_VERSION = '0.9.0' as const;
+export const PROTOCOL_VERSION = '0.10.0' as const;

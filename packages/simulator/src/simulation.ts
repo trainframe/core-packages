@@ -143,7 +143,13 @@ export class Simulation {
     const registrationPayload: {
       capabilities: string[];
       train_length_mm?: number;
-    } = { capabilities: ['core.controls_motion', 'core.accepts_route'] };
+    } = {
+      capabilities: [
+        'core.controls_motion',
+        'core.accepts_route',
+        ...(config.can_reverse ? ['core.can_reverse'] : []),
+      ],
+    };
     if (config.length_mm > 0) {
       registrationPayload.train_length_mm = config.length_mm;
     }

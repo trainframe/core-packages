@@ -98,17 +98,22 @@ table: full yard → train waits; slot frees → train enters.
 
 ## What's built, and what proves it
 
-Two seams are implemented and tested end-to-end through a real broker +
-scheduler (`packages/integration/src/zone-admission.test.ts`): **admission** — a
-`VirtualRailyard` (scalable to N slots) asserts occupancy, and a routed train
-holds at the throat of a full yard and is admitted when a slot frees, via the
-`core.gates_zone` consultation veto and the existing retry machinery; and
-**length reconcile on exit** — the yard reports a train out at a different length
-via `core.reports_length` (ADR-023, now built), and the scheduler updates it. The
-"yard swallows length X, emits length Y" headline is real. The remaining hand-wave
-is the *interior maneuvering itself* (the single-lead shuffle driving interior
-markers under the device's authority), which needs the opaque-interior transit
-handoff — ADR-026 future work.
+The whole lifecycle is implemented and tested end-to-end through a real broker +
+scheduler: **admission** — a `VirtualRailyard` (scalable to N slots) asserts
+occupancy, and a routed train holds at the throat of a full yard and is admitted
+when a slot frees, via the `core.gates_zone` consultation veto and the existing
+retry machinery (`zone-admission.test.ts`); **the interior handoff**
+([ADR-027](../adr/027-zone-interior-handoff.md), now built) — an admitted
+reversible train reaching the throat is suspended into the device's opaque
+interior (holding no core block, so the throat frees for the next), the device
+releases it with `zone_train_released`, and it departs only under ordinary
+clearance; **length reconcile** — the yard reports a train out at a different
+length via `core.reports_length` (ADR-023), so the "yard swallows length X, emits
+length Y" headline is real; and the **reverse gate** — only trains declaring
+`core.can_reverse` are admitted (interior shunting needs reversing). The only
+remaining hand-wave is the *interior choreography itself* (the single-lead shuffle
+on the device's private track) — which ADR-027 deliberately keeps device-side, not
+core's concern.
 
 ## Why it's experimental, not the norm
 

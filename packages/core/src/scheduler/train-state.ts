@@ -102,6 +102,15 @@ export interface TrainState {
    * the train is not dwelling.
    */
   dwell_until?: number | undefined;
+
+  /**
+   * The zone boundary marker this train is suspended inside (ADR-027). Set when
+   * an admitted train reaches a zone boundary as its route terminus: the train
+   * passes into the device's opaque interior, holds no core blocks, and core
+   * routes it no further until the owning device emits `zone_train_released`.
+   * `undefined` when the train is under normal core authority.
+   */
+  in_zone?: string | undefined;
 }
 
 export const initialTrainState = (

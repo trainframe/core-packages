@@ -51,6 +51,13 @@ export interface VirtualTrainConfig {
    * the train is treated as a point mass (tail coincides with the head).
    */
   length_mm: number;
+  /**
+   * Whether the train's hardware can run backward (ADR-027). When true the train
+   * declares `core.can_reverse` at registration, which the scheduler requires
+   * before admitting it to a zone (a railyard, whose interior is worked by
+   * shunting). Default false — many toy locos only run forward.
+   */
+  can_reverse: boolean;
 }
 
 export const DEFAULT_TRAIN_CONFIG: VirtualTrainConfig = {
@@ -64,6 +71,7 @@ export const DEFAULT_TRAIN_CONFIG: VirtualTrainConfig = {
   spurious_read_rate: 0,
   train_status_interval_ms: 250,
   length_mm: 0,
+  can_reverse: false,
 };
 
 interface TrainEvent {

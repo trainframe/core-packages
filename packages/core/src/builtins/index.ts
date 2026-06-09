@@ -61,6 +61,13 @@ export const reportsLengthCapability = stubCapability(
     'scheduler enforces that only devices declaring it may emit train_length_changed.',
 );
 
+export const canReverseCapability = stubCapability(
+  'core.can_reverse',
+  'A train whose hardware can run backward (ADR-027). Required for admission to a ' +
+    'zone, whose interior is worked by shunting; the scheduler denies zone entry to ' +
+    'trains that do not declare it.',
+);
+
 export { gatesClearanceCapability };
 export { gatesZoneCapability };
 
@@ -80,4 +87,5 @@ export const BUILTIN_CAPABILITIES: ReadonlyArray<Capability<unknown>> = [
   assignsTagsCapability,
   gatesZoneCapability,
   reportsLengthCapability,
+  canReverseCapability,
 ] as ReadonlyArray<Capability<unknown>>;

@@ -2,10 +2,16 @@
 
 ## Status
 
-Proposed. The core mechanism [ADR-026](026-delegated-capacity-territory.md)
-deferred: how a *tracked* train is handed to a zone-owning device while it is
-inside, and handed back. Additive when accepted (a minor bump): one new event,
-one new capability, a scheduler state machine over a new zone-boundary registry.
+Accepted — **implemented** (protocol 0.10.0). The core mechanism
+[ADR-026](026-delegated-capacity-territory.md) deferred: how a *tracked* train is
+handed to a zone-owning device while it is inside, and handed back. Additive: the
+`zone_train_released` event + `core.can_reverse` capability, plus a scheduler
+state machine (entry-suspend / exit-reclaim) over a new zone-boundary registry
+(`scheduler.ts`: `handleZoneEntry`, `handleZoneTrainReleased`, the reverse-gate in
+`planAndExecuteCurrentTransit`). The interior itself stays hand-waved (the train
+parks at the throat; the device asserts occupancy, length, and release) — only the
+*handoff* is now real in core. Crossing tests in `scheduler.test.ts`; end-to-end
+reverse-gate refusal in `zone-admission.test.ts`.
 
 Builds on:
 

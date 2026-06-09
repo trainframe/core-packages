@@ -65,6 +65,15 @@ const registerLongTrain = (scheduler: Scheduler, trainId: string, lengthMm: numb
     },
   });
 
+const registerReversibleTrain = (scheduler: Scheduler, trainId: string) =>
+  scheduler.handleEvent({
+    event_type: 'device_registered',
+    device_id: trainId,
+    payload: {
+      capabilities: ['core.controls_motion', 'core.accepts_route', 'core.can_reverse'],
+    },
+  });
+
 const registerLengthReporter = (scheduler: Scheduler, deviceId: string) =>
   scheduler.handleEvent({
     event_type: 'device_registered',
@@ -860,7 +869,7 @@ describe('Scheduler — zone admission (gates_zone, ADR-026)', () => {
 
   it('withholds clearance into a full zone (occupancy >= capacity)', () => {
     const { scheduler } = setup();
-    registerTrain(scheduler, 'T1');
+    registerReversibleTrain(scheduler, 'T1');
     registerRailyard(scheduler, 'YARD-M3');
     setZoneState(scheduler, 'YARD-M3', 'M3', 2, 2); // full
 
@@ -872,7 +881,7 @@ describe('Scheduler — zone admission (gates_zone, ADR-026)', () => {
 
   it('admits the held train when a slot frees', () => {
     const { scheduler } = setup();
-    registerTrain(scheduler, 'T1');
+    registerReversibleTrain(scheduler, 'T1');
     registerRailyard(scheduler, 'YARD-M3');
     setZoneState(scheduler, 'YARD-M3', 'M3', 2, 2);
     advanceToM2(scheduler); // held at M2
@@ -887,7 +896,7 @@ describe('Scheduler — zone admission (gates_zone, ADR-026)', () => {
 
   it('abstains (admits) when the zone has room', () => {
     const { scheduler } = setup();
-    registerTrain(scheduler, 'T1');
+    registerReversibleTrain(scheduler, 'T1');
     registerRailyard(scheduler, 'YARD-M3');
     setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0); // empty
 
@@ -900,7 +909,7 @@ describe('Scheduler — zone admission (gates_zone, ADR-026)', () => {
 
   it('ignores unrelated events from the zone device without changing its gate', () => {
     const { scheduler } = setup();
-    registerTrain(scheduler, 'T1');
+    registerReversibleTrain(scheduler, 'T1');
     registerRailyard(scheduler, 'YARD-M3');
     setZoneState(scheduler, 'YARD-M3', 'M3', 1, 1); // full
     // A non-zone event reaches the gates_zone hook; it must be a no-op.
@@ -915,7 +924,7 @@ describe('Scheduler — zone admission (gates_zone, ADR-026)', () => {
 
   it('drops its admission gate when the zone device disconnects', () => {
     const { scheduler } = setup();
-    registerTrain(scheduler, 'T1');
+    registerReversibleTrain(scheduler, 'T1');
     registerRailyard(scheduler, 'YARD-M3');
     setZoneState(scheduler, 'YARD-M3', 'M3', 1, 1); // full
     advanceToM2(scheduler); // held at M2
@@ -933,6 +942,149 @@ describe('Scheduler — zone admission (gates_zone, ADR-026)', () => {
     expect((grant?.payload as { limit_marker_id: string }).limit_marker_id).toBe('M3');
     const anomaly = dcEffects.find((e) => e.kind === 'publish_event' && e.event_type === 'anomaly');
     expect(anomaly).toBeDefined();
+  });
+});
+
+describe('Scheduler — zone interior handoff (ADR-027)', () => {
+  /** Drive a reversible, admitted train M1→M2→M3 so it pulls into the M3 zone. */
+  const enterZone = (scheduler: Scheduler, trainId: string) => {
+    scheduler.assignSchedule(trainId, `r-${trainId}`, ['M1', 'M3']);
+    for (const tag of ['M1', 'M2', 'M3']) {
+      scheduler.handleEvent({
+        event_type: 'tag_observed',
+        device_id: trainId,
+        payload: { tag_id: tag },
+      });
+    }
+  };
+  const grantFor = (effects: ReadonlyArray<SchedulerEffect>, trainId: string) =>
+    effects.find(
+      (e) =>
+        e.kind === 'send_command' &&
+        e.command_type === 'grant_clearance' &&
+        e.device_id === trainId,
+    );
+
+  it('suspends an admitted reversible train at the zone boundary, freeing the throat', () => {
+    const { scheduler } = setup();
+    registerReversibleTrain(scheduler, 'T1');
+    registerRailyard(scheduler, 'YARD-M3');
+    setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0); // room
+
+    enterZone(scheduler, 'T1');
+
+    const t1 = scheduler.getTrainState('T1');
+    expect(t1?.in_zone).toBe('M3');
+    expect(t1?.cleared_edges).toHaveLength(0); // holds no core block — throat free
+    expect(t1?.transit).toBeUndefined(); // core routes it no further
+  });
+
+  it('reverse-gate refuses to route a non-reversible train into a zone', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1'); // no core.can_reverse
+    registerRailyard(scheduler, 'YARD-M3');
+    setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0);
+
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    const effects = scheduler.assignSchedule('T1', 'r1', ['M1', 'M3']);
+
+    expect(
+      effects.find((e) => e.kind === 'publish_event' && e.event_type === 'anomaly'),
+    ).toBeDefined();
+    expect(
+      effects.find((e) => e.kind === 'send_command' && e.command_type === 'assign_route'),
+    ).toBeUndefined();
+    expect(scheduler.getTrainState('T1')?.transit).toBeUndefined();
+  });
+
+  it('reverse-gate does not gate a non-reversible train passing through the boundary', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1'); // no core.can_reverse
+    registerRailyard(scheduler, 'YARD-M3');
+    setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0);
+
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: 'M1' },
+    });
+    // Route TERMINATES at M4, merely passing through the M3 boundary.
+    const effects = scheduler.assignSchedule('T1', 'r1', ['M1', 'M4']);
+
+    expect(
+      effects.find((e) => e.kind === 'send_command' && e.command_type === 'assign_route'),
+    ).toBeDefined();
+    expect(scheduler.getTrainState('T1')?.transit).toBeDefined();
+  });
+
+  it('reclaims a released train; departure goes through ordinary clearance (exclusivity holds)', () => {
+    const { scheduler } = setup();
+    registerReversibleTrain(scheduler, 'T1');
+    registerTrain(scheduler, 'T2');
+    registerRailyard(scheduler, 'YARD-M3');
+    setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0);
+
+    enterZone(scheduler, 'T1'); // T1 suspended at M3
+    expect(scheduler.getTrainState('T1')?.in_zone).toBe('M3');
+
+    // A peer holds the onward block (M4→M1, sharing M4 with M3→M4).
+    scheduler.assignSchedule('T2', 'r2', ['M4', 'M1']);
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T2',
+      payload: { tag_id: 'M4' },
+    });
+
+    // The owning device releases T1 back to core authority.
+    scheduler.handleEvent({
+      event_type: 'zone_train_released',
+      device_id: 'YARD-M3',
+      payload: { zone_marker_id: 'M3', train_id: 'T1' },
+    });
+    expect(scheduler.getTrainState('T1')?.in_zone).toBeUndefined();
+
+    // Route T1 out via M3→M4→M1. M3→M4 shares M4 with T2's held M4→M1, so T1
+    // is held — the device never shoved it onto an occupied block; exit is
+    // core-cleared.
+    const onward = scheduler.assignSchedule('T1', 'r1b', ['M3', 'M1']);
+    expect(grantFor(onward, 'T1')).toBeUndefined();
+  });
+
+  it('rejects a release from a device that does not own the zone', () => {
+    const { scheduler } = setup();
+    registerReversibleTrain(scheduler, 'T1');
+    registerRailyard(scheduler, 'YARD-M3');
+    registerGate(scheduler, 'IMPOSTER');
+    setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0);
+    enterZone(scheduler, 'T1');
+
+    const effects = scheduler.handleEvent({
+      event_type: 'zone_train_released',
+      device_id: 'IMPOSTER',
+      payload: { zone_marker_id: 'M3', train_id: 'T1' },
+    });
+
+    expect(
+      effects.find((e) => e.kind === 'publish_event' && e.event_type === 'anomaly'),
+    ).toBeDefined();
+    expect(scheduler.getTrainState('T1')?.in_zone).toBe('M3'); // still held
+  });
+
+  it('reconciles a length change applied while a train is suspended inside', () => {
+    const { scheduler } = setup();
+    registerReversibleTrain(scheduler, 'T1');
+    registerRailyard(scheduler, 'YARD-M3');
+    registerLengthReporter(scheduler, 'STATION-1');
+    setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0);
+    enterZone(scheduler, 'T1');
+
+    reportLength(scheduler, 'STATION-1', 'T1', 80);
+
+    expect(scheduler.getTrainState('T1')?.length_mm).toBe(80);
   });
 });
 

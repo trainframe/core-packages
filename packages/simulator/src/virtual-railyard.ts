@@ -79,6 +79,20 @@ export class VirtualRailyard {
   }
 
   /**
+   * Release a train the yard holds inside back to core authority (ADR-027). The
+   * scheduler reclaims it at the throat; it departs only under ordinary
+   * clearance — the yard never drives a train across the throat itself. Pair with
+   * `vacate()` to free the slot it occupied.
+   */
+  releaseTrain(train_id: string): void {
+    this.emit({
+      event_type: 'zone_train_released',
+      device_id: this.device_id,
+      payload: { zone_marker_id: this.zone_marker_id, train_id },
+    });
+  }
+
+  /**
    * Fill the next free slot with an occupant label (a parked consist, or a cut
    * of carriages — the label is the device's private business). Emits the new
    * occupancy. Returns the slot index, or -1 if the yard is already full.

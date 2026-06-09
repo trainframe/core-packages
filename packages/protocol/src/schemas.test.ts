@@ -44,6 +44,7 @@ import {
   TrainStatus,
   ZoneRetainedState,
   ZoneStateChanged,
+  ZoneTrainReleased,
 } from './events.js';
 import { Layout } from './layout.js';
 import { DeviceManifest } from './manifest.js';
@@ -108,6 +109,7 @@ describe('capabilities', () => {
     expect(BUILTIN_CAPABILITIES).toContain('core.controls_motion');
     expect(BUILTIN_CAPABILITIES).toContain('core.gates_zone');
     expect(BUILTIN_CAPABILITIES).toContain('core.reports_length');
+    expect(BUILTIN_CAPABILITIES).toContain('core.can_reverse');
   });
 
   it('CapabilityId accepts dotted lowercase identifiers', () => {
@@ -385,6 +387,26 @@ describe('ZoneStateChanged', () => {
           capacity: 4,
           occupancy: -1,
         }),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe('ZoneTrainReleased', () => {
+  it('validates a well-formed payload', () => {
+    expect(
+      Value.Check(
+        ZoneTrainReleased,
+        baseEnvelope('zone_train_released', { zone_marker_id: VALID_UUID, train_id: OTHER_UUID }),
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects a payload missing train_id', () => {
+    expect(
+      Value.Check(
+        ZoneTrainReleased,
+        baseEnvelope('zone_train_released', { zone_marker_id: VALID_UUID }),
       ),
     ).toBe(false);
   });

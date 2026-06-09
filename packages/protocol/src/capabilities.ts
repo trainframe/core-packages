@@ -20,6 +20,7 @@ export const BUILTIN_CAPABILITIES = [
   'core.assigns_tags',
   'core.gates_zone',
   'core.reports_length',
+  'core.can_reverse',
 ] as const;
 
 export type BuiltinCapability = (typeof BUILTIN_CAPABILITIES)[number];

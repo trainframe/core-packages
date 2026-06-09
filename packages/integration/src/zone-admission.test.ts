@@ -104,9 +104,11 @@ describe('Railyard zone admission: the scheduler obeys the device-asserted occup
     yard.fillToCapacity();
     await waitForOccupancy('YARD-1', 2);
 
-    // Spawn the train and route it through the throat.
+    // Spawn the train and route it through the throat. It declares core.can_reverse
+    // (ADR-027) — a prerequisite for zone admission.
     simulation.spawnTrain('T1', {
       startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+      config: { can_reverse: true },
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
     harness.server.assignSchedule('T1', 'yard-route', ['M1', 'M3']);
@@ -173,5 +175,38 @@ describe('Railyard zone admission: the scheduler obeys the device-asserted occup
       if (lengthOf() === 100) break;
     }
     expect(lengthOf()).toBe(100);
+  });
+
+  it('refuses to admit a train that cannot reverse (ADR-027)', async () => {
+    simulation.spawnRailyard('YARD-1', 'M3', 2); // room to admit
+    await harness.testClient.waitForState('railway/state/devices/YARD-1');
+
+    // A train that does NOT declare core.can_reverse. Interior shunting needs
+    // reversing, so the scheduler must refuse it admission into the yard.
+    simulation.spawnTrain('T1', {
+      startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+    });
+    await harness.testClient.waitForState('railway/state/devices/T1');
+    harness.server.assignSchedule('T1', 'yard-route', ['M1', 'M3']);
+
+    // Let the route attempt settle. The train is never cleared toward the throat,
+    // and the scheduler warns.
+    const deadline = Date.now() + 2000;
+    while (Date.now() < deadline) {
+      simulation.advance(50);
+      await new Promise((r) => setTimeout(r, 10));
+      const refused = harness.testClient
+        .events()
+        .some(
+          (e) => e.event_type === 'anomaly' && JSON.stringify(e.payload).includes('can_reverse'),
+        );
+      if (refused) break;
+    }
+
+    expect(m3GrantsFor('T1')).toHaveLength(0);
+    const anomaly = harness.testClient
+      .events()
+      .find((e) => e.event_type === 'anomaly' && JSON.stringify(e.payload).includes('can_reverse'));
+    expect(anomaly).toBeDefined();
   });
 });

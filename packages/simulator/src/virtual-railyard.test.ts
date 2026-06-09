@@ -60,6 +60,18 @@ describe('VirtualRailyard device mechanics', () => {
     expect(lengthEvent?.payload).toEqual({ train_id: 'T1', train_length_mm: 120 });
   });
 
+  it('releaseTrain emits zone_train_released naming the train and the throat', () => {
+    const { events, yard } = capture();
+    const y = yard('YARD-1', 'M3', 2);
+    y.register();
+
+    y.releaseTrain('T1');
+
+    const released = events.find((e) => e.event_type === 'zone_train_released');
+    expect(released?.device_id).toBe('YARD-1');
+    expect(released?.payload).toEqual({ zone_marker_id: 'M3', train_id: 'T1' });
+  });
+
   it('occupy fills the next free slot and asserts the new occupancy', () => {
     const { events, yard } = capture();
     const y = yard('YARD-1', 'M3', 2);

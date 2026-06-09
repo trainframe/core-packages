@@ -232,6 +232,30 @@ const ZoneStateChangedPayload = Type.Object({
 export const ZoneStateChanged = eventEnvelope('zone_state_changed', ZoneStateChangedPayload);
 export type ZoneStateChanged = Static<typeof ZoneStateChanged>;
 
+// ---------- zone_train_released ----------
+
+/**
+ * Emitted by a `core.gates_zone` device to release a train it holds inside its
+ * opaque interior, back to core's authority (ADR-027). The device asserts the
+ * train has finished inside and is ready to leave; the scheduler reclaims it at
+ * the throat and lets it depart only under ordinary clearance (main-line block
+ * exclusivity holds — the device never drives a train across the throat itself).
+ *
+ * Honoured only from the device that owns `zone_marker_id`. Release and any
+ * length change are independent: a train may leave unchanged, or the device may
+ * also emit `train_length_changed` (ADR-023) for rearranged carriages.
+ *
+ * `zone_marker_id` — the zone boundary the train is held at.
+ * `train_id` — the train to release.
+ */
+const ZoneTrainReleasedPayload = Type.Object({
+  zone_marker_id: Uuid,
+  train_id: Uuid,
+});
+
+export const ZoneTrainReleased = eventEnvelope('zone_train_released', ZoneTrainReleasedPayload);
+export type ZoneTrainReleased = Static<typeof ZoneTrainReleased>;
+
 // ---------- train_length_changed ----------
 
 /**
@@ -318,6 +342,7 @@ export const CoreEvent = Type.Union([
   GateStateChanged,
   SwitchStateChanged,
   ZoneStateChanged,
+  ZoneTrainReleased,
   TrainLengthChanged,
   AspectChanged,
   TagAssignment,
@@ -342,6 +367,7 @@ export const CORE_EVENT_SCHEMAS = {
   gate_state_changed: GateStateChanged,
   switch_state_changed: SwitchStateChanged,
   zone_state_changed: ZoneStateChanged,
+  zone_train_released: ZoneTrainReleased,
   train_length_changed: TrainLengthChanged,
   aspect_changed: AspectChanged,
   tag_assignment: TagAssignment,

@@ -27,7 +27,7 @@
  * bridge serving mixed-firmware devices can decode each frame against the
  * right table and detect a stale device on its first frame.
  */
-export const TCF_REGISTRY_EPOCH = 4 as const;
+export const TCF_REGISTRY_EPOCH = 5 as const;
 
 /**
  * Event types in compact-ID order. Index === compact `type_id`. APPEND-ONLY:
@@ -50,6 +50,7 @@ export const EVENT_TYPE_ORDER = [
   'topology_violation',
   'zone_state_changed',
   'train_length_changed',
+  'zone_train_released',
 ] as const;
 
 /**
