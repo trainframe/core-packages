@@ -10,7 +10,12 @@ import { SeededRandom } from './random.js';
 import { VirtualGate } from './virtual-gate.js';
 import { VirtualRailyard } from './virtual-railyard.js';
 import { VirtualSwitch } from './virtual-switch.js';
-import { DEFAULT_TRAIN_CONFIG, VirtualTrain, type VirtualTrainConfig } from './virtual-train.js';
+import {
+  DEFAULT_TRAIN_CONFIG,
+  type VirtualCarriage,
+  VirtualTrain,
+  type VirtualTrainConfig,
+} from './virtual-train.js';
 
 export interface CapturedEvent {
   at_ms: number;
@@ -336,6 +341,11 @@ export class Simulation {
     for (const train of this.trains.values()) {
       train.tick(dt_ms);
     }
+    // After motion settles, let each railyard service any train now parked in
+    // its throat (swap the leading pair, release it back to core — ADR-027).
+    for (const yard of this.railyards.values()) {
+      yard.service(this.trains.entries());
+    }
   }
 
   /**
@@ -359,6 +369,20 @@ export class Simulation {
 
   getTrain(id: string): VirtualTrain | undefined {
     return this.trains.get(id);
+  }
+
+  getRailyard(id: string): VirtualRailyard | undefined {
+    return this.railyards.get(id);
+  }
+
+  /**
+   * Couple a consist onto a train (head-first order). Carriages are physical
+   * wagons invisible to core (ADR-016) — this never touches the wire. Used by
+   * the toy-table when the operator scans hand-placed wagons live, and seeded by
+   * proximity at attach time. No-op if the train is unknown.
+   */
+  setTrainConsist(trainId: string, carriages: ReadonlyArray<VirtualCarriage>): void {
+    this.trains.get(trainId)?.setConsist(carriages);
   }
 
   getCommandsForDevice(device_id: string): ReadonlyArray<CapturedEvent> {

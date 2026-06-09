@@ -1,8 +1,13 @@
+import type { VirtualCarriage, VirtualTrain } from './virtual-train.js';
+
 interface RailyardEvent {
   event_type: string;
   device_id: string;
   payload: unknown;
 }
+
+/** How many leading wagons the yard swaps per visiting train. */
+const SWAP_PAIR_SIZE = 2;
 
 /**
  * A virtual railyard: a `core.gates_zone` device owning a capacity-limited
@@ -28,6 +33,17 @@ interface RailyardEvent {
 export class VirtualRailyard {
   /** One entry per slot: an occupant label, or null if free. */
   private readonly slots: (string | null)[];
+  /**
+   * The yard's spare cut — the wagons it holds ready to couple onto the next
+   * visiting train (e.g. the two purple carriages it starts with). FIFO: when a
+   * train is serviced its leading pair is dropped here and becomes the spares
+   * for the *next* visitor, so a wagon migrates from train to train across
+   * laps. Holds one yard slot while non-empty.
+   */
+  private spares: VirtualCarriage[] = [];
+  /** Trains serviced since their current arrival (so we swap once per visit),
+   *  mapped to the slot they occupy while inside; cleared when they depart. */
+  private readonly servicing = new Map<string, number>();
 
   constructor(
     private readonly device_id: string,
@@ -39,6 +55,86 @@ export class VirtualRailyard {
       throw new Error(`VirtualRailyard capacity must be a non-negative integer, got ${capacity}`);
     }
     this.slots = new Array<string | null>(capacity).fill(null);
+  }
+
+  /** The marker this yard gates (its throat). */
+  get throatMarkerId(): string {
+    return this.zone_marker_id;
+  }
+
+  /** The wagons the yard currently holds spare (read-only view, for the UI). */
+  getSpares(): ReadonlyArray<VirtualCarriage> {
+    return this.spares;
+  }
+
+  /**
+   * Load the yard's initial spare cut (e.g. the two purple carriages it starts
+   * with). Occupies a slot while non-empty and re-announces occupancy.
+   */
+  loadSpares(carriages: ReadonlyArray<VirtualCarriage>): void {
+    this.spares = [...carriages];
+    if (this.spares.length > 0 && this.slots.indexOf('spares') === -1) {
+      const idx = this.slots.indexOf(null);
+      if (idx !== -1) this.slots[idx] = 'spares';
+    }
+    this.announce();
+  }
+
+  /**
+   * Swap a visiting train's leading pair for the yard's spares (ADR-026/027 —
+   * the opaque-interior rearrange). The train's front `SWAP_PAIR_SIZE` wagons
+   * are dropped into the yard and become the next spares; the previous spares
+   * couple onto the front of the train. Pure consist mutation — nothing crosses
+   * the wire (carriages are invisible to core, ADR-016). A no-op if the train
+   * has fewer than `SWAP_PAIR_SIZE` wagons.
+   */
+  swapLeadingPair(train: VirtualTrain): void {
+    const consist = train.getConsist();
+    if (consist.length < SWAP_PAIR_SIZE) return;
+    const leaving = consist.slice(0, SWAP_PAIR_SIZE);
+    const rest = consist.slice(SWAP_PAIR_SIZE);
+    const incoming = this.spares.slice(0, SWAP_PAIR_SIZE);
+    train.setConsist([...incoming, ...rest]);
+    this.spares = [...leaving];
+  }
+
+  /**
+   * Service trains that have pulled into the throat and suspended there
+   * (ADR-027). For each train newly parked at the throat: swap its leading pair
+   * for the spares, occupy a slot, and release it back to core authority (the
+   * scheduler reclaims it; the operator's next leg drives it out). A train
+   * already serviced this visit is skipped until it departs; one that has left
+   * the throat frees its slot and re-arms for its next lap.
+   *
+   * `entries` is the live (train_id, train) set — supplied by `Simulation` each
+   * tick. The yard only ever *reads* train state and rearranges carriages; it
+   * never drives a train across the throat (that stays core-cleared, ADR-027).
+   */
+  service(entries: Iterable<readonly [string, VirtualTrain]>): void {
+    const present = new Set<string>();
+    for (const [trainId, train] of entries) {
+      present.add(trainId);
+      const parked = train.isParkedAt(this.zone_marker_id);
+      if (parked && !this.servicing.has(trainId)) {
+        this.swapLeadingPair(train);
+        const slot = this.occupy(trainId);
+        this.servicing.set(trainId, slot);
+        this.releaseTrain(trainId);
+      } else if (!parked && this.servicing.has(trainId)) {
+        this.departTrain(trainId);
+      }
+    }
+    // A train that vanished entirely (despawned) also frees its slot.
+    for (const trainId of [...this.servicing.keys()]) {
+      if (!present.has(trainId)) this.departTrain(trainId);
+    }
+  }
+
+  /** Free the slot a departed/vanished train held and re-arm it for next lap. */
+  private departTrain(trainId: string): void {
+    const slot = this.servicing.get(trainId);
+    this.servicing.delete(trainId);
+    if (slot !== undefined && slot >= 0) this.vacate(slot);
   }
 
   get capacity(): number {

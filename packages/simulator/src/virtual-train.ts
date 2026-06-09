@@ -7,6 +7,20 @@ interface RouteEdge {
   to_marker_id: string;
 }
 
+/**
+ * A dumb wagon coupled behind a train. Physical only: a carriage carries an id
+ * and an opaque `colorId` (its livery, for presentation) and NOTHING crosses
+ * the wire — the simulator models carriages because they are physical things,
+ * but they are invisible to core (ADR-016). A railyard rearranges them
+ * (`swapLeadingPair`); the toy-table renders them by colour so an individual
+ * wagon stays trackable as it is shunted between trains.
+ */
+export interface VirtualCarriage {
+  readonly id: string;
+  /** Opaque livery label carried for the renderer; never emitted on the bus. */
+  readonly colorId?: string;
+}
+
 export interface VirtualTrainConfig {
   /** Maximum velocity in mm/s. */
   max_velocity_mm_s: number;
@@ -137,6 +151,10 @@ export class VirtualTrain {
      is exceeded. Physical fact — persists across route re-assignment.
      Starts empty at spawn; grows at each edge-transition site. */
   private readonly traversal_history: RouteEdge[] = [];
+  /* Ordered consist, head-first: index 0 is the wagon directly behind the loco.
+     Physical state, never emitted on the wire (ADR-016). A railyard mutates it
+     via setConsist when it shunts the train's leading pair. */
+  private consist: VirtualCarriage[] = [];
 
   constructor(
     private readonly device_id: string,
@@ -665,6 +683,34 @@ export class VirtualTrain {
   }
   getCurrentEdge(): RouteEdge | null {
     return this.current_edge;
+  }
+
+  /** The train's ordered consist, head-first (index 0 = behind the loco). */
+  getConsist(): ReadonlyArray<VirtualCarriage> {
+    return this.consist;
+  }
+
+  /** Replace the consist (used by a railyard shunting carriages, and at attach
+   *  time when the toy-table couples hand-placed wagons). Copied defensively. */
+  setConsist(carriages: ReadonlyArray<VirtualCarriage>): void {
+    this.consist = [...carriages];
+  }
+
+  /**
+   * True when the head is parked — stopped and not trying to move — at the
+   * to-marker end of its current edge being `markerId`. A zone device uses this
+   * to detect an admitted train that has pulled into its throat and suspended
+   * there (ADR-027). A pass-through train never parks at an intermediate marker
+   * (its clearance limit lies beyond), so this cleanly separates entry from
+   * transit. Limitation: it cannot distinguish a zone entry from a train that
+   * happens to terminate its route exactly at this marker for unrelated reasons
+   * — the caller owns that marker, so that ambiguity does not arise in practice.
+   */
+  isParkedAt(markerId: string): boolean {
+    if (this.current_edge === null) return false;
+    if (this.current_edge.to_marker_id !== markerId) return false;
+    if (this.velocity_mm_s !== 0 || this.target_velocity_mm_s !== 0) return false;
+    return this.distance_into_edge_mm >= this.currentEdgeLength();
   }
 
   /**

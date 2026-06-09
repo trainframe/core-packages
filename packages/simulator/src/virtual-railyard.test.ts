@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Simulation } from './simulation.js';
 import { VirtualRailyard } from './virtual-railyard.js';
+import type { VirtualCarriage } from './virtual-train.js';
 
 /*
  * Device-mechanics tests for the VirtualRailyard: it asserts capacity +
@@ -138,6 +139,101 @@ describe('VirtualRailyard device mechanics', () => {
     const { yard } = capture();
     expect(yard('YARD-BIG', 'M3', 12).capacity).toBe(12);
     expect(yard('YARD-ZERO', 'M3', 0).capacity).toBe(0);
+  });
+});
+
+describe('VirtualRailyard carriage swap (the opaque-interior rearrange)', () => {
+  const SWAP_LOOP = {
+    name: 'swap-loop',
+    markers: [
+      { id: 'M1', kind: 'block_boundary' as const },
+      { id: 'M3', kind: 'yard_entry' as const },
+    ],
+    edges: [{ from_marker_id: 'M1', to_marker_id: 'M3', estimated_length_mm: 200 }],
+    junctions: [],
+  };
+
+  const wagon = (id: string, colorId: string): VirtualCarriage => ({ id, colorId });
+  const consistIds = (sim: Simulation, trainId: string) =>
+    (sim.getTrain(trainId)?.getConsist() ?? []).map((c) => c.id);
+
+  const FLEET = ['T-A', 'T-B', 'T-C'];
+
+  /** Which fleet train currently holds wagon `id` (or 'yard' / 'lost'). */
+  const holderOf = (sim: Simulation, yard: VirtualRailyard, id: string): string =>
+    FLEET.find((t) => consistIds(sim, t).includes(id)) ??
+    (yard.getSpares().some((c) => c.id === id) ? 'yard' : 'lost');
+
+  /** Service the train at `id`, asserting it exists; returns nothing. */
+  const visit = (sim: Simulation, yard: VirtualRailyard, id: string): void => {
+    const train = sim.getTrain(id);
+    if (train === undefined) throw new Error(`no train ${id}`);
+    yard.swapLeadingPair(train);
+  };
+
+  /** Spawn a train carrying a 4-wagon rake of one livery (e.g. R1..R4). */
+  const trainWith = (sim: Simulation, id: string, livery: string) => {
+    sim.spawnTrain(id, { startEdge: { from_marker_id: 'M1', to_marker_id: 'M3' } });
+    sim.setTrainConsist(
+      id,
+      [1, 2, 3, 4].map((n) => wagon(`${livery}${n}`, livery)),
+    );
+  };
+
+  it('swaps the leading pair for the spares and keeps the dropped pair as new spares', () => {
+    const sim = new Simulation({ layout: SWAP_LOOP, seed: 1 });
+    const yard = sim.spawnRailyard('YARD-1', 'M3', 6);
+    yard.loadSpares([wagon('P1', 'purple'), wagon('P2', 'purple')]);
+    trainWith(sim, 'T-red', 'R');
+
+    const train = sim.getTrain('T-red');
+    if (train === undefined) throw new Error('no train');
+    yard.swapLeadingPair(train);
+
+    // The purple spares now lead the rake; the red leading pair was dropped.
+    expect(consistIds(sim, 'T-red')).toEqual(['P1', 'P2', 'R3', 'R4']);
+    expect(yard.getSpares().map((c) => c.id)).toEqual(['R1', 'R2']);
+  });
+
+  it('is a no-op for a train shorter than the swap pair', () => {
+    const sim = new Simulation({ layout: SWAP_LOOP, seed: 1 });
+    const yard = sim.spawnRailyard('YARD-1', 'M3', 6);
+    yard.loadSpares([wagon('P1', 'purple'), wagon('P2', 'purple')]);
+    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M3' } });
+    sim.setTrainConsist('T1', [wagon('X1', 'x')]);
+
+    const train = sim.getTrain('T1');
+    if (train === undefined) throw new Error('no train');
+    yard.swapLeadingPair(train);
+
+    expect(consistIds(sim, 'T1')).toEqual(['X1']); // untouched
+    expect(yard.getSpares().map((c) => c.id)).toEqual(['P1', 'P2']); // spares intact
+  });
+
+  it('cycles a wagon across successive trains rather than ping-ponging two', () => {
+    // Three trains visiting in rotation: a given wagon only moves when its
+    // current holder is revisited, so over enough laps the purple pair must
+    // land on EVERY train, not bounce between a fixed two — proof a carriage
+    // tours the whole fleet, the headline the demo exists to show.
+    const sim = new Simulation({ layout: SWAP_LOOP, seed: 1 });
+    const yard = sim.spawnRailyard('YARD-1', 'M3', 6);
+    yard.loadSpares([wagon('P1', 'purple'), wagon('P2', 'purple')]);
+    trainWith(sim, 'T-A', 'A');
+    trainWith(sim, 'T-B', 'B');
+    trainWith(sim, 'T-C', 'C');
+
+    // Three full rounds of the rotation (9 visits), tracking where P1 lands.
+    const visited = new Set<string>();
+    const sequence = [...FLEET, ...FLEET, ...FLEET];
+    for (const id of sequence) {
+      visit(sim, yard, id);
+      visited.add(holderOf(sim, yard, 'P1'));
+    }
+
+    // P1 has ridden on all three trains — it is touring the fleet, not bouncing
+    // between a fixed pair. And it is never lost in the shuffle.
+    expect(FLEET.every((t) => visited.has(t))).toBe(true);
+    expect(holderOf(sim, yard, 'P1')).not.toBe('lost');
   });
 });
 

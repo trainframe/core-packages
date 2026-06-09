@@ -5,7 +5,7 @@ export type {
   SimulationOptions,
 } from './simulation.js';
 export { VirtualTrain, DEFAULT_TRAIN_CONFIG } from './virtual-train.js';
-export type { VirtualTrainConfig } from './virtual-train.js';
+export type { VirtualTrainConfig, VirtualCarriage } from './virtual-train.js';
 export { VirtualGate } from './virtual-gate.js';
 export { VirtualRailyard } from './virtual-railyard.js';
 export { VirtualSwitch } from './virtual-switch.js';
