@@ -32,6 +32,18 @@ export function nearestStartEdge(
   return { from_marker_id: first.from_marker_id, to_marker_id: first.to_marker_id };
 }
 
+/**
+ * The id of the layout marker whose centroid is closest to `position`, or
+ * `undefined` if no marker has a position yet. Used to bind a device dropped
+ * beside the track (e.g. a railyard) to the marker it acts on — its throat.
+ */
+export function nearestMarkerId(
+  layout: Layout,
+  position: { readonly x: number; readonly y: number },
+): string | undefined {
+  return nearestPositionedMarker(layout.markers, position)?.id;
+}
+
 function nearestPositionedMarker(
   markers: ReadonlyArray<LayoutMarker>,
   position: { readonly x: number; readonly y: number },

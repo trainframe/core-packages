@@ -45,6 +45,7 @@ const ALL_PIECE_TYPES = [
   'train',
   'gate',
   'carriage',
+  'railyard',
 ] as const;
 
 export type TrackPieceType = (typeof ALL_PIECE_TYPES)[number];
@@ -60,7 +61,7 @@ export type TrackPieceType = (typeof ALL_PIECE_TYPES)[number];
  * distinguish the two. (In the registry: carriage is category `'device'`;
  * train/gate are `'wire-device'`.)
  */
-export type DevicePieceType = 'train' | 'gate' | 'carriage';
+export type DevicePieceType = 'train' | 'gate' | 'carriage' | 'railyard';
 
 /**
  * Wire-visible device types. These are the subset of device pieces that
@@ -68,7 +69,7 @@ export type DevicePieceType = 'train' | 'gate' | 'carriage';
  * Carriages are intentionally excluded — they are physical wagons with no
  * RFID tag; the system has no awareness of them on the wire.
  */
-export type WireDeviceType = 'train' | 'gate';
+export type WireDeviceType = 'train' | 'gate' | 'railyard';
 
 /**
  * A carriage's livery. A carriage carries an intrinsic colour so a particular
@@ -874,6 +875,28 @@ function carriageBody(): PieceBody {
   };
 }
 
+function railyardBody(): PieceBody {
+  // A little engine shed / depot beside the track: a wide rounded building with
+  // a roof ridge and a row of bay doors (its slots). A structure, not a vehicle
+  // — drawn larger than the rolling stock so it reads as part of the scenery.
+  const w = 96;
+  const h = 40;
+  const doors: PieceFeature[] = [];
+  for (const cx of [-36, -18, 0, 18, 36]) {
+    doors.push({ role: 'dark-wood', d: roundRect(cx - 6, 0, 12, h / 2 - 3, 2) });
+  }
+  return {
+    svgPath: roundRect(-w / 2, -h / 2, w, h, 6),
+    features: [
+      // Roof ridge along the top edge.
+      { role: 'dark-wood', d: roundRect(-w / 2 + 5, -h / 2 + 3, w - 10, 6, 3) },
+      ...doors,
+    ],
+    width: w,
+    height: h,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // The piece registry — one self-contained descriptor per type.
 // ---------------------------------------------------------------------------
@@ -1029,6 +1052,7 @@ const PIECES: Record<TrackPieceType, PieceDescriptor> = {
   train: devicePiece('wire-device', 'Train', trainBody),
   gate: devicePiece('wire-device', 'Gate', gateBody),
   carriage: devicePiece('device', 'Carriage', carriageBody),
+  railyard: devicePiece('wire-device', 'Railyard', railyardBody),
 };
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { InMemoryBrokerClient } from '../broker/in-memory-client.js';
-import type { RotationDeg, TrackPiece } from '../track/pieces.js';
+import type { CarriageColorId, RotationDeg, TrackPiece } from '../track/pieces.js';
 import { ToyHardware } from './toy-hardware.js';
 
 let nextId = 0;
@@ -319,6 +319,103 @@ describe('ToyHardware', () => {
       hardware.tick(0);
       hardware.tick(-50);
       expect(hardware.getSimulation().clock.now()).toBe(before);
+    } finally {
+      hardware.dispose();
+    }
+  });
+});
+
+function carriage(x: number, y: number, colorId: CarriageColorId): TrackPiece {
+  return {
+    id: pid('carriage'),
+    type: 'carriage',
+    position: { x, y },
+    rotationDeg: 0,
+    tagged: false,
+    colorId,
+  };
+}
+
+describe('ToyHardware — railyard + carriage consists', () => {
+  /**
+   * Two straights + a train towing two red wagons, with a railyard beside the
+   * far marker holding two purple spares. Exercises the wire-faithful seam: the
+   * railyard becomes a gates_zone device gating the nearest marker, the train's
+   * sim consist is seeded from proximity, and the carriages by the yard become
+   * its spares.
+   */
+  function railyardScene() {
+    const s1 = piece('straight', 100, 100);
+    const s2 = piece('straight', 300, 100);
+    const train = piece('train', 110, 100);
+    const red1 = carriage(60, 100, 'red');
+    const red2 = carriage(10, 100, 'red');
+    const railyard = piece('railyard', 300, 170);
+    const purple1 = carriage(280, 210, 'purple');
+    const purple2 = carriage(320, 210, 'purple');
+    const pieces = [s1, s2, train, red1, red2, railyard, purple1, purple2];
+    return { pieces, s2, train, railyard, red1, red2, purple1, purple2 };
+  }
+
+  it('spawns a gates_zone railyard on the nearest marker and seeds consist + spares', () => {
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId });
+    try {
+      const scene = railyardScene();
+      const live = new Set(scene.pieces.map((p) => p.id));
+      hardware.syncLayout(scene.pieces);
+      hardware.syncLive(scene.pieces, live);
+
+      const sim = hardware.getSimulation();
+      const yard = sim.getRailyard(`YARD-${scene.railyard.id}`);
+      expect(yard).toBeDefined();
+      // The throat is the marker nearest the shed (the far straight, M-s2).
+      expect(yard?.throatMarkerId).toBe(`M-${scene.s2.id}`);
+
+      // The train's consist is seeded from proximity: its two red wagons.
+      const consist = sim.getTrain(`T-${scene.train.id}`)?.getConsist() ?? [];
+      expect(consist.map((c) => c.id).sort()).toEqual([scene.red1.id, scene.red2.id].sort());
+
+      // The carriages by the shed (claimed by no train) are the yard's spares.
+      expect((yard?.getSpares() ?? []).map((c) => c.id).sort()).toEqual(
+        [scene.purple1.id, scene.purple2.id].sort(),
+      );
+    } finally {
+      hardware.dispose();
+    }
+  });
+
+  it('preserves a railyard swap across re-syncs (composition unchanged → no reseed)', () => {
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId });
+    try {
+      const scene = railyardScene();
+      const live = new Set(scene.pieces.map((p) => p.id));
+      hardware.syncLayout(scene.pieces);
+      hardware.syncLive(scene.pieces, live);
+
+      const sim = hardware.getSimulation();
+      const yard = sim.getRailyard(`YARD-${scene.railyard.id}`);
+      const train = sim.getTrain(`T-${scene.train.id}`);
+      if (yard === undefined || train === undefined) throw new Error('scene not spawned');
+
+      // The yard shunts: the train's leading pair (red) swaps for the purple
+      // spares. The sim consist now leads with purple.
+      yard.swapLeadingPair(train);
+      expect(train.getConsist().every((c) => c.colorId === 'purple')).toBe(true);
+
+      // A subsequent render re-syncs with the SAME pieces. The composition is
+      // unchanged, so the hardware must NOT reseed from proximity and clobber
+      // the swap — the train keeps its purple wagons.
+      hardware.syncLive(scene.pieces, live);
+      expect(
+        sim
+          .getTrain(`T-${scene.train.id}`)
+          ?.getConsist()
+          .every((c) => c.colorId === 'purple'),
+      ).toBe(true);
     } finally {
       hardware.dispose();
     }

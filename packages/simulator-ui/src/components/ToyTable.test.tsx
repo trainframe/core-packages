@@ -246,6 +246,20 @@ describe('ToyTable — palette and placement', () => {
     }
     expect(screen.getByTestId('toybox-train')).toBeInTheDocument();
     expect(screen.getByTestId('toybox-gate')).toBeInTheDocument();
+    expect(screen.getByTestId('toybox-railyard')).toBeInTheDocument();
+  });
+
+  it('places a railyard depot in its own colour', async () => {
+    const user = userEvent.setup();
+    renderToyTable();
+
+    await user.click(screen.getByTestId('toybox-railyard'));
+    await user.click(screen.getByTestId('toy-table-canvas'));
+
+    const placed = document.querySelector('[data-testid^="piece-railyard-"]');
+    if (placed === null) throw new Error('no railyard placed');
+    const fills = Array.from(placed.querySelectorAll('path')).map((p) => p.getAttribute('fill'));
+    expect(fills).toContain('#5b7b6a');
   });
 
   it('arms a piece type and places it on the canvas without publishing any device traffic', async () => {

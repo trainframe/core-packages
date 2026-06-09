@@ -72,6 +72,7 @@ const DEVICE_FILL: Record<DevicePieceType, string> = {
   train: '#cf4436',
   carriage: '#3f6fa6',
   gate: '#8a929c',
+  railyard: '#5b7b6a',
 };
 
 /**
@@ -506,6 +507,58 @@ function anyLiveTrainMoving(
   return false;
 }
 
+/**
+ * The ordered carriage-piece-ids each live train carries. Prefers the
+ * SIMULATION consist (seeded from proximity at attach, then mutated by a
+ * railyard swap) — that is what makes a shunt visible, the renderer following
+ * the sim rather than the static placement. Falls back to live proximity
+ * coupling for a train whose consist has not been seeded yet (e.g. the frame a
+ * carriage is first dropped, before the hardware effect runs), so hand-built
+ * coupling still reads instantly.
+ */
+function consistTrails(
+  pieces: ReadonlyArray<TrackPiece>,
+  liveIds: ReadonlySet<string>,
+  hardware: ToyHardware,
+): Map<string, string[]> {
+  const sim = hardware.getSimulation();
+  const proximity = computeTrainTrails(pieces, liveIds);
+  const trails = new Map<string, string[]>();
+  for (const p of pieces) {
+    if (p.type !== 'train' || !liveIds.has(p.id)) continue;
+    const consist = sim.getTrain(`T-${p.id}`)?.getConsist();
+    if (consist !== undefined && consist.length > 0) {
+      trails.set(
+        p.id,
+        consist.map((c) => c.id),
+      );
+    } else {
+      const prox = proximity.get(p.id);
+      if (prox !== undefined && prox.length > 0) trails.set(p.id, prox);
+    }
+  }
+  return trails;
+}
+
+/** Park a live railyard's spare wagons in a neat row in front of its shed, so a
+ *  carriage the yard is holding (not on any train) renders at the yard rather
+ *  than stranded at its placement spot after a swap. */
+function placeYardSpares(
+  piece: TrackPiece,
+  sim: ToySimulation,
+  result: Map<string, WorldPosition>,
+): void {
+  const yard = sim.getRailyard(`YARD-${piece.id}`);
+  if (yard === undefined) return;
+  const spares = yard.getSpares();
+  for (let i = 0; i < spares.length; i++) {
+    const id = spares[i]?.id;
+    if (id === undefined) continue;
+    const x = piece.position.x + (i - (spares.length - 1) / 2) * CARRIAGE_SPACING_MM;
+    result.set(id, { x, y: piece.position.y + 32, rotationDeg: 0 });
+  }
+}
+
 function computeRenderPositions(
   pieces: ReadonlyArray<TrackPiece>,
   liveIds: ReadonlySet<string>,
@@ -524,6 +577,8 @@ function computeRenderPositions(
   for (const piece of pieces) {
     if (piece.type === 'train' && liveIds.has(piece.id)) {
       placeLiveTrain(piece, sim, piecesById, trainTrails, result);
+    } else if (piece.type === 'railyard' && liveIds.has(piece.id)) {
+      placeYardSpares(piece, sim, result);
     }
   }
   return result;
@@ -1081,13 +1136,17 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
 
   const selectedPiece = pieces.find((p) => p.id === selectedId) ?? null;
 
-  // Coupling: derive which carriages are coupled to which live train each render.
-  const trainTrails = computeTrainTrails(pieces, liveIds);
+  // Coupling: read which carriages each live train carries, in order, from the
+  // SIMULATION consist (seeded from proximity at attach, then authoritative — a
+  // railyard rearranges it, so this reflects swaps). Falls back to an empty map
+  // when no hardware yet.
+  const hardware = hardwareRef.current;
+  const trainTrails: ReadonlyMap<string, string[]> =
+    hardware !== null ? consistTrails(pieces, liveIds, hardware) : new Map<string, string[]>();
   trainTrailsRef.current = trainTrails;
 
   // Compute render positions from the live simulation. Only non-empty when
   // there are coupled carriages and the train has a resolved sim edge.
-  const hardware = hardwareRef.current;
   const hasLiveTrain = pieces.some((p) => p.type === 'train' && liveIds.has(p.id));
   const renderPositions =
     hardware !== null && hasLiveTrain

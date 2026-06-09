@@ -1,16 +1,32 @@
 import type { Layout } from '@trainframe/protocol';
-import { BrokerBridge, Simulation } from '@trainframe/simulator';
+import { BrokerBridge, Simulation, type VirtualCarriage } from '@trainframe/simulator';
 import type { BrokerClient } from '../broker/client.js';
 import { encodeDeviceEvent } from '../broker/encode-event.js';
+import { COUPLING_DISTANCE_MM, computeTrainTrails } from '../track/coupling.js';
 import { compileLayout } from '../track/layout-from-pieces.js';
 import { TRAIN_LENGTH_MM, type TrackPiece, isDevicePiece, layerOf } from '../track/pieces.js';
-import { nearestStartEdge } from './nearest-edge.js';
+import { nearestMarkerId, nearestStartEdge } from './nearest-edge.js';
+
+/** Slots a toy-table railyard owns. Plenty for a handful of trains + spares. */
+const RAILYARD_CAPACITY = 6;
 
 /** Device id for a piece's own broker identity. Must match `ToyTable`. */
 function deviceIdForDevicePiece(piece: TrackPiece): string {
   if (piece.type === 'train') return `T-${piece.id}`;
   if (piece.type === 'gate') return `GATE-${piece.id}`;
+  if (piece.type === 'railyard') return `YARD-${piece.id}`;
   throw new Error(`deviceIdForDevicePiece called on non-device piece ${piece.type}`);
+}
+
+/** A sim carriage from a carriage piece: piece id + its livery (if any). */
+function toCarriage(piece: TrackPiece): VirtualCarriage {
+  return piece.colorId !== undefined ? { id: piece.id, colorId: piece.colorId } : { id: piece.id };
+}
+
+function centreDistance(a: TrackPiece, b: TrackPiece): number {
+  const dx = a.position.x - b.position.x;
+  const dy = a.position.y - b.position.y;
+  return Math.sqrt(dx * dx + dy * dy);
 }
 
 /**
@@ -119,6 +135,10 @@ export class ToyHardware {
   // is still on the track) but is inert and silent. Power is not lifecycle —
   // it never spawns, despawns, or publishes `device_disconnected`.
   private lastPoweredOff: ReadonlySet<string> = new Set();
+  // Signature of the last carriage/train/railyard composition we seeded sim
+  // consists from. Reseeding only when this changes keeps a railyard's swapped
+  // consist alive across frames (a swap doesn't change the pieces).
+  private lastComposition = '';
 
   constructor(options: ToyHardwareOptions) {
     this.client = options.client;
@@ -156,6 +176,8 @@ export class ToyHardware {
     this.lastLive = new Set();
     this.lastPieces = new Map();
     this.lastPoweredOff = new Set();
+    // The new Simulation has empty consists; force a reseed on the next syncLive.
+    this.lastComposition = '';
   }
 
   /**
@@ -211,6 +233,72 @@ export class ToyHardware {
 
     this.lastLive = new Set(liveIds);
     this.lastPieces = piecesById;
+
+    // Re-seed sim consists + yard spares from proximity whenever the COMPOSITION
+    // changes (a carriage/train/railyard added, removed, or repositioned) — not
+    // every frame, and never on a mere train movement. A railyard swap mutates
+    // the sim consist but not the pieces, so the key is stable across a swap and
+    // the swapped consist survives until the operator changes the layout again.
+    const composition = this.compositionKey(pieces, liveIds);
+    if (composition !== this.lastComposition) {
+      this.lastComposition = composition;
+      this.reseedConsists(pieces, liveIds);
+    }
+  }
+
+  /**
+   * Seed each live train's sim consist (and each live railyard's spare cut) from
+   * proximity, so the renderer can read carriage membership/order off the sim
+   * and a railyard can rearrange it. Carriages couple to the nearest train
+   * (`computeTrainTrails`); carriages left near a railyard, claimed by no train,
+   * become its spares.
+   */
+  private reseedConsists(pieces: ReadonlyArray<TrackPiece>, liveIds: ReadonlySet<string>): void {
+    const piecesById = new Map<string, TrackPiece>();
+    for (const p of pieces) piecesById.set(p.id, p);
+
+    const trails = computeTrainTrails(pieces, liveIds);
+    const claimed = new Set<string>();
+    for (const [trainPieceId, carriageIds] of trails) {
+      const trainPiece = piecesById.get(trainPieceId);
+      if (trainPiece === undefined) continue;
+      const carriages: VirtualCarriage[] = [];
+      for (const id of carriageIds) {
+        claimed.add(id);
+        const cp = piecesById.get(id);
+        if (cp !== undefined) carriages.push(toCarriage(cp));
+      }
+      this.simulation.setTrainConsist(deviceIdForDevicePiece(trainPiece), carriages);
+    }
+
+    for (const p of pieces) {
+      if (p.type !== 'railyard' || !liveIds.has(p.id)) continue;
+      const yard = this.simulation.getRailyard(deviceIdForDevicePiece(p));
+      if (yard === undefined) continue;
+      const spares = pieces
+        .filter(
+          (c) =>
+            c.type === 'carriage' &&
+            !claimed.has(c.id) &&
+            centreDistance(c, p) <= COUPLING_DISTANCE_MM,
+        )
+        .map(toCarriage);
+      yard.loadSpares(spares);
+    }
+  }
+
+  /** Stable signature of the carriage/train/railyard composition + positions. */
+  private compositionKey(pieces: ReadonlyArray<TrackPiece>, liveIds: ReadonlySet<string>): string {
+    const parts: string[] = [];
+    for (const p of pieces) {
+      if (p.type === 'carriage' || p.type === 'railyard') {
+        parts.push(`${p.id}|${p.type}|${Math.round(p.position.x)}|${Math.round(p.position.y)}`);
+      } else if (p.type === 'train' && liveIds.has(p.id)) {
+        parts.push(`${p.id}|live-train|${Math.round(p.position.x)}|${Math.round(p.position.y)}`);
+      }
+    }
+    parts.sort();
+    return parts.join('\n');
   }
 
   private spawnPiece(piece: TrackPiece): void {
@@ -241,10 +329,19 @@ export class ToyHardware {
       this.simulation.spawnGate(deviceIdForDevicePiece(piece));
       return;
     }
+    if (piece.type === 'railyard') {
+      // A railyard gates the nearest marker (its throat). `nearestMarkerId`
+      // already returns the compiled `M-…` id. Defer if no track has been placed
+      // near it yet — the next reseed/spawn picks it up.
+      const throat = nearestMarkerId(this.layout, piece.position);
+      if (throat === undefined) return;
+      this.simulation.spawnRailyard(deviceIdForDevicePiece(piece), throat, RAILYARD_CAPACITY);
+      return;
+    }
     if (piece.type === 'carriage') {
-      // Carriages are wire-invisible physical wagons. The simulation has no
-      // virtual carriage device — coupling detection lives in the UI layer
-      // (`computeTrainTrails` in coupling.ts). Nothing to do here.
+      // Carriages are wire-invisible physical wagons (ADR-016): no device, no
+      // bus traffic. Their coupling to a train (and thus the sim consist a
+      // railyard rearranges) is seeded from proximity in `reseedConsists`.
       return;
     }
     // Track pieces: ToyTable.scanPiece already published the tag_assignment
@@ -290,8 +387,13 @@ export class ToyHardware {
       this.simulation.despawnGate(deviceIdForDevicePiece(piece));
       return;
     }
+    if (piece.type === 'railyard') {
+      this.simulation.despawnRailyard(deviceIdForDevicePiece(piece));
+      return;
+    }
     if (piece.type === 'carriage') {
-      // Carriages have no simulation counterpart. Nothing to despawn.
+      // Carriages have no simulation device. Nothing to despawn; the next
+      // reseed drops it from any consist/spares it was part of.
       return;
     }
     if (piece.type === 'junction') {
