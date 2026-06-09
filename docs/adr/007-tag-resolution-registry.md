@@ -2,7 +2,13 @@
 
 ## Status
 
-Accepted
+Accepted — implemented (June 2026). Implementation notes at the end of this
+document. The decision landed in full: registry, event-driven population with
+no fallback, the four-way resolution flow, `core.assigns_tags` enforcement, and
+retained state on `railway/state/tags/*`. No protocol-version bump was needed —
+`tag_assignment` already carried the necessary fields. Unassignment remains
+deferred (the API exists; the wire event has no "remove" flavour yet), as does
+exploiting `vehicle_identified` past its derivation.
 
 ## Context
 
@@ -85,3 +91,51 @@ Concretely:
 - **Discovery mode** (priority item) becomes easier: when an unknown tag is reported, the operator can register it on the spot via a garage UI; the scheduler then re-evaluates pending clearances. The infrastructure is the same retry-after-state-change pattern already used for gate releases and switch confirmations.
 - **A capability gets meat.** `core.assigns_tags` enforces that only devices with the contract can change registry state.
 - **What we don't get yet:** vehicle identity flows past `vehicle_identified` event derivation. Trains-as-vehicles in the registry is consistent with the spec but isn't yet exploited by the scheduler.
+
+## Implementation notes (June 2026)
+
+What landed, and where:
+
+- **`TagRegistry`** lives at `packages/core/src/scheduler/tag-registry.ts` as a
+  sibling of `LayoutState`. `assign` / `resolve` / `unassign` exactly as the
+  decision specifies, plus an `entries()` snapshot for the admin API and tests.
+  The `Scheduler` owns one (`getTagRegistry()` exposes a read view).
+- **Resolution flow** is `Scheduler.handleTagObserved`
+  (`packages/core/src/scheduler/scheduler.ts`): unknown tag → `info` anomaly
+  naming the tag; `{ kind: 'marker' }` read by a `core.controls_motion` device →
+  `handleTrainAtMarker(target_id)` (route advance + clearance, the old code
+  path, but keyed on the *resolved* marker); `{ kind: 'vehicle' }` →
+  `vehicle_identified { vehicle_id: target_id, context_device_id }`. A marker
+  tag read by a non-train device derives nothing (no train_id to attach).
+- **Population** is `Scheduler.handleTagAssignment`. Only a device that declared
+  `core.assigns_tags` may mutate the registry; any other device's
+  `tag_assignment` is rejected with a warning anomaly and no state change. Each
+  honoured assignment publishes `update_state_snapshot` on
+  `railway/state/tags/<tag_id>` (retained). Marker assignments to an unknown
+  `target_id` create the marker on the fly (the discovery-mode tie-in this ADR
+  anticipated, ADR-009).
+- **`core.assigns_tags`** is the marker capability the decision settled on — the
+  scheduler enforces the contract directly; there is no capability voting for
+  tag binding (mirrors how `switch_state_changed` is handled against
+  `LayoutState`).
+- **Simulator** (`packages/simulator/src/`): `VirtualTrain` takes a
+  `markerToTag` map and emits `tag_observed` with the resolved tag id, or
+  nothing for an untagged marker. `Simulation.seedIdentityTags(layout)` (and the
+  `bindIdentityTag` single-marker variant) publish real `tag_assignment` events
+  via a synthetic `GARAGE` device — a test convenience over the real seam, not a
+  registry back door. The `testing.ts` harness defaults to `tags: 'identity'`.
+- **Server / operator path**: `packages/server/src/admin-http.ts` exposes
+  `POST /api/tags` and `GET /api/query/tags`, minting `tag_assignment` events
+  from a built-in admin device that declares `core.assigns_tags`. The visualiser
+  surfaces unknown-tag anomalies and an "assign this tag" affordance
+  (`packages/visualiser/src/state/use-unknown-tags.ts`).
+- **Tests.** Scheduler-level: marker indirection (`TAG-NEW → M2`), vehicle
+  derivation, unknown-tag anomaly, and the `core.assigns_tags` rejection in
+  `packages/core/src/scheduler/scheduler.test.ts`; registry unit tests in
+  `tag-registry.test.ts`. Over-the-wire: a new
+  `packages/integration/src/tag-resolution.test.ts` drives opaque tag ids
+  (`RFID-AA01 → M1`, `RFID-BB02 → M2`) through a real broker + server and
+  asserts the train traverses the *bound* markers (never the tag id) and that an
+  unbound tag (`RFID-GHOST-9`) yields an `info` anomaly with no phantom
+  traversal. UI-level: `packages/ui-tests/tests/unknown-tag-closure.spec.ts`
+  closes the operator loop (`TAG-MYSTERY → M2`).
