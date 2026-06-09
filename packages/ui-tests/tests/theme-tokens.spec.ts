@@ -36,13 +36,15 @@ async function getCssVar(page: import('@playwright/test').Page, name: string): P
 }
 
 test.describe('Visualiser theme tokens', () => {
-  test('light theme (default): --tf-vis-color-marker is white', async ({ page }) => {
+  test('light theme (default): --tf-vis-color-marker is the warm marker cream', async ({
+    page,
+  }) => {
     await openThemeTestPage(page);
 
     const markerColor = await getCssVar(page, '--tf-vis-color-marker');
-    // The light theme sets --tf-vis-color-marker: #ffffff.
+    // The light theme sets the warm "workshop" marker puck (ADR-017): #fdf6e6.
     // Chromium normalises hex colours to rgb(...) in getComputedStyle.
-    expect(markerColor).toMatch(/^#?fff(fff)?$|^rgb\(255,\s*255,\s*255\)$/i);
+    expect(markerColor).toMatch(/^#?fdf6e6$|^rgb\(253,\s*246,\s*230\)$/i);
   });
 
   test('dark theme: --tf-vis-color-marker changes when data-theme="dark" is set', async ({

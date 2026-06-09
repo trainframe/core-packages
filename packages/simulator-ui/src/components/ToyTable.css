@@ -171,6 +171,11 @@ body {
   background: radial-gradient(120% 100% at 50% 0%, #f5e9cf 0%, #ecdcb9 55%, #e0cca2 100%);
   border-radius: 12px;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.4), inset 0 2px 12px rgba(120, 85, 40, 0.14);
+  /* Fit the table to its column rather than overflowing the viewport. The SVG
+     keeps its 3:2 viewBox, so the pointer→mm mapping (rect-relative) is
+     unchanged — placement, drag and drop stay correct at any rendered size. */
+  width: 100%;
+  height: auto;
 }
 
 /* Toybox */
