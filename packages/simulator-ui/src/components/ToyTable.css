@@ -32,12 +32,26 @@ body {
   min-height: 100vh;
 }
 
+/* The whole page sits on the wooden desk (body background). The white "table"
+   card and the parts shelf are stacked, centred, with the shelf OFF the card. */
+.tf-toytable-page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+  padding: 1rem;
+  font-family: var(--tf-font-family);
+}
+
 .tf-toytable {
   display: flex;
   flex-direction: column;
   gap: 0.85rem;
   padding: 1.1rem 1.25rem 1.4rem;
-  margin: 1rem;
+  /* Hug the table surface (capped to viewport height) so the card ends at the
+     table; the parts shelf lives below it on the desk, not inside the box. */
+  width: fit-content;
+  max-width: 100%;
   font-family: var(--tf-font-family);
   /* The app surface: a sheet of warm paper on the desk. */
   background: linear-gradient(180deg, #fdf9f0 0%, #f9f1e2 100%);
@@ -192,11 +206,14 @@ body {
   gap: 1.25rem;
   flex-wrap: wrap;
   align-items: flex-start;
+  justify-content: center;
+  max-width: 100%;
   padding: 0.75rem 0.9rem;
+  /* A wooden parts shelf resting on the desk, below (off) the table card. */
   background: linear-gradient(180deg, #f1e4cb 0%, #e9d8b6 100%);
   border: 1px solid #ddc79c;
   border-radius: 14px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5), 0 6px 16px rgba(90, 60, 25, 0.14);
 }
 
 .tf-toybox__group {

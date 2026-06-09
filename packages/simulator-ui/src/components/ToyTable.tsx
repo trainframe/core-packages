@@ -1046,59 +1046,62 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       : new Map<string, WorldPosition>();
 
   return (
-    <div className="tf-toytable">
+    <div className="tf-toytable-page">
       {/* Wood gradients live once here so both the canvas and the parts-tray
           previews can reference them by id (SVG ids are document-scoped). */}
       <svg className="tf-toytable__defs" width="0" height="0" aria-hidden="true">
         <WoodDefs />
       </svg>
-      <header className="tf-toytable__header">
-        <h1>Trainframe Toy Table</h1>
-        <ConnectionStatus />
-        <Settings initialUrl={initialUrl} />
-      </header>
-      <ActionBar
-        selectedPiece={selectedPiece}
-        selectedLive={selectedPiece !== null && liveIds.has(selectedPiece.id)}
-        selectedPoweredOff={selectedPiece !== null && poweredOffIds.has(selectedPiece.id)}
-        onRotate={rotateSelected}
-        onFlip={flipSelected}
-        onDelete={deleteSelected}
-        onTogglePower={() => {
-          if (selectedPiece !== null) togglePower(selectedPiece.id);
-        }}
-        armedType={armedType}
-        activeLayer={activeLayer}
-        onActiveLayerChange={setActiveLayer}
-      />
-      {/* The table itself, with the scan zone floating in its bottom-left
-          corner — drag a placed piece onto it to put it on the bus. */}
-      <div className="tf-toytable__stage">
-        <Table
-          pieces={pieces}
-          liveIds={liveIds}
-          poweredOffIds={poweredOffIds}
-          selectedId={selectedId}
+      {/* The white "table" card: header, controls, and the table surface. */}
+      <div className="tf-toytable">
+        <header className="tf-toytable__header">
+          <h1>Trainframe Toy Table</h1>
+          <ConnectionStatus />
+          <Settings initialUrl={initialUrl} />
+        </header>
+        <ActionBar
+          selectedPiece={selectedPiece}
+          selectedLive={selectedPiece !== null && liveIds.has(selectedPiece.id)}
+          selectedPoweredOff={selectedPiece !== null && poweredOffIds.has(selectedPiece.id)}
+          onRotate={rotateSelected}
+          onFlip={flipSelected}
+          onDelete={deleteSelected}
+          onTogglePower={() => {
+            if (selectedPiece !== null) togglePower(selectedPiece.id);
+          }}
           armedType={armedType}
           activeLayer={activeLayer}
-          trainTrails={trainTrails}
-          renderPositions={renderPositions}
-          hardware={hardware}
-          onCanvasClick={placePiece}
-          onMovePiece={movePiece}
-          onScanPiece={requestScan}
-          onPieceAction={handlePiecePointerAction}
+          onActiveLayerChange={setActiveLayer}
         />
-        <div className="tf-toytable__scanzone">
-          <ScanBox
-            describePiece={describePiece}
-            onConfirm={handleScanConfirm}
-            onReady={handleScanBoxReady}
+        {/* The table itself, with the scan zone floating in its bottom-left
+          corner — drag a placed piece onto it to put it on the bus. */}
+        <div className="tf-toytable__stage">
+          <Table
+            pieces={pieces}
+            liveIds={liveIds}
+            poweredOffIds={poweredOffIds}
+            selectedId={selectedId}
+            armedType={armedType}
+            activeLayer={activeLayer}
+            trainTrails={trainTrails}
+            renderPositions={renderPositions}
+            hardware={hardware}
+            onCanvasClick={placePiece}
+            onMovePiece={movePiece}
+            onScanPiece={requestScan}
+            onPieceAction={handlePiecePointerAction}
           />
+          <div className="tf-toytable__scanzone">
+            <ScanBox
+              describePiece={describePiece}
+              onConfirm={handleScanConfirm}
+              onReady={handleScanBoxReady}
+            />
+          </div>
         </div>
       </div>
-      {/* The parts tray under the table: actual wooden renders of each piece,
-          dragged onto the table to place them. */}
+      {/* The parts shelf sits OFF the table — on the desk below the white card.
+          Drag a wooden part up onto the table to place it. */}
       <Toybox armedType={armedType} onArm={armPieceType} />
     </div>
   );
