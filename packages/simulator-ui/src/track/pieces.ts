@@ -1145,15 +1145,25 @@ export function getPieceShape(piece: TrackPiece): PieceShape {
   };
 }
 
+/** Saturation caps for the per-layer height cue (see `layerStyle`). Reached
+ * around the sixth deck, beyond which extra height stops reading anyway. */
+const SHADOW_DY_MAX = 16;
+const SHADOW_BLUR_MAX = 12;
+const SHADOW_OPACITY_MAX = 0.55;
+
 /**
  * A height cue for a layer group: a drop-shadow offset + blur (and optional
- * opacity) the renderer turns into an SVG `filter`. Pure data, total over the
- * small layer range a Brio table uses; lives next to the piece model so the
- * visual height ramp is defined with the geometry, not buried in JSX.
+ * opacity) the renderer turns into an SVG `filter`. Pure data; lives next to the
+ * piece model so the visual height ramp is defined with the geometry, not buried
+ * in JSX.
  *
- * Layer 0 is the ground/baseline (no shadow). Each higher layer floats further
- * "above" the table with a larger, softer offset shadow. Layers beyond 2 clamp
- * to the layer-2 cue (a Brio table rarely stacks deeper).
+ * Layer 0 is the ground/baseline (no shadow). Each higher deck floats a little
+ * further "above" the table with a larger, softer offset shadow, so a stack of n
+ * decks reads as progressively higher rather than collapsing to two looks. The
+ * cue grows linearly but SATURATES (`SHADOW_*_MAX`) so a deep stack stays
+ * legible instead of casting an absurd shadow — a Brio table is quantised, not
+ * theatrical. Layer 1 keeps its original {6,4,0.35} values so existing two-deck
+ * layouts are visually unchanged.
  */
 export function layerStyle(layer: number): {
   readonly dx: number;
@@ -1162,6 +1172,52 @@ export function layerStyle(layer: number): {
   readonly opacity?: number;
 } {
   if (layer <= 0) return { dx: 0, dy: 0, blur: 0 };
-  if (layer === 1) return { dx: 0, dy: 6, blur: 4, opacity: 0.35 };
-  return { dx: 0, dy: 12, blur: 8, opacity: 0.45 };
+  return {
+    dx: 0,
+    dy: Math.min(4 + 2 * layer, SHADOW_DY_MAX),
+    blur: Math.min(2 + 2 * layer, SHADOW_BLUR_MAX),
+    opacity: Math.min(0.31 + 0.04 * layer, SHADOW_OPACITY_MAX),
+  };
+}
+
+/** Width (mm) of the slim support column drawn under a raised piece — a pier,
+ * not a pillar; the height read comes from the drop-shadow, the column just
+ * makes the "standing above the table" explicit. */
+export const SUPPORT_COLUMN_WIDTH_MM = 9;
+
+/** A support column under a raised piece, in WORLD coordinates: a slim pier
+ * standing under the deck centre and dropping `height` mm down-screen toward the
+ * table. The renderer fills it (and a foot) below the deck body. */
+export interface SupportColumn {
+  /** Centre x of the column (world). */
+  readonly x: number;
+  /** Deck-underside y where the column meets the piece (world). */
+  readonly yTop: number;
+  /** Drop in mm from the deck toward the table (the pier's visible length). */
+  readonly height: number;
+  /** Column width (mm). */
+  readonly width: number;
+}
+
+/**
+ * The support column for a piece, or `null` when it needs none — a device piece
+ * (trains/gates ride the track, they don't hold it up) or ground-layer track
+ * (it sits on the table). A raised track piece gets a single pier under its
+ * centre: the same point the layout marker sits on, which lands on the wooden
+ * band for every piece type (a curve's origin is its arc midpoint, see
+ * `curvePointR`). It drops down-screen by `dropMm` — pass `layerStyle(layer).dy`
+ * so the pier foot lines up with the layer's drop-shadow and the deck reads as
+ * floating on its own footing. The caller suppresses the pier when track runs
+ * directly beneath (a bridge crossing) via `pierSuppressed` in `overlap.ts`.
+ * Pure.
+ */
+export function supportColumn(piece: TrackPiece, dropMm: number): SupportColumn | null {
+  if (isDevicePiece(piece.type)) return null;
+  if (layerOf(piece) <= 0) return null;
+  return {
+    x: piece.position.x,
+    yTop: piece.position.y,
+    height: dropMm,
+    width: SUPPORT_COLUMN_WIDTH_MM,
+  };
 }

@@ -183,6 +183,19 @@ body {
   box-shadow: 0 1px 2px rgba(90, 60, 25, 0.18);
 }
 
+/* The "+ Add level" affordance reads as quieter than the deck buttons — a
+   dashed outline, no fill — so it sits apart as an action, not a deck. */
+.tf-toytable__layer-button--add {
+  color: #9b7d4e;
+  border: 1px dashed #c2a36b;
+  font-weight: 500;
+}
+
+.tf-toytable__layer-button--add:hover {
+  color: #5e4626;
+  border-color: #9b7d4e;
+}
+
 .tf-toytable__status {
   margin-left: auto;
   font-size: 0.82em;

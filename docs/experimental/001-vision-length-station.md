@@ -57,6 +57,33 @@ This closes ADR-023's open loop: a child swaps carriages by hand; the next time
 the train visits the station, its new length is measured and reported; its
 tail-clearance occupancy self-corrects. No train-side sensing, no manual config.
 
+## Visible goal
+
+This device's visible goal is genuinely subtle — it is a *passive observer*, so
+unlike the crane or decoupler nothing physical moves as a result of it acting. It
+does **not** need a moving animation; a small **status LED** is enough. The LED
+lights when the station has a train under its sensor (detected and being
+measured) and is dark otherwise. The deeper effect is in the visualiser, not the
+toy table: on emitting a `train_length_changed`, *that train's tail occupancy*
+redraws to the new length. The legible cause-and-effect is "the train sat under
+the lit sensor, and now the system's idea of how long it is matches reality
+again."
+
+## Toy-box element & animation
+
+- **Shape:** an ordinary station silhouette (wood plank + platform feature,
+  ADR-024), with one manufactured (non-wood) addition: a small grey **camera /
+  sensor mast** beside the platform — a thin upright with a lens fitting,
+  signalling "this station also watches."
+- **Animation (minimal by design):** a single **detection LED** on the mast — a
+  `pop`-accent dot that lights while a train is under the sensor and goes dark
+  when the train leaves. No sweep, no moving parts; this device's job is
+  perception, not actuation, so its only "motion" is the LED's on/off. (It is the
+  one entry in the log defined by *stillness* — a useful contrast to the
+  turntable's spin, the crane's trolley, the wedge's pop, and the bridge's lift.)
+- **Hand-wave:** the computer vision is hypothetical (see above); the LED is a
+  *depiction* of "a train is being measured", not a real optical readout.
+
 ## Why it's experimental, not the norm
 
 - Most layouts have fixed-length trains or a length configured once; they never

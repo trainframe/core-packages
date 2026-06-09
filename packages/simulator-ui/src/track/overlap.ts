@@ -63,6 +63,65 @@ function isInvalidOverlap(a: TrackPiece, b: TrackPiece): boolean {
 }
 
 /**
+ * The pier point (the raised piece's centre) counts as "over" a lower piece when
+ * it lands within this distance (mm) of that piece's rail centre-line. A plank is
+ * `2 × PLANK_HALF_WIDTH` (26 mm) wide and the pier ~9 mm, so half the plank plus
+ * half the pier (~17.5 mm) plus a small cushion is the band where a column would
+ * actually sit on the rail below. NOT a centre-to-centre test — a perpendicular
+ * crossing's two centres can be 100 mm apart along the lower rail while the pier
+ * point sits squarely on it.
+ */
+const PIER_OVER_RAIL_MM = 20;
+
+/** Distance from point P to the line segment A→B. */
+function pointToSegment(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+/**
+ * True when a raised piece's support pier should be SUPPRESSED because track
+ * runs directly beneath it. This is the bridge-crossing case: the deck spans
+ * *over* the lower rail, so its piers belong beside the span, never planted on
+ * the track passing underneath.
+ *
+ * The pier is a point under the deck's centre, so the test is whether that point
+ * lies over a lower piece's BODY — point-to-centre-line distance against the
+ * segments from the lower piece's centre out to each of its endpoints (exact for
+ * a straight, a close chord approximation for a curve/junction). A centre-to-
+ * centre test would miss a perpendicular crossing, where the lower rail's centre
+ * is offset along its own length while the pier point sits on the rail.
+ *
+ * Ground-layer and device pieces never carry a pier and always return false.
+ */
+export function pierSuppressed(piece: TrackPiece, pieces: ReadonlyArray<TrackPiece>): boolean {
+  const layer = layerOf(piece);
+  if (layer <= 0 || isDevicePiece(piece.type)) return false;
+  const px = piece.position.x;
+  const py = piece.position.y; // the pier point
+  for (const other of pieces) {
+    if (other.id === piece.id) continue;
+    if (isDevicePiece(other.type)) continue;
+    if (layerOf(other) >= layer) continue; // only track BELOW this deck blocks a pier
+    const { x: cx, y: cy } = other.position;
+    for (const ep of getEndpoints(other)) {
+      if (pointToSegment(px, py, cx, cy, ep.x, ep.y) <= PIER_OVER_RAIL_MM) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * The ids of track pieces involved in an invalid same-layer overlap (see
  * `isInvalidOverlap`). Device pieces (trains, gates, carriages) are ignored —
  * they ride on top of track by design and contribute no topology.

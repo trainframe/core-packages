@@ -3,6 +3,7 @@ import {
   type CentreLinePath,
   PIECE_TINT,
   type RotationDeg,
+  SUPPORT_COLUMN_WIDTH_MM,
   TRACK_PIECE_TYPES,
   type TrackPiece,
   type TrackPieceType,
@@ -15,6 +16,7 @@ import {
   layerOf,
   layerStyle,
   pieceMarkerKind,
+  supportColumn,
 } from './pieces.js';
 
 function makePiece(type: TrackPiece['type'], rotationDeg: RotationDeg = 0): TrackPiece {
@@ -745,8 +747,61 @@ describe('layerStyle — height cue', () => {
     expect(s.blur).toBeGreaterThan(0);
   });
 
-  it('higher layers cast a larger shadow than layer 1', () => {
+  it('each deck casts a progressively larger shadow than the one below', () => {
     expect(layerStyle(2).dy).toBeGreaterThan(layerStyle(1).dy);
-    expect(layerStyle(5).dy).toBe(layerStyle(2).dy); // clamps at the deepest cue
+    expect(layerStyle(3).dy).toBeGreaterThan(layerStyle(2).dy);
+    expect(layerStyle(4).dy).toBeGreaterThan(layerStyle(3).dy);
+  });
+
+  it('the height cue saturates so a deep stack stays legible', () => {
+    // A tall stack must not cast an ever-growing shadow; deep decks clamp.
+    expect(layerStyle(20).dy).toBe(layerStyle(10).dy);
+    expect(layerStyle(20).dy).toBeLessThanOrEqual(16);
+  });
+
+  it('layer 1 keeps its original values so two-deck layouts are unchanged', () => {
+    expect(layerStyle(1)).toEqual({ dx: 0, dy: 6, blur: 4, opacity: 0.35 });
+  });
+});
+
+describe('supportColumn — pier under a raised piece', () => {
+  const raised = (layer: number): TrackPiece => ({
+    id: 'p',
+    type: 'straight',
+    position: { x: 120, y: 80 },
+    rotationDeg: 0,
+    tagged: false,
+    ...(layer !== 0 ? { layer } : {}),
+  });
+
+  it('ground track gets no pier', () => {
+    expect(supportColumn(raised(0), 6)).toBeNull();
+  });
+
+  it('a device piece gets no pier even when raised', () => {
+    const train: TrackPiece = {
+      id: 't',
+      type: 'train',
+      position: { x: 0, y: 0 },
+      rotationDeg: 0,
+      tagged: false,
+      layer: 2,
+    };
+    expect(supportColumn(train, 10)).toBeNull();
+  });
+
+  it('a raised piece stands a column under its centre, dropping by the given offset', () => {
+    const col = supportColumn(raised(1), 6);
+    expect(col).not.toBeNull();
+    expect(col?.x).toBe(120);
+    expect(col?.yTop).toBe(80);
+    expect(col?.height).toBe(6);
+    expect(col?.width).toBe(SUPPORT_COLUMN_WIDTH_MM);
+  });
+
+  it('a deeper deck drops a taller column when passed its larger shadow offset', () => {
+    const l1 = supportColumn(raised(1), layerStyle(1).dy);
+    const l3 = supportColumn(raised(3), layerStyle(3).dy);
+    expect((l3?.height ?? 0) > (l1?.height ?? 0)).toBe(true);
   });
 });

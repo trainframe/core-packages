@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { detectSameLayerOverlaps } from './overlap.js';
+import { detectSameLayerOverlaps, pierSuppressed } from './overlap.js';
 import type { TrackPiece } from './pieces.js';
 
 function straight(id: string, x: number, y: number, layer?: number): TrackPiece {
@@ -77,5 +77,75 @@ describe('detectSameLayerOverlaps', () => {
       tagged: false,
     };
     expect(detectSameLayerOverlaps([rail, train]).size).toBe(0);
+  });
+});
+
+describe('pierSuppressed — supports avoid the rail below', () => {
+  it('a raised piece over open table keeps its pier', () => {
+    const deck = straight('deck', 500, 500, 1);
+    expect(pierSuppressed(deck, [deck])).toBe(false);
+  });
+
+  it('a raised piece directly over ground track suppresses its pier', () => {
+    // The deck spans over a ground rail sharing its footprint — the column
+    // would plant on the rail beneath, so it is omitted.
+    const ground = straight('ground', 500, 500, 0);
+    const deck = straight('deck', 500, 500, 1);
+    expect(pierSuppressed(deck, [ground, deck])).toBe(true);
+  });
+
+  it('only LOWER track blocks a pier — a piece on the same or higher layer does not', () => {
+    const deck = straight('deck', 500, 500, 1);
+    const sameLayer = straight('same', 500, 500, 1);
+    const higher = straight('higher', 500, 500, 2);
+    expect(pierSuppressed(deck, [deck, sameLayer, higher])).toBe(false);
+  });
+
+  it('ground track and device pieces never carry a pier', () => {
+    const ground = straight('ground', 500, 500, 0);
+    const train: TrackPiece = {
+      id: 'train',
+      type: 'train',
+      position: { x: 500, y: 500 },
+      rotationDeg: 0,
+      tagged: false,
+      layer: 2,
+    };
+    expect(pierSuppressed(ground, [ground])).toBe(false);
+    expect(pierSuppressed(train, [train])).toBe(false);
+  });
+
+  it('a lower piece that is far away does not block the pier', () => {
+    const ground = straight('ground', 100, 100, 0);
+    const deck = straight('deck', 700, 700, 1);
+    expect(pierSuppressed(deck, [ground, deck])).toBe(false);
+  });
+
+  it('a perpendicular deck crossing OVER a ground rail suppresses its pier', () => {
+    // The real bridge case: a ground rail runs horizontally through (450,300),
+    // its body spanning x∈[350,550]. The deck piece crosses it at right angles
+    // with its CENTRE (the pier point) sitting on the ground rail at (500,300) —
+    // 50mm along the ground rail from its centre. The pier point is squarely on
+    // the rail below, so it must be suppressed even though the two CENTRES are
+    // 50mm apart along the ground rail's length.
+    const ground = straight('ground', 450, 300, 0);
+    const deck: TrackPiece = {
+      id: 'deck',
+      type: 'straight',
+      position: { x: 500, y: 300 },
+      rotationDeg: 90,
+      tagged: false,
+      layer: 1,
+    };
+    expect(pierSuppressed(deck, [ground, deck])).toBe(true);
+  });
+
+  it('a deck pier just BESIDE a ground rail (not over it) keeps its pier', () => {
+    // The ground rail spans x∈[350,550] at y=300. The deck piece sits at
+    // (450,360) — 60mm clear of the rail body in y — so its pier lands beside
+    // the span, not on the rail, and must survive.
+    const ground = straight('ground', 450, 300, 0);
+    const deck = straight('deck', 450, 360, 1);
+    expect(pierSuppressed(deck, [ground, deck])).toBe(false);
   });
 });

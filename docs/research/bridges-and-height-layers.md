@@ -1,7 +1,12 @@
 # Design research: bridges and multiple height layers
 
-**Status:** research note. Nothing here is decided or implemented. It exists to
-ground a future discussion (and, if we go ahead, a future ADR + protocol bump).
+**Status:** research note — **partly implemented.** Option A's editor-side work
+shipped: a discrete `layer` on `TrackPiece`, the ramp piece, layer-aware
+clustering/snapping, and layer-ordered rendering. [ADR-025](../adr/025-n-level-toy-table.md)
+then took it to *n* decks (supports, depth-scaled height cue, growable deck
+selector) — still editor-only, graph height-free. **Open question #1 (height on
+the wire, for the visualiser) remains undecided** and would still need a protocol
+bump. The rest of this note is preserved as the original argument.
 
 **Scope:** how Trainframe might support track that crosses *over* other track on
 a different vertical level — bridges, ramps/inclines, stacked loops — on a

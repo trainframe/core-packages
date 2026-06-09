@@ -9,7 +9,7 @@ import { useToyHardware } from '../sim/use-toy-hardware.js';
 import { CARRIAGE_SPACING_MM, type WorldPosition, computeTrainTrails } from '../track/coupling.js';
 import { type EdgePath, composeEdgePath } from '../track/edge-path.js';
 import { SNAP_DISTANCE, compileLayout } from '../track/layout-from-pieces.js';
-import { detectSameLayerOverlaps } from '../track/overlap.js';
+import { detectSameLayerOverlaps, pierSuppressed } from '../track/overlap.js';
 import {
   DEVICE_PIECE_TYPES,
   type DevicePieceType,
@@ -17,6 +17,7 @@ import {
   PIECE_TINT,
   type PieceFeature,
   type RotationDeg,
+  type SupportColumn,
   TRACK_PIECE_TYPES,
   TRAIN_LENGTH_MM,
   type TrackPiece,
@@ -28,6 +29,7 @@ import {
   layerOf,
   layerStyle,
   pieceMarkerKind,
+  supportColumn,
 } from '../track/pieces.js';
 import {
   computeMovePlacement,
@@ -210,6 +212,12 @@ function WoodDefs() {
       <linearGradient id="tf-platwood" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0" stopColor="#eed7a8" />
         <stop offset="1" stopColor="#cda878" />
+      </linearGradient>
+      {/* The support pier: a darker, in-shadow wood than the deck above it, so a
+        raised piece's column recedes and reads as standing under the deck. */}
+      <linearGradient id="tf-pier" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stopColor="#a8732f" />
+        <stop offset="1" stopColor="#7a5523" />
       </linearGradient>
     </defs>
   );
@@ -1085,6 +1093,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
           }}
           armedType={armedType}
           activeLayer={activeLayer}
+          maxLevel={pieces.reduce((m, p) => Math.max(m, layerOf(p)), activeLayer)}
           onActiveLayerChange={setActiveLayer}
         />
         {/* The table itself, with the scan zone floating in its bottom-left
@@ -1252,15 +1261,17 @@ interface ActionBarProps {
   readonly armedType: TrackPieceType | null;
   /** The deck new pieces land on (0 = ground). */
   readonly activeLayer: number;
+  /** Highest deck the selector shows — the deeper of the highest deck any piece
+   * sits on and the active deck (so a freshly-added, still-empty top deck stays
+   * visible). The "+ Add level" button offers `maxLevel + 1`. */
+  readonly maxLevel: number;
   readonly onActiveLayerChange: (layer: number) => void;
 }
 
-/** The decks the layer selector offers. Ground + one upper deck cover the
- * bridge demo; extend if deeper stacks are ever authored by hand. */
-const SELECTABLE_LAYERS: ReadonlyArray<{ readonly layer: number; readonly label: string }> = [
-  { layer: 0, label: 'Ground' },
-  { layer: 1, label: 'Upper' },
-];
+/** Human label for a deck: ground floor, then numbered levels up. */
+function layerLabel(layer: number): string {
+  return layer === 0 ? 'Ground' : `Level ${layer}`;
+}
 
 /** The action-bar status line — guides the operator on what to do next. */
 function actionBarStatus(
@@ -1300,6 +1311,7 @@ function ActionBar({
   onTogglePower,
   armedType,
   activeLayer,
+  maxLevel,
   onActiveLayerChange,
 }: ActionBarProps) {
   // The explicit power affordance: shown only when the selected piece is a live
@@ -1327,19 +1339,31 @@ function ActionBar({
           {selectedPoweredOff ? 'Power on' : 'Power off'}
         </button>
       )}
+      {/* Deck selector. Grows with the layout: one button per deck from Ground
+        up to the highest in use (or the active one), plus "+ Add level" to
+        author one deck higher. No fixed two-deck cap. */}
       <span className="tf-toytable__layer-selector" aria-label="Active layer">
-        {SELECTABLE_LAYERS.map(({ layer, label }) => (
+        {Array.from({ length: maxLevel + 1 }, (_, i) => i).map((layer) => (
           <button
-            key={layer}
+            key={`deck-${layer}`}
             type="button"
             onClick={() => onActiveLayerChange(layer)}
             aria-pressed={activeLayer === layer}
             className={`tf-toytable__layer-button${activeLayer === layer ? ' tf-toytable__layer-button--active' : ''}`}
             data-testid={`active-layer-${layer}`}
           >
-            {label}
+            {layerLabel(layer)}
           </button>
         ))}
+        <button
+          type="button"
+          onClick={() => onActiveLayerChange(maxLevel + 1)}
+          className="tf-toytable__layer-button tf-toytable__layer-button--add"
+          data-testid="add-level"
+          title={`Add ${layerLabel(maxLevel + 1)}`}
+        >
+          + Add level
+        </button>
       </span>
       <span className="tf-toytable__status">
         {actionBarStatus(selectedPiece, selectedLive, selectedPoweredOff, armedType)}
@@ -1723,6 +1747,24 @@ function Table({
           const trackPieces = layerPieces.filter((p) => !isDevicePiece(p.type));
           const devicePieces = layerPieces.filter((p) => isDevicePiece(p.type));
           const filter = layerFilter(layer);
+          /* Support piers for a raised deck: one under each raised track piece,
+            dropping by this layer's shadow offset so pier and shadow agree. A
+            pier is omitted where track runs directly beneath (a bridge crossing)
+            so a column never lands on the rail it spans over. Drawn UNFILTERED,
+            before the deck, so the deck body caps each column. */
+          const supportColumns =
+            layer > 0
+              ? trackPieces.flatMap((p) => {
+                  if (pierSuppressed(p, pieces)) return [];
+                  const column = supportColumn(p, layerStyle(layer).dy);
+                  return column !== null ? [{ id: p.id, column }] : [];
+                })
+              : [];
+          /* While a piece is armed for placement, fade decks other than the
+            active one so the operator can see which deck a drop will land on —
+            the one disambiguation a stacked 2D view needs. Quiet, and only while
+            authoring; normal viewing shows every deck at full strength. */
+          const dimmed = armedType !== null && layer !== activeLayer;
           const renderPiece = (p: TrackPiece) => (
             <PieceRenderer
               key={p.id}
@@ -1749,15 +1791,28 @@ function Table({
             />
           );
           return (
-            <g key={`layer-${layer}`} data-layer={layer} style={filter ? { filter } : undefined}>
-              {trackPieces.map(renderPiece)}
-              {/* Marker dots: one per track piece, at the piece CENTRE (where the
-                layout marker M-{id} sits), painted over the track but under the
-                devices below. Junctions get one too. Subtle + non-interactive. */}
-              {trackPieces.map((p) => (
-                <MarkerDot key={`marker-${p.id}`} piece={p} selected={p.id === selectedId} />
-              ))}
-              {devicePieces.map(renderPiece)}
+            <g
+              key={`layer-${layer}`}
+              style={dimmed ? { opacity: 0.4 } : undefined}
+              data-dimmed={dimmed || undefined}
+            >
+              {supportColumns.length > 0 && (
+                <g data-testid={`supports-${layer}`}>
+                  {supportColumns.map(({ id, column }) => (
+                    <SupportLeg key={`support-${id}`} column={column} />
+                  ))}
+                </g>
+              )}
+              <g data-layer={layer} style={filter ? { filter } : undefined}>
+                {trackPieces.map(renderPiece)}
+                {/* Marker dots: one per track piece, at the piece CENTRE (where the
+                  layout marker M-{id} sits), painted over the track but under the
+                  devices below. Junctions get one too. Subtle + non-interactive. */}
+                {trackPieces.map((p) => (
+                  <MarkerDot key={`marker-${p.id}`} piece={p} selected={p.id === selectedId} />
+                ))}
+                {devicePieces.map(renderPiece)}
+              </g>
             </g>
           );
         })}
@@ -1806,6 +1861,34 @@ function MarkerDot({ piece, selected }: { piece: TrackPiece; selected: boolean }
       style={{ pointerEvents: 'none' }}
       data-testid={`marker-${piece.id}`}
     />
+  );
+}
+
+/**
+ * A slim support pier under a raised deck: a darker wood column dropping from the
+ * deck underside to a soft contact shadow on the table, in world coordinates.
+ * Non-interactive and drawn BENEATH the deck body, so the deck caps the column
+ * top and the pier reads as holding it up. Only raised track gets one, and the
+ * caller omits it where track runs directly underneath (a bridge crossing).
+ */
+function SupportLeg({ column }: { column: SupportColumn }) {
+  const half = column.width / 2;
+  const footY = column.yTop + column.height;
+  return (
+    <g style={{ pointerEvents: 'none' }} data-testid="support-leg">
+      <ellipse cx={column.x} cy={footY} rx={half + 2} ry={2.5} fill="#000" fillOpacity={0.18} />
+      <rect
+        x={column.x - half}
+        y={column.yTop}
+        width={column.width}
+        height={column.height}
+        rx={2}
+        fill="url(#tf-pier)"
+        stroke="#6f4d20"
+        strokeWidth={0.5}
+        strokeOpacity={0.6}
+      />
+    </g>
   );
 }
 
