@@ -32,10 +32,13 @@ const DWELL_TICKS = 4;
    crane at these poses. The lane values mirror the UI's RAILYARD_SLOT_YS so a
    moving train lands ON a drawn slot. */
 /* Lateral lanes (mm) the interior choreography uses — three of the yard's six
-   drawn slots: an entry slot the train first parks in, the spares slot it
-   reverses into to pick up, and the centre spine it returns to (neutral). */
-const ENTRY_LANE_MM = -36;
-const SPARES_LANE_MM = 84;
+   drawn slots: an entry slot the train first parks in (a free lower slot), the
+   spares slot it reverses across into to pick up (an upper slot, where the yard
+   draws its waiting cut), and the centre spine it returns to (neutral). The
+   spares lane matches where the toy-table renders the yard's spare wagons so the
+   reverse-into-them reads as a real collision. */
+const ENTRY_LANE_MM = 84;
+const SPARES_LANE_MM = -84;
 const NEUTRAL_LANE_MM = 0;
 /* Depths (mm from the throat): a parked slot depth, and the deeper pull-forward
    the train makes before reversing across into the spares slot. */

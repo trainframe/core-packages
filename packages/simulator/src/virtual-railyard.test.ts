@@ -306,12 +306,12 @@ describe('VirtualRailyard carriage swap (the opaque-interior rearrange)', () => 
       'release',
     ]);
     // The train physically left the throat spine into the entry slot...
-    expect([...(lanesByStep.get('enter') ?? [])].some((y) => y < 0)).toBe(true);
-    // ...reversed across to the spares slot (positive lane)...
-    expect([...(lanesByStep.get('reverse-pickup') ?? [])].some((y) => y > 0)).toBe(true);
-    // ...moved back toward the centre during return (off the spares lane)...
-    // 84 = the spares lane the train reverses into; return moves back off it.
-    expect(Math.min(...(lanesByStep.get('return') ?? [Number.NaN]))).toBeLessThan(84);
+    expect([...(lanesByStep.get('enter') ?? [])].some((y) => y > 0)).toBe(true);
+    // ...reversed ACROSS to the spares slot (opposite, negative lane)...
+    expect([...(lanesByStep.get('reverse-pickup') ?? [])].some((y) => y < 0)).toBe(true);
+    // ...moving back off the spares lane during return (toward neutral)...
+    // -84 = the spares lane the train reverses into; return moves back off it.
+    expect(Math.max(...(lanesByStep.get('return') ?? [Number.NaN]))).toBeGreaterThan(-84);
     // ...and was read by the camera at the neutral centre lane.
     expect([...(lanesByStep.get('inspect') ?? [])]).toContain(0);
     // The rake was short (decoupled) through the forward pull, and the spares
