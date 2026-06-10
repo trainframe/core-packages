@@ -38,12 +38,13 @@ shared home for speculative, viability-test pieces, kept visually and
 organisationally apart from the staples an ordinary layout uses, so an operator
 reaching for one knows they are picking up a stress-test, not a standard part.
 
-The box is **built** (June 2026): 001, 002, 003 and 005 are real
+The box is **built but untested** (June 2026): 001, 002, 003 and 005 are real
 `TrackPieceType`s in the ADR-024 workshop style, presented in an "Experiments"
 tray group derived from the piece registry (`TOYBOX_TRAYS` in
-`packages/simulator-ui/src/track/pieces.ts`). 004 (the wedge decoupler) ships
-no piece — it was superseded by the railyard (006), whose wedge unit owns the
-coupling-split job. Each built piece carries the wire identity its entry
+`packages/simulator-ui/src/track/pieces.ts`) — automated suites cover them,
+but none has yet been exercised in a real operator session against a live
+server. 004 (the wedge decoupler) ships no piece — it was superseded by the
+railyard (006), whose wedge unit owns the coupling-split job. Each built piece carries the wire identity its entry
 declares — and nothing else — and they all move on the table: the lift
 bridge's leaf lifts (foreshortening toward its hinge over the opening gap) as
 its gate withholds; the turntable's bridge swings inside its recessed pit to

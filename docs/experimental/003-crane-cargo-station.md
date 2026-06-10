@@ -3,7 +3,7 @@
 **Status:** speculative viability test. NOT normative; not expected in a typical
 setup.
 
-**Built (June 2026):** toy-table piece in the Experiments tray (`crane-station`
+**Built (June 2026), untested:** toy-table piece in the Experiments tray (`crane-station`
 in `pieces.ts`) — a station plank with a grey gantry, trolley + hook, and a
 live trackside crate stack. The cargo transfer WORKS: a carriage piece carries
 the optional cosmetic cargo slot this entry calls for (`TrackPiece.cargo`),
@@ -13,7 +13,9 @@ box heavier or lighter, the stack grows or shrinks to match. Each transfer is
 bracketed by a clearance withhold/grant pulse on the crane's own marker
 (`CRANE-{piece.id}`, `core.gates_clearance`, a real `VirtualGate`) — the pin,
 never a dwell timer — and **nothing cargo-specific crosses the wire**: no
-crate event, no manifest, no carriage id. The negative-space proof, run. that a device can perform a **meaningful physical manipulation of a
+crate event, no manifest, no carriage id. The negative-space proof, run.
+
+**Proves:** that a device can perform a **meaningful physical manipulation of a
 train's payload** — lifting a crate off, or placing one on, a carriage — using
 only the seams that already exist: scheduled **dwell**, **tag identity**
 ([ADR-007](../adr/007-tag-resolution-registry.md)), and **clearance**. The crate,

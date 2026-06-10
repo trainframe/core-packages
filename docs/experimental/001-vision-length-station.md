@@ -3,7 +3,7 @@
 **Status:** speculative viability test. NOT normative; not expected in a typical
 setup.
 
-**Built (June 2026):** toy-table piece in the Experiments tray (`vision-station`
+**Built (June 2026), untested:** toy-table piece in the Experiments tray (`vision-station`
 in `pieces.ts`) — station plank + grey sensor mast, with the detection LED lit
 while a live train is under the sensor. The proof itself runs: scanning
 registers `VLS-{piece.id}` with `core.reports_length`, and

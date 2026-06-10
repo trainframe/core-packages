@@ -3,7 +3,7 @@
 **Status:** speculative viability test. NOT normative; not expected in a typical
 setup.
 
-**Built (June 2026):** toy-table piece in the Experiments tray (`turntable` in
+**Built (June 2026), untested:** toy-table piece in the Experiments tray (`turntable` in
 `pieces.ts`) — drawn from the real thing (cf. BRIO's 33361 mechanical
 turntable and prototype pits): a beech surround with a dark **recessed pit**,
 a steel **ring rail** around the pit floor carrying the bridge's end carriages
@@ -15,7 +15,9 @@ snaps like every other piece). `compileLayout` emits one junction marker with
 edges — the N-way claim, compiled by the unchanged junction machinery. The
 deck is a separate rotating sub-shape drawn at the confirmed `VirtualSwitch`
 position (eased), and a "Spin deck" affordance models a hand on the knob: the
-device seats and confirms exactly as for `set_switch_position`. that the switch seam is **already N-way** and a junction is not
+device seats and confirms exactly as for `set_switch_position`.
+
+**Proves:** that the switch seam is **already N-way** and a junction is not
 limited to two exits. A rotating turntable that aligns its single bridge rail to
 any one of three (or more) radiating tracks is, to the scheduler, *just a switch
 with more position strings*. If a train can route through it end-to-end, the

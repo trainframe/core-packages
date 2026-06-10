@@ -8,7 +8,9 @@ standalone decoupler piece ships in the toy-table Experiments tray; a
 free-standing trackside decoupler would re-open exactly the
 detached-carriage-as-untracked-obstacle problem the railyard's owned, gated
 territory was designed to contain. The shunting-orchestration analysis below
-remains the reference for any future maneuver planner. the **decrease direction** of [ADR-023](../adr/023-coupling-and-decoupling.md).
+remains the reference for any future maneuver planner.
+
+**Proves:** the **decrease direction** of [ADR-023](../adr/023-coupling-and-decoupling.md).
 A trackside device physically separates a carriage from a dwelling train and
 emits `train_length_changed` with the *shorter* length; the detached carriage
 simply **leaves core's awareness** — no composition model, no lone-carriage
