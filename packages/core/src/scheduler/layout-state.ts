@@ -125,6 +125,13 @@ export class LayoutState {
     return this.outgoingEdges.get(markerId) ?? [];
   }
 
+  /** Edges entering a marker, regardless of switch state. The mirror of
+   *  `edgesFrom`; used to walk the graph backwards (e.g. resolving where a
+   *  train's trailing consist sits on the track behind the head). */
+  edgesInto(markerId: string): ReadonlyArray<LayoutEdge> {
+    return this.incomingEdges.get(markerId) ?? [];
+  }
+
   /** Edge from one marker to another, if it exists. */
   findEdge(fromMarkerId: string, toMarkerId: string): LayoutEdge | undefined {
     return this.outgoingEdges.get(fromMarkerId)?.find((e) => e.to_marker_id === toMarkerId);

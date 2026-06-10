@@ -3954,3 +3954,71 @@ describe('Scheduler — topology violation handling (ADR-019)', () => {
     expect((revokeClearance?.state as { block_reason?: string }).block_reason).toBeUndefined();
   });
 });
+
+describe("Scheduler — directional seed from the train's reported heading", () => {
+  /* A BIDIRECTIONAL 4-loop M1↔M2↔M3↔M4↔M1 (every connection both ways, like a
+     real compiled layout). From M1, the stop M4 is ONE hop via the back-edge
+     M1→M4, or THREE hops the long way M1→M2→M3→M4. A parked train that reports
+     it faces M2 must take the long way — never flip 180° onto M1→M4. */
+  const BIDI_LOOP: Layout = {
+    name: 'bidi-loop',
+    markers: ['M1', 'M2', 'M3', 'M4'].map((id) => ({ id, kind: 'block_boundary' as const })),
+    edges: [
+      ['M1', 'M2'],
+      ['M2', 'M3'],
+      ['M3', 'M4'],
+      ['M4', 'M1'],
+    ].flatMap(([a, b]) => [
+      { from_marker_id: a as string, to_marker_id: b as string, estimated_length_mm: 200 },
+      { from_marker_id: b as string, to_marker_id: a as string, estimated_length_mm: 200 },
+    ]),
+    junctions: [],
+  };
+
+  const setupBidi = () => {
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const layout = new LayoutState(BIDI_LOOP, { now: () => 0 });
+    const scheduler = new Scheduler(registry, layout, { now: () => 0 });
+    seedIdentityTags(scheduler, ['M1', 'M2', 'M3', 'M4']);
+    return scheduler;
+  };
+
+  it('routes the way the parked train faces, not the 180° shortcut', () => {
+    const scheduler = setupBidi();
+    registerTrain(scheduler, 'T1');
+    // The train reports it is parked on M1→M2 (head at M1, facing M2). That
+    // report IS its heading — the scheduler adopts it as the seed direction.
+    sendTrainStatus(scheduler, 'T1', { from_marker_id: 'M1', to_marker_id: 'M2' }, 0);
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M4']);
+    // The long way round, because the one-hop M1→M4 would be a U-turn.
+    expect(scheduler.getTrainState('T1')?.transit?.edges).toEqual([
+      { from_marker_id: 'M1', to_marker_id: 'M2' },
+      { from_marker_id: 'M2', to_marker_id: 'M3' },
+      { from_marker_id: 'M3', to_marker_id: 'M4' },
+    ]);
+  });
+
+  it('without a reported heading, a parked train takes the shortest path', () => {
+    const scheduler = setupBidi();
+    registerTrain(scheduler, 'T1');
+    // No train_status → no facing known → shortest path, the one-hop back-edge.
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M4']);
+    expect(scheduler.getTrainState('T1')?.transit?.edges).toEqual([
+      { from_marker_id: 'M1', to_marker_id: 'M4' },
+    ]);
+  });
+
+  it('does not override a heading already established by a running route', () => {
+    const scheduler = setupBidi();
+    registerTrain(scheduler, 'T1');
+    sendTrainStatus(scheduler, 'T1', { from_marker_id: 'M1', to_marker_id: 'M2' }, 0);
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    // A later status reporting a DIFFERENT edge must not retro-seed; the route
+    // is already committed forward and current_edge is driven by traversal.
+    const before = scheduler.getTrainState('T1')?.current_edge;
+    sendTrainStatus(scheduler, 'T1', { from_marker_id: 'M4', to_marker_id: 'M1' }, 10);
+    expect(scheduler.getTrainState('T1')?.current_edge).toEqual(before);
+  });
+});

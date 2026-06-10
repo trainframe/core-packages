@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { InMemoryBrokerClient } from '../broker/in-memory-client.js';
+import { CARRIAGE_SPACING_MM } from '../track/coupling.js';
+import { TRAIN_LENGTH_MM } from '../track/pieces.js';
 import type { CarriageColorId, RotationDeg, TrackPiece } from '../track/pieces.js';
 import { ToyHardware } from './toy-hardware.js';
 
@@ -357,7 +359,7 @@ describe('ToyHardware — railyard + carriage consists', () => {
     return { pieces, s2, train, railyard, red1, red2, purple1, purple2 };
   }
 
-  it('spawns a gates_zone railyard on the nearest marker and seeds consist + spares', () => {
+  it('spawns a gates_zone railyard gating its own marker and seeds consist + spares', () => {
     const client = new InMemoryBrokerClient();
     client.connect('inmem://');
     const hardware = new ToyHardware({ client, newId });
@@ -370,8 +372,9 @@ describe('ToyHardware — railyard + carriage consists', () => {
       const sim = hardware.getSimulation();
       const yard = sim.getRailyard(`YARD-${scene.railyard.id}`);
       expect(yard).toBeDefined();
-      // The throat is the marker nearest the shed (the far straight, M-s2).
-      expect(yard?.throatMarkerId).toBe(`M-${scene.s2.id}`);
+      // The railyard is now a length of track in its own right, so it gates its
+      // OWN marker (its spine) as the zone throat — not a neighbouring straight.
+      expect(yard?.throatMarkerId).toBe(`M-${scene.railyard.id}`);
 
       // The train's consist is seeded from proximity: its two red wagons.
       const consist = sim.getTrain(`T-${scene.train.id}`)?.getConsist() ?? [];
@@ -531,8 +534,8 @@ describe('ToyHardware — experimental devices', () => {
       const envelope = decodeEnvelope(reports[0] ?? { payload: new Uint8Array() });
       expect(envelope.device_id).toBe(`VLS-${vs.id}`);
       expect(envelope.payload.train_id).toBe(`T-${train.id}`);
-      // 60 mm loco + 2 × 50 mm carriage spacing — measured, not configured.
-      expect(envelope.payload.train_length_mm).toBe(160);
+      // loco + 2 × carriage spacing — measured, not configured.
+      expect(envelope.payload.train_length_mm).toBe(TRAIN_LENGTH_MM + 2 * CARRIAGE_SPACING_MM);
     } finally {
       hardware.dispose();
     }

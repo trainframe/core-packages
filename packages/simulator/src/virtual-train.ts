@@ -99,6 +99,17 @@ interface TrainEvent {
    the shortest reasonable layouts. */
 const MAX_TRAVERSAL_HISTORY = 32;
 
+/* Track each coupled wagon takes up, mm — the pitch the toy-table renders rakes
+   at, so a train's reported occupancy length matches what's drawn (and what core
+   must keep clear behind the head). */
+const CARRIAGE_OCCUPANCY_MM = 68;
+
+/* Safety cap on how many graph edges `getTrailingPosition` will walk backwards
+   when history runs out (a freshly-spawned train with a long rake). A real
+   consist spans a couple of edges; this only stops a closed loop spinning on a
+   pathological offset. */
+const MAX_TRAILING_GRAPH_STEPS = 64;
+
 /**
  * A virtual train that simulates motion along edges and emits tag_observed
  * events as it crosses markers.
@@ -211,20 +222,7 @@ export class VirtualTrain {
       }
       case 'assign_route': {
         const { edges, route_id } = payload as { edges: RouteEdge[]; route_id?: string };
-        // A concrete route supersedes exploration.
-        this.exploring = false;
-        this.route = edges;
-        this.route_index = 0;
-        this.route_id = route_id ?? null;
-        this.route_progress_edge_index = 0;
-        // Always snap to the new route's first edge. Without this, a moving
-        // train ignores reassignment and keeps walking its old plan with the
-        // new route_id mismatched against its current edge.
-        if (edges[0]) {
-          this.current_edge = edges[0];
-          this.distance_into_edge_mm = 0;
-          this.emitted_current_edge_end = false;
-        }
+        this.applyAssignedRoute(edges, route_id);
         // Speed will be set when clearance arrives.
         break;
       }
@@ -277,6 +275,38 @@ export class VirtualTrain {
         this.target_velocity_mm_s = 0;
         break;
     }
+  }
+
+  /**
+   * Adopt a freshly assigned route, superseding any exploration. Always snaps to
+   * the new route's first edge — without this a moving train would ignore the
+   * reassignment and keep walking its old plan with a mismatched `route_id`.
+   *
+   * If the head is parked at the END of its current edge and the new route
+   * continues forward from there (the usual case: a station stop replanned
+   * onward), that current edge has been FULLY TRAVERSED — record it in the
+   * history before we drop it, so a trailing rake doesn't skip it and jump
+   * backward a whole edge when the train pulls out. Mirrors the
+   * `grant_clearance` transition, which already records the completed edge.
+   */
+  private applyAssignedRoute(edges: ReadonlyArray<RouteEdge>, route_id?: string): void {
+    this.exploring = false;
+    this.route = [...edges];
+    this.route_index = 0;
+    this.route_id = route_id ?? null;
+    this.route_progress_edge_index = 0;
+    const first = edges[0];
+    if (first === undefined) return;
+    if (
+      this.current_edge &&
+      this.distance_into_edge_mm >= this.currentEdgeLength() &&
+      first.from_marker_id === this.current_edge.to_marker_id
+    ) {
+      this.recordCompletedEdge(this.current_edge);
+    }
+    this.current_edge = { from_marker_id: first.from_marker_id, to_marker_id: first.to_marker_id };
+    this.distance_into_edge_mm = 0;
+    this.emitted_current_edge_end = false;
   }
 
   /**
@@ -690,10 +720,35 @@ export class VirtualTrain {
     return this.consist;
   }
 
+  /**
+   * The train's PHYSICAL occupancy length: the loco (`config.length_mm`) plus
+   * each coupled wagon. Carriages are invisible to core (ADR-016), but they do
+   * take up track — so a train's reported length must include its rake, or block
+   * exclusivity frees the blocks the wagons still sit on and another train drives
+   * straight through them. Zero stays zero (a point-mass train with no rake keeps
+   * point-mass semantics).
+   */
+  private effectiveLengthMm(): number {
+    if (this.config.length_mm <= 0) return 0;
+    return this.config.length_mm + this.consist.length * CARRIAGE_OCCUPANCY_MM;
+  }
+
   /** Replace the consist (used by a railyard shunting carriages, and at attach
-   *  time when the toy-table couples hand-placed wagons). Copied defensively. */
+   *  time when the toy-table couples hand-placed wagons). Copied defensively.
+   *  When the coupled length changes, the train REPORTS its new physical length
+   *  (it declares `core.reports_length`) so the scheduler holds the right blocks
+   *  for the rake — ADR-023/ADR-029 §0. */
   setConsist(carriages: ReadonlyArray<VirtualCarriage>): void {
+    const before = this.effectiveLengthMm();
     this.consist = [...carriages];
+    const after = this.effectiveLengthMm();
+    if (after !== before && after > 0) {
+      this.emit({
+        event_type: 'train_length_changed',
+        device_id: this.device_id,
+        payload: { train_id: this.device_id, train_length_mm: after },
+      });
+    }
   }
 
   /**
@@ -717,49 +772,98 @@ export class VirtualTrain {
    * Return the point on the rail `offset_mm` behind the head, walking
    * backwards through the traversal history. Pure query: no state mutation.
    *
-   * - No current edge (parked after route end) → null.
+   * The base the offset is measured back from is the head's edge + distance —
+   * EXCEPT when parked (no current edge): then the head sits at the END of its
+   * last traversed edge, so we trail back from there, keeping a stopped train's
+   * rake on the rail instead of snapping to static placement.
+   * - No current edge AND no history (never moved) → null.
    * - offset_mm <= 0 → head position itself.
-   * - offset <= distance_into_edge_mm → same edge, moved back by offset.
+   * - offset <= base distance → same edge, moved back by offset.
    * - Otherwise walk history newest-first consuming each edge's length; if
    *   the remaining offset fits inside an historical edge, return that point.
-   * - History exhausted → clamp: start of oldest known edge (or start of
-   *   current edge when history is empty). Mirrors the UI's spawn-time
-   *   clamp-at-edge-start behaviour.
+   * - History exhausted → keep walking the LAYOUT GRAPH backwards onto the real
+   *   predecessor edge(s), so a long rake behind a freshly-spawned (history-less)
+   *   train still trails along the track behind it instead of piling at the edge
+   *   start. Bounded by the edge count so a closed loop can't spin forever; a
+   *   genuine dead-end (no predecessor edge) still clamps at the edge start.
+   *   (Query is UI-only — carriage rendering — so this never affects scheduling.)
    */
   getTrailingPosition(
     offset_mm: number,
   ): { edge: RouteEdge; distance_into_edge_mm: number } | null {
-    if (this.current_edge === null) return null;
-    if (offset_mm <= 0) {
-      return { edge: this.current_edge, distance_into_edge_mm: this.distance_into_edge_mm };
+    // Resolve the base (head) edge + distance. Parked → the last traversed edge
+    // at its full length (the marker the train stopped on). `historyEnd` is how
+    // many history entries the walk-back may consume — one fewer when parked,
+    // since the last entry IS the base and must not be re-walked.
+    let baseEdge = this.current_edge;
+    let baseDist = this.distance_into_edge_mm;
+    let historyEnd = this.traversal_history.length;
+    if (baseEdge === null) {
+      const last = this.traversal_history[this.traversal_history.length - 1];
+      if (last === undefined) return null; // never moved — nothing to trail from
+      baseEdge = last;
+      baseDist = this.edgeLength(last);
+      historyEnd -= 1;
     }
-    if (offset_mm <= this.distance_into_edge_mm) {
-      return {
-        edge: this.current_edge,
-        distance_into_edge_mm: this.distance_into_edge_mm - offset_mm,
-      };
+
+    if (offset_mm <= 0) {
+      return { edge: baseEdge, distance_into_edge_mm: baseDist };
+    }
+    if (offset_mm <= baseDist) {
+      return { edge: baseEdge, distance_into_edge_mm: baseDist - offset_mm };
     }
 
     /* Walk history from newest to oldest, consuming offset as we go. */
-    let remaining = offset_mm - this.distance_into_edge_mm;
-    const len = this.traversal_history.length;
-    for (let i = len - 1; i >= 0; i--) {
+    let remaining = offset_mm - baseDist;
+    for (let i = historyEnd - 1; i >= 0; i--) {
       const histEdge = this.traversal_history[i];
       if (histEdge === undefined) continue;
-      const histLen =
-        this.layout.findEdge(histEdge.from_marker_id, histEdge.to_marker_id)?.estimated_length_mm ??
-        200;
+      const histLen = this.edgeLength(histEdge);
       if (remaining <= histLen) {
         return { edge: histEdge, distance_into_edge_mm: histLen - remaining };
       }
       remaining -= histLen;
     }
 
-    /* History exhausted: clamp to the start of the oldest known position. */
-    const oldest = this.traversal_history[0];
-    if (oldest !== undefined) {
-      return { edge: oldest, distance_into_edge_mm: 0 };
+    /* History exhausted: keep walking the layout graph backwards onto the real
+       predecessor edge(s) so the rake trails on track behind a history-less
+       (freshly-spawned) train. */
+    return this.trailByGraphWalk(this.traversal_history[0] ?? baseEdge, remaining);
+  }
+
+  /** Declared length (mm) of an edge, defaulting when the layout doesn't know it. */
+  private edgeLength(edge: RouteEdge): number {
+    return this.layout.findEdge(edge.from_marker_id, edge.to_marker_id)?.estimated_length_mm ?? 200;
+  }
+
+  /**
+   * Resolve a trailing point `remaining` mm back from the start of `oldestKnown`
+   * by walking the layout graph backwards onto predecessor edges. At each marker
+   * we take an incoming edge that isn't the reverse of the one we just came down
+   * (so the walk doesn't fold forward), bounded so a closed loop can't spin
+   * forever; a genuine dead-end (no predecessor) clamps at the edge start.
+   */
+  private trailByGraphWalk(
+    oldestKnown: RouteEdge,
+    remaining: number,
+  ): { edge: RouteEdge; distance_into_edge_mm: number } {
+    let backMarker = oldestKnown.from_marker_id;
+    let avoidMarker = oldestKnown.to_marker_id;
+    let rem = remaining;
+    for (let steps = 0; steps < MAX_TRAILING_GRAPH_STEPS; steps++) {
+      const pred = this.layout.edgesInto(backMarker).find((e) => e.from_marker_id !== avoidMarker);
+      if (pred === undefined) break; // genuine dead-end → clamp below
+      const predLen = pred.estimated_length_mm ?? 200;
+      if (rem <= predLen) {
+        return {
+          edge: { from_marker_id: pred.from_marker_id, to_marker_id: pred.to_marker_id },
+          distance_into_edge_mm: predLen - rem,
+        };
+      }
+      rem -= predLen;
+      avoidMarker = backMarker;
+      backMarker = pred.from_marker_id;
     }
-    return { edge: this.current_edge, distance_into_edge_mm: 0 };
+    return { edge: oldestKnown, distance_into_edge_mm: 0 };
   }
 }

@@ -527,6 +527,9 @@ export class Scheduler {
   private handleZoneEntry(train: TrainState, markerId: string): ReadonlyArray<SchedulerEffect> {
     train.in_zone = markerId;
     train.transit = undefined;
+    // Preserve the arrival heading before dropping the edge, so the zone resume
+    // sends the train onward (out the far side) instead of reversing back in.
+    train.zone_entry_edge = train.current_edge;
     train.current_edge = undefined;
     train.clearance_limit_marker_id = markerId;
     const hadEdges = train.cleared_edges.length > 0;
@@ -618,6 +621,9 @@ export class Scheduler {
     }
 
     train.last_marker_id = markerId;
+    // The train has moved on under its own current_edge now; the saved zone
+    // arrival heading is stale.
+    train.zone_entry_edge = undefined;
 
     /* Zone entry (ADR-027): an admitted train reaching a zone boundary as its
      * route terminus is pulling into the device's interior. Suspend it here,
@@ -1233,6 +1239,22 @@ export class Scheduler {
 
     const train = this.trains.get(train_id);
     if (!train) return [];
+
+    /* Trust the train's reported heading to SEED an initial direction. A train
+     * is an autonomous agent: when it reports which edge its head is on, that
+     * IS its facing. We adopt it only to fill a genuine gap — the train has no
+     * heading yet (freshly registered / parked between legs) and is not in a
+     * zone (where `zone_entry_edge` carries the arrival heading instead). This
+     * is what stops a stopped train from being routed 180° off the way it
+     * points: the planner now plans FROM its real facing. Once a route is
+     * running, `current_edge` is non-undefined and this is a no-op. */
+    if (
+      current_edge !== undefined &&
+      train.current_edge === undefined &&
+      train.zone_entry_edge === undefined
+    ) {
+      train.current_edge = current_edge;
+    }
 
     /* Deterministic station dwell. Checked before the length gate because the
      * dwell applies to point trains too. When the dwell has elapsed, clear it
@@ -2003,7 +2025,12 @@ export class Scheduler {
       return this.advanceScheduleAndReplan(train);
     }
 
-    const transitEdges = planTransit(this.layout, train.last_marker_id, targetStop);
+    // Keep the route directional: a train may not flip 180° to take a shortcut.
+    // `current_edge` carries the heading mid-route; at a zone throat (edge
+    // cleared) `zone_entry_edge` carries the arrival heading so the resume drives
+    // the train onward, not back in.
+    const heading = train.current_edge ?? train.zone_entry_edge;
+    const transitEdges = planTransit(this.layout, train.last_marker_id, targetStop, heading);
     if (transitEdges === null) {
       // Structural unreachability. Surface and leave the train parked —
       // the operator must fix the layout or the schedule.

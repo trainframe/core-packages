@@ -249,7 +249,7 @@ describe('ToyTable — palette and placement', () => {
     expect(screen.getByTestId('toybox-railyard')).toBeInTheDocument();
   });
 
-  it('places a railyard depot in its own colour', async () => {
+  it('places a railyard as wooden track straddled by a steel gantry', async () => {
     const user = userEvent.setup();
     renderToyTable();
 
@@ -258,8 +258,21 @@ describe('ToyTable — palette and placement', () => {
 
     const placed = document.querySelector('[data-testid^="piece-railyard-"]');
     if (placed === null) throw new Error('no railyard placed');
-    const fills = Array.from(placed.querySelectorAll('path')).map((p) => p.getAttribute('fill'));
-    expect(fills).toContain('#5b7b6a');
+    // The yard is real track now: its body fills with the beech-wood gradient,
+    // not a flat device colour.
+    const pathFills = Array.from(placed.querySelectorAll('path')).map((p) =>
+      p.getAttribute('fill'),
+    );
+    expect(pathFills).toContain('url(#tf-wood)');
+    // …and the XY gantry straddles it: steel foundations rendered as <rect>s.
+    const rectFills = Array.from(placed.querySelectorAll('rect')).map((r) =>
+      r.getAttribute('fill'),
+    );
+    expect(rectFills).toContain('#7c8a94');
+    // An empty yard's crane is PARKED: with no train in the yard there is no
+    // train to service, so the gantry runs none of its SMIL choreography —
+    // "the crane only moves to act on trains".
+    expect(placed.querySelectorAll('animateTransform')).toHaveLength(0);
   });
 
   it('arms a piece type and places it on the canvas without publishing any device traffic', async () => {
@@ -530,11 +543,15 @@ describe('ToyTable — scan and power', () => {
     const regs = client.published.filter((m) =>
       m.topic.startsWith('railway/events/device_registered/YARD-'),
     );
-    expect(regs.length).toBe(1);
-    const reg = regs[0];
-    if (!reg) throw new Error('unreachable');
-    const payload = decodeEnvelope(reg.payload).payload as { capabilities: string[] };
-    expect(payload.capabilities).toEqual(['core.gates_zone', 'core.reports_length']);
+    // At least one gates_zone registration for the yard. (The scan flow announces
+    // it; once the yard is also live its in-browser virtual device re-announces
+    // the same id — both are idempotent and carry identical capabilities, since
+    // the railyard now owns a track marker so the sim device always spawns.)
+    expect(regs.length).toBeGreaterThanOrEqual(1);
+    for (const reg of regs) {
+      const payload = decodeEnvelope(reg.payload).payload as { capabilities: string[] };
+      expect(payload.capabilities).toEqual(['core.gates_zone', 'core.reports_length']);
+    }
   });
 
   it('clicking a live train SELECTS it — it stays live and is NOT powered off', async () => {

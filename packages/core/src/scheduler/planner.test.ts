@@ -74,6 +74,46 @@ const cyclicWithBranch = (): LayoutState =>
     { now: () => 0 },
   );
 
+/** A bidirectional square A-B-C-D-A (every connection both ways) — a real
+ *  compiled layout looks like this. Reversing is structurally possible, so the
+ *  directionality constraint has something to bite on. */
+const bidiSquare = (): LayoutState =>
+  new LayoutState(
+    {
+      name: 'bidi-square',
+      markers: ['A', 'B', 'C', 'D'].map((id) => ({ id, kind: 'block_boundary' as const })),
+      edges: [
+        ['A', 'B'],
+        ['B', 'C'],
+        ['C', 'D'],
+        ['D', 'A'],
+      ].flatMap(([x, y]) => [
+        { from_marker_id: x as string, to_marker_id: y as string, estimated_length_mm: 100 },
+        { from_marker_id: y as string, to_marker_id: x as string, estimated_length_mm: 100 },
+      ]),
+      junctions: [],
+    },
+    { now: () => 0 },
+  );
+
+/** A bidirectional line A-B-C — a dead-end either way. */
+const bidiLinear = (): LayoutState =>
+  new LayoutState(
+    {
+      name: 'bidi-linear',
+      markers: ['A', 'B', 'C'].map((id) => ({ id, kind: 'block_boundary' as const })),
+      edges: [
+        ['A', 'B'],
+        ['B', 'C'],
+      ].flatMap(([x, y]) => [
+        { from_marker_id: x as string, to_marker_id: y as string, estimated_length_mm: 100 },
+        { from_marker_id: y as string, to_marker_id: x as string, estimated_length_mm: 100 },
+      ]),
+      junctions: [],
+    },
+    { now: () => 0 },
+  );
+
 /** Two isolated subgraphs. No path between them; planner returns null. */
 const disconnected = (): LayoutState =>
   new LayoutState(
@@ -203,5 +243,133 @@ describe('planTransit', () => {
       { from_marker_id: 'A', to_marker_id: 'J' },
       { from_marker_id: 'J', to_marker_id: 'S' },
     ]);
+  });
+
+  describe('directionality — no 180° flips', () => {
+    it('without a heading, takes the shortest path even if it reverses', () => {
+      // From A to D, the bare D→A back-edge is one hop; with no current edge the
+      // planner is free to use it.
+      expect(planTransit(bidiSquare(), 'A', 'D')).toEqual([
+        { from_marker_id: 'A', to_marker_id: 'D' },
+      ]);
+    });
+
+    it('a train mid-edge continues forward rather than flipping 180°', () => {
+      // The train occupies A→B (heading B). To reach D it must go the long way
+      // round the square (A→B→C→D), NOT reverse off its edge onto the one-hop
+      // A→D back-edge.
+      const path = planTransit(bidiSquare(), 'A', 'D', {
+        from_marker_id: 'A',
+        to_marker_id: 'B',
+      });
+      expect(path).toEqual([
+        { from_marker_id: 'A', to_marker_id: 'B' },
+        { from_marker_id: 'B', to_marker_id: 'C' },
+        { from_marker_id: 'C', to_marker_id: 'D' },
+      ]);
+    });
+
+    it('returns the current edge alone when it leads straight to the target', () => {
+      const path = planTransit(bidiSquare(), 'A', 'B', {
+        from_marker_id: 'A',
+        to_marker_id: 'B',
+      });
+      expect(path).toEqual([{ from_marker_id: 'A', to_marker_id: 'B' }]);
+    });
+
+    it('stopped at a marker, leaves any way but straight back the way it came', () => {
+      // The train arrived at B via A→B and is now at B. Reaching A must go the
+      // long way (B→C→D→A), not the one-hop U-turn B→A.
+      const path = planTransit(bidiSquare(), 'B', 'A', {
+        from_marker_id: 'A',
+        to_marker_id: 'B',
+      });
+      expect(path).toEqual([
+        { from_marker_id: 'B', to_marker_id: 'C' },
+        { from_marker_id: 'C', to_marker_id: 'D' },
+        { from_marker_id: 'D', to_marker_id: 'A' },
+      ]);
+    });
+
+    it('returns null when the target is only reachable by reversing (dead-end line)', () => {
+      // The train occupies B→C (heading C, a dead end). Reaching A would require
+      // flipping 180°, which ordinary routing refuses — so: no path. (An explicit
+      // grant_reverse is the separate, gated way back.)
+      expect(
+        planTransit(bidiLinear(), 'B', 'A', { from_marker_id: 'B', to_marker_id: 'C' }),
+      ).toBeNull();
+    });
+  });
+
+  describe('turnout topology — no leg-to-leg (exit-to-exit) moves', () => {
+    /** A single turnout: trunk T, junction J, two switched legs L1 (main) and
+     *  L2 (divert). The legs join the trunk, never each other. */
+    const turnout = (): LayoutState =>
+      new LayoutState(
+        {
+          name: 'turnout',
+          markers: [
+            { id: 'T', kind: 'block_boundary' },
+            { id: 'J', kind: 'junction' },
+            { id: 'L1', kind: 'block_boundary' },
+            { id: 'L2', kind: 'block_boundary' },
+          ],
+          edges: [
+            { from_marker_id: 'T', to_marker_id: 'J', estimated_length_mm: 100 },
+            { from_marker_id: 'J', to_marker_id: 'T', estimated_length_mm: 100 },
+            {
+              from_marker_id: 'J',
+              to_marker_id: 'L1',
+              estimated_length_mm: 100,
+              requires_switch_state: 'main',
+            },
+            { from_marker_id: 'L1', to_marker_id: 'J', estimated_length_mm: 100 },
+            {
+              from_marker_id: 'J',
+              to_marker_id: 'L2',
+              estimated_length_mm: 100,
+              requires_switch_state: 'divert',
+            },
+            { from_marker_id: 'L2', to_marker_id: 'J', estimated_length_mm: 100 },
+          ],
+          junctions: [{ marker_id: 'J', initial_state: 'main' }],
+        },
+        { now: () => 0 },
+      );
+
+    it('a train that entered the junction on one leg cannot cross to the other', () => {
+      // Arrived at J via L1→J (a leg). L2 is the OTHER leg — reaching it would be
+      // an exit-to-exit move, which a turnout can't do, so: no path (reversing
+      // back out via the trunk is the separate, gated manoeuvre).
+      expect(
+        planTransit(turnout(), 'J', 'L2', { from_marker_id: 'L1', to_marker_id: 'J' }),
+      ).toBeNull();
+    });
+
+    it('trunk → leg is allowed', () => {
+      expect(planTransit(turnout(), 'T', 'L1')).toEqual([
+        { from_marker_id: 'T', to_marker_id: 'J' },
+        { from_marker_id: 'J', to_marker_id: 'L1' },
+      ]);
+    });
+
+    it('leg → trunk is allowed', () => {
+      expect(
+        planTransit(turnout(), 'L1', 'T', { from_marker_id: 'X', to_marker_id: 'L1' }),
+      ).toEqual([
+        { from_marker_id: 'L1', to_marker_id: 'J' },
+        { from_marker_id: 'J', to_marker_id: 'T' },
+      ]);
+    });
+
+    it('a train heading INTO the junction on a leg continues to the trunk, never the other leg', () => {
+      // Mid-edge L1→J (heading J). Target T sits past the trunk; the route must
+      // be L1→J→T, never L1→J→L2.
+      const path = planTransit(turnout(), 'L1', 'T', { from_marker_id: 'L1', to_marker_id: 'J' });
+      expect(path).toEqual([
+        { from_marker_id: 'L1', to_marker_id: 'J' },
+        { from_marker_id: 'J', to_marker_id: 'T' },
+      ]);
+    });
   });
 });

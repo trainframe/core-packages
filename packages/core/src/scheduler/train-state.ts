@@ -86,6 +86,15 @@ export interface TrainState {
   current_edge?: EdgeRef | undefined;
 
   /**
+   * The edge the train arrived on when it suspended inside a zone (its
+   * `current_edge` at the throat). `current_edge` is cleared on zone entry — the
+   * train holds no block — so this preserves its HEADING, letting the planner
+   * resume it FORWARD out the far side rather than reversing back the way it
+   * came in. Cleared once the train moves on (crosses its next marker).
+   */
+  zone_entry_edge?: EdgeRef | undefined;
+
+  /**
    * Physical length of the train in millimetres. When undefined or 0 the
    * scheduler uses point-train semantics (release on marker_traversed).
    * When > 0 the scheduler waits for `train_status` to report

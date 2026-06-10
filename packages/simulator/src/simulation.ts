@@ -152,6 +152,10 @@ export class Simulation {
       capabilities: [
         'core.controls_motion',
         'core.accepts_route',
+        // A train reports its OWN physical length as wagons couple/uncouple
+        // (ADR-023): the rake is part of its occupancy even though carriages are
+        // invisible to core (ADR-016). See VirtualTrain.setConsist.
+        'core.reports_length',
         ...(config.can_reverse ? ['core.can_reverse'] : []),
       ],
     };

@@ -155,6 +155,8 @@ export async function openVisualiser(
 export interface OpenSimulatorUiOptions {
   /** Override the broker WS URL the sim UI connects to. */
   readonly brokerUrl?: string;
+  /** When set, record a video of this page into the given directory. */
+  readonly recordVideoDir?: string;
 }
 
 export async function openSimulatorUi(
@@ -162,7 +164,11 @@ export async function openSimulatorUi(
   opts: OpenSimulatorUiOptions = {},
 ): Promise<Page> {
   const brokerUrl = opts.brokerUrl ?? 'ws://127.0.0.1:9001';
-  const ctx = await browser.newContext();
+  const ctx = await browser.newContext(
+    opts.recordVideoDir !== undefined
+      ? { recordVideo: { dir: opts.recordVideoDir, size: { width: 1280, height: 800 } } }
+      : {},
+  );
   await ctx.addInitScript(
     ({ broker }) => {
       localStorage.setItem('trainframe.simulator-ui.brokerUrl', broker);
@@ -205,6 +211,10 @@ export interface PlacePieceOptions {
    * placed wagon carries this colour intrinsically.
    */
   readonly carriageColor?: 'red' | 'green' | 'amber' | 'blue' | 'purple';
+  /** Number of 45° rotations (`R` key presses) to apply after placing. */
+  readonly rotateSteps?: number;
+  /** Whether to flip the piece (`F` key) after placing — left/right curves. */
+  readonly flip?: boolean;
 }
 
 /**
@@ -228,7 +238,16 @@ export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): 
     await toyboxBtn.click();
   }
 
-  // Pick the carriage livery (the swatch row appears once carriage is armed).
+  // Wait for the arm to take effect: the button must report aria-pressed="true"
+  // before we fire the canvas click, otherwise React may not have re-rendered
+  // with the new armedType yet.
+  await sim.waitForFunction((t: string) => {
+    const btn = document.querySelector(`[data-testid="toybox-${t}"]`);
+    return btn?.getAttribute('aria-pressed') === 'true';
+  }, type);
+
+  // Pick the carriage livery — only AFTER the carriage tool is confirmed armed,
+  // since the swatch row only renders then.
   if (type === 'carriage' && carriageColor !== undefined) {
     await sim.getByTestId(`toybox-carriage-color-${carriageColor}`).click();
   }
@@ -252,14 +271,6 @@ export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): 
   const canvas = sim.getByTestId('toy-table-canvas');
   await canvas.waitFor({ state: 'visible' });
 
-  // Wait for the arm to take effect: the button must report aria-pressed="true"
-  // before we fire the canvas click, otherwise React may not have re-rendered
-  // with the new armedType yet.
-  await sim.waitForFunction((t: string) => {
-    const btn = document.querySelector(`[data-testid="toybox-${t}"]`);
-    return btn?.getAttribute('aria-pressed') === 'true';
-  }, type);
-
   const clickInfo = await canvas.evaluate(
     (el, { xMm, yMm }) => {
       const svg = el as SVGSVGElement;
@@ -268,9 +279,11 @@ export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): 
       const vpX = Number(svg.getAttribute('data-viewport-x') ?? '0');
       const vpY = Number(svg.getAttribute('data-viewport-y') ?? '0');
       const canvasWMm = 900;
-      const canvasHMm = 600;
       const worldW = canvasWMm / zoom;
-      const worldH = canvasHMm / zoom;
+      // The canvas adapts its world HEIGHT to the box aspect (see ToyTable's
+      // `clientToMm`): worldH = worldW * (rectHeight/rectWidth). Mirror that, or
+      // off-centre Y placements land in the wrong spot.
+      const worldH = worldW * (rect.height / rect.width);
       // Fraction of the world window where this mm coord falls.
       const fracX = (xMm - vpX) / worldW;
       const fracY = (yMm - vpY) / worldH;
@@ -307,6 +320,16 @@ export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): 
   if (pieceId === undefined) {
     throw new Error('placePieceOnToyTable: no piece appeared after click');
   }
+
+  // A freshly-placed piece is selected, so the R/F keyboard shortcuts act on it
+  // — exactly the gestures an operator uses to orient a curve before it snaps.
+  if (opts.flip === true) {
+    await sim.keyboard.press('f');
+  }
+  for (let i = 0; i < (opts.rotateSteps ?? 0); i++) {
+    await sim.keyboard.press('r');
+  }
+
   return pieceId;
 }
 

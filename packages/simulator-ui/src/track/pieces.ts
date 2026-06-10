@@ -65,7 +65,7 @@ export type TrackPieceType = (typeof ALL_PIECE_TYPES)[number];
  * distinguish the two. (In the registry: carriage is category `'device'`;
  * train/gate are `'wire-device'`.)
  */
-export type DevicePieceType = 'train' | 'gate' | 'carriage' | 'railyard';
+export type DevicePieceType = 'train' | 'gate' | 'carriage';
 
 /**
  * Wire-visible device types. These are the subset of device pieces that
@@ -73,7 +73,7 @@ export type DevicePieceType = 'train' | 'gate' | 'carriage' | 'railyard';
  * Carriages are intentionally excluded — they are physical wagons with no
  * RFID tag; the system has no awareness of them on the wire.
  */
-export type WireDeviceType = 'train' | 'gate' | 'railyard';
+export type WireDeviceType = 'train' | 'gate';
 
 /**
  * The toybox tray a piece is presented in. `'track'` and `'devices'` are the
@@ -899,25 +899,123 @@ function carriageBody(): PieceBody {
   };
 }
 
-function railyardBody(): PieceBody {
-  // A little engine shed / depot beside the track: a wide rounded building with
-  // a roof ridge and a row of bay doors (its slots). A structure, not a vehicle
-  // — drawn larger than the rolling stock so it reads as part of the scenery.
-  const w = 96;
-  const h = 40;
-  const doors: PieceFeature[] = [];
-  for (const cx of [-36, -18, 0, 18, 36]) {
-    doors.push({ role: 'dark-wood', d: roundRect(cx - 6, 0, 12, h / 2 - 3, 2) });
-  }
+// ---------------------------------------------------------------------------
+// Railyard: a self-contained PASS-THROUGH yard, rendered as ordinary wooden
+// track (ADR-024). A single running line (the spine) runs west→east — its two
+// endpoints are the yard's single input and single output. Off that spine, a
+// ladder of normal-looking turnouts leads onto six pass-through slots (three
+// each side) and, at the far end, a mirror ladder leads them back onto the
+// spine. Every rail is real wood (planks + swept bands) with routed grooves.
+//
+// A 3D-printer-style XY gantry (drawn by ToyTable) straddles the yard: its
+// foundations sit OUTSIDE the outer slots, a bridge rolls along them, and a
+// crane head crosses the bridge so it can reach OVER any slot to work a
+// coupling. The gantry geometry it needs is exported below.
+// ---------------------------------------------------------------------------
+
+/** Half the spine length (x): west input endpoint → east output endpoint. 300 so
+ *  the yard spans exactly 600 mm end-to-end — three straights — which lets a
+ *  rectangular demo loop splice it in and still close on the 200 mm grid. */
+export const RAILYARD_HALF_LENGTH_MM = 300;
+/** The six slots, at these local-y offsets (three each side of the spine).
+ *  Spaced 48 mm apart (double the original) so a 26 mm-tall carriage sitting in
+ *  one slot clears its neighbours; the inner pair sits ±36 so the centre spine
+ *  keeps a clear margin. */
+export const RAILYARD_SLOT_YS: readonly number[] = [-132, -84, -36, 36, 84, 132];
+/** x of the slot mouths: slots run from -RAILYARD_SLOT_HALF_X to +. Long enough
+ *  (220 mm) to hold a short rake of spare carriages, with run to spare for each
+ *  ladder leg's gentle S-bend. */
+const RAILYARD_SLOT_HALF_X = 110;
+/** Plank half-width for the yard's (narrower) tracks. */
+const RAILYARD_PLANK_HW = 7;
+/** Where the three west turnouts tap off the spine (outer slot peels off first,
+ *  furthest from the slot mouths, so the ladder legs never cross). Indexed by
+ *  rank-from-centre: inner pair, mid pair, outer pair. Spread wide so every leg
+ *  is a long, gentle crossover even at the larger track spacing. Mirrored east. */
+const RAILYARD_LADDER_XS: readonly number[] = [174, 220, 260];
+
+/** Side-rail (gantry foundation) offset: just OUTSIDE the outer slots. */
+export const RAILYARD_RAIL_Y = 152;
+/** How far along the spine the gantry bridge may travel (inside the endpoints). */
+export const RAILYARD_GANTRY_X = 250;
+/** Outer bound of the crane head's reach across the bridge (over the slots). */
+export const RAILYARD_HEAD_Y = 138;
+/** Drawing bounds (selection glow / body box): the gantry footprint. */
+export const RAILYARD_FRAME_TOP_MM = -RAILYARD_RAIL_Y - 10;
+export const RAILYARD_FRAME_BOT_MM = RAILYARD_RAIL_Y + 10;
+
+const RAILYARD_ENDPOINTS: readonly LocalEndpoint[] = [
+  { lx: -RAILYARD_HALF_LENGTH_MM, ly: 0, localAngle: 180 },
+  { lx: RAILYARD_HALF_LENGTH_MM, ly: 0, localAngle: 0 },
+];
+
+/** A smooth ladder leg from a turnout on the spine at `(sx, 0)` out to a slot
+ *  mouth at `(ex, ey)`, leaving and arriving parallel to the rails (an S-bend,
+ *  like a crossover) so the wood and its grooves flow rather than kink. The
+ *  tangents point along the tap→mouth direction (east legs run back west toward
+ *  the output), so the bezier never folds into a hairpin. */
+function railyardLeg(sx: number, ex: number, ey: number): CentreLinePath {
+  const along = ex >= sx ? 0 : 180; // heading from tap toward the slot mouth
+  const base = bezierHalfPath(ex - sx, ey, along, along);
   return {
-    svgPath: roundRect(-w / 2, -h / 2, w, h, 6),
-    features: [
-      // Roof ridge along the top edge.
-      { role: 'dark-wood', d: roundRect(-w / 2 + 5, -h / 2 + 3, w - 10, 6, 3) },
-      ...doors,
-    ],
-    width: w,
-    height: h,
+    length: base.length,
+    at(d: number): RailPose {
+      const p = base.at(d);
+      return { x: p.x + sx, y: p.y, headingDeg: p.headingDeg };
+    },
+  };
+}
+
+/** The west + east ladder legs feeding every slot (12 in all). Rank `r`
+ *  (0=inner … 2=outer) taps the spine at ∓RAILYARD_LADDER_XS[r]. */
+function railyardLegs(): CentreLinePath[] {
+  const legs: CentreLinePath[] = [];
+  for (const [r, x] of RAILYARD_LADDER_XS.entries()) {
+    // Rank 0 taps nearest the mouths and feeds the INNERMOST slot (y=-12); the
+    // furthest tap feeds the outermost (y=-60). Mapping rank→slot this way keeps
+    // the ladder legs from crossing. SLOT_YS top trio is [-60,-36,-12], so the
+    // inner-first order is its reverse.
+    const top = RAILYARD_SLOT_YS[2 - r] ?? 0; // r:0→-12, 1→-36, 2→-60
+    const bot = -top;
+    legs.push(railyardLeg(-x, -RAILYARD_SLOT_HALF_X, top)); // west → top slot mouth
+    legs.push(railyardLeg(-x, -RAILYARD_SLOT_HALF_X, bot)); // west → bottom slot mouth
+    legs.push(railyardLeg(x, RAILYARD_SLOT_HALF_X, top)); // east → top slot mouth
+    legs.push(railyardLeg(x, RAILYARD_SLOT_HALF_X, bot)); // east → bottom slot mouth
+  }
+  return legs;
+}
+
+/** Every rail a train could ride in the yard: the spine, the six slots, and the
+ *  ladder legs that connect them — grooves are derived from these. */
+function railyardRailLines(): CentreLinePath[] {
+  const lines: CentreLinePath[] = [
+    segmentPath(-RAILYARD_HALF_LENGTH_MM, 0, RAILYARD_HALF_LENGTH_MM, 0), // spine
+  ];
+  for (const sy of RAILYARD_SLOT_YS) {
+    lines.push(segmentPath(-RAILYARD_SLOT_HALF_X, sy, RAILYARD_SLOT_HALF_X, sy));
+  }
+  lines.push(...railyardLegs());
+  return lines;
+}
+
+function railyardBody(): PieceBody {
+  // Wooden track: a plank for the spine and each slot, plus a band swept along
+  // each ladder leg, so the wood follows the rails exactly (ADR-024).
+  const ph = RAILYARD_PLANK_HW;
+  const planks: string[] = [
+    roundRect(-RAILYARD_HALF_LENGTH_MM, -ph, RAILYARD_HALF_LENGTH_MM * 2, ph * 2, PLANK_CORNER),
+  ];
+  for (const sy of RAILYARD_SLOT_YS) {
+    planks.push(
+      roundRect(-RAILYARD_SLOT_HALF_X, sy - ph, RAILYARD_SLOT_HALF_X * 2, ph * 2, PLANK_CORNER),
+    );
+  }
+  for (const leg of railyardLegs()) planks.push(sweptBandAlong(leg, ph));
+  return {
+    svgPath: planks.join(' '),
+    features: [],
+    width: RAILYARD_HALF_LENGTH_MM * 2,
+    height: RAILYARD_FRAME_BOT_MM - RAILYARD_FRAME_TOP_MM,
   };
 }
 
@@ -1430,7 +1528,22 @@ const PIECES: Record<TrackPieceType, PieceDescriptor> = {
   train: devicePiece('wire-device', 'Train', trainBody),
   gate: devicePiece('wire-device', 'Gate', gateBody),
   carriage: devicePiece('device', 'Carriage', carriageBody),
-  railyard: devicePiece('wire-device', 'Railyard', railyardBody),
+  // The railyard is REAL track: a pass-through main line (two endpoints) whose
+  // sidings are wooden track with routed grooves. It is also a `gates_zone`
+  // device, announced specially at scan time (it is the one piece that is both
+  // track and device).
+  railyard: trackPiece({
+    label: 'Railyard',
+    tint: '#caa46a',
+    markerKind: 'block_boundary',
+    endpoints: () => RAILYARD_ENDPOINTS,
+    centreLine: (index) => {
+      const e = RAILYARD_ENDPOINTS[index];
+      return e === undefined ? undefined : linearHalfPath(e.lx, e.ly);
+    },
+    railLines: railyardRailLines,
+    body: railyardBody,
+  }),
   // The Experiments tray (docs/experimental/ 001–005). Real track / device
   // pieces with real wire identities; the speculative part is the hardware
   // each one pretends to be, never what it puts on the bus.

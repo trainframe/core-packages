@@ -92,4 +92,59 @@ describe('nearestStartEdge', () => {
     };
     expect(nearestStartEdge(layout, { x: 0, y: 0 })).toBeUndefined();
   });
+
+  describe('facing-aware selection', () => {
+    // A mid-loop marker M with two outgoing edges: one EAST (to A-east) and one
+    // WEST (to Z-west). Alphabetical sort would always pick A-east; the train's
+    // facing must override that so it departs the way it points.
+    const junctionOfTwo: Layout = {
+      name: 'two-way',
+      markers: [
+        { id: 'M', kind: 'block_boundary', position: { x_mm: 0, y_mm: 0 } },
+        { id: 'A-east', kind: 'block_boundary', position: { x_mm: 100, y_mm: 0 } },
+        { id: 'Z-west', kind: 'block_boundary', position: { x_mm: -100, y_mm: 0 } },
+      ],
+      edges: [
+        { from_marker_id: 'M', to_marker_id: 'A-east', estimated_length_mm: 100 },
+        { from_marker_id: 'M', to_marker_id: 'Z-west', estimated_length_mm: 100 },
+      ],
+      junctions: [],
+    };
+
+    it('departs along the edge the train faces (east)', () => {
+      const edge = nearestStartEdge(junctionOfTwo, { x: 1, y: 1 }, { x: 1, y: 0 });
+      expect(edge?.to_marker_id).toBe('A-east');
+    });
+
+    it('departs along the edge the train faces (west), overriding the alpha sort', () => {
+      // Facing west: must pick Z-west even though A-east sorts first.
+      const edge = nearestStartEdge(junctionOfTwo, { x: 1, y: 1 }, { x: -1, y: 0 });
+      expect(edge?.to_marker_id).toBe('Z-west');
+    });
+
+    it('falls back to the deterministic sort when no facing is given', () => {
+      const edge = nearestStartEdge(junctionOfTwo, { x: 1, y: 1 });
+      expect(edge?.to_marker_id).toBe('A-east');
+    });
+
+    it('tolerates a y-down (SVG) facing — a south-facing train at a vertical fork', () => {
+      const vertical: Layout = {
+        name: 'vertical-fork',
+        markers: [
+          { id: 'M', kind: 'block_boundary', position: { x_mm: 0, y_mm: 0 } },
+          { id: 'M-north', kind: 'block_boundary', position: { x_mm: 0, y_mm: -100 } },
+          { id: 'M-south', kind: 'block_boundary', position: { x_mm: 0, y_mm: 100 } },
+        ],
+        edges: [
+          { from_marker_id: 'M', to_marker_id: 'M-north', estimated_length_mm: 100 },
+          { from_marker_id: 'M', to_marker_id: 'M-south', estimated_length_mm: 100 },
+        ],
+        junctions: [],
+      };
+      // +y is DOWN (south) in table space; a south-facing loco departs south.
+      expect(nearestStartEdge(vertical, { x: 0, y: 0 }, { x: 0, y: 1 })?.to_marker_id).toBe(
+        'M-south',
+      );
+    });
+  });
 });

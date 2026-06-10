@@ -17,3 +17,7 @@ coverage/
 .screenshots/
 .playwright-mcp/
 .claude/
+
+# Generated dev artifacts (session screenshots / recordings)
+packages/simulator-ui/screenshots/
+packages/ui-tests/videos/

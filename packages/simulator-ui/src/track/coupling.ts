@@ -17,8 +17,10 @@
 
 import type { TrackPiece } from './pieces.js';
 
-/** Centre-to-centre carriage spacing in mm (train head → first carriage → …). */
-export const CARRIAGE_SPACING_MM = 50;
+/** Centre-to-centre carriage spacing in mm (train head → first carriage → …).
+ *  A carriage body is ~60 mm long, so this sits just above that to leave a small
+ *  coupling gap between wagons rather than letting them overlap. */
+export const CARRIAGE_SPACING_MM = 68;
 
 /** A rendered world position for a piece on the canvas. */
 export interface WorldPosition {

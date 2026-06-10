@@ -411,7 +411,16 @@ export class ToyHardware {
 
   private spawnPiece(piece: TrackPiece): void {
     if (piece.type === 'train') {
-      const startEdge = nearestStartEdge(this.layout, piece.position);
+      // The loco departs the way it POINTS. Its forward is its piece's local +x
+      // rotated by `rotationDeg` (the y-flip leaves +x untouched), giving a
+      // facing vector in table mm-space; `nearestStartEdge` then picks the
+      // outgoing edge most aligned with it. So a placed train reports the edge
+      // it actually faces — the scheduler never has to guess a direction.
+      const rad = (piece.rotationDeg * Math.PI) / 180;
+      const startEdge = nearestStartEdge(this.layout, piece.position, {
+        x: Math.cos(rad),
+        y: Math.sin(rad),
+      });
       if (startEdge === undefined) return; // defer until track exists
       // Spawn length-aware (length_mm > 0). The server's scheduler only
       // serialises a switched junction for trains with a known physical length
@@ -441,12 +450,14 @@ export class ToyHardware {
       return;
     }
     if (piece.type === 'railyard') {
-      // A railyard gates the nearest marker (its throat). `nearestMarkerId`
-      // already returns the compiled `M-…` id. Defer if no track has been placed
-      // near it yet — the next reseed/spawn picks it up.
-      const throat = nearestMarkerId(this.layout, piece.position);
-      if (throat === undefined) return;
-      this.simulation.spawnRailyard(deviceIdForDevicePiece(piece), throat, RAILYARD_CAPACITY);
+      // The railyard is itself a length of track, so it OWNS a marker (`M-{id}`,
+      // its spine) — bind it into the sim like any track piece, then gate that
+      // very marker as the zone throat. Defer until the layout has compiled the
+      // marker (e.g. it was just placed); the next reseed/spawn picks it up.
+      const markerId = `M-${piece.id}`;
+      if (nearestMarkerId(this.layout, piece.position) === undefined) return;
+      this.simulation.bindIdentityTag(markerId);
+      this.simulation.spawnRailyard(deviceIdForDevicePiece(piece), markerId, RAILYARD_CAPACITY);
       return;
     }
     if (piece.type === 'carriage') {

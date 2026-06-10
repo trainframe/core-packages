@@ -3,6 +3,7 @@ import { useBroker } from '../broker/broker-context.js';
 import type { BrokerClient } from '../broker/client.js';
 import { encodeDeviceEvent } from '../broker/encode-event.js';
 import { buildBridgeDemo } from '../demo/bridge-demo.js';
+import { buildRailyardDemo } from '../demo/railyard-demo.js';
 import { nearestStartEdge } from '../sim/nearest-edge.js';
 import type { ToyHardware } from '../sim/toy-hardware.js';
 import { useToyHardware } from '../sim/use-toy-hardware.js';
@@ -25,6 +26,10 @@ import {
   PIECE_LABELS,
   PIECE_TINT,
   type PieceFeature,
+  RAILYARD_GANTRY_X,
+  RAILYARD_HEAD_Y,
+  RAILYARD_RAIL_Y,
+  RAILYARD_SLOT_YS,
   type RotationDeg,
   type SupportColumn,
   TOYBOX_TRAYS,
@@ -90,7 +95,6 @@ const DEVICE_FILL: Record<DevicePieceType, string> = {
   train: '#cf4436',
   carriage: '#3f6fa6',
   gate: '#8a929c',
-  railyard: '#5b7b6a',
 };
 
 /**
@@ -675,6 +679,40 @@ export function trailingCarriagePose(
  */
 type ToySimulation = ReturnType<ToyHardware['getSimulation']>;
 
+/**
+ * Render a PARKED train (no current sim edge — it ran to a route end and
+ * stopped) and its rake from the traversal history, so the whole train stays on
+ * the rail behind where it stopped instead of every piece snapping back to its
+ * static placement off the track. `offset 0` is the loco at its parked marker;
+ * carriages trail back from there. No-op (→ static fallback) when the train has
+ * no position at all (deferred — scanned with no track yet).
+ */
+function placeParkedTrain(
+  piece: TrackPiece,
+  simTrain: NonNullable<ReturnType<ToySimulation['getTrain']>>,
+  piecesById: ReadonlyMap<string, TrackPiece>,
+  edgeEstLen: (f: string, to: string) => number,
+  carriageIds: ReadonlyArray<string>,
+  result: Map<string, WorldPosition>,
+): void {
+  const cache = new Map<string, EdgePath>();
+  const locoPose = trailingCarriagePose(simTrain, 0, piecesById, edgeEstLen, cache);
+  if (locoPose === undefined) return;
+  result.set(piece.id, locoPose);
+  for (let i = 0; i < carriageIds.length; i++) {
+    const carriageId = carriageIds[i];
+    if (carriageId === undefined) continue;
+    const pose = trailingCarriagePose(
+      simTrain,
+      (i + 1) * CARRIAGE_SPACING_MM,
+      piecesById,
+      edgeEstLen,
+      cache,
+    );
+    if (pose !== undefined) result.set(carriageId, pose);
+  }
+}
+
 function placeLiveTrain(
   piece: TrackPiece,
   sim: ToySimulation,
@@ -685,8 +723,15 @@ function placeLiveTrain(
   const simTrain = sim.getTrain(`T-${piece.id}`);
   if (simTrain === undefined) return;
 
+  const edgeEstLen = (f: string, to: string): number =>
+    sim.layout.findEdge(f, to)?.estimated_length_mm ?? 200;
+  const carriageIds = trainTrails.get(piece.id) ?? [];
+
   const endpoints = resolveEdgeEndpoints(simTrain, piecesById);
-  if (endpoints === undefined) return;
+  if (endpoints === undefined) {
+    placeParkedTrain(piece, simTrain, piecesById, edgeEstLen, carriageIds, result);
+    return;
+  }
 
   const { fromPiece, toPiece, fromMarkerId, toMarkerId } = endpoints;
 
@@ -711,10 +756,7 @@ function placeLiveTrain(
      current-edge carriages are a cache hit; previous-edge carriages compose
      once per distinct edge and then also hit the cache. */
   const pathCache = new Map<string, EdgePath>([[`${fromMarkerId}->${toMarkerId}`, path]]);
-  const edgeEstLen = (f: string, to: string): number =>
-    sim.layout.findEdge(f, to)?.estimated_length_mm ?? 200;
 
-  const carriageIds = trainTrails.get(piece.id) ?? [];
   for (let i = 0; i < carriageIds.length; i++) {
     const carriageId = carriageIds[i];
     if (carriageId === undefined) continue;
@@ -785,11 +827,19 @@ function placeYardSpares(
   const yard = sim.getRailyard(`YARD-${piece.id}`);
   if (yard === undefined) return;
   const spares = yard.getSpares();
+  // Each held wagon sits in its own slot (one of the yard's six pass-through
+  // bays), so a swapped-out carriage reads as parked on yard track rather than
+  // stranded. Slots are local-frame rows; transform to world by the yard's pose.
   for (let i = 0; i < spares.length; i++) {
     const id = spares[i]?.id;
     if (id === undefined) continue;
-    const x = piece.position.x + (i - (spares.length - 1) / 2) * CARRIAGE_SPACING_MM;
-    result.set(id, { x, y: piece.position.y + 32, rotationDeg: 0 });
+    const slotY = RAILYARD_SLOT_YS[i % RAILYARD_SLOT_YS.length] ?? 0;
+    const lane = Math.floor(i / RAILYARD_SLOT_YS.length); // 2nd wagon per slot sits west
+    const lx = lane * -CARRIAGE_SPACING_MM;
+    const rad = (piece.rotationDeg * Math.PI) / 180;
+    const x = piece.position.x + lx * Math.cos(rad) - slotY * Math.sin(rad);
+    const y = piece.position.y + lx * Math.sin(rad) + slotY * Math.cos(rad);
+    result.set(id, { x, y, rotationDeg: piece.rotationDeg });
   }
 }
 
@@ -839,6 +889,30 @@ function trainUnderSensor(
     const pos = renderPositions.get(p.id) ?? p.position;
     const d = Math.hypot(pos.x - station.position.x, pos.y - station.position.y);
     if (d <= VISION_SENSOR_RANGE_MM) return true;
+  }
+  return false;
+}
+
+/** A train this close to the yard's throat marker (its piece centre, where a
+ * serviced train parks) counts as "in the yard". Kept well under the yard's
+ * descent drop (~290 mm) so a train passing on the main loop above never trips
+ * it — only one that has actually pulled into the yard does. */
+const YARD_SERVICING_RANGE_MM = 180;
+
+/** True when a live train currently renders at the yard's throat — "a train is
+ * in the yard, being serviced". The crane only comes alive while this holds; an
+ * empty yard parks its crane at home. Visual only. */
+function trainOverYard(
+  yard: TrackPiece,
+  pieces: ReadonlyArray<TrackPiece>,
+  liveIds: ReadonlySet<string>,
+  renderPositions: ReadonlyMap<string, WorldPosition>,
+): boolean {
+  for (const p of pieces) {
+    if (p.type !== 'train' || !liveIds.has(p.id)) continue;
+    const pos = renderPositions.get(p.id) ?? p.position;
+    const d = Math.hypot(pos.x - yard.position.x, pos.y - yard.position.y);
+    if (d <= YARD_SERVICING_RANGE_MM) return true;
   }
   return false;
 }
@@ -1070,6 +1144,9 @@ declare global {
     /** DEV-only seed hook: stages the two-train bridge demo on the table.
      * Registered behind `import.meta.env.DEV`; absent in production builds. */
     __tfLoadBridgeDemo?: (() => void) | undefined;
+    /** DEV-only seed hook: stages the multi-train railyard spectacle on the
+     * table. Registered behind `import.meta.env.DEV`; absent in production. */
+    __tfLoadRailyardDemo?: (() => void) | undefined;
   }
 }
 
@@ -1301,6 +1378,62 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       window.__tfLoadBridgeDemo = undefined;
     };
   }, [client]);
+
+  // DEV-only: stage the multi-train railyard spectacle — a main loop with the
+  // yard hung off it as a junction branch, trains each with a coloured rake, and
+  // purple spares in the yard. Marks every piece live and scans it onto the bus
+  // (like the scan-box) so an external server resolves the trains' marker
+  // observations and can schedule them. The orchestrator
+  // (scripts/railyard-demo-server) then assigns each train a cyclic schedule.
+  //
+  // Consists are seeded EXPLICITLY via the sim API once the trains spawn, NOT by
+  // proximity: the four stations sit close enough that ToyHardware's proximity
+  // reseed would merge adjacent trains' rakes into one. We let that reseed run
+  // (it fires once at stage time on the static positions) and then overwrite it
+  // with each train's exact rake by id — so what migrates is never guessed.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    window.__tfLoadRailyardDemo = () => {
+      const demo = buildRailyardDemo();
+      setPieces(demo.pieces);
+      setLiveIds(new Set(demo.liveIds));
+      let garage = garageRegisteredRef.current;
+      for (const piece of demo.pieces) {
+        if (scanPiece(client, piece, garage)) garage = true;
+      }
+      garageRegisteredRef.current = garage;
+
+      // Poll until every train + the yard have spawned, then seed consists +
+      // spares by id (overriding the proximity reseed). Bounded so a failed
+      // stage doesn't poll forever.
+      const seedConsists = (attempt: number): void => {
+        const sim = hardwareRef.current?.getSimulation();
+        const ready =
+          sim !== undefined &&
+          demo.trains.every((t) => sim.getTrain(t.deviceId) !== undefined) &&
+          sim.getRailyard(demo.yardDeviceId) !== undefined;
+        if (!ready) {
+          if (attempt < 50) setTimeout(() => seedConsists(attempt + 1), 100);
+          return;
+        }
+        for (const t of demo.trains) {
+          sim.setTrainConsist(
+            t.deviceId,
+            t.consist.map((c) => ({ id: c.id, colorId: c.colorId as CarriageColorId })),
+          );
+        }
+        sim
+          .getRailyard(demo.yardDeviceId)
+          ?.loadSpares(
+            demo.yardSpares.map((c) => ({ id: c.id, colorId: c.colorId as CarriageColorId })),
+          );
+      };
+      seedConsists(0);
+    };
+    return () => {
+      window.__tfLoadRailyardDemo = undefined;
+    };
+  }, [client, hardwareRef]);
 
   // pagehide: publish `device_disconnected` for every wire-visible live
   // device before the WebSocket tears down. Playwright's `page.close()`
@@ -2562,6 +2695,11 @@ function Table({
               coupledToTrainId={carriageCoupledTo.get(p.id)}
               renderPosition={renderPositions.get(p.id)}
               experimentVisual={experimentVisuals.get(p.id)}
+              servicing={
+                p.type === 'railyard' &&
+                liveIds.has(p.id) &&
+                trainOverYard(p, pieces, liveIds, renderPositions)
+              }
               onAction={(action) => onPieceAction(p.id, action)}
               dragOverride={
                 pieceDragPreview?.id === p.id
@@ -2707,6 +2845,10 @@ interface PieceRendererProps {
   /** Live moving-part state for an experimental piece (deck angle, span
    * raised, LED lit); undefined for pieces with no moving parts. */
   readonly experimentVisual: ExperimentVisual | undefined;
+  /** For a railyard piece: true while a train is in the yard being serviced.
+   * The gantry crane only runs its servicing choreography while this holds;
+   * an idle yard parks its crane at home. False for every other piece type. */
+  readonly servicing: boolean;
   readonly onAction: (action: 'select' | PowerToggleAction) => void;
   /**
    * While a pointer-drag of this piece is in progress, the live world position
@@ -2737,6 +2879,15 @@ function powerLabelSuffix(live: boolean, powered: boolean): string {
   return powered ? ' (powered on)' : ' (powered off)';
 }
 
+/** A piece's solid body colour: the beech-wood gradient for track, a carriage's
+ *  intrinsic livery, or the device's flat colour. (Calls the `isDevicePiece`
+ *  type guard so `piece.type` narrows to a `DEVICE_FILL` key.) */
+function pieceBodyFill(piece: TrackPiece): string {
+  if (!isDevicePiece(piece.type)) return WOOD_FILL;
+  if (piece.type === 'carriage') return carriageFill(piece);
+  return DEVICE_FILL[piece.type];
+}
+
 function PieceRenderer({
   piece,
   selected,
@@ -2747,6 +2898,7 @@ function PieceRenderer({
   coupledToTrainId,
   renderPosition,
   experimentVisual,
+  servicing,
   onAction,
   dragOverride,
   onDragMove,
@@ -2759,11 +2911,7 @@ function PieceRenderer({
   // carriage's colour is its intrinsic livery (so a wagon stays trackable as it
   // is shunted between trains), defaulting to the standard blue.
   const tint = PIECE_TINT[piece.type];
-  const bodyFill = isDevice
-    ? piece.type === 'carriage'
-      ? carriageFill(piece)
-      : DEVICE_FILL[piece.type]
-    : WOOD_FILL;
+  const bodyFill = pieceBodyFill(piece);
   // Wire devices (train / gate) can be powered off by clicking when live.
   // Carriages are wire-invisible — clicking a live carriage just selects it.
   const isWire = isWireDevice(piece.type);
@@ -2896,6 +3044,10 @@ function PieceRenderer({
       {/* The moving / lit parts of an experimental piece ride inside the same
           transformed group, over the static body (null for ordinary pieces). */}
       <ExperimentParts pieceId={piece.id} visual={experimentVisual} />
+      {/* The railyard's XY gantry: foundations OUTSIDE the slots, a bridge that
+          rolls along them, and a crane head that crosses the bridge to reach
+          over any slot. Drawn over the wooden track, in the yard's local frame. */}
+      {piece.type === 'railyard' && <RailyardGantry servicing={servicing} />}
       {/* Power dot for wire-visible devices only (train / gate): green when
           powered, grey when inert/off-bus. Carriages have no wire identity —
           no dot. Clicking the dot of an on-track train toggles its power in
@@ -2911,6 +3063,236 @@ function PieceRenderer({
           onTogglePower={() => onAction({ type: 'power-toggle', pieceId: piece.id })}
         />
       )}
+    </g>
+  );
+}
+
+const RAILYARD_STEEL = '#7c8a94';
+const RAILYARD_STEEL_DARK = '#5a6770';
+const RAILYARD_STEEL_LIGHT = '#aeb9c1';
+
+/* The gantry's choreography is DRIVEN BY THE WORK, not a blind timer. A serviced
+   train parks at the yard's throat — the gantry's exact centre (local 0,0,
+   measured live). So the crane does one purposeful thing: while a train is in
+   the yard it RUNS IN from its home end to centre, over the train, then works
+   the hook up-and-down on the spot until the train leaves; idle, it sits parked
+   at home and does nothing. No sweeping empty bays. The run-in plays once
+   (`fill="freeze"`); the hook lift + hum + LED pulse begin only once the bridge
+   has arrived (`begin="<run>"`). */
+const GX = RAILYARD_GANTRY_X;
+const SERVICE_RUN_DUR_S = 2.4;
+const SERVICE_RUN_DUR = `${SERVICE_RUN_DUR_S}s`;
+/* Bridge: home end (-GX) → centre (0), over the train at the throat. */
+const BRIDGE_RUN_VALUES = `${-GX} 0;0 0`;
+/* Hook: a slow lift-and-lower over the coupling — the actual working stroke. */
+const HEAD_LIFT_VALUES = '0 0;0 -7;0 0';
+const LED_IDLE = '#4ad7b0';
+const LED_WORK = '#ffb52e';
+/* LED pulse while working: amber stroke, back to teal, repeating. */
+const LED_PULSE_VALUES = `${LED_WORK};${LED_IDLE};${LED_WORK}`;
+
+/**
+ * The railyard's XY gantry — a 3D-printer-style frame straddling the yard. Its
+ * FOUNDATIONS (the two side rails + feet) sit OUTSIDE the outer slots, running
+ * the length of the yard. A BRIDGE spans across them and rolls along their
+ * length (local x); a CRANE HEAD rides the bridge and crosses it (local y), so
+ * the head can reach any point OVER the track without the foundations ever
+ * standing on it. Everything is in the yard's local frame, so it rotates with
+ * the piece; motion is SMIL, so it animates with no React re-render.
+ */
+function RailyardGantry({ servicing }: { servicing: boolean }) {
+  const railY = RAILYARD_RAIL_Y;
+  const railX = GX + 14; // foundations overrun the bridge's travel a touch
+  const beam = 5;
+  return (
+    <g>
+      {/* Foundations: the two side rails (along the length, OUTSIDE the slots)
+          and a foot at each corner — the only parts that touch the table. */}
+      {[-railY, railY].map((y) => (
+        <rect
+          key={`rail-${y}`}
+          x={-railX}
+          y={y - beam / 2}
+          width={railX * 2}
+          height={beam}
+          rx={2}
+          fill={RAILYARD_STEEL}
+        />
+      ))}
+      {[-railX, railX].flatMap((x) =>
+        [-railY, railY].map((y) => (
+          <rect
+            key={`foot-${x},${y}`}
+            x={x - 5}
+            y={y - 5}
+            width={10}
+            height={10}
+            rx={2}
+            fill={RAILYARD_STEEL_DARK}
+          />
+        )),
+      )}
+      <RailyardCrane railY={railY} beam={beam} servicing={servicing} />
+    </g>
+  );
+}
+
+/** The rolling bridge + crane head. Split out so the foundations stay static
+ *  while this whole group translates along the rails. The crane only RUNS its
+ *  servicing choreography (bridge + head + vibration + LED) while a train is in
+ *  the yard; idle, it sits parked at its home end — the user's "move only to act
+ *  on trains". Mounting/unmounting the `<animateTransform>` on `servicing`
+ *  restarts the run from home each time a train arrives, which is what we want;
+ *  an empty yard renders a wholly static crane at the home pose. */
+function RailyardCrane({
+  railY,
+  beam,
+  servicing,
+}: {
+  railY: number;
+  beam: number;
+  servicing: boolean;
+}) {
+  return (
+    <g>
+      {/* Bridge runs IN from home (-GX) to centre (0) over the serviced train,
+          once, and freezes there; parked at home when idle. */}
+      <g transform={servicing ? undefined : `translate(${-GX}, 0)`}>
+        {servicing && (
+          <animateTransform
+            attributeName="transform"
+            type="translate"
+            values={BRIDGE_RUN_VALUES}
+            keyTimes="0;1"
+            dur={SERVICE_RUN_DUR}
+            calcMode="spline"
+            keySplines="0.45 0 0.2 1"
+            fill="freeze"
+            repeatCount="1"
+          />
+        )}
+        {/* The bridge: a steel lattice truss spanning the two side rails, a truck
+            riding each. The girder reads as the gantry's main beam. */}
+        <RailyardTruss railY={railY} />
+        {[-railY, railY].map((y) => (
+          <rect
+            key={`truck-${y}`}
+            x={-8}
+            y={y - beam / 2 - 2}
+            width={16}
+            height={beam + 4}
+            rx={2}
+            fill={RAILYARD_STEEL_DARK}
+          />
+        ))}
+        {/* Crane head: once the bridge has run in (begin=run duration), works the
+            hook up-and-down over the coupling. No travel in y otherwise — it sits
+            over the train, not over empty bays. */}
+        <g>
+          {servicing && (
+            <animateTransform
+              attributeName="transform"
+              type="translate"
+              values={HEAD_LIFT_VALUES}
+              dur="1.6s"
+              begin={SERVICE_RUN_DUR}
+              calcMode="spline"
+              keySplines="0.4 0 0.6 1;0.4 0 0.6 1"
+              repeatCount="indefinite"
+            />
+          )}
+          <RailyardHead servicing={servicing} />
+        </g>
+      </g>
+    </g>
+  );
+}
+
+/** The bridge girder, drawn as a steel lattice truss spanning the side rails
+ *  (local y). Two chords with a Warren zigzag of cross-bracing between them and
+ *  a few node gussets — the gantry's main beam, in workshop steel. */
+function RailyardTruss({ railY }: { railY: number }) {
+  const half = 5; // chord offset either side of the bridge centreline
+  const bays = 10;
+  const step = (railY * 2) / bays;
+  let zig = `M ${-half} ${-railY}`;
+  const nodes: Array<[number, number]> = [];
+  for (let i = 1; i <= bays; i++) {
+    const y = -railY + i * step;
+    const cx = i % 2 === 0 ? -half : half;
+    zig += ` L ${cx} ${y}`;
+    nodes.push([cx, y]);
+  }
+  return (
+    <g>
+      {/* Two chords running the length of the truss. */}
+      <rect x={-half - 1} y={-railY} width={2} height={railY * 2} rx={1} fill={RAILYARD_STEEL} />
+      <rect x={half - 1} y={-railY} width={2} height={railY * 2} rx={1} fill={RAILYARD_STEEL} />
+      {/* Diagonal lattice web between the chords. */}
+      <path
+        d={zig}
+        fill="none"
+        stroke={RAILYARD_STEEL_LIGHT}
+        strokeWidth={1.6}
+        strokeLinejoin="round"
+      />
+      {/* Rivet gussets where the web meets a chord. */}
+      {nodes.map(([cx, cy]) => (
+        <circle key={`node-${cy}`} cx={cx} cy={cy} r={1.3} fill={RAILYARD_STEEL_DARK} />
+      ))}
+    </g>
+  );
+}
+
+/** The crane head itself: a housing carrying a downward CAMERA (the computer-
+ *  vision element that reads each wagon's livery) and a status LED. The wedge
+ *  that splits couplings is a physical part below the head — not rendered. A
+ *  subtle constant jitter is the head's working "vibration". */
+function RailyardHead({ servicing }: { servicing: boolean }) {
+  return (
+    <g>
+      {/* Vibration: a tiny jitter, additive over the hook's lift — the working
+          "hum", begun only once the crane has run in over the train. */}
+      {servicing && (
+        <animateTransform
+          attributeName="transform"
+          type="translate"
+          additive="sum"
+          values="0 0;0.5 0.4;-0.4 0.5;0.4 -0.4;0 0"
+          dur="0.22s"
+          begin={SERVICE_RUN_DUR}
+          repeatCount="indefinite"
+        />
+      )}
+      {/* Head housing (the trolley body on the bridge). */}
+      <rect x={-11} y={-13} width={22} height={26} rx={4} fill="#2f3a42" />
+      <rect
+        x={-11}
+        y={-13}
+        width={22}
+        height={26}
+        rx={4}
+        fill="none"
+        stroke={RAILYARD_STEEL_LIGHT}
+        strokeWidth={1}
+      />
+      {/* Camera: a lens housing under the head, looking down at the coupling. */}
+      <circle cx={0} cy={3} r={5.5} fill="#11151a" />
+      <circle cx={0} cy={3} r={3} fill="#1c3a4a" />
+      <circle cx={-1.4} cy={1.6} r={1} fill="#cfe9f2" />
+      {/* Status LED on the head's shoulder — pulses amber while working, holds
+          teal idle when no train is in the yard. */}
+      <circle cx={0} cy={-8} r={2.6} fill={LED_IDLE}>
+        {servicing && (
+          <animate
+            attributeName="fill"
+            values={LED_PULSE_VALUES}
+            dur="1.6s"
+            begin={SERVICE_RUN_DUR}
+            repeatCount="indefinite"
+          />
+        )}
+      </circle>
     </g>
   );
 }
@@ -3028,15 +3410,18 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
     return false;
   }
   if (piece.type === 'railyard') {
-    // A railyard announces gates_zone (admission) + reports_length (it may
-    // reconcile a train's length on the way out, ADR-023). Its zone capacity +
-    // occupancy arrive separately as zone_state_changed from the sim device.
+    // The railyard is itself a length of track (a pass-through yard), so it
+    // contributes a marker like any track piece — bound via the GARAGE in the
+    // track path below. In ADDITION, it announces gates_zone (admission) +
+    // reports_length (it may reconcile a train's length on the way out,
+    // ADR-023). Its zone capacity + occupancy arrive separately as
+    // zone_state_changed from the sim device. Note: NO early return — fall
+    // through so the GARAGE binds its `M-{id}` marker too.
     const device_id = deviceIdForDevicePiece(piece);
     const reg = encodeDeviceEvent('device_registered', device_id, {
       capabilities: ['core.gates_zone', 'core.reports_length'],
     });
     client.publish(reg.topic, reg.payload);
-    return false;
   }
   // Track piece — announce GARAGE if needed, then bind the tag.
   let announced = false;

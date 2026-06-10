@@ -183,11 +183,11 @@ describe('carriageWorldPos — position along a horizontal edge', () => {
     expect(pos.rotationDeg).toBeCloseTo(0);
   });
 
-  it('places the first coupled carriage (trail index 0) at (50, 0) given d=100 and spacing 50', () => {
-    // d_carriage = 100 - (0 + 1) * CARRIAGE_SPACING_MM = 100 - 50 = 50
+  it('places the first coupled carriage (trail index 0) one spacing behind the head', () => {
+    // d_carriage = 100 - (0 + 1) * CARRIAGE_SPACING_MM, along the +x edge.
     const carriageDist = 100 - 1 * CARRIAGE_SPACING_MM;
     const pos = carriageWorldPos(FROM, TO, LENGTH, carriageDist);
-    expect(pos.x).toBeCloseTo(50);
+    expect(pos.x).toBeCloseTo(100 - CARRIAGE_SPACING_MM);
     expect(pos.y).toBeCloseTo(0);
     expect(pos.rotationDeg).toBeCloseTo(0);
   });

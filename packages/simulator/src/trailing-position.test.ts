@@ -163,6 +163,56 @@ describe('getTrailingPosition — crossing onto the previous edge after a transi
   });
 });
 
+describe('getTrailingPosition — station departure keeps the arrival edge', () => {
+  it('records the just-traversed edge when a parked train is replanned onward', () => {
+    const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
+    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+    sim.handleCommand('T1', 'assign_route', {
+      route_id: 'in',
+      edges: [
+        { from_marker_id: 'M1', to_marker_id: 'M2' },
+        { from_marker_id: 'M2', to_marker_id: 'M3' },
+      ],
+    });
+    sim.handleCommand('T1', 'grant_clearance', { limit_marker_id: 'M3' });
+
+    // Run in and PARK at the station M3 (the end of the M2→M3 arrival edge).
+    let spent = 0;
+    for (; spent < 30_000; spent += 50) {
+      const t = sim.getTrain('T1');
+      const e = t?.getCurrentEdge();
+      if (
+        e?.to_marker_id === 'M3' &&
+        (t?.getDistanceIntoEdge() ?? 0) >= 200 &&
+        t?.getVelocity() === 0
+      )
+        break;
+      sim.advance(50);
+    }
+    const train = sim.getTrain('T1');
+    if (!train) throw new Error('train missing');
+    expect(train.getCurrentEdge()).toEqual({ from_marker_id: 'M2', to_marker_id: 'M3' });
+
+    // The scheduler replans the dwelling train onward from the station.
+    sim.handleCommand('T1', 'assign_route', {
+      route_id: 'out',
+      edges: [
+        { from_marker_id: 'M3', to_marker_id: 'M4' },
+        { from_marker_id: 'M4', to_marker_id: 'M1' },
+      ],
+    });
+
+    // A wagon 50 mm behind the loco must sit on the ARRIVAL edge M2→M3 (at
+    // 200 − 50), NOT skip back onto M1→M2. Before the fix the arrival edge was
+    // dropped from the history on replan, so the whole rake jumped backward a
+    // full edge the moment the train pulled out of the station.
+    const pos = train.getTrailingPosition(50);
+    expect(pos?.edge.from_marker_id).toBe('M2');
+    expect(pos?.edge.to_marker_id).toBe('M3');
+    expect(pos?.distance_into_edge_mm).toBeCloseTo(150, 5);
+  });
+});
+
 describe('getTrailingPosition — spanning two edges back', () => {
   it('resolves a tail that spans two historical edges on a short-edge layout', () => {
     /* 100mm edges. Drive onto edge C→D; offset > (distance + 100 + something)
@@ -203,8 +253,8 @@ describe('getTrailingPosition — spanning two edges back', () => {
   });
 });
 
-describe('getTrailingPosition — clamp at spawn (no history, offset > distance)', () => {
-  it('clamps to the start of the current edge when history is empty', () => {
+describe('getTrailingPosition — graph walk-back when history is empty (closed loop)', () => {
+  it('walks the layout graph backwards onto the real predecessor edges', () => {
     const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
     sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
     sim.handleCommand('T1', 'assign_route', {
@@ -212,7 +262,7 @@ describe('getTrailingPosition — clamp at spawn (no history, offset > distance)
       edges: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
     });
     sim.handleCommand('T1', 'grant_clearance', { limit_marker_id: 'M2' });
-    sim.advance(300); // still on M1→M2
+    sim.advance(300); // still on M1→M2, now at the M2 end (dist 200)
 
     const train = sim.getTrain('T1');
     if (!train) throw new Error('train missing');
@@ -221,20 +271,23 @@ describe('getTrailingPosition — clamp at spawn (no history, offset > distance)
     const edge = train.getCurrentEdge();
     expect(edge?.from_marker_id).toBe('M1');
 
-    /* A massive offset with no history → clamp to current_edge at 0. */
+    /* A big offset with no history no longer piles at the edge start: it follows
+       the loop backwards — M1 ← M4←M1(200) ← M3←M4(200) ← lands on M2→M3 with
+       (700 − 200 dist − 200 − 200) = 100 mm remaining into it. A trailing
+       carriage sits on real track behind the head, not on top of it. */
     const pos = train.getTrailingPosition(dist + 500);
 
     expect(pos).not.toBeNull();
-    expect(pos?.edge.from_marker_id).toBe('M1');
-    expect(pos?.edge.to_marker_id).toBe('M2');
-    expect(pos?.distance_into_edge_mm).toBe(0);
+    expect(pos?.edge.from_marker_id).toBe('M2');
+    expect(pos?.edge.to_marker_id).toBe('M3');
+    expect(pos?.distance_into_edge_mm).toBe(100);
   });
 });
 
-describe('getTrailingPosition — clamp to oldest history edge when history is non-empty', () => {
-  it('clamps to the start of the oldest historical edge when offset exceeds total known track', () => {
+describe('getTrailingPosition — continues past history onto graph predecessors', () => {
+  it('walks the loop backwards past the oldest historical edge', () => {
     /* Put exactly two edges of history, then ask for an offset larger than
-       dist + edge2 + edge1. */
+       dist + edge2 + edge1 — the surplus now walks the loop instead of clamping. */
     const sim = new Simulation({ layout: SHORT_LOOP, seed: 1 });
     sim.spawnTrain('T1', { startEdge: { from_marker_id: 'A', to_marker_id: 'B' } });
     sim.handleCommand('T1', 'assign_route', {
@@ -256,29 +309,64 @@ describe('getTrailingPosition — clamp to oldest history edge when history is n
 
     const dist = train.getDistanceIntoEdge();
 
-    /* offset > dist + 100 (B→C) + 100 (A→B) = dist + 200 → exhausts history. */
+    /* offset = dist + 250. History (B→C 100, A→B 100) absorbs 200; the remaining
+       50 walks one more predecessor back from A — the loop's D→A edge — landing
+       at (100 − 50) = 50 mm into it. */
     const pos = train.getTrailingPosition(dist + 250);
 
     expect(pos).not.toBeNull();
-    /* Oldest history entry should be A→B, clamped at distance 0. */
-    expect(pos?.edge.from_marker_id).toBe('A');
-    expect(pos?.edge.to_marker_id).toBe('B');
+    expect(pos?.edge.from_marker_id).toBe('D');
+    expect(pos?.edge.to_marker_id).toBe('A');
+    expect(pos?.distance_into_edge_mm).toBe(50);
+  });
+});
+
+describe('getTrailingPosition — clamps at a genuine dead-end (no predecessor edge)', () => {
+  it('clamps to the start of the oldest edge when the track does not continue back', () => {
+    /* A LINE, not a loop: M1→M2→M3 with nothing leading INTO M1. A train on
+       M1→M2 with a huge offset has no predecessor to walk onto, so it clamps at
+       the start of its edge — the original spawn-time behaviour, preserved for
+       open track. */
+    const LINE: Layout = {
+      name: 'line',
+      markers: [
+        { id: 'M1', kind: 'block_boundary' },
+        { id: 'M2', kind: 'block_boundary' },
+        { id: 'M3', kind: 'block_boundary' },
+      ],
+      edges: [
+        { from_marker_id: 'M1', to_marker_id: 'M2', estimated_length_mm: 200 },
+        { from_marker_id: 'M2', to_marker_id: 'M3', estimated_length_mm: 200 },
+      ],
+      junctions: [],
+    };
+    const sim = new Simulation({ layout: LINE, seed: 1 });
+    sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
+
+    const train = sim.getTrain('T1');
+    if (!train) throw new Error('train missing');
+
+    const pos = train.getTrailingPosition(500); // no history, no predecessor into M1
+    expect(pos).not.toBeNull();
+    expect(pos?.edge.from_marker_id).toBe('M1');
+    expect(pos?.edge.to_marker_id).toBe('M2');
     expect(pos?.distance_into_edge_mm).toBe(0);
   });
 });
 
-describe('getTrailingPosition — null when no current edge (route ended)', () => {
-  it('returns null after the train reaches its final route marker and parks off-track', () => {
+describe('getTrailingPosition — parked train trails along its last edge', () => {
+  it('keeps a stopped (no current edge) train on the rail behind where it parked', () => {
     /* Single-edge route: M1→M2 only. Clearance to M3 (past the route end) so
-       that crossing M2 triggers transitionToNextEdge's null branch. */
+       that crossing M2 triggers transitionToNextEdge's null branch — the train
+       parks at M2 with current_edge = null. Rather than returning null (which
+       would snap the rendered rake to static placement off the rail), it now
+       trails from the END of its last edge, so a stopped train stays on track. */
     const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
     sim.spawnTrain('T1', { startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' } });
     sim.handleCommand('T1', 'assign_route', {
       route_id: 'r1',
       edges: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
     });
-    /* Clearance past the route's only edge end → train crosses M2 freely
-       and transitionToNextEdge finds no next edge → current_edge = null. */
     sim.handleCommand('T1', 'grant_clearance', { limit_marker_id: 'M3' });
     sim.advance(15_000);
 
@@ -286,8 +374,14 @@ describe('getTrailingPosition — null when no current edge (route ended)', () =
     if (!train) throw new Error('train missing');
 
     expect(train.getCurrentEdge()).toBeNull();
-    expect(train.getTrailingPosition(0)).toBeNull();
-    expect(train.getTrailingPosition(50)).toBeNull();
+    // Head (offset 0): parked at the M2 end of its last edge M1→M2 (200 mm).
+    const head = train.getTrailingPosition(0);
+    expect(head?.edge).toEqual({ from_marker_id: 'M1', to_marker_id: 'M2' });
+    expect(head?.distance_into_edge_mm).toBe(200);
+    // A carriage 50 mm back is still on M1→M2, on the rail behind the head.
+    const car = train.getTrailingPosition(50);
+    expect(car?.edge).toEqual({ from_marker_id: 'M1', to_marker_id: 'M2' });
+    expect(car?.distance_into_edge_mm).toBe(150);
   });
 });
 
