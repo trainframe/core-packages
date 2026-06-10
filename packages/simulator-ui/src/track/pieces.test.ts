@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CRANE_INITIAL_CRATES,
   CRANE_STACK_SLOTS,
+  CRANE_TROLLEY_REST_Y_MM,
   type CentreLinePath,
   EXPERIMENT_PIECE_TYPES,
   PIECE_TINT,
@@ -16,6 +17,7 @@ import {
   type TrackPieceType,
   carriageCratePath,
   craneCratePath,
+  craneTrolley,
   getCentreLinePath,
   getEndpoints,
   getPieceShape,
@@ -907,12 +909,19 @@ describe('vision station + crane (experimental 001 / 003) — stations underneat
     expect(shape.features.some((f) => f.role === 'glass')).toBe(true);
   });
 
-  it('the crane carries a metal gantry; its crate stack is a LIVE part, not static decor', () => {
+  it('the crane carries a metal gantry; the trolley arm and crate stack are LIVE parts', () => {
     const shape = getPieceShape(makePiece('crane-station'));
+    // Two uprights + the cantilevered beam — the runway the trolley travels.
     expect(shape.features.filter((f) => f.role === 'metal').length).toBeGreaterThanOrEqual(3);
-    // The hook accent is the only static pop; crates render from the live
-    // stack count (the crane grows/shrinks it working wagons).
-    expect(shape.features.filter((f) => f.role === 'pop').length).toBe(1);
+    // No static pop at all: the bright hook rides the MOVING trolley, and
+    // crates render from the live stack count.
+    expect(shape.features.filter((f) => f.role === 'pop').length).toBe(0);
+    const trolley = craneTrolley();
+    expect(trolley.some((f) => f.role === 'pop')).toBe(true);
+    expect(trolley.some((f) => f.role === 'metal')).toBe(true);
+    // The trolley's travel spans rail (y=0) to a rest beyond the plank edge
+    // (half-width 13) — a real, visible slide.
+    expect(CRANE_TROLLEY_REST_Y_MM).toBeGreaterThan(13);
     expect(CRANE_STACK_SLOTS.length).toBeGreaterThanOrEqual(CRANE_INITIAL_CRATES);
     expect(craneCratePath(0, 0).length).toBeGreaterThan(0);
     expect(carriageCratePath().length).toBeGreaterThan(0);

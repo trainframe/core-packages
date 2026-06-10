@@ -554,3 +554,97 @@ describe('ToyHardware — experimental devices', () => {
     }
   });
 });
+
+describe('ToyHardware — device state survives topology rebuilds', () => {
+  it('a raised span stays raised and a spun deck stays spun when track is added', () => {
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId });
+    try {
+      const bridge = piece('lift-bridge', 100, 100);
+      const turntable = piece('turntable', 500, 100);
+      const before = [bridge, turntable];
+      const live = new Set([bridge.id, turntable.id]);
+      hardware.syncLayout(before);
+      hardware.syncLive(before, live);
+
+      // The operator raises the span and spins the deck…
+      hardware
+        .getSimulation()
+        .getGate(`BRIDGE-${bridge.id}`)
+        ?.withhold(`M-${bridge.id}`, 'span raised');
+      hardware.getSimulation().getSwitch(`SWITCH-${turntable.id}`)?.setPosition('stub-b');
+
+      // …then extends the track. Topology changes ⇒ the sim is rebuilt.
+      const extended = [...before, piece('straight', 800, 100)];
+      hardware.syncLayout(extended);
+      hardware.syncLive(extended, live);
+
+      const sim = hardware.getSimulation();
+      expect(sim.getGate(`BRIDGE-${bridge.id}`)?.isWithholding(`M-${bridge.id}`)).toBe(true);
+      expect(sim.getSwitch(`SWITCH-${turntable.id}`)?.getPosition()).toBe('stub-b');
+
+      /* The respawned devices RE-ASSERT their state on the bus — one
+       * withholding event before the rebuild, one after, like a device coming
+       * back up announcing where it stands. */
+      const gateTopic = `railway/events/gate_state_changed/BRIDGE-${bridge.id}`;
+      expect(client.published.filter((m) => m.topic === gateTopic)).toHaveLength(2);
+      const switchTopic = `railway/events/switch_state_changed/SWITCH-${turntable.id}`;
+      expect(client.published.filter((m) => m.topic === switchTopic)).toHaveLength(2);
+    } finally {
+      hardware.dispose();
+    }
+  });
+
+  it('default state is NOT re-asserted: a seated span and unset deck stay silent', () => {
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId });
+    try {
+      const bridge = piece('lift-bridge', 100, 100);
+      const turntable = piece('turntable', 500, 100);
+      const before = [bridge, turntable];
+      const live = new Set([bridge.id, turntable.id]);
+      hardware.syncLayout(before);
+      hardware.syncLive(before, live);
+
+      const extended = [...before, piece('straight', 800, 100)];
+      hardware.syncLayout(extended);
+      hardware.syncLive(extended, live);
+
+      const sim = hardware.getSimulation();
+      expect(sim.getGate(`BRIDGE-${bridge.id}`)?.isWithholding(`M-${bridge.id}`)).toBe(false);
+      expect(sim.getSwitch(`SWITCH-${turntable.id}`)?.getPosition()).toBeUndefined();
+      const gateTopic = `railway/events/gate_state_changed/BRIDGE-${bridge.id}`;
+      expect(client.published.filter((m) => m.topic === gateTopic)).toHaveLength(0);
+      const switchTopic = `railway/events/switch_state_changed/SWITCH-${turntable.id}`;
+      expect(client.published.filter((m) => m.topic === switchTopic)).toHaveLength(0);
+    } finally {
+      hardware.dispose();
+    }
+  });
+
+  it('a deleted piece takes its device state with it (no orphan re-assertion)', () => {
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId });
+    try {
+      const bridge = piece('lift-bridge', 100, 100);
+      hardware.syncLayout([bridge]);
+      hardware.syncLive([bridge], new Set([bridge.id]));
+      hardware
+        .getSimulation()
+        .getGate(`BRIDGE-${bridge.id}`)
+        ?.withhold(`M-${bridge.id}`, 'span raised');
+
+      // Delete the bridge while raised; the snapshot keys off the NEW pieces,
+      // so its state is dropped rather than re-asserted onto thin air.
+      const after = [piece('straight', 800, 100)];
+      hardware.syncLayout(after);
+      hardware.syncLive(after, new Set());
+      expect(hardware.getSimulation().getGate(`BRIDGE-${bridge.id}`)).toBeUndefined();
+    } finally {
+      hardware.dispose();
+    }
+  });
+});

@@ -1,5 +1,11 @@
 import type { Layout } from '@trainframe/protocol';
-import { BrokerBridge, Simulation, type VirtualCarriage } from '@trainframe/simulator';
+import {
+  BrokerBridge,
+  Simulation,
+  type VirtualCarriage,
+  type VirtualGate,
+  type VirtualSwitch,
+} from '@trainframe/simulator';
 import type { BrokerClient } from '../broker/client.js';
 import { encodeDeviceEvent } from '../broker/encode-event.js';
 import {
@@ -26,6 +32,22 @@ function deviceIdForDevicePiece(piece: TrackPiece): string {
 function toCarriage(piece: TrackPiece): VirtualCarriage {
   return piece.colorId !== undefined ? { id: piece.id, colorId: piece.colorId } : { id: piece.id };
 }
+
+/** The clearance-gating device id behind a piece, or undefined: the gate
+ * piece itself, or an experimental piece's companion gate (crane 003,
+ * lift bridge 005). Must match the ids `spawnPiece` uses. */
+function gateDeviceIdFor(piece: TrackPiece): string | undefined {
+  if (piece.type === 'gate') return `GATE-${piece.id}`;
+  if (piece.type === 'crane-station') return `CRANE-${piece.id}`;
+  if (piece.type === 'lift-bridge') return `BRIDGE-${piece.id}`;
+  return undefined;
+}
+
+/** Mechanical device state snapshotted across a simulation rebuild: a switch
+ * motor's confirmed position, or a gate's withheld markers. */
+type DeviceState =
+  | { readonly kind: 'switch'; readonly position: string }
+  | { readonly kind: 'gate'; readonly withheld: ReadonlyArray<string> };
 
 function centreDistance(a: TrackPiece, b: TrackPiece): number {
   const dx = a.position.x - b.position.x;
@@ -119,6 +141,11 @@ export interface ToyHardwareOptions {
  * is torn down and rebuilt. Any train currently moving is re-spawned at its
  * start edge — the on-canvas piece doesn't remember the sim's true position.
  * Acceptable for v1; the operator typically builds the loop before scanning.
+ * Mechanical DEVICE state does survive the rebuild: switch positions and gate
+ * withholds are snapshotted before teardown and re-asserted through the
+ * respawned devices (`snapshotDeviceState` / `restoreSwitch` / `restoreGate`),
+ * so a raised lift-bridge span stays raised and a spun turntable deck stays
+ * spun when the operator extends the track.
  */
 export class ToyHardware {
   private readonly client: BrokerClient;
@@ -153,6 +180,12 @@ export class ToyHardware {
   // Last length each station asserted per train — the hysteresis band that
   // keeps a station from re-emitting an unchanged estimate on every lap.
   private readonly visionReported = new Map<string, number>();
+  /* Mechanical device state captured just before a topology rebuild tears the
+   * sim down (switch positions, gate withholds), keyed by device id. Each
+   * respawned device re-asserts its entry — a raised span stays raised, a
+   * spun deck stays spun — re-confirming on the bus exactly as a real device
+   * coming back up would announce its state. */
+  private pendingDeviceState: Map<string, DeviceState> = new Map();
 
   constructor(options: ToyHardwareOptions) {
     this.client = options.client;
@@ -181,6 +214,10 @@ export class ToyHardware {
     const next = topologySignature(pieces);
     if (next === this.topology) return;
     this.topology = next;
+    // Capture switch positions + gate withholds from the OLD sim before the
+    // teardown, so the respawned devices can re-assert them. Keyed off the
+    // incoming pieces: a deleted piece's state naturally drops out.
+    this.pendingDeviceState = this.snapshotDeviceState(pieces);
     this.bridge.stop();
     const layout = compileLayout(pieces, 'toy-table');
     this.layout = layout;
@@ -263,6 +300,43 @@ export class ToyHardware {
       this.lastComposition = composition;
       this.reseedConsists(pieces, liveIds);
     }
+  }
+
+  /** Snapshot the mechanical state of every stateful device the given pieces
+   * own, read from the CURRENT (about-to-be-torn-down) simulation. Only
+   * non-default state is recorded: an unset switch or an all-granting gate
+   * needs nothing re-asserted. */
+  private snapshotDeviceState(pieces: ReadonlyArray<TrackPiece>): Map<string, DeviceState> {
+    const out = new Map<string, DeviceState>();
+    for (const p of pieces) {
+      if (p.type === 'junction' || p.type === 'turntable') {
+        const position = this.simulation.getSwitch(`SWITCH-${p.id}`)?.getPosition();
+        if (position !== undefined) out.set(`SWITCH-${p.id}`, { kind: 'switch', position });
+        continue;
+      }
+      const gateId = gateDeviceIdFor(p);
+      if (gateId === undefined) continue;
+      const withheld = this.simulation.getGate(gateId)?.getWithheldMarkers() ?? [];
+      if (withheld.length > 0) out.set(gateId, { kind: 'gate', withheld });
+    }
+    return out;
+  }
+
+  /** Re-seat a respawned switch at its pre-rebuild position. Re-confirms on
+   * the bus — a device coming back up announces its mechanical state. */
+  private restoreSwitch(deviceId: string, sw: VirtualSwitch): void {
+    const state = this.pendingDeviceState.get(deviceId);
+    if (state?.kind !== 'switch') return;
+    this.pendingDeviceState.delete(deviceId);
+    sw.setPosition(state.position);
+  }
+
+  /** Re-assert a respawned gate's withholds (a raised span stays raised). */
+  private restoreGate(deviceId: string, gate: VirtualGate): void {
+    const state = this.pendingDeviceState.get(deviceId);
+    if (state?.kind !== 'gate') return;
+    this.pendingDeviceState.delete(deviceId);
+    for (const marker of state.withheld) gate.withhold(marker, 'reasserted after rebuild');
   }
 
   /** Index the live vision stations by the tag id their sensor watches, so
@@ -362,7 +436,8 @@ export class ToyHardware {
       return;
     }
     if (piece.type === 'gate') {
-      this.simulation.spawnGate(deviceIdForDevicePiece(piece));
+      const gateId = deviceIdForDevicePiece(piece);
+      this.restoreGate(gateId, this.simulation.spawnGate(gateId));
       return;
     }
     if (piece.type === 'railyard') {
@@ -395,17 +470,18 @@ export class ToyHardware {
     // A turntable (experimental 002) is the same declaration with more
     // position strings — the device timing differs, never the mechanism.
     if (piece.type === 'junction' || piece.type === 'turntable') {
-      this.simulation.spawnSwitch(`SWITCH-${piece.id}`, markerId);
+      const switchId = `SWITCH-${piece.id}`;
+      this.restoreSwitch(switchId, this.simulation.spawnSwitch(switchId, markerId));
     }
     // Track pieces that gate clearance across their own marker (experimental
     // 003/005) carry a companion VirtualGate: a crane pins a dwelling train
     // during a lift; a lift bridge withholds while its span is raised. Same
     // machinery as a level-crossing gate, pointed at the piece's own marker.
-    if (piece.type === 'crane-station') {
-      this.simulation.spawnGate(`CRANE-${piece.id}`);
-    }
-    if (piece.type === 'lift-bridge') {
-      this.simulation.spawnGate(`BRIDGE-${piece.id}`);
+    if (piece.type === 'crane-station' || piece.type === 'lift-bridge') {
+      const gateId = gateDeviceIdFor(piece);
+      if (gateId !== undefined) {
+        this.restoreGate(gateId, this.simulation.spawnGate(gateId));
+      }
     }
     // A vision station (experimental 001) needs no sim entity: it is a passive
     // observer whose length reports are emitted from `reportVisionLengths` as

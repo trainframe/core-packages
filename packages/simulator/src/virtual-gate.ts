@@ -43,6 +43,13 @@ export class VirtualGate {
     return this.withheld.has(marker_id);
   }
 
+  /** Public observer: every marker this gate is currently withholding. Lets a
+   * platform snapshot the gate's state across a simulation rebuild and
+   * re-assert it through the respawned device. */
+  getWithheldMarkers(): ReadonlyArray<string> {
+    return [...this.withheld];
+  }
+
   release(marker_id: string): void {
     if (!this.withheld.has(marker_id)) return;
     this.withheld.delete(marker_id);

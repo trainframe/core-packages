@@ -16,6 +16,7 @@ import {
   CRANE_INITIAL_CRATES,
   CRANE_REACH_MM,
   CRANE_STACK_SLOTS,
+  CRANE_TROLLEY_REST_Y_MM,
   type CarriageColorId,
   type DevicePieceType,
   LIFT_BRIDGE_FORESHORTEN,
@@ -36,6 +37,7 @@ import {
   VISION_SENSOR_RANGE_MM,
   carriageCratePath,
   craneCratePath,
+  craneTrolley,
   getEndpoints,
   getPieceShape,
   isDevicePiece,
@@ -200,7 +202,7 @@ type ExperimentVisual =
   | { readonly kind: 'turntable'; readonly angleDeg: number }
   | { readonly kind: 'lift-bridge'; readonly raised: boolean }
   | { readonly kind: 'vision-station'; readonly lit: boolean }
-  | { readonly kind: 'crane-station'; readonly crates: number }
+  | { readonly kind: 'crane-station'; readonly crates: number; readonly trolleyOverRail: boolean }
   | { readonly kind: 'cargo' };
 
 /** Rest-state visual for a piece type — what a tray preview or an un-scanned
@@ -210,7 +212,9 @@ function restingExperimentVisual(type: TrackPieceType): ExperimentVisual | undef
   if (type === 'turntable') return { kind: 'turntable', angleDeg: 0 };
   if (type === 'lift-bridge') return { kind: 'lift-bridge', raised: false };
   if (type === 'vision-station') return { kind: 'vision-station', lit: false };
-  if (type === 'crane-station') return { kind: 'crane-station', crates: CRANE_INITIAL_CRATES };
+  if (type === 'crane-station') {
+    return { kind: 'crane-station', crates: CRANE_INITIAL_CRATES, trolleyOverRail: false };
+  }
   return undefined;
 }
 
@@ -290,6 +294,47 @@ function LiftBridgeSpanPart({ pieceId, raised }: { pieceId: string; raised: bool
 }
 
 /**
+ * The crane's moving parts (experimental 003): the trackside crate stack —
+ * one crate per held slot, growing and shrinking as the hook works wagons —
+ * and the TROLLEY, the travelling arm. The trolley rides the beam: parked
+ * over the stack at rest, it slides out over the rail whenever a wagon is
+ * under the gantry (the design doc's trolley-along-the-cross-beam motion),
+ * so cause and effect read from the table: wagon arrives, the arm comes over.
+ */
+function CranePart({
+  pieceId,
+  crates,
+  trolleyOverRail,
+}: {
+  pieceId: string;
+  crates: number;
+  trolleyOverRail: boolean;
+}) {
+  return (
+    <g data-testid={`crane-stack-${pieceId}`} data-crates={crates}>
+      {CRANE_STACK_SLOTS.slice(0, crates).map((slot) => (
+        <Feature
+          key={`${slot.x},${slot.y}`}
+          feature={{ role: 'pop', d: craneCratePath(slot.x, slot.y) }}
+        />
+      ))}
+      <g
+        data-testid={`crane-trolley-${pieceId}`}
+        data-over-rail={trolleyOverRail ? 'true' : 'false'}
+        style={{
+          transform: `translateY(${trolleyOverRail ? 0 : CRANE_TROLLEY_REST_Y_MM}px)`,
+          transition: 'transform 700ms ease-in-out',
+        }}
+      >
+        {craneTrolley().map((f) => (
+          <Feature key={f.d} feature={f} />
+        ))}
+      </g>
+    </g>
+  );
+}
+
+/**
  * The moving / lit parts of an experimental piece, drawn OVER its static body
  * inside the piece's transformed group (so they rotate/flip with it):
  *  - turntable: the bridge deck swings to the confirmed stub angle — the
@@ -326,18 +371,12 @@ function ExperimentParts({
     case 'lift-bridge':
       return <LiftBridgeSpanPart pieceId={pieceId} raised={visual.raised} />;
     case 'crane-station':
-      // The trackside stack the crane works from — one crate per held slot,
-      // growing and shrinking as the hook lifts crates off and places them
-      // onto wagons (experimental 003).
       return (
-        <g data-testid={`crane-stack-${pieceId}`} data-crates={visual.crates}>
-          {CRANE_STACK_SLOTS.slice(0, visual.crates).map((slot) => (
-            <Feature
-              key={`${slot.x},${slot.y}`}
-              feature={{ role: 'pop', d: craneCratePath(slot.x, slot.y) }}
-            />
-          ))}
-        </g>
+        <CranePart
+          pieceId={pieceId}
+          crates={visual.crates}
+          trolleyOverRail={visual.trolleyOverRail}
+        />
       );
     case 'cargo':
       // The crate riding a laden wagon's back — visibly one box heavier.
@@ -843,6 +882,12 @@ function experimentVisualFor(
       return {
         kind: 'crane-station',
         crates: ctx.craneStacks.get(p.id) ?? CRANE_INITIAL_CRATES,
+        // A LIVE crane's arm slides out over the rail whenever any wagon is
+        // in reach; an un-scanned crane stays parked over its stack.
+        trolleyOverRail:
+          ctx.liveIds.has(p.id) &&
+          (wagonUnderHook(p, ctx.pieces, true) !== undefined ||
+            wagonUnderHook(p, ctx.pieces, false) !== undefined),
       };
     case 'carriage':
       return p.cargo === true ? { kind: 'cargo' } : undefined;

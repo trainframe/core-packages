@@ -1109,15 +1109,24 @@ export const CRANE_REACH_MM = 60;
 /** Crates a freshly placed crane has waiting on its trackside stack. */
 export const CRANE_INITIAL_CRATES = 3;
 
-/** Trackside stack slot centres (local coords), filled bottom row first —
- * also the stack's capacity. The renderer draws one crate per held slot. */
+/** Local y where the cantilevered beam ends, south of the track, over the
+ * stack — the trolley's rest position and the crates' home. */
+export const CRANE_BEAM_SOUTH_Y_MM = 46;
+
+/** Trolley rest offset (local y): parked over the stack at the beam's south
+ * end. The renderer translates the trolley between here and y=0 (over the
+ * rail) — the slide along the cross-beam the design doc describes. */
+export const CRANE_TROLLEY_REST_Y_MM = 34;
+
+/** Stack slot centres (local coords) under the beam's south end, filled
+ * bottom row first — also the stack's capacity. One crate per held slot. */
 export const CRANE_STACK_SLOTS: ReadonlyArray<{ readonly x: number; readonly y: number }> = [
-  { x: 62.5, y: 20.5 },
-  { x: 73.5, y: 20.5 },
-  { x: 84.5, y: 20.5 },
-  { x: 68, y: 10.5 },
-  { x: 79, y: 10.5 },
-  { x: 73.5, y: 0.5 },
+  { x: CRANE_GANTRY_X_MM - 11, y: 34 },
+  { x: CRANE_GANTRY_X_MM + 11, y: 34 },
+  { x: CRANE_GANTRY_X_MM - 11, y: 45 },
+  { x: CRANE_GANTRY_X_MM + 11, y: 45 },
+  { x: CRANE_GANTRY_X_MM - 11, y: 56 },
+  { x: CRANE_GANTRY_X_MM + 11, y: 56 },
 ];
 
 /** One trackside crate, centred on a stack slot. */
@@ -1130,28 +1139,52 @@ export function carriageCratePath(): string {
   return roundRect(-6, -6, 12, 12, 2);
 }
 
+/**
+ * The crane's TROLLEY — the travelling arm: a grey carriage astride the beam
+ * with a bright hook hanging from it. Drawn at y=0 (over the rail); the
+ * renderer translates the whole sub-shape down the beam to
+ * `CRANE_TROLLEY_REST_Y_MM` (over the stack) and back — sliding out over a
+ * wagon whenever one is under the gantry. Local coordinates.
+ */
+export function craneTrolley(): ReadonlyArray<PieceFeature> {
+  const gx = CRANE_GANTRY_X_MM;
+  return [
+    // The trolley carriage astride the beam, wider than the beam so it reads
+    // as riding it.
+    { role: 'metal', d: roundRect(gx - 8, -6.5, 16, 13, 2.5) },
+    { role: 'dark-wood', d: roundRect(gx - 5, -4, 10, 8, 1.5) },
+    // The hook block slung under the carriage, with its bright sheave.
+    { role: 'metal', d: roundRect(gx - 3, 4.5, 6, 5, 1.5) },
+    { role: 'pop', d: circle(gx, 7, 2.2) },
+  ];
+}
+
 function craneStationBody(): PieceBody {
-  // A station plank with the platform shifted west; a manufactured grey gantry
-  // (two uprights + a cross-beam, drawn top-down) straddles the track to the
-  // east, with the trolley + hook on the beam (experimental 003). The crate
-  // STACK is not here — it is a moving part the renderer draws from the live
-  // count, since the crane grows/shrinks it as it works wagons.
+  // A station plank with the platform shifted west; a manufactured grey
+  // gantry straddles the track to the east (experimental 003): two uprights,
+  // and a cross-beam that runs over the rails and CANTILEVERS south past the
+  // track to end over the crate stack — the runway the trolley travels. The
+  // trolley (the arm) and the stack are moving parts the renderer draws live.
   const ph = PLANK_HALF_WIDTH;
   const platformTop = -(ph + 22);
   const gx = CRANE_GANTRY_X_MM;
+  const beamTop = -ph - 13;
   return {
     svgPath: roundRect(-110, -ph, 220, ph * 2, PLANK_CORNER),
     features: [
       { role: 'platform', d: roundRect(-95, platformTop, 80, 24, 4) },
       { role: 'line', width: 2, d: `M -93 ${-ph - 1} H -17` },
-      { role: 'metal', d: roundRect(gx - 7, -ph - 13, 14, 10, 2) },
-      { role: 'metal', d: roundRect(gx - 7, ph + 3, 14, 10, 2) },
-      { role: 'metal', d: roundRect(gx - 3, -ph - 13, 6, ph * 2 + 26, 2) },
-      { role: 'dark-wood', d: roundRect(gx - 5, -8, 10, 9, 2) },
-      { role: 'pop', d: circle(gx, 4.5, 2) },
+      // Uprights either side of the track.
+      { role: 'metal', d: roundRect(gx - 8, beamTop, 16, 10, 2) },
+      { role: 'metal', d: roundRect(gx - 8, ph + 3, 16, 10, 2) },
+      // The beam: across the track and cantilevered south over the stack.
+      { role: 'metal', d: roundRect(gx - 3.5, beamTop, 7, CRANE_BEAM_SOUTH_Y_MM - beamTop, 2) },
+      // Beam end stop over the stack.
+      { role: 'dark-wood', d: roundRect(gx - 5, CRANE_BEAM_SOUTH_Y_MM - 3, 10, 4, 1.5) },
     ],
     width: 220,
-    height: ph + 25 - platformTop,
+    // From the platform's north edge down to the bottom crate row.
+    height: 60.5 - platformTop,
   };
 }
 

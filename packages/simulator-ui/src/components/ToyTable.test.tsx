@@ -1811,6 +1811,10 @@ describe('ToyTable — Experiments tray', () => {
     const user = userEvent.setup();
     const { client } = renderToyTable();
     const craneId = await placeArmedPiece('crane-station');
+    // A crane with nothing to work parks its trolley arm over the stack.
+    expect(screen.getByTestId(`crane-trolley-${craneId}`).getAttribute('data-over-rail')).toBe(
+      'false',
+    );
     /* The wagon parks under the hook: the gantry sits 45 mm east of the crane
      * origin and both pieces drop at the canvas centre — within reach. */
     const wagonId = await placeArmedPiece('carriage');
@@ -1818,6 +1822,12 @@ describe('ToyTable — Experiments tray', () => {
     dropPieceOnScanBox(screen.getByTestId('scan-box'), craneId);
     await user.click(screen.getByTestId('toybox-carriage')); // disarm
     fireEvent.click(screen.getByTestId(`piece-${craneId}`)); // select the crane
+
+    // Live crane + wagon in reach: the arm slides out over the rail — the
+    // trolley-along-the-beam motion the design doc describes.
+    expect(screen.getByTestId(`crane-trolley-${craneId}`).getAttribute('data-over-rail')).toBe(
+      'true',
+    );
 
     // A fresh crane: full stack, empty wagon — Place enabled, Lift not.
     expect(screen.getByTestId(`crane-stack-${craneId}`).getAttribute('data-crates')).toBe('3');
