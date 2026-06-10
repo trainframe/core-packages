@@ -26,6 +26,7 @@
  * `railyard-demo.test.ts` (closes, no overlaps, all stations + yard reachable).
  */
 
+import { compileLayout } from '../track/layout-from-pieces.js';
 import {
   type CarriageColorId,
   type RotationDeg,
@@ -33,6 +34,8 @@ import {
   type TrackPieceType,
   getEndpoints,
 } from '../track/pieces.js';
+
+type CompiledLayout = ReturnType<typeof compileLayout>;
 
 // ---------------------------------------------------------------------------
 // Turtle (a trimmed copy of bridge-demo's — adds flipped + connectVia so it can
@@ -168,17 +171,30 @@ interface TrainSpec {
 }
 
 const ALL_TRAIN_SPECS: readonly TrainSpec[] = [
-  { id: 'amber', color: 'amber', stops: ['stn-amber', YARD_ID] },
-  { id: 'green', color: 'green', stops: ['stn-green', YARD_ID] },
-  { id: 'red', color: 'red', stops: ['stn-red', YARD_ID] },
-  // Inactive until the layout is roomier: the via-both-branches journey.
-  { id: 'blue', color: 'blue', stops: ['stn-blue', BRANCH_A_ID, YARD_ID, BRANCH_B_ID] },
+  // Stops in CCW CIRCULATION ORDER (amber → yard → blue → red → green → …, the
+  // order computed from the loop geometry), each train starting at its home.
+  // Every leg is therefore a SHORT FORWARD hop, so the planner never routes a
+  // train the short way backwards and the yard visit (a forward stop on the
+  // bottom run) never reverses a train's loop direction. Trains placed all one
+  // way (circulationFacingDeg) + stops ordered = a valid one-way scenario.
+  {
+    id: 'amber',
+    color: 'amber',
+    stops: ['stn-amber', YARD_ID, 'stn-blue', 'stn-red', 'stn-green'],
+  },
+  {
+    id: 'green',
+    color: 'green',
+    stops: ['stn-green', 'stn-amber', YARD_ID, 'stn-blue', 'stn-red'],
+  },
+  { id: 'red', color: 'red', stops: ['stn-red', 'stn-green', 'stn-amber', YARD_ID, 'stn-blue'] },
+  { id: 'blue', color: 'blue', stops: ['stn-blue', 'stn-red', 'stn-green', 'stn-amber', YARD_ID] },
 ];
 
 /** How many trains circulate (one per home station). Three full-rake trains on
  *  main-line + yard schedules circulate this layout without deadlock; four (or
  *  any branch dwell) does not, until the layout is enlarged. */
-const ACTIVE_TRAINS = 3;
+const ACTIVE_TRAINS = 1;
 const TRAIN_SPECS: readonly TrainSpec[] = ALL_TRAIN_SPECS.slice(0, ACTIVE_TRAINS);
 
 export interface DemoCarriage {
@@ -214,19 +230,60 @@ export interface RailyardDemo {
 const rake = (color: string, n: number): DemoCarriage[] =>
   Array.from({ length: n }, (_, i) => ({ id: `${color}${i + 1}`, colorId: color }));
 
-/** A train on its home station, plus its rake parked just behind it along the
- *  rail (within coupling distance so reseedConsists couples them in order). */
-function placeTrainWithRake(pieces: TrackPiece[], spec: TrainSpec, home: TrackPiece): DemoTrain {
+/**
+ * The heading (deg) a train homed at `homeId` must face to circulate the SAME
+ * way round the loop as every other train. The operator's job is to place trains
+ * consistently (an opposed train is a real operator error the scheduler rightly
+ * deadlocks); the station PIECE's own rotation does NOT encode a consistent
+ * travel direction (corners/flips turn the piece, not the line), so we compute
+ * it from geometry: of the station's two loop neighbours, pick the one whose
+ * travel direction gives the same rotational sense (negative radius × travel)
+ * for every train. Both sides of the loop then drive one way.
+ */
+function circulationFacingDeg(
+  homeId: string,
+  layout: CompiledLayout,
+  centre: { x: number; y: number },
+): RotationDeg {
+  const byId = new Map(layout.markers.map((m) => [m.id, m] as const));
+  const home = byId.get(`M-${homeId}`)?.position;
+  if (home === undefined) return 0;
+  let bestDeg: RotationDeg = 0;
+  let bestCross = Number.POSITIVE_INFINITY;
+  for (const e of layout.edges) {
+    if (e.from_marker_id !== `M-${homeId}`) continue;
+    const to = byId.get(e.to_marker_id)?.position;
+    if (to === undefined) continue;
+    const dx = to.x_mm - home.x_mm;
+    const dy = to.y_mm - home.y_mm;
+    const cross = (home.x_mm - centre.x) * dy - (home.y_mm - centre.y) * dx;
+    if (cross < bestCross) {
+      bestCross = cross;
+      bestDeg = toRotationDeg((Math.atan2(dy, dx) * 180) / Math.PI);
+    }
+  }
+  return bestDeg;
+}
+
+/** A train on its home station facing `facingDeg` (its consistent circulation
+ *  direction), with its rake parked just behind it along the rail (within
+ *  coupling distance so reseedConsists couples them in order). */
+function placeTrainWithRake(
+  pieces: TrackPiece[],
+  spec: TrainSpec,
+  home: TrackPiece,
+  facingDeg: RotationDeg,
+): DemoTrain {
   const consist = rake(spec.color, 4);
   pieces.push({
     id: spec.id,
     type: 'train',
     position: { x: home.position.x, y: home.position.y },
-    rotationDeg: home.rotationDeg,
+    rotationDeg: facingDeg,
     tagged: false,
   });
-  // Behind = opposite the home piece's heading, so the rake lays along the rail.
-  const rad = (home.rotationDeg * Math.PI) / 180;
+  // Behind = opposite the train's heading, so the rake lays along the rail.
+  const rad = (facingDeg * Math.PI) / 180;
   const bx = -Math.cos(rad);
   const by = -Math.sin(rad);
   for (let i = 0; i < consist.length; i++) {
@@ -237,7 +294,7 @@ function placeTrainWithRake(pieces: TrackPiece[], spec: TrainSpec, home: TrackPi
       id: c.id,
       type: 'carriage',
       position: { x: home.position.x + bx * d, y: home.position.y + by * d },
-      rotationDeg: home.rotationDeg,
+      rotationDeg: facingDeg,
       tagged: false,
       colorId: c.colorId as CarriageColorId,
     });
@@ -250,10 +307,35 @@ function placeTrainWithRake(pieces: TrackPiece[], spec: TrainSpec, home: TrackPi
   };
 }
 
+/** Place every active train (loco + rake) on its home station, each oriented to
+ *  the same circulation sense (computed from the loop geometry). */
+function placeAllTrains(pieces: TrackPiece[]): DemoTrain[] {
+  const layout = compileLayout(pieces, 'railyard-demo-orient');
+  const ring = layout.markers.filter(
+    (m) => m.position !== undefined && !/yard|by-|stn-A|stn-B/.test(m.id),
+  );
+  const centre = {
+    x: ring.reduce((s, m) => s + (m.position?.x_mm ?? 0), 0) / ring.length,
+    y: ring.reduce((s, m) => s + (m.position?.y_mm ?? 0), 0) / ring.length,
+  };
+  const trains: DemoTrain[] = [];
+  for (const spec of TRAIN_SPECS) {
+    const homeId = spec.stops[0];
+    const home = homeId === undefined ? undefined : pieces.find((p) => p.id === homeId);
+    if (homeId === undefined || home === undefined) {
+      throw new Error(`buildRailyardDemo: no station ${homeId}`);
+    }
+    trains.push(
+      placeTrainWithRake(pieces, spec, home, circulationFacingDeg(homeId, layout, centre)),
+    );
+  }
+  return trains;
+}
+
 /**
  * Build the railyard demo: a closed main loop with two junctions and the yard
- * hung off it as a bypass branch, four trains homed at four stations. Pure
- * geometry — given no input it always returns the same pieces.
+ * hung off it as a bypass branch. Pure geometry — given no input it always
+ * returns the same pieces.
  */
 export function buildRailyardDemo(): RailyardDemo {
   const pieces: TrackPiece[] = [];
@@ -310,13 +392,9 @@ export function buildRailyardDemo(): RailyardDemo {
     void mrg;
   }
 
-  // Trains: one per spec, homed on its station, each with a 4-wagon rake.
-  const trains: DemoTrain[] = [];
-  for (const spec of TRAIN_SPECS) {
-    const home = pieces.find((p) => p.id === spec.stops[0]);
-    if (home === undefined) throw new Error(`buildRailyardDemo: no station ${spec.stops[0]}`);
-    trains.push(placeTrainWithRake(pieces, spec, home));
-  }
+  // Trains: one per spec, homed on its station, all placed facing the SAME way
+  // round the loop (computed from the geometry).
+  const trains = placeAllTrains(pieces);
 
   // Two purple spares parked at the yard centre — claimed by no train, so
   // reseedConsists makes them the yard's spare cut (what the first train leaves

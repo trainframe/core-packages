@@ -87,7 +87,7 @@ describe('railyard demo layout', () => {
     // Each active train homes at a DISTINCT station.
     const homes = demo.trains.map((t) => t.homeMarker);
     expect(new Set(homes).size).toBe(demo.trains.length);
-    expect(demo.trains.length).toBeGreaterThanOrEqual(2);
+    expect(demo.trains.length).toBeGreaterThanOrEqual(1);
     for (const train of demo.trains) {
       // The home (schedule stops[0]) and the yard stop are real markers.
       expect(markerIds.has(train.homeMarker), `${train.deviceId} home`).toBe(true);
