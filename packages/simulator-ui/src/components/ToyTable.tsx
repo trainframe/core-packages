@@ -865,7 +865,59 @@ function computeRenderPositions(
       placeYardSpares(piece, sim, result);
     }
   }
+  // Second pass: a train being shunted INSIDE a yard (ADR-029) overrides its
+  // throat position with its interior depth, so it visibly pulls in and out.
+  // Runs after the train pass so it wins over `placeLiveTrain`.
+  for (const piece of pieces) {
+    if (piece.type === 'railyard' && liveIds.has(piece.id)) {
+      placeShuntedTrain(piece, sim, trainTrails, result);
+    }
+  }
   return result;
+}
+
+/** How far into the yard (mm along its length, from the throat) a train is drawn
+ *  at full interior depth — comfortably inside the yard body (half-length 300). */
+const INTERIOR_RENDER_DEPTH_MM = 180;
+
+/** Render the train the yard is currently shunting at its interior depth: the
+ *  loco pulled `depthFraction` of the way into the yard along the piece's length,
+ *  its (current) coupled rake trailing back toward the throat. The rake shortens
+ *  as the crane decouples and lengthens as it couples — the wagons visibly move
+ *  between train and yard. No-op when the yard isn't shunting anyone. */
+function placeShuntedTrain(
+  piece: TrackPiece,
+  sim: ToySimulation,
+  trainTrails: ReadonlyMap<string, ReadonlyArray<string>>,
+  result: Map<string, WorldPosition>,
+): void {
+  const yard = sim.getRailyard(`YARD-${piece.id}`);
+  const interior = yard?.getInteriorState();
+  if (interior == null) return;
+  const trainPieceId = interior.trainId.startsWith('T-')
+    ? interior.trainId.slice(2)
+    : interior.trainId;
+  const rad = (piece.rotationDeg * Math.PI) / 180;
+  const dir = { x: Math.cos(rad), y: Math.sin(rad) };
+  const depth = interior.depthFraction * INTERIOR_RENDER_DEPTH_MM;
+  const loco: WorldPosition = {
+    x: piece.position.x + dir.x * depth,
+    y: piece.position.y + dir.y * depth,
+    rotationDeg: piece.rotationDeg,
+  };
+  result.set(trainPieceId, loco);
+  // The coupled rake trails back toward the throat (opposite the pull-in).
+  const carriageIds = trainTrails.get(trainPieceId) ?? [];
+  for (let i = 0; i < carriageIds.length; i++) {
+    const carriageId = carriageIds[i];
+    if (carriageId === undefined) continue;
+    const d = (i + 1) * CARRIAGE_SPACING_MM;
+    result.set(carriageId, {
+      x: loco.x - dir.x * d,
+      y: loco.y - dir.y * d,
+      rotationDeg: piece.rotationDeg,
+    });
+  }
 }
 
 /** Angle for a turntable's confirmed switch position; unknown or not-yet-set
@@ -893,28 +945,14 @@ function trainUnderSensor(
   return false;
 }
 
-/** A train this close to the yard's throat marker (its piece centre, where a
- * serviced train parks) counts as "in the yard". Kept well under the yard's
- * descent drop (~290 mm) so a train passing on the main loop above never trips
- * it — only one that has actually pulled into the yard does. */
-const YARD_SERVICING_RANGE_MM = 180;
-
-/** True when a live train currently renders at the yard's throat — "a train is
- * in the yard, being serviced". The crane only comes alive while this holds; an
- * empty yard parks its crane at home. Visual only. */
-function trainOverYard(
-  yard: TrackPiece,
-  pieces: ReadonlyArray<TrackPiece>,
-  liveIds: ReadonlySet<string>,
-  renderPositions: ReadonlyMap<string, WorldPosition>,
-): boolean {
-  for (const p of pieces) {
-    if (p.type !== 'train' || !liveIds.has(p.id)) continue;
-    const pos = renderPositions.get(p.id) ?? p.position;
-    const d = Math.hypot(pos.x - yard.position.x, pos.y - yard.position.y);
-    if (d <= YARD_SERVICING_RANGE_MM) return true;
-  }
-  return false;
+/** True when the yard is actively shunting a train in its interior (ADR-029):
+ * the device is driving a train between slots / working its crane. The gantry
+ * crane runs only while this holds; an idle yard parks its crane at home. Visual
+ * only — read straight off the device's interior state, not proximity. */
+function yardShunting(piece: TrackPiece, hardware: ToyHardware | null): boolean {
+  if (hardware === null) return false;
+  const yard = hardware.getSimulation().getRailyard(`YARD-${piece.id}`);
+  return yard?.getInteriorState() != null;
 }
 
 /** Everything `experimentVisualFor` reads — bundled so the per-piece dispatch
@@ -2695,11 +2733,7 @@ function Table({
               coupledToTrainId={carriageCoupledTo.get(p.id)}
               renderPosition={renderPositions.get(p.id)}
               experimentVisual={experimentVisuals.get(p.id)}
-              servicing={
-                p.type === 'railyard' &&
-                liveIds.has(p.id) &&
-                trainOverYard(p, pieces, liveIds, renderPositions)
-              }
+              servicing={p.type === 'railyard' && liveIds.has(p.id) && yardShunting(p, hardware)}
               onAction={(action) => onPieceAction(p.id, action)}
               dragOverride={
                 pieceDragPreview?.id === p.id
@@ -3082,8 +3116,9 @@ const RAILYARD_STEEL_LIGHT = '#aeb9c1';
 const GX = RAILYARD_GANTRY_X;
 const SERVICE_RUN_DUR_S = 2.4;
 const SERVICE_RUN_DUR = `${SERVICE_RUN_DUR_S}s`;
-/* Bridge: home end (-GX) → centre (0), over the train at the throat. */
-const BRIDGE_RUN_VALUES = `${-GX} 0;0 0`;
+/* Bridge: home end (-GX) → the working depth, over the train the yard has pulled
+   into its interior (matches `placeShuntedTrain`'s INTERIOR_RENDER_DEPTH_MM). */
+const BRIDGE_RUN_VALUES = `${-GX} 0;${INTERIOR_RENDER_DEPTH_MM} 0`;
 /* Hook: a slow lift-and-lower over the coupling — the actual working stroke. */
 const HEAD_LIFT_VALUES = '0 0;0 -7;0 0';
 const LED_IDLE = '#4ad7b0';

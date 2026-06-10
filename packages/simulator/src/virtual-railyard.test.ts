@@ -195,6 +195,45 @@ describe('VirtualRailyard carriage swap (the opaque-interior rearrange)', () => 
     expect(yard.getSpares().map((c) => c.id)).toEqual(['R1', 'R2']);
   });
 
+  it('shunts the leading cut as a timed interior maneuver, not an atomic swap (ADR-029)', () => {
+    const sim = new Simulation({ layout: SWAP_LOOP, seed: 1 });
+    const yard = sim.spawnRailyard('YARD-1', 'M3', 6);
+    yard.loadSpares([wagon('P1', 'purple'), wagon('P2', 'purple')]);
+    trainWith(sim, 'T-red', 'R');
+    // Drive the train to the yard throat (M3) and let it park there.
+    sim.handleCommand('T-red', 'assign_route', {
+      route_id: 'in',
+      edges: [{ from_marker_id: 'M1', to_marker_id: 'M3' }],
+    });
+    sim.handleCommand('T-red', 'grant_clearance', { limit_marker_id: 'M3' });
+
+    // Run the sim; the yard pulls the train in, the crane decouples its leading
+    // cut, couples the spares, and it returns to the throat. Record the rake
+    // length each tick + whether the interior maneuver was ever in progress.
+    const lengthsSeen = new Set<number>();
+    let sawInteriorMotion = false;
+    let craneWorked = false;
+    for (let i = 0; i < 400; i++) {
+      sim.advance(50);
+      lengthsSeen.add(sim.getTrain('T-red')?.getConsist().length ?? 0);
+      const interior = yard.getInteriorState();
+      if (interior !== null) {
+        sawInteriorMotion = true;
+        if (interior.craneWorking) craneWorked = true;
+      }
+    }
+
+    // The rake passed through a SHORTER state (decoupled) before being made
+    // whole — proof it was a timed maneuver, not an instantaneous array swap.
+    expect(lengthsSeen.has(2), 'rake briefly shortened (decoupled)').toBe(true);
+    expect(lengthsSeen.has(4), 'rake made whole again (coupled)').toBe(true);
+    expect(sawInteriorMotion, 'train was driven inside the yard').toBe(true);
+    expect(craneWorked, 'crane worked a cut').toBe(true);
+    // End state matches the swap: the purple spares now lead, the red pair dropped.
+    expect(consistIds(sim, 'T-red')).toEqual(['P1', 'P2', 'R3', 'R4']);
+    expect(yard.getSpares().map((c) => c.id)).toEqual(['R1', 'R2']);
+  });
+
   it('is a no-op for a train shorter than the swap pair', () => {
     const sim = new Simulation({ layout: SWAP_LOOP, seed: 1 });
     const yard = sim.spawnRailyard('YARD-1', 'M3', 6);

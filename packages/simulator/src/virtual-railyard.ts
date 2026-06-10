@@ -20,6 +20,35 @@ const SWAP_PAIR_SIZE = 2;
  */
 const DWELL_TICKS = 4;
 
+/* The interior choreography (ADR-029). A serviced train is driven, in sim
+   ticks, from the throat to a WORKING depth and back, with the crane decoupling
+   its leading cut and coupling the yard's spares while it dwells. Distances are
+   the device's private interior geometry (mm into the lead from the throat); the
+   toy-table renders the train at these depths. */
+/* Depth into the lead the train pulls to before the crane works it. */
+const WORKING_DEPTH_MM = 220;
+/* How far the train moves into the interior per tick (deterministic, tick-based
+   like the rest of the yard's timing — no dt threading). */
+const INTERIOR_STEP_MM = 12;
+/* Ticks the crane spends lowering/lifting at each couple/decouple. */
+const CRANE_TICKS = 6;
+
+/** The single-lead interior maneuver in progress (ADR-026: one mover inside at a
+ *  time). A train pulls in, the crane decouples its leading cut into a slot,
+ *  couples the yard's spares on, then it returns to the throat to be released. */
+interface Shunt {
+  readonly trainId: string;
+  readonly train: VirtualTrain;
+  step: 'pull-in' | 'decouple' | 'couple' | 'return' | 'done';
+  /** Depth into the lead, mm from the throat (0 = at the throat). */
+  depthMm: number;
+  /** Ticks left in the current crane action. */
+  craneTicks: number;
+  /** The cut the crane has lifted off this train (held until it becomes the
+   *  next visitor's spares). */
+  dropped: VirtualCarriage[];
+}
+
 /**
  * A virtual railyard: a `core.gates_zone` device owning a capacity-limited
  * territory behind a single boundary marker (the throat). It admits trains by
@@ -58,6 +87,10 @@ export class VirtualRailyard {
   /** Consecutive ticks a not-yet-serviced train has been parked at the throat.
    *  We wait a short dwell before acting (see DWELL_TICKS). */
   private readonly parkedTicks = new Map<string, number>();
+  /** The interior maneuver currently running, or null when the lead is free.
+   *  Single-lead (ADR-026): at most one train moves inside at a time; others
+   *  wait suspended at the throat. */
+  private activeShunt: Shunt | null = null;
 
   constructor(
     private readonly device_id: string,
@@ -125,38 +158,150 @@ export class VirtualRailyard {
    * never drives a train across the throat (that stays core-cleared, ADR-027).
    */
   service(entries: Iterable<readonly [string, VirtualTrain]>): void {
-    const present = new Set<string>();
-    for (const [trainId, train] of entries) {
-      present.add(trainId);
-      this.serviceTrain(trainId, train);
-    }
+    const present = new Map<string, VirtualTrain>();
+    for (const [trainId, train] of entries) present.set(trainId, train);
+
+    this.tickActiveShunt(present); // advance the maneuver in progress (single-lead)
+    for (const [trainId, train] of present) this.considerTrain(trainId, train);
     // A train that vanished entirely (despawned) also frees its slot.
     for (const trainId of [...this.servicing.keys()]) {
       if (!present.has(trainId)) this.departTrain(trainId);
     }
   }
 
-  /** Service one train: dwell while it parks, swap+release once, free on exit. */
-  private serviceTrain(trainId: string, train: VirtualTrain): void {
-    const parked = train.isParkedAt(this.zone_marker_id);
-    if (this.servicing.has(trainId)) {
-      if (!parked) this.departTrain(trainId); // it has pulled out — re-arm
+  /** Step the single-lead maneuver one tick, or drop it if its train vanished. */
+  private tickActiveShunt(present: ReadonlyMap<string, VirtualTrain>): void {
+    if (this.activeShunt === null) return;
+    if (!present.has(this.activeShunt.trainId)) {
+      this.activeShunt = null;
       return;
     }
+    this.advanceShunt(this.activeShunt);
+  }
+
+  /** Per-train bookkeeping: free a serviced train's slot when it pulls out, and
+   *  start the next maneuver once a freshly-parked train has dwelt and the lead
+   *  is free. */
+  private considerTrain(trainId: string, train: VirtualTrain): void {
+    const parked = train.isParkedAt(this.zone_marker_id);
+    if (this.servicing.has(trainId)) {
+      if (!parked) this.departTrain(trainId);
+      return;
+    }
+    if (this.activeShunt?.trainId === trainId) return; // already moving inside
     if (!parked) {
       this.parkedTicks.delete(trainId);
       return;
     }
     const ticks = (this.parkedTicks.get(trainId) ?? 0) + 1;
-    if (ticks < DWELL_TICKS) {
-      this.parkedTicks.set(trainId, ticks);
-      return;
-    }
-    // Dwell satisfied: rearrange the consist and hand the train back to core.
+    this.parkedTicks.set(trainId, ticks);
+    if (ticks >= DWELL_TICKS && this.activeShunt === null) this.beginShunt(trainId, train);
+  }
+
+  /** Start the interior maneuver for a train newly parked at the throat. */
+  private beginShunt(trainId: string, train: VirtualTrain): void {
     this.parkedTicks.delete(trainId);
-    this.swapLeadingPair(train);
-    this.servicing.set(trainId, this.occupy(trainId));
-    this.releaseTrain(trainId);
+    this.activeShunt = {
+      trainId,
+      train,
+      step: 'pull-in',
+      depthMm: 0,
+      craneTicks: 0,
+      dropped: [],
+    };
+  }
+
+  /**
+   * Advance one tick of the single-lead interior maneuver: pull in to the
+   * working depth, crane-decouple the leading cut into a slot, crane-couple the
+   * yard's spares on, return to the throat, then reconcile length and release.
+   */
+  private advanceShunt(shunt: Shunt): void {
+    switch (shunt.step) {
+      case 'pull-in':
+        if (this.driveTo(shunt, WORKING_DEPTH_MM)) shunt.step = 'decouple';
+        return;
+      case 'decouple':
+        if (this.craneWorking(shunt)) {
+          this.decoupleLeadingCut(shunt);
+          shunt.step = 'couple';
+        }
+        return;
+      case 'couple':
+        if (this.craneWorking(shunt)) {
+          this.coupleSpares(shunt);
+          shunt.step = 'return';
+        }
+        return;
+      case 'return':
+        if (this.driveTo(shunt, 0)) shunt.step = 'done';
+        return;
+      case 'done':
+        this.completeShunt(shunt);
+        return;
+    }
+  }
+
+  /** Move the train toward `targetMm` by one step; true once it arrives. */
+  private driveTo(shunt: Shunt, targetMm: number): boolean {
+    const delta = targetMm - shunt.depthMm;
+    if (Math.abs(delta) <= INTERIOR_STEP_MM) {
+      shunt.depthMm = targetMm;
+      return true;
+    }
+    shunt.depthMm += Math.sign(delta) * INTERIOR_STEP_MM;
+    return false;
+  }
+
+  /** Count down a crane action; true on the tick it completes. */
+  private craneWorking(shunt: Shunt): boolean {
+    if (shunt.craneTicks === 0) shunt.craneTicks = CRANE_TICKS;
+    shunt.craneTicks -= 1;
+    return shunt.craneTicks === 0;
+  }
+
+  /** Crane lifts the train's leading cut off; it is held by the crane until it
+   *  becomes the yard's spares at the couple step (the spares already hold a
+   *  slot, so no extra slot is taken here). */
+  private decoupleLeadingCut(shunt: Shunt): void {
+    const consist = shunt.train.getConsist();
+    if (consist.length < SWAP_PAIR_SIZE) return;
+    shunt.dropped = consist.slice(0, SWAP_PAIR_SIZE);
+    shunt.train.setConsist(consist.slice(SWAP_PAIR_SIZE));
+  }
+
+  /** Crane lifts the yard's spare cut onto the train's front; the cut just
+   *  dropped becomes the spares for the next visitor (the FIFO migration). */
+  private coupleSpares(shunt: Shunt): void {
+    const incoming = this.spares.slice(0, SWAP_PAIR_SIZE);
+    shunt.train.setConsist([...incoming, ...shunt.train.getConsist()]);
+    this.spares = [...shunt.dropped];
+  }
+
+  /** Finish the maneuver: take the train's slot, hand it back to core (it
+   *  departs under ordinary clearance, ADR-027), and free the lead. */
+  private completeShunt(shunt: Shunt): void {
+    this.servicing.set(shunt.trainId, this.occupy(shunt.trainId));
+    this.releaseTrain(shunt.trainId);
+    this.activeShunt = null;
+  }
+
+  /**
+   * The interior pose for the toy-table to render: the train currently being
+   * shunted (with its depth into the lead, 0..1 normalised) and whether the
+   * crane is actively working a cut. Null when the lead is idle. UI-only.
+   */
+  getInteriorState(): {
+    trainId: string;
+    depthFraction: number;
+    craneWorking: boolean;
+  } | null {
+    if (this.activeShunt === null) return null;
+    return {
+      trainId: this.activeShunt.trainId,
+      depthFraction: Math.min(1, this.activeShunt.depthMm / WORKING_DEPTH_MM),
+      craneWorking: this.activeShunt.step === 'decouple' || this.activeShunt.step === 'couple',
+    };
   }
 
   /** Free the slot a departed/vanished train held and re-arm it for next lap. */
