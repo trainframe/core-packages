@@ -876,15 +876,14 @@ function computeRenderPositions(
   return result;
 }
 
-/** How far into the yard (mm along its length, from the throat) a train is drawn
- *  at full interior depth — comfortably inside the yard body (half-length 300). */
-const INTERIOR_RENDER_DEPTH_MM = 180;
-
-/** Render the train the yard is currently shunting at its interior depth: the
- *  loco pulled `depthFraction` of the way into the yard along the piece's length,
- *  its (current) coupled rake trailing back toward the throat. The rake shortens
- *  as the crane decouples and lengthens as it couples — the wagons visibly move
- *  between train and yard. No-op when the yard isn't shunting anyone. */
+/** Render the train the yard is currently shunting at its interior pose: the
+ *  loco at the device's (depth, lane) in the yard's local frame — so it pulls
+ *  off the throat spine INTO a slot, reverses ACROSS into the spares slot, and
+ *  returns to the centre — its (current) coupled rake trailing back along the
+ *  spine. The rake shortens as the crane decouples and lengthens as the spares
+ *  collide on — the wagons visibly move between train and yard. No-op when the
+ *  yard isn't shunting anyone. Depth/lane are in mm in the piece's local frame
+ *  (depth along its length, lane across its slots); we rotate them into world. */
 function placeShuntedTrain(
   piece: TrackPiece,
   sim: ToySimulation,
@@ -898,26 +897,37 @@ function placeShuntedTrain(
     ? interior.trainId.slice(2)
     : interior.trainId;
   const rad = (piece.rotationDeg * Math.PI) / 180;
-  const dir = { x: Math.cos(rad), y: Math.sin(rad) };
-  const depth = interior.depthFraction * INTERIOR_RENDER_DEPTH_MM;
-  const loco: WorldPosition = {
-    x: piece.position.x + dir.x * depth,
-    y: piece.position.y + dir.y * depth,
-    rotationDeg: piece.rotationDeg,
-  };
-  result.set(trainPieceId, loco);
-  // The coupled rake trails back toward the throat (opposite the pull-in).
+  const dir = { x: Math.cos(rad), y: Math.sin(rad) }; // local +x (depth)
+  const lat = { x: -Math.sin(rad), y: Math.cos(rad) }; // local +y (lane)
+  const local = localToWorld(piece.position, dir, lat, interior.depthMm, interior.laneMm);
+  result.set(trainPieceId, { ...local, rotationDeg: piece.rotationDeg });
+  // The coupled rake trails back along the spine (toward the throat).
   const carriageIds = trainTrails.get(trainPieceId) ?? [];
   for (let i = 0; i < carriageIds.length; i++) {
     const carriageId = carriageIds[i];
     if (carriageId === undefined) continue;
     const d = (i + 1) * CARRIAGE_SPACING_MM;
     result.set(carriageId, {
-      x: loco.x - dir.x * d,
-      y: loco.y - dir.y * d,
+      x: local.x - dir.x * d,
+      y: local.y - dir.y * d,
       rotationDeg: piece.rotationDeg,
     });
   }
+}
+
+/** Rotate a piece-local (depth, lane) offset into a world point about an origin,
+ *  given the piece's local +x (depth) and +y (lane) unit vectors. */
+function localToWorld(
+  origin: { x: number; y: number },
+  dir: { x: number; y: number },
+  lat: { x: number; y: number },
+  depthMm: number,
+  laneMm: number,
+): { x: number; y: number } {
+  return {
+    x: origin.x + dir.x * depthMm + lat.x * laneMm,
+    y: origin.y + dir.y * depthMm + lat.y * laneMm,
+  };
 }
 
 /** Angle for a turntable's confirmed switch position; unknown or not-yet-set
@@ -945,14 +955,26 @@ function trainUnderSensor(
   return false;
 }
 
-/** True when the yard is actively shunting a train in its interior (ADR-029):
- * the device is driving a train between slots / working its crane. The gantry
- * crane runs only while this holds; an idle yard parks its crane at home. Visual
- * only — read straight off the device's interior state, not proximity. */
-function yardShunting(piece: TrackPiece, hardware: ToyHardware | null): boolean {
-  if (hardware === null) return false;
-  const yard = hardware.getSimulation().getRailyard(`YARD-${piece.id}`);
-  return yard?.getInteriorState() != null;
+/** The gantry crane's live pose (where its bridge + head sit, and whether it is
+ *  working a cut or reading the train), in the yard's local mm frame — the crane
+ *  FOLLOWS the work tick by tick. Null when the yard isn't shunting, so the crane
+ *  parks at home. The pose is read straight off the device's interior state so
+ *  the gantry animates truthfully to the maneuver. */
+interface YardCranePose {
+  readonly depthMm: number;
+  readonly laneMm: number;
+  readonly working: boolean;
+}
+
+function yardCranePose(piece: TrackPiece, hardware: ToyHardware | null): YardCranePose | null {
+  if (hardware === null) return null;
+  const interior = hardware.getSimulation().getRailyard(`YARD-${piece.id}`)?.getInteriorState();
+  if (interior == null) return null;
+  return {
+    depthMm: interior.craneDepthMm,
+    laneMm: interior.craneLaneMm,
+    working: interior.craneWorking,
+  };
 }
 
 /** Everything `experimentVisualFor` reads — bundled so the per-piece dispatch
@@ -1174,6 +1196,10 @@ interface TrainframeSimHandle {
   readonly pause: () => void;
   readonly resume: () => void;
   readonly step: (ms: number) => void;
+  /** The live in-browser simulation (or null before the table mounts one) — an
+   * escape hatch for the live-driving playbook + screenshot harnesses to read
+   * device state (e.g. the yard's interior maneuver) from the page. */
+  readonly getSimulation: () => ToySimulation | null;
 }
 
 declare global {
@@ -1380,13 +1406,14 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       pause: () => {},
       resume: () => {},
       step: () => {},
+      getSimulation: () => hardwareRef.current?.getSimulation() ?? null,
     };
     window.trainframeSim = handle;
     return () => {
       // exactOptionalPropertyTypes forbids `delete`; assign undefined.
       window.trainframeSim = undefined;
     };
-  }, []);
+  }, [hardwareRef]);
 
   // DEV-only: a console/orchestrator hook that stages the unified flyover demo
   // — one connected theta-graph track with a diverge junction (J1), a layer-1
@@ -2733,7 +2760,9 @@ function Table({
               coupledToTrainId={carriageCoupledTo.get(p.id)}
               renderPosition={renderPositions.get(p.id)}
               experimentVisual={experimentVisuals.get(p.id)}
-              servicing={p.type === 'railyard' && liveIds.has(p.id) && yardShunting(p, hardware)}
+              cranePose={
+                p.type === 'railyard' && liveIds.has(p.id) ? yardCranePose(p, hardware) : null
+              }
               onAction={(action) => onPieceAction(p.id, action)}
               dragOverride={
                 pieceDragPreview?.id === p.id
@@ -2879,10 +2908,10 @@ interface PieceRendererProps {
   /** Live moving-part state for an experimental piece (deck angle, span
    * raised, LED lit); undefined for pieces with no moving parts. */
   readonly experimentVisual: ExperimentVisual | undefined;
-  /** For a railyard piece: true while a train is in the yard being serviced.
-   * The gantry crane only runs its servicing choreography while this holds;
-   * an idle yard parks its crane at home. False for every other piece type. */
-  readonly servicing: boolean;
+  /** For a railyard piece: the gantry crane's live pose (bridge depth + head
+   * lane + working), driving the crane to FOLLOW the interior maneuver tick by
+   * tick. Null when the yard isn't shunting (crane parks at home). */
+  readonly cranePose: YardCranePose | null;
   readonly onAction: (action: 'select' | PowerToggleAction) => void;
   /**
    * While a pointer-drag of this piece is in progress, the live world position
@@ -2932,7 +2961,7 @@ function PieceRenderer({
   coupledToTrainId,
   renderPosition,
   experimentVisual,
-  servicing,
+  cranePose,
   onAction,
   dragOverride,
   onDragMove,
@@ -3081,7 +3110,7 @@ function PieceRenderer({
       {/* The railyard's XY gantry: foundations OUTSIDE the slots, a bridge that
           rolls along them, and a crane head that crosses the bridge to reach
           over any slot. Drawn over the wooden track, in the yard's local frame. */}
-      {piece.type === 'railyard' && <RailyardGantry servicing={servicing} />}
+      {piece.type === 'railyard' && <RailyardGantry cranePose={cranePose} />}
       {/* Power dot for wire-visible devices only (train / gate): green when
           powered, grey when inert/off-bus. Carriages have no wire identity —
           no dot. Clicking the dot of an on-track train toggles its power in
@@ -3105,21 +3134,18 @@ const RAILYARD_STEEL = '#7c8a94';
 const RAILYARD_STEEL_DARK = '#5a6770';
 const RAILYARD_STEEL_LIGHT = '#aeb9c1';
 
-/* The gantry's choreography is DRIVEN BY THE WORK, not a blind timer. A serviced
-   train parks at the yard's throat — the gantry's exact centre (local 0,0,
-   measured live). So the crane does one purposeful thing: while a train is in
-   the yard it RUNS IN from its home end to centre, over the train, then works
-   the hook up-and-down on the spot until the train leaves; idle, it sits parked
-   at home and does nothing. No sweeping empty bays. The run-in plays once
-   (`fill="freeze"`); the hook lift + hum + LED pulse begin only once the bridge
-   has arrived (`begin="<run>"`). */
+/* The gantry's choreography is DRIVEN BY THE WORK, not a blind timer. Its pose
+   comes live from the device's interior maneuver (`cranePose`): the bridge sits
+   at the crane's depth and the head at its lane, so the gantry FOLLOWS the train
+   tick by tick — over the cut it is decoupling, then over the train as it pulls
+   forward, reverses into the spares slot, and is read for release. Position is
+   plain React transforms (re-rendered each sim tick, like the trains); only the
+   working stroke + hum + LED pulse are SMIL, mounted while the crane is actually
+   working a cut or reading the train. Idle, with no maneuver, it parks at its
+   home end and does nothing. No sweeping empty bays. */
 const GX = RAILYARD_GANTRY_X;
-const SERVICE_RUN_DUR_S = 2.4;
-const SERVICE_RUN_DUR = `${SERVICE_RUN_DUR_S}s`;
-/* Bridge: home end (-GX) → the working depth, over the train the yard has pulled
-   into its interior (matches `placeShuntedTrain`'s INTERIOR_RENDER_DEPTH_MM). */
-const BRIDGE_RUN_VALUES = `${-GX} 0;${INTERIOR_RENDER_DEPTH_MM} 0`;
-/* Hook: a slow lift-and-lower over the coupling — the actual working stroke. */
+/* Hook: a slow lift-and-lower over the coupling — the actual working stroke,
+   looped while the crane is working a cut or reading the train. */
 const HEAD_LIFT_VALUES = '0 0;0 -7;0 0';
 const LED_IDLE = '#4ad7b0';
 const LED_WORK = '#ffb52e';
@@ -3133,9 +3159,9 @@ const LED_PULSE_VALUES = `${LED_WORK};${LED_IDLE};${LED_WORK}`;
  * length (local x); a CRANE HEAD rides the bridge and crosses it (local y), so
  * the head can reach any point OVER the track without the foundations ever
  * standing on it. Everything is in the yard's local frame, so it rotates with
- * the piece; motion is SMIL, so it animates with no React re-render.
+ * the piece; the bridge + head follow the live `cranePose` (null = parked home).
  */
-function RailyardGantry({ servicing }: { servicing: boolean }) {
+function RailyardGantry({ cranePose }: { cranePose: YardCranePose | null }) {
   const railY = RAILYARD_RAIL_Y;
   const railX = GX + 14; // foundations overrun the bridge's travel a touch
   const beam = 5;
@@ -3167,45 +3193,33 @@ function RailyardGantry({ servicing }: { servicing: boolean }) {
           />
         )),
       )}
-      <RailyardCrane railY={railY} beam={beam} servicing={servicing} />
+      <RailyardCrane railY={railY} beam={beam} cranePose={cranePose} />
     </g>
   );
 }
 
 /** The rolling bridge + crane head. Split out so the foundations stay static
- *  while this whole group translates along the rails. The crane only RUNS its
- *  servicing choreography (bridge + head + vibration + LED) while a train is in
- *  the yard; idle, it sits parked at its home end — the user's "move only to act
- *  on trains". Mounting/unmounting the `<animateTransform>` on `servicing`
- *  restarts the run from home each time a train arrives, which is what we want;
- *  an empty yard renders a wholly static crane at the home pose. */
+ *  while this whole group translates along the rails. The bridge sits at the
+ *  crane's live depth (or parked at home `-GX` when idle) and the head crosses
+ *  the bridge to the crane's live lane — so the gantry follows the interior
+ *  maneuver. The working stroke + hum + LED pulse run only while `working`. */
 function RailyardCrane({
   railY,
   beam,
-  servicing,
+  cranePose,
 }: {
   railY: number;
   beam: number;
-  servicing: boolean;
+  cranePose: YardCranePose | null;
 }) {
+  const bridgeX = cranePose?.depthMm ?? -GX;
+  const headY = cranePose?.laneMm ?? 0;
+  const working = cranePose?.working ?? false;
   return (
     <g>
-      {/* Bridge runs IN from home (-GX) to centre (0) over the serviced train,
-          once, and freezes there; parked at home when idle. */}
-      <g transform={servicing ? undefined : `translate(${-GX}, 0)`}>
-        {servicing && (
-          <animateTransform
-            attributeName="transform"
-            type="translate"
-            values={BRIDGE_RUN_VALUES}
-            keyTimes="0;1"
-            dur={SERVICE_RUN_DUR}
-            calcMode="spline"
-            keySplines="0.45 0 0.2 1"
-            fill="freeze"
-            repeatCount="1"
-          />
-        )}
+      {/* Bridge rolls along the rails to sit over the crane's working depth;
+          parked at home (-GX) when there's no maneuver. */}
+      <g transform={`translate(${bridgeX}, 0)`}>
         {/* The bridge: a steel lattice truss spanning the two side rails, a truck
             riding each. The girder reads as the gantry's main beam. */}
         <RailyardTruss railY={railY} />
@@ -3220,23 +3234,24 @@ function RailyardCrane({
             fill={RAILYARD_STEEL_DARK}
           />
         ))}
-        {/* Crane head: once the bridge has run in (begin=run duration), works the
-            hook up-and-down over the coupling. No travel in y otherwise — it sits
-            over the train, not over empty bays. */}
-        <g>
-          {servicing && (
-            <animateTransform
-              attributeName="transform"
-              type="translate"
-              values={HEAD_LIFT_VALUES}
-              dur="1.6s"
-              begin={SERVICE_RUN_DUR}
-              calcMode="spline"
-              keySplines="0.4 0 0.6 1;0.4 0 0.6 1"
-              repeatCount="indefinite"
-            />
-          )}
-          <RailyardHead servicing={servicing} />
+        {/* Crane head: rides the bridge across to the crane's lane (so it sits
+            over whatever slot the work is in), and works the hook up-and-down
+            over the coupling while the crane is actually working. */}
+        <g transform={`translate(0, ${headY})`}>
+          <g>
+            {working && (
+              <animateTransform
+                attributeName="transform"
+                type="translate"
+                values={HEAD_LIFT_VALUES}
+                dur="1.6s"
+                calcMode="spline"
+                keySplines="0.4 0 0.6 1;0.4 0 0.6 1"
+                repeatCount="indefinite"
+              />
+            )}
+            <RailyardHead working={working} />
+          </g>
         </g>
       </g>
     </g>
@@ -3283,19 +3298,18 @@ function RailyardTruss({ railY }: { railY: number }) {
  *  vision element that reads each wagon's livery) and a status LED. The wedge
  *  that splits couplings is a physical part below the head — not rendered. A
  *  subtle constant jitter is the head's working "vibration". */
-function RailyardHead({ servicing }: { servicing: boolean }) {
+function RailyardHead({ working }: { working: boolean }) {
   return (
     <g>
       {/* Vibration: a tiny jitter, additive over the hook's lift — the working
-          "hum", begun only once the crane has run in over the train. */}
-      {servicing && (
+          "hum", running while the crane is working a cut or reading the train. */}
+      {working && (
         <animateTransform
           attributeName="transform"
           type="translate"
           additive="sum"
           values="0 0;0.5 0.4;-0.4 0.5;0.4 -0.4;0 0"
           dur="0.22s"
-          begin={SERVICE_RUN_DUR}
           repeatCount="indefinite"
         />
       )}
@@ -3318,12 +3332,11 @@ function RailyardHead({ servicing }: { servicing: boolean }) {
       {/* Status LED on the head's shoulder — pulses amber while working, holds
           teal idle when no train is in the yard. */}
       <circle cx={0} cy={-8} r={2.6} fill={LED_IDLE}>
-        {servicing && (
+        {working && (
           <animate
             attributeName="fill"
             values={LED_PULSE_VALUES}
             dur="1.6s"
-            begin={SERVICE_RUN_DUR}
             repeatCount="indefinite"
           />
         )}
