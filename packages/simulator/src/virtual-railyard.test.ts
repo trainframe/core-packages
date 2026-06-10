@@ -234,6 +234,125 @@ describe('VirtualRailyard carriage swap (the opaque-interior rearrange)', () => 
     expect(yard.getSpares().map((c) => c.id)).toEqual(['R1', 'R2']);
   });
 
+  /** Accumulates what a replayed maneuver passed through (ordered phases, lanes
+   *  per phase, collision pickup). */
+  interface ShuntTrace {
+    phaseOrder: string[];
+    lanesByStep: Map<string, Set<number>>;
+    coupledOnReverse: boolean;
+    lengthBeforeReverse: number;
+  }
+
+  /** Fold one observed interior tick into the running trace. */
+  const recordTick = (
+    trace: ShuntTrace,
+    interior: NonNullable<ReturnType<VirtualRailyard['getInteriorState']>>,
+    rakeLength: number,
+  ): void => {
+    if (trace.phaseOrder.at(-1) !== interior.step) trace.phaseOrder.push(interior.step);
+    const lanes = trace.lanesByStep.get(interior.step) ?? new Set<number>();
+    lanes.add(Math.round(interior.laneMm));
+    trace.lanesByStep.set(interior.step, lanes);
+    if (interior.step === 'pull-forward') trace.lengthBeforeReverse = rakeLength;
+    if (interior.step === 'return' && trace.lengthBeforeReverse === 2) {
+      trace.coupledOnReverse = true;
+    }
+  };
+
+  /** Replay a serviced train's interior maneuver, returning its trace. Pure
+   *  observation — drives the real sim. */
+  const replayShunt = (sim: Simulation, yard: VirtualRailyard, trainId: string): ShuntTrace => {
+    const trace: ShuntTrace = {
+      phaseOrder: [],
+      lanesByStep: new Map(),
+      coupledOnReverse: false,
+      lengthBeforeReverse: 4,
+    };
+    for (let i = 0; i < 600; i++) {
+      sim.advance(50);
+      const interior = yard.getInteriorState();
+      if (interior !== null) {
+        recordTick(trace, interior, sim.getTrain(trainId)?.getConsist().length ?? 0);
+      }
+    }
+    return trace;
+  };
+
+  it('drives the 5-step choreography: enter a slot, decouple, reverse into the spares, return, inspect, release', () => {
+    const sim = new Simulation({ layout: SWAP_LOOP, seed: 1 });
+    const yard = sim.spawnRailyard('YARD-1', 'M3', 6);
+    yard.loadSpares([wagon('P1', 'purple'), wagon('P2', 'purple')]);
+    trainWith(sim, 'T-red', 'R');
+    sim.handleCommand('T-red', 'assign_route', {
+      route_id: 'in',
+      edges: [{ from_marker_id: 'M1', to_marker_id: 'M3' }],
+    });
+    sim.handleCommand('T-red', 'grant_clearance', { limit_marker_id: 'M3' });
+
+    /* The ordered phases, the train's lane each phase, and the collision pickup
+       — proof it moves OFF the throat spine into a slot, reverses ACROSS into the
+       spares lane, and returns to neutral, not just teleports a consist. */
+    const { phaseOrder, lanesByStep, coupledOnReverse } = replayShunt(sim, yard, 'T-red');
+
+    // Every phase ran, in order. Enter precedes the crane work; inspect precedes
+    // release (the camera-read gate).
+    expect(phaseOrder).toEqual([
+      'enter',
+      'decouple',
+      'pull-forward',
+      'reverse-pickup',
+      'return',
+      'inspect',
+      'release',
+    ]);
+    // The train physically left the throat spine into the entry slot...
+    expect([...(lanesByStep.get('enter') ?? [])].some((y) => y < 0)).toBe(true);
+    // ...reversed across to the spares slot (positive lane)...
+    expect([...(lanesByStep.get('reverse-pickup') ?? [])].some((y) => y > 0)).toBe(true);
+    // ...moved back toward the centre during return (off the spares lane)...
+    // 84 = the spares lane the train reverses into; return moves back off it.
+    expect(Math.min(...(lanesByStep.get('return') ?? [Number.NaN]))).toBeLessThan(84);
+    // ...and was read by the camera at the neutral centre lane.
+    expect([...(lanesByStep.get('inspect') ?? [])]).toContain(0);
+    // The rake was short (decoupled) through the forward pull, and the spares
+    // collided on during the reverse — picked up by reversing into them.
+    expect(coupledOnReverse).toBe(true);
+    // End state matches the swap: purple spares now lead, red pair dropped.
+    expect(consistIds(sim, 'T-red')).toEqual(['P1', 'P2', 'R3', 'R4']);
+    expect(yard.getSpares().map((c) => c.id)).toEqual(['R1', 'R2']);
+  });
+
+  it('a train with nothing to swap still enters and is inspected, but the crane lifts no cut', () => {
+    const sim = new Simulation({ layout: SWAP_LOOP, seed: 1 });
+    // No spares loaded: the yard has nothing to hand back, so it decides not to
+    // decouple — but the train still officially enters and is camera-read.
+    const yard = sim.spawnRailyard('YARD-1', 'M3', 6);
+    trainWith(sim, 'T-red', 'R');
+    sim.handleCommand('T-red', 'assign_route', {
+      route_id: 'in',
+      edges: [{ from_marker_id: 'M1', to_marker_id: 'M3' }],
+    });
+    sim.handleCommand('T-red', 'grant_clearance', { limit_marker_id: 'M3' });
+
+    const phases = new Set<string>();
+    const lengthsSeen = new Set<number>();
+    for (let i = 0; i < 600; i++) {
+      sim.advance(50);
+      const interior = yard.getInteriorState();
+      if (interior !== null) phases.add(interior.step);
+      lengthsSeen.add(sim.getTrain('T-red')?.getConsist().length ?? 4);
+    }
+
+    expect(phases.has('enter')).toBe(true);
+    expect(phases.has('inspect')).toBe(true);
+    // It skipped the swap phases entirely — no decouple, no reverse-pickup.
+    expect(phases.has('decouple')).toBe(false);
+    expect(phases.has('reverse-pickup')).toBe(false);
+    // The rake was never shortened — the crane lifted nothing.
+    expect(lengthsSeen.has(2)).toBe(false);
+    expect(consistIds(sim, 'T-red')).toEqual(['R1', 'R2', 'R3', 'R4']);
+  });
+
   it('is a no-op for a train shorter than the swap pair', () => {
     const sim = new Simulation({ layout: SWAP_LOOP, seed: 1 });
     const yard = sim.spawnRailyard('YARD-1', 'M3', 6);
