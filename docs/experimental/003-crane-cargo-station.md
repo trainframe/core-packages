@@ -5,11 +5,15 @@ setup.
 
 **Built (June 2026):** toy-table piece in the Experiments tray (`crane-station`
 in `pieces.ts`) — a station plank with a grey gantry, trolley + hook, and a
-warm-accent crate stack. Scanning registers `CRANE-{piece.id}` with
-`core.gates_clearance`, backed by a real `VirtualGate` (the hold-the-train
-seam). The cargo itself stays as documented design: the carriage cargo slot and
-the trolley/crate animation are NOT built — they wait on the simulator change
-this entry describes below. that a device can perform a **meaningful physical manipulation of a
+live trackside crate stack. The cargo transfer WORKS: a carriage piece carries
+the optional cosmetic cargo slot this entry calls for (`TrackPiece.cargo`),
+and the operator's "Lift crate" / "Place crate" affordances move a crate
+between the stack and the wagon under the hook — the wagon departs visibly one
+box heavier or lighter, the stack grows or shrinks to match. Each transfer is
+bracketed by a clearance withhold/grant pulse on the crane's own marker
+(`CRANE-{piece.id}`, `core.gates_clearance`, a real `VirtualGate`) — the pin,
+never a dwell timer — and **nothing cargo-specific crosses the wire**: no
+crate event, no manifest, no carriage id. The negative-space proof, run. that a device can perform a **meaningful physical manipulation of a
 train's payload** — lifting a crate off, or placing one on, a carriage — using
 only the seams that already exist: scheduled **dwell**, **tag identity**
 ([ADR-007](../adr/007-tag-resolution-registry.md)), and **clearance**. The crate,
@@ -53,18 +57,18 @@ The load-bearing claim is that this list is **short and entirely existing**:
   no carriage id. The crate transfer is a simulator/visualiser fact, invisible to
   protocol and scheduler — the whole point.
 
-## The small simulator change it would need (documented, not built)
+## The small simulator change it needed (now built)
 
-Today a carriage is a dumb visual piece (`DEVICE_PIECE_TYPES`, no MQTT identity,
+A carriage is a dumb visual piece (`DEVICE_PIECE_TYPES`, no MQTT identity,
 [`pieces.ts`](../../packages/simulator-ui/src/track/pieces.ts)). For the crane to
-have something to act on, a carriage gains an **optional cosmetic cargo slot** — a
-nullable "is a crate riding on this wagon?" flag the simulator and visualiser
-render and the crane toggles. Crucially the carriage **stays dumb**: no comms, no
-RFID, no `device_registered`, nothing on the bus. Cargo is to a carriage what a
-carriage is to a train — a layer of physical detail the core never sees. This is
-the only code change the device implies, and it is confined to the
-simulator/visualiser carriage model; protocol, core, and the scheduler are
-untouched.
+have something to act on, a carriage gained the **optional cosmetic cargo
+slot** — `TrackPiece.cargo`, a "is a crate riding on this wagon?" flag the
+toy table renders and the crane toggles. Crucially the carriage **stays
+dumb**: no comms, no RFID, no `device_registered`, nothing on the bus. Cargo
+is to a carriage what a carriage is to a train — a layer of physical detail
+the core never sees. This was the only code change the device implied, and it
+is confined to the simulator-ui carriage model; protocol, core, and the
+scheduler are untouched.
 
 ## Action-oriented goal
 

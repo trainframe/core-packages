@@ -37,21 +37,17 @@ test.describe
       await harness.shutdown();
     });
 
-    test('the shelf offers the Experiments box with all five pieces', async ({ browser }) => {
+    test('the shelf offers the Experiments box (004 absent — superseded by the railyard)', async ({
+      browser,
+    }) => {
       const sim = await openSimulatorUi(browser, { brokerUrl: harness.brokerWsUrl });
-      for (const type of [
-        'vision-station',
-        'turntable',
-        'crane-station',
-        'decoupler',
-        'lift-bridge',
-      ]) {
+      for (const type of ['vision-station', 'turntable', 'crane-station', 'lift-bridge']) {
         await expect(sim.getByTestId(`toybox-${type}`)).toBeVisible();
       }
       await sim.close();
     });
 
-    test('raise/lower a lift bridge span; spin a turntable deck; a vision station lights over a parked train', async ({
+    test('raise/lower a lift bridge; spin a turntable; crane a crate onto a wagon; a vision station lights over a parked train', async ({
       browser,
     }) => {
       const sim = await openSimulatorUi(browser, { brokerUrl: harness.brokerWsUrl });
@@ -90,6 +86,30 @@ test.describe
       await expect(deck).toHaveAttribute('data-angle', '45');
       await sim.getByTestId('action-spin-deck').click();
       await expect(deck).toHaveAttribute('data-angle', '-45');
+
+      /* Crane: a crate moves from the trackside stack onto the wagon parked
+       * under the hook — the train leaves one box heavier, with nothing
+       * cargo-specific on the wire (experimental 003). */
+      const craneId = await placePieceOnToyTable(sim, {
+        type: 'crane-station',
+        xMm: 650,
+        yMm: 480,
+      });
+      const wagonId = await placePieceOnToyTable(sim, { type: 'carriage', xMm: 695, yMm: 480 });
+      await scanPiece(sim, craneId);
+      await disarm(sim);
+
+      await expect(sim.getByTestId(`crane-stack-${craneId}`)).toHaveAttribute('data-crates', '3');
+      /* Select the crane by clicking its plank's WEST end: the wagon sits over
+       * the gantry middle (a centre click would hit the wagon), and the bbox
+       * corner is empty space (the platform doesn't reach it). Mid-height at
+       * the west edge is always plank wood. */
+      const craneBox = await sim.getByTestId(`piece-${craneId}`).boundingBox();
+      if (craneBox === null) throw new Error('crane not visible');
+      await sim.mouse.click(craneBox.x + 8, craneBox.y + craneBox.height * 0.55);
+      await sim.getByTestId('action-place-crate').click();
+      await expect(sim.getByTestId(`cargo-${wagonId}`)).toBeVisible();
+      await expect(sim.getByTestId(`crane-stack-${craneId}`)).toHaveAttribute('data-crates', '2');
 
       /* Vision station: defined by stillness — its only motion is the
        * detection LED, dark until a live train sits under the sensor. */

@@ -1,14 +1,14 @@
 # Experimental device 004: Wedge decoupler
 
-**Status:** speculative viability test. NOT normative; not expected in a typical
-setup.
-
-**Built (June 2026):** toy-table piece in the Experiments tray (`decoupler` in
-`pieces.ts`) — a low graphite housing straddling the track band, wedge parked
-in its slot. It is a wire device: scanning registers `DEC-{piece.id}` declaring
-`core.reports_length` + `core.gates_clearance`, gate-backed in the sim. The
-wedge does not yet fire: the length-decrease emission and everything downstream
-of it is the shunting-orchestration question this entry deliberately parks. the **decrease direction** of [ADR-023](../adr/023-coupling-and-decoupling.md).
+**Status:** **superseded by [006 (railyard)](006-railyard.md)** — kept for the
+analysis, not as a device to build. The railyard's wedge unit owns the
+coupling-split job inside its own territory, and its `core.reports_length`
+declaration covers the decrease direction this entry exists to prove. No
+standalone decoupler piece ships in the toy-table Experiments tray; a
+free-standing trackside decoupler would re-open exactly the
+detached-carriage-as-untracked-obstacle problem the railyard's owned, gated
+territory was designed to contain. The shunting-orchestration analysis below
+remains the reference for any future maneuver planner. the **decrease direction** of [ADR-023](../adr/023-coupling-and-decoupling.md).
 A trackside device physically separates a carriage from a dwelling train and
 emits `train_length_changed` with the *shorter* length; the detached carriage
 simply **leaves core's awareness** — no composition model, no lone-carriage

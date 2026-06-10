@@ -233,8 +233,18 @@ export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): 
     await sim.getByTestId(`toybox-carriage-color-${carriageColor}`).click();
   }
 
-  // Capture the piece IDs that exist before the click, so we can diff.
-  const piecesBeforeCount = await sim.locator('[data-piece-id]').count();
+  // Capture the piece IDs that exist before the click, so we can diff. The
+  // new piece must be found by SET difference, not document order: pieces
+  // render bucketed by layer and track-before-device phases, so the newest
+  // piece is NOT necessarily last in the DOM (a station placed after a
+  // carriage paints before it).
+  const idsBefore = new Set(
+    await sim
+      .locator('[data-piece-id]')
+      .evaluateAll((els) =>
+        els.map((el) => el.getAttribute('data-piece-id')).filter((id): id is string => id !== null),
+      ),
+  );
 
   // The canvas is an SVG with a viewBox driven by viewport state. We convert
   // world-space mm to element-relative px using the bounding rect and the
@@ -284,16 +294,16 @@ export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): 
   // Wait for a new piece to appear.
   await sim.waitForFunction(
     (before: number) => document.querySelectorAll('[data-piece-id]').length > before,
-    piecesBeforeCount,
+    idsBefore.size,
   );
 
-  // The newly placed piece is the last one added.
+  // The newly placed piece is the one that wasn't there before the click.
   const allPieceIds = await sim
     .locator('[data-piece-id]')
     .evaluateAll((els) =>
       els.map((el) => el.getAttribute('data-piece-id')).filter((id): id is string => id !== null),
     );
-  const pieceId = allPieceIds[allPieceIds.length - 1];
+  const pieceId = allPieceIds.find((id) => !idsBefore.has(id));
   if (pieceId === undefined) {
     throw new Error('placePieceOnToyTable: no piece appeared after click');
   }

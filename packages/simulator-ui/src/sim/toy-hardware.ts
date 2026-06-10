@@ -19,7 +19,6 @@ function deviceIdForDevicePiece(piece: TrackPiece): string {
   if (piece.type === 'train') return `T-${piece.id}`;
   if (piece.type === 'gate') return `GATE-${piece.id}`;
   if (piece.type === 'railyard') return `YARD-${piece.id}`;
-  if (piece.type === 'decoupler') return `DEC-${piece.id}`;
   throw new Error(`deviceIdForDevicePiece called on non-device piece ${piece.type}`);
 }
 
@@ -366,14 +365,6 @@ export class ToyHardware {
       this.simulation.spawnGate(deviceIdForDevicePiece(piece));
       return;
     }
-    if (piece.type === 'decoupler') {
-      // A wedge decoupler (experimental 004) pins a dwelling train via
-      // core.gates_clearance while the wedge is up — gate machinery, reused.
-      // Its core.reports_length emission (the shorter train) stays unbuilt:
-      // the docs park the shunting orchestration as a separate question.
-      this.simulation.spawnGate(deviceIdForDevicePiece(piece));
-      return;
-    }
     if (piece.type === 'railyard') {
       // A railyard gates the nearest marker (its throat). `nearestMarkerId`
       // already returns the compiled `M-…` id. Defer if no track has been placed
@@ -443,7 +434,7 @@ export class ToyHardware {
       this.client.publish(topic, payload);
       return;
     }
-    if (piece.type === 'gate' || piece.type === 'decoupler') {
+    if (piece.type === 'gate') {
       this.simulation.despawnGate(deviceIdForDevicePiece(piece));
       return;
     }

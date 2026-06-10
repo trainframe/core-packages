@@ -38,19 +38,21 @@ shared home for speculative, viability-test pieces, kept visually and
 organisationally apart from the staples an ordinary layout uses, so an operator
 reaching for one knows they are picking up a stress-test, not a standard part.
 
-The box is **built** (June 2026): all five of 001–005 are real `TrackPieceType`s
-in the ADR-024 workshop style, presented in an "Experiments" tray group derived
-from the piece registry (`TOYBOX_TRAYS` in
-`packages/simulator-ui/src/track/pieces.ts`). Each piece carries the wire
-identity its entry declares — and nothing else — and the three with moving
-parts move on the table: the lift bridge's span tilts as its gate withholds,
-the turntable's deck swings to the confirmed switch position, the vision
-station's LED lights while a train is measured (and its `VLS-` identity really
-asserts `train_length_changed` from the consist it observes). What stays
-unbuilt is exactly what each entry hand-waves: the crane's cargo slots and the
-decoupler's length-decrease + shunting orchestration are still documented
-design, not code. Per-entry build status is noted under each doc's **Status**
-line.
+The box is **built** (June 2026): 001, 002, 003 and 005 are real
+`TrackPieceType`s in the ADR-024 workshop style, presented in an "Experiments"
+tray group derived from the piece registry (`TOYBOX_TRAYS` in
+`packages/simulator-ui/src/track/pieces.ts`). 004 (the wedge decoupler) ships
+no piece — it was superseded by the railyard (006), whose wedge unit owns the
+coupling-split job. Each built piece carries the wire identity its entry
+declares — and nothing else — and they all move on the table: the lift
+bridge's leaf lifts (foreshortening toward its hinge over the opening gap) as
+its gate withholds; the turntable's bridge swings inside its recessed pit to
+the confirmed switch position; the crane works crates between its trackside
+stack and the wagon under its hook, pinning the train with a clearance pulse
+and putting nothing cargo-specific on the wire; the vision station's LED
+lights while a train is measured (and its `VLS-` identity really asserts
+`train_length_changed` from the consist it observes). Per-entry build status
+is noted under each doc's **Status** line.
 
 ## What every entry must cover
 
@@ -79,6 +81,6 @@ bridge). The honest answer is usually `core.gates_clearance`, not a dwell timer.
 | [001](001-vision-length-station.md)        | Vision length station | A device other than the train can report and change `train_length_mm` at runtime    | ADR-023, ADR-007        |
 | [002](002-turntable-junction.md)           | Turntable junction    | The switch seam is already N-way; a 3-way junction needs no core change, only a piece | switch seam (`layout.ts`/`layout-state.ts`) |
 | [003](003-crane-cargo-station.md)          | Crane cargo station   | A device manipulates a train's payload via dwell + identity + clearance, payload stays out of core | ADR-016, ADR-007 |
-| [004](004-wedge-decoupler.md)              | Wedge decoupler       | The decrease direction of ADR-023: length drops, the detached carriage leaves core's awareness | ADR-023, ADR-007 |
+| [004](004-wedge-decoupler.md)              | Wedge decoupler       | The decrease direction of ADR-023 (**superseded by 006** — the railyard's wedge owns the split) | ADR-023, ADR-007 |
 | [005](005-lift-bridge.md)                  | Lift bridge           | `core.gates_clearance` carries *physical track availability*, not just traffic policy | ADR-018 (gates)         |
 | [006](006-railyard.md)                     | Railyard              | A device owns a capacity-territory and gates admission by its own asserted occupancy (**graduated → ADR-026, partly built**) | ADR-026, ADR-016, ADR-023 |

@@ -502,26 +502,6 @@ describe('ToyHardware — experimental devices', () => {
     }
   });
 
-  it('a scanned decoupler registers DEC- with a gate behind it, and disconnects on delete', () => {
-    const client = new InMemoryBrokerClient();
-    client.connect('inmem://');
-    const hardware = new ToyHardware({ client, newId });
-    try {
-      const dec = piece('decoupler', 100, 100);
-      hardware.syncLayout([dec]);
-      hardware.syncLive([dec], new Set([dec.id]));
-      expect(hardware.getSimulation().getGate(`DEC-${dec.id}`)).toBeDefined();
-      const regTopic = `railway/events/device_registered/DEC-${dec.id}`;
-      expect(client.published.find((m) => m.topic === regTopic)).toBeDefined();
-
-      hardware.syncLive([dec], new Set());
-      const offTopic = `railway/events/device_disconnected/DEC-${dec.id}`;
-      expect(client.published.find((m) => m.topic === offTopic)).toBeDefined();
-    } finally {
-      hardware.dispose();
-    }
-  });
-
   it('a vision station asserts a passing train’s length from ITS OWN identity (ADR-023)', () => {
     /* The 001 proof, end-to-end: a train towing two wagons explores across the
      * station's marker; the station (not the train) emits train_length_changed

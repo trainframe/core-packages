@@ -1686,20 +1686,16 @@ describe('ToyTable — Experiments tray', () => {
       .map((m) => decodeEnvelope(m.payload).payload as { capabilities?: string[] });
   }
 
-  it('shows the Experiments box as a third tray group with the five viability-test pieces', () => {
+  it('shows the Experiments box as a third tray group with the viability-test pieces', () => {
     renderToyTable();
     const tray = screen.getByLabelText('Experiments');
-    for (const type of [
-      'vision-station',
-      'turntable',
-      'crane-station',
-      'decoupler',
-      'lift-bridge',
-    ]) {
+    for (const type of ['vision-station', 'turntable', 'crane-station', 'lift-bridge']) {
       const button = screen.getByTestId(`toybox-${type}`);
       expect(button).toBeInTheDocument();
       expect(tray.contains(button)).toBe(true);
     }
+    // 004 (wedge decoupler) has no tray piece — superseded by the railyard.
+    expect(screen.queryByTestId('toybox-decoupler')).toBeNull();
   });
 
   it('scanning a vision station binds a station_stop marker and registers VLS- with core.reports_length', async () => {
@@ -1749,26 +1745,6 @@ describe('ToyTable — Experiments tray', () => {
         (regs.find((r) => 'controls_marker_id' in r) as { controls_marker_id?: string })
           ?.controls_marker_id,
     ).toBe(`M-${pieceId}`);
-  });
-
-  it('scanning a decoupler registers DEC- with reports_length + gates_clearance', async () => {
-    const { client } = renderToyTable();
-    const pieceId = await placeArmedPiece('decoupler');
-    dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
-
-    const regs = registrationsFor(client, `DEC-${pieceId}`);
-    expect(
-      regs.some(
-        (r) =>
-          r.capabilities?.includes('core.reports_length') === true &&
-          r.capabilities?.includes('core.gates_clearance') === true,
-      ),
-    ).toBe(true);
-    // Wire-faithful: no tag binding — the decoupler is a device, not a marker.
-    const assigns = filterScanFlowAssignments(client).filter(
-      (a) => a.payload.target_id === `M-${pieceId}`,
-    );
-    expect(assigns).toHaveLength(0);
   });
 
   it('Raise span withholds the bridge marker and tilts the deck; Lower seats and grants', async () => {
@@ -1829,6 +1805,45 @@ describe('ToyTable — Experiments tray', () => {
 
     await user.click(screen.getByTestId('action-spin-deck'));
     expect(deck.getAttribute('data-angle')).toBe('-45'); // stub-c
+  });
+
+  it('the crane works crates between its stack and the wagon under the hook', async () => {
+    const user = userEvent.setup();
+    const { client } = renderToyTable();
+    const craneId = await placeArmedPiece('crane-station');
+    /* The wagon parks under the hook: the gantry sits 45 mm east of the crane
+     * origin and both pieces drop at the canvas centre — within reach. */
+    const wagonId = await placeArmedPiece('carriage');
+
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), craneId);
+    await user.click(screen.getByTestId('toybox-carriage')); // disarm
+    fireEvent.click(screen.getByTestId(`piece-${craneId}`)); // select the crane
+
+    // A fresh crane: full stack, empty wagon — Place enabled, Lift not.
+    expect(screen.getByTestId(`crane-stack-${craneId}`).getAttribute('data-crates')).toBe('3');
+    expect(screen.queryByTestId(`cargo-${wagonId}`)).toBeNull();
+    expect(screen.getByTestId('action-lift-crate')).toBeDisabled();
+
+    // Place: a crate moves from the stack onto the wagon's back.
+    await user.click(screen.getByTestId('action-place-crate'));
+    expect(screen.getByTestId(`cargo-${wagonId}`)).toBeTruthy();
+    expect(screen.getByTestId(`crane-stack-${craneId}`).getAttribute('data-crates')).toBe('2');
+
+    /* The transfer pinned the train via a withhold/grant pulse on the crane's
+     * own marker — and NOTHING cargo-specific crossed the wire: no crate
+     * event, no manifest, no carriage id. The negative-space proof of 003. */
+    const gateTopic = `railway/events/gate_state_changed/CRANE-${craneId}`;
+    const states = client.published
+      .filter((m) => m.topic === gateTopic)
+      .map((m) => (decodeEnvelope(m.payload).payload as { state: string }).state);
+    expect(states).toEqual(['withholding', 'granting']);
+    const cargoish = client.published.filter((m) => /crate|cargo|manifest/i.test(m.topic));
+    expect(cargoish).toHaveLength(0);
+
+    // Lift: the crate comes back off the wagon onto the stack.
+    await user.click(screen.getByTestId('action-lift-crate'));
+    expect(screen.queryByTestId(`cargo-${wagonId}`)).toBeNull();
+    expect(screen.getByTestId(`crane-stack-${craneId}`).getAttribute('data-crates')).toBe('3');
   });
 
   it('the vision station LED lights while a live train sits under the sensor', async () => {

@@ -5,8 +5,11 @@ setup.
 
 **Built (June 2026):** toy-table piece in the Experiments tray (`lift-bridge`
 in `pieces.ts`) — two fixed wooden approaches with a visible seam, and the
-hinged span as a separate sub-shape that tilts about its pivot over a dark gap
-while raised. The proof runs: scanning registers `BRIDGE-{piece.id}` with
+hinged span as a separate sub-shape. The raised state reads as a LIFT, not a
+swing: seen from above, the leaf **foreshortens toward its hinge** (plan-view
+length compresses as it tilts up), its dark underside end face comes into view
+at the free end, it floats on a longer cast shadow, and the gap opens beyond
+it. The proof runs: scanning registers `BRIDGE-{piece.id}` with
 `core.gates_clearance` (a real `VirtualGate`); the "Raise span" affordance
 withholds clearance across the bridge's own marker the instant it is pressed,
 and "Lower span" grants it — the drawn deck state is read off the gate, so the

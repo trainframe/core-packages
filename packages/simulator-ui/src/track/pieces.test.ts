@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CRANE_INITIAL_CRATES,
+  CRANE_STACK_SLOTS,
   type CentreLinePath,
   EXPERIMENT_PIECE_TYPES,
   PIECE_TINT,
@@ -12,6 +14,8 @@ import {
   TURNTABLE_RADIUS_MM,
   type TrackPiece,
   type TrackPieceType,
+  carriageCratePath,
+  craneCratePath,
   getCentreLinePath,
   getEndpoints,
   getPieceShape,
@@ -856,6 +860,19 @@ describe('getEndpoints — turntable (experimental 002)', () => {
     expect(PIECE_TINT.turntable).toBeNull();
   });
 
+  it('reads as a real turntable: recessed pit, ring-rail arcs, red operating knob', () => {
+    const shape = getPieceShape(makePiece('turntable'));
+    // The dark pit floor the bridge swings inside.
+    expect(shape.features.some((f) => f.role === 'dark-wood')).toBe(true);
+    // At least the two ring-rail arcs in steel.
+    expect(shape.features.filter((f) => f.role === 'metal').length).toBeGreaterThanOrEqual(2);
+    // The hand-crank knob on the beech surround (the one red fitting).
+    expect(shape.features.some((f) => f.role === 'danger')).toBe(true);
+    // The deck carries end carriages riding the ring + the pivot hub.
+    const deck = turntableDeck();
+    expect(deck.features.filter((f) => f.role === 'metal').length).toBeGreaterThanOrEqual(3);
+  });
+
   it('routes grooves only at the fixed rim stubs; the bridge grooves ride the deck', () => {
     // 4 stubs × 2 grooves. The rotating deck (turntableDeck) carries its own.
     const shape = getPieceShape(makePiece('turntable'));
@@ -890,10 +907,15 @@ describe('vision station + crane (experimental 001 / 003) — stations underneat
     expect(shape.features.some((f) => f.role === 'glass')).toBe(true);
   });
 
-  it('the crane carries a metal gantry and warm-accent (pop) crates', () => {
+  it('the crane carries a metal gantry; its crate stack is a LIVE part, not static decor', () => {
     const shape = getPieceShape(makePiece('crane-station'));
     expect(shape.features.filter((f) => f.role === 'metal').length).toBeGreaterThanOrEqual(3);
-    expect(shape.features.filter((f) => f.role === 'pop').length).toBeGreaterThanOrEqual(3);
+    // The hook accent is the only static pop; crates render from the live
+    // stack count (the crane grows/shrinks it working wagons).
+    expect(shape.features.filter((f) => f.role === 'pop').length).toBe(1);
+    expect(CRANE_STACK_SLOTS.length).toBeGreaterThanOrEqual(CRANE_INITIAL_CRATES);
+    expect(craneCratePath(0, 0).length).toBeGreaterThan(0);
+    expect(carriageCratePath().length).toBeGreaterThan(0);
   });
 });
 
@@ -922,30 +944,16 @@ describe('lift bridge (experimental 005) — a hinged wooden span', () => {
   });
 });
 
-describe('decoupler (experimental 004) — a wire device, not track', () => {
-  it('has no endpoints, no grooves, and a wire identity', () => {
-    expect(getEndpoints(makePiece('decoupler'))).toHaveLength(0);
-    expect(getPieceShape(makePiece('decoupler')).grooves).toHaveLength(0);
-    expect(isDevicePiece('decoupler')).toBe(true);
-    expect(isWireDevice('decoupler')).toBe(true);
-  });
-
-  it('shows the wedge as a pop accent in its slot', () => {
-    const shape = getPieceShape(makePiece('decoupler'));
-    expect(shape.features.some((f) => f.role === 'pop')).toBe(true);
-    expect(shape.features.some((f) => f.role === 'line')).toBe(true);
-  });
-});
-
 describe('the Experiments toybox tray', () => {
-  it('groups the five experimental pieces, in design-doc order, apart from the staples', () => {
+  it('groups the experimental pieces, in design-doc order, apart from the staples', () => {
+    // 004 (wedge decoupler) is deliberately absent — superseded by the
+    // railyard, whose wedge unit owns the coupling-split job.
     const trays = new Map(TOYBOX_TRAYS.map((t) => [t.heading, t.types]));
     expect([...trays.keys()]).toEqual(['Track', 'Devices', 'Experiments']);
     expect(trays.get('Experiments')).toEqual([
       'vision-station',
       'turntable',
       'crane-station',
-      'decoupler',
       'lift-bridge',
     ]);
     expect(trays.get('Experiments')).toEqual(EXPERIMENT_PIECE_TYPES);
@@ -955,7 +963,6 @@ describe('the Experiments toybox tray', () => {
         expect(EXPERIMENT_PIECE_TYPES).not.toContain(type);
       }
     }
-    expect(trays.get('Devices')).not.toContain('decoupler');
   });
 
   it('experimental TRACK pieces still register as track topology (semantic lists unchanged)', () => {
