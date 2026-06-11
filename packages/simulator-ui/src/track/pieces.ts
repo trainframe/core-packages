@@ -437,6 +437,39 @@ function linearHalfPath(ex: number, ey: number): CentreLinePath {
   return segmentPath(0, 0, ex, ey);
 }
 
+/** Chain several centre-lines end-to-end into one, arc length the running sum.
+ *  Sampling past a sub-path's end rolls into the next; the result is a single
+ *  sampleable rail the length of all of them — used to follow a train along a
+ *  multi-segment route (spine → ladder leg → slot). @pure */
+function concatPaths(parts: readonly CentreLinePath[]): CentreLinePath {
+  const length = parts.reduce((sum, p) => sum + p.length, 0);
+  return {
+    length,
+    at(distFromStart: number): RailPose {
+      let d = Math.max(0, Math.min(length, distFromStart));
+      for (const part of parts) {
+        if (d <= part.length) return part.at(d);
+        d -= part.length;
+      }
+      const last = parts.at(-1);
+      return last ? last.at(last.length) : { x: 0, y: 0, headingDeg: 0 };
+    },
+  };
+}
+
+/** The same rail traversed the other way: position mirrored end-for-end, heading
+ *  flipped 180° (so a train following it reads as travelling in reverse along the
+ *  physical track). @pure */
+function reversePath(path: CentreLinePath): CentreLinePath {
+  return {
+    length: path.length,
+    at(distFromStart: number): RailPose {
+      const p = path.at(path.length - Math.max(0, Math.min(path.length, distFromStart)));
+      return { x: p.x, y: p.y, headingDeg: p.headingDeg + 180 };
+    },
+  };
+}
+
 /**
  * The curve's centre-line from its origin (the arc midpoint) out to the
  * endpoint at arc angle `endAngleDeg`, sampled by real arc length. The piece
@@ -539,7 +572,7 @@ function bezierHalfPath(
  * applying the same mirror→rotate→translate the renderer (and `getEndpoints`)
  * use. `flip` mirrors across the local x-axis (y and heading negate) first.
  */
-function worldHalfPath(piece: TrackPiece, local: CentreLinePath): CentreLinePath {
+export function worldHalfPath(piece: TrackPiece, local: CentreLinePath): CentreLinePath {
   const flip = piece.flipped === true;
   return {
     length: local.length,
@@ -983,6 +1016,76 @@ function railyardLegs(): CentreLinePath[] {
     legs.push(railyardLeg(x, RAILYARD_SLOT_HALF_X, bot)); // east → bottom slot mouth
   }
   return legs;
+}
+
+/** The west ladder tap (spine x, always negative — the throat is the west end)
+ *  that feeds the slot at local `slotY`. Inner slots (±36) tap nearest the
+ *  mouths, outer (±132) furthest, mirroring `railyardLegs`. */
+function railyardTapX(slotY: number): number {
+  const rank = [36, 84, 132].indexOf(Math.abs(slotY)); // 0 inner … 2 outer
+  return -(RAILYARD_LADDER_XS[rank < 0 ? 0 : rank] ?? RAILYARD_LADDER_XS[0] ?? 174);
+}
+
+/** The west-side approach onto a slot: spine from `fromX` east to the slot's tap,
+ *  the ladder leg out to the west mouth, then along the slot to `toX`. A train
+ *  following this rides real rails (spine → S-bend leg → slot), heading east. */
+function railyardSlotApproach(fromX: number, slotY: number, toX: number): CentreLinePath {
+  const tap = railyardTapX(slotY);
+  return concatPaths([
+    segmentPath(fromX, 0, tap, 0),
+    railyardLeg(tap, -RAILYARD_SLOT_HALF_X, slotY),
+    segmentPath(-RAILYARD_SLOT_HALF_X, slotY, toX, slotY),
+  ]);
+}
+
+/**
+ * The interior shunting journey as four directed, on-rail phase paths (local
+ * frame). The train drives itself: **enter** from the throat onto a free slot;
+ * **crossPull** back out west onto the spine lead; **crossSet** reverse east into
+ * the spares slot to bump-and-couple; **releaseOut** back to the throat. Each is
+ * a single physical direction so a rake trails cleanly along it (ADR-029). The
+ * crane works the cuts in between; it is not part of these paths.
+ */
+export interface RailyardJourney {
+  readonly enter: CentreLinePath;
+  readonly crossPull: CentreLinePath;
+  readonly crossSet: CentreLinePath;
+  readonly releaseOut: CentreLinePath;
+  /** Local poses the device's phases pause at (for the crane + spares render). */
+  readonly entryPark: RailPose;
+  readonly sparesBump: RailPose;
+}
+
+/** Park/bump depth into a slot from its west mouth (mm), leaving room for a rake
+ *  to trail back onto the lead and for the spares ahead of the bump. */
+const RAILYARD_PARK_X = 40;
+const RAILYARD_BUMP_X = 20;
+
+export function railyardInteriorJourney(entrySlotY: number, sparesSlotY: number): RailyardJourney {
+  const throatX = -RAILYARD_HALF_LENGTH_MM;
+  // Pull west just past the spares-slot tap so the train can reverse east into
+  // its leg — but stay inside the yard's west end (the throat).
+  const leadX = Math.max(throatX + 24, railyardTapX(sparesSlotY) - 50);
+  const enter = railyardSlotApproach(throatX, entrySlotY, RAILYARD_PARK_X);
+  const crossPull = concatPaths([
+    segmentPath(RAILYARD_PARK_X, entrySlotY, -RAILYARD_SLOT_HALF_X, entrySlotY),
+    reversePath(railyardLeg(railyardTapX(entrySlotY), -RAILYARD_SLOT_HALF_X, entrySlotY)),
+    segmentPath(railyardTapX(entrySlotY), 0, leadX, 0),
+  ]);
+  const crossSet = railyardSlotApproach(leadX, sparesSlotY, RAILYARD_BUMP_X);
+  const releaseOut = concatPaths([
+    segmentPath(RAILYARD_BUMP_X, sparesSlotY, -RAILYARD_SLOT_HALF_X, sparesSlotY),
+    reversePath(railyardLeg(railyardTapX(sparesSlotY), -RAILYARD_SLOT_HALF_X, sparesSlotY)),
+    segmentPath(railyardTapX(sparesSlotY), 0, throatX, 0),
+  ]);
+  return {
+    enter,
+    crossPull,
+    crossSet,
+    releaseOut,
+    entryPark: { x: RAILYARD_PARK_X, y: entrySlotY, headingDeg: 0 },
+    sparesBump: { x: RAILYARD_BUMP_X, y: sparesSlotY, headingDeg: 0 },
+  };
 }
 
 /** Every rail a train could ride in the yard: the spine, the six slots, and the

@@ -20,82 +20,65 @@ const SWAP_PAIR_SIZE = 2;
  */
 const DWELL_TICKS = 4;
 
-/* The interior choreography (ADR-029). A serviced train is driven, in sim ticks,
-   through the yard's private 2D interior: it pulls off the throat into a free
-   slot to enter, the crane decides whether to decouple and lifts its leading cut
-   off, the train pulls forward then REVERSES across into the spares slot where
-   the waiting cut collides and magnetically auto-couples (simulator-only), it
-   returns to a neutral slot, and the crane's camera reads it correct before the
-   yard releases it. All distances are the device's private interior geometry in
-   its local frame (depth = mm into the yard from the throat along its spine;
-   lane = mm laterally across the slots); the toy-table renders the train and the
-   crane at these poses. The lane values mirror the UI's RAILYARD_SLOT_YS so a
-   moving train lands ON a drawn slot. */
-/* Lateral lanes (mm) the interior choreography uses — three of the yard's six
-   drawn slots: an entry slot the train first parks in (a free lower slot), the
-   spares slot it reverses across into to pick up (an upper slot, where the yard
-   draws its waiting cut), and the centre spine it returns to (neutral). The
-   spares lane matches where the toy-table renders the yard's spare wagons so the
-   reverse-into-them reads as a real collision. */
-const ENTRY_LANE_MM = 84;
-const SPARES_LANE_MM = -84;
-const NEUTRAL_LANE_MM = 0;
-/* Depths (mm from the throat): a parked slot depth, and the deeper pull-forward
-   the train makes before reversing across into the spares slot. */
-const SLOT_DEPTH_MM = 150;
-const FORWARD_DEPTH_MM = 235;
-/* How far the train moves through the interior per tick (deterministic,
-   tick-based like the rest of the yard's timing — no dt threading). */
-const INTERIOR_STEP_MM = 12;
-/* Ticks the crane spends working at each couple/decouple, and the ticks its
-   camera spends reading the train before the yard trusts the consist for
-   release. */
-const CRANE_TICKS = 6;
-const INSPECT_TICKS = 5;
+/* The interior choreography (ADR-029). The yard drives the SELF-PROPELLED train
+   along its REAL interior rails (the toy-table's spine + ladder legs + slots) —
+   no floating across the body. Phases, each a single physical move the toy-table
+   animates by following the matching centre-line path:
 
-/** One interior step toward a target delta, capped at INTERIOR_STEP_MM (so the
- *  crane creeps rather than teleports). @pure */
-function clampStep(delta: number): number {
-  if (Math.abs(delta) <= INTERIOR_STEP_MM) return delta;
-  return Math.sign(delta) * INTERIOR_STEP_MM;
-}
+     enter        the train drives in off the throat onto a free slot;
+     decouple     it sits while the CRANE lifts its leading cut off (the crane
+                  only ever handles CUTS OF CARRIAGES, never the loco/train);
+     cross-pull   it pulls back out onto the spine lead;
+     cross-set    it drives into the spares slot and the spares couple on;
+     inspect      it sits while the crane's camera reads it correct;
+     release-out  it drives back to the throat to be handed to core.
+
+   The train STAYS in the slot it ends up in (no return-to-neutral). The device
+   owns the logic + consist; the toy-table owns all geometry (which centre-line,
+   where the crane and cuts render) — this file only emits phase + progress +
+   slot choices, kept geometry-free. The slot lane values mirror the UI's
+   RAILYARD_SLOT_YS so the train lands ON a drawn slot. */
+/** The free slot the train enters, and the slot holding the yard's spares (where
+ *  the UI also draws the spare cut). Mirrors RAILYARD_SLOT_YS. */
+const ENTRY_SLOT_Y = 132;
+const SPARES_SLOT_Y = -84;
+/* Ticks each phase takes: drive phases roll the train along their path; crane
+   phases are the lift/read dwell. Tick-based like the rest of the yard's timing
+   (deterministic, no dt threading). */
+const DRIVE_TICKS = 22;
+const DECOUPLE_TICKS = 16;
+const INSPECT_TICKS = 14;
+/** Progress within `decouple` at which the crane has lifted the cut, and within
+ *  `cross-set` at which the train has bumped and coupled the spares. */
+const DECOUPLE_LIFT_AT = 0.5;
+const COUPLE_AT = 0.88;
 
 /** The phases of the single-lead interior maneuver (ADR-026: one mover inside at
- *  a time), in order. `enter` parks the train off the throat into a free slot;
- *  `decouple` is the crane deciding-and-lifting its leading cut into a drop slot;
- *  `pull-forward` then `reverse-pickup` is the forward-and-back move that reverses
- *  the train across into the spares slot, where the waiting cut collides and
- *  auto-couples; `return` neutralises it in a slot; `inspect` is the crane camera
- *  reading it correct; `release` hands it back to core. */
-type ShuntStep =
-  | 'enter'
-  | 'decouple'
-  | 'pull-forward'
-  | 'reverse-pickup'
-  | 'return'
-  | 'inspect'
-  | 'release';
+ *  a time), in order. See the file-head comment for what each animates. */
+type ShuntPhase = 'enter' | 'decouple' | 'cross-pull' | 'cross-set' | 'inspect' | 'release-out';
 
-/** The single-lead interior maneuver in progress. Tracks the train's interior
- *  pose (depth + lane) and the crane's, so both animate truthfully to the work. */
+/** The single-lead interior maneuver in progress. Geometry-free: just the phase,
+ *  its 0..1 progress, the chosen slots, and the consist bookkeeping. */
 interface Shunt {
   readonly trainId: string;
   readonly train: VirtualTrain;
-  step: ShuntStep;
-  /** Train pose: depth into the yard (mm from throat) and lateral lane (mm). */
-  depthMm: number;
-  laneMm: number;
-  /** Crane pose: it travels over whatever it is working (the cut, then the
-   *  train). Lags toward the train's working point each tick. */
-  craneDepthMm: number;
-  craneLaneMm: number;
-  /** Ticks left in the current crane action (couple/decouple) or camera read. */
-  craneTicks: number;
-  /** Whether the yard decided this visit needs a decouple/recouple at all. */
+  phase: ShuntPhase;
+  /** Progress through the current phase, 0..1. */
+  progress: number;
+  /** Whether this visit swaps a cut at all (needs a full leading cut + spares). */
   swapping: boolean;
-  /** The cut the crane has lifted off this train (held until it becomes the
-   *  next visitor's spares). */
+  /** The leading cut the crane has lifted off (held until the train picks up the
+   *  spares, then it becomes the next visitor's spares). */
   dropped: VirtualCarriage[];
+  decoupled: boolean;
+  coupled: boolean;
+}
+
+/** Ticks the given phase runs for (crane phases dwell; drives roll). */
+function phaseTicks(phase: ShuntPhase): number {
+  if (phase === 'decouple') return DECOUPLE_TICKS;
+  if (phase === 'inspect') return INSPECT_TICKS;
+  return DRIVE_TICKS;
 }
 
 /**
@@ -258,106 +241,58 @@ export class VirtualRailyard {
     this.activeShunt = {
       trainId,
       train,
-      step: 'enter',
-      depthMm: 0,
-      laneMm: 0,
-      craneDepthMm: 0,
-      craneLaneMm: 0,
-      craneTicks: 0,
+      phase: 'enter',
+      progress: 0,
       swapping,
       dropped: [],
+      decoupled: false,
+      coupled: false,
     };
   }
 
   /**
-   * Advance one tick of the single-lead interior maneuver (the 5-step
-   * choreography): the train pulls off the throat into a free slot to ENTER, the
-   * crane DECOUPLEs its leading cut into a drop slot, the train pulls FORWARD then
-   * REVERSEs across into the spares slot where the waiting cut collides and
-   * auto-couples (PICKUP), it RETURNs to a neutral slot, the crane camera INSPECTs
-   * it, then the yard RELEASEs it. A no-swap visit skips straight from enter to
-   * inspect (it still officially enters and is read).
+   * Advance one tick of the single-lead interior maneuver: roll the current
+   * phase's progress, fire its consist milestone (the crane lifting the leading
+   * cut mid-`decouple`; the spares coupling on near the end of `cross-set`), and
+   * step to the next phase when the current one completes.
    */
   private advanceShunt(shunt: Shunt): void {
-    this.creepCrane(shunt);
-    switch (shunt.step) {
+    shunt.progress = Math.min(1, shunt.progress + 1 / phaseTicks(shunt.phase));
+    if (shunt.phase === 'decouple' && !shunt.decoupled && shunt.progress >= DECOUPLE_LIFT_AT) {
+      this.decoupleLeadingCut(shunt);
+      shunt.decoupled = true;
+    }
+    if (shunt.phase === 'cross-set' && !shunt.coupled && shunt.progress >= COUPLE_AT) {
+      this.coupleSpares(shunt);
+      shunt.coupled = true;
+    }
+    if (shunt.progress >= 1) this.nextPhase(shunt);
+  }
+
+  /** Step to the next phase (resetting progress), or finish the maneuver. A
+   *  no-swap visit skips the crane/cross phases: it enters, is inspected, leaves. */
+  private nextPhase(shunt: Shunt): void {
+    shunt.progress = 0;
+    switch (shunt.phase) {
       case 'enter':
-        // Pull off the throat into the entry slot; a no-swap visit is read and
-        // released without the crane ever lifting a cut.
-        this.driveStep(
-          shunt,
-          SLOT_DEPTH_MM,
-          ENTRY_LANE_MM,
-          shunt.swapping ? 'decouple' : 'inspect',
-        );
+        shunt.phase = shunt.swapping ? 'decouple' : 'inspect';
         return;
       case 'decouple':
-        if (this.craneWorking(shunt)) {
-          this.decoupleLeadingCut(shunt);
-          shunt.step = 'pull-forward';
-        }
+        shunt.phase = 'cross-pull';
         return;
-      case 'pull-forward':
-        this.driveStep(shunt, FORWARD_DEPTH_MM, ENTRY_LANE_MM, 'reverse-pickup');
+      case 'cross-pull':
+        shunt.phase = 'cross-set';
         return;
-      case 'reverse-pickup':
-        // Back across into the spares slot; on contact the waiting cut collides
-        // and magnetically auto-couples (simulator-only).
-        if (this.driveTo(shunt, SLOT_DEPTH_MM, SPARES_LANE_MM)) {
-          this.coupleSpares(shunt);
-          shunt.step = 'return';
-        }
-        return;
-      case 'return':
-        this.driveStep(shunt, SLOT_DEPTH_MM, NEUTRAL_LANE_MM, 'inspect');
+      case 'cross-set':
+        shunt.phase = 'inspect';
         return;
       case 'inspect':
-        // The crane camera reads the train; once it has dwelt over it the yard
-        // trusts the consist and releases.
-        if (this.craneWorking(shunt, INSPECT_TICKS)) shunt.step = 'release';
+        shunt.phase = 'release-out';
         return;
-      case 'release':
+      case 'release-out':
         this.completeShunt(shunt);
         return;
     }
-  }
-
-  /** Drive toward a (depth, lane) target; advance to `next` once arrived. */
-  private driveStep(shunt: Shunt, depthMm: number, laneMm: number, next: ShuntStep): void {
-    if (this.driveTo(shunt, depthMm, laneMm)) shunt.step = next;
-  }
-
-  /** Drift the crane one step toward the train's working point each tick, so the
-   *  gantry visibly follows the action (over the cut while decoupling, over the
-   *  train otherwise) rather than teleporting. */
-  private creepCrane(shunt: Shunt): void {
-    const targetDepth = shunt.depthMm;
-    const targetLane = shunt.step === 'decouple' ? ENTRY_LANE_MM : shunt.laneMm;
-    shunt.craneDepthMm += clampStep(targetDepth - shunt.craneDepthMm);
-    shunt.craneLaneMm += clampStep(targetLane - shunt.craneLaneMm);
-  }
-
-  /** Move the train toward the (depth, lane) target by one step along the
-   *  straight line to it; true once it arrives. */
-  private driveTo(shunt: Shunt, depthMm: number, laneMm: number): boolean {
-    const dd = depthMm - shunt.depthMm;
-    const dl = laneMm - shunt.laneMm;
-    const dist = Math.hypot(dd, dl);
-    if (dist <= INTERIOR_STEP_MM) {
-      shunt.depthMm = depthMm;
-      shunt.laneMm = laneMm;
-      return true;
-    }
-    shunt.depthMm += (dd / dist) * INTERIOR_STEP_MM;
-    shunt.laneMm += (dl / dist) * INTERIOR_STEP_MM;
-    return false;
-  }
-
-  /** Count down a crane action; true on the tick it completes. */
-  private craneWorking(shunt: Shunt, ticks: number = CRANE_TICKS): boolean {
-    if (shunt.craneTicks === 0) shunt.craneTicks = ticks;
-    shunt.craneTicks -= 1;
-    return shunt.craneTicks === 0;
   }
 
   /** Crane lifts the train's leading cut off; it is held by the crane until it
@@ -388,37 +323,38 @@ export class VirtualRailyard {
   }
 
   /**
-   * The interior pose for the toy-table to render: the train currently being
-   * shunted (its interior depth + lane, both in the yard's local mm frame), the
-   * crane's pose (which follows the work), and the phase. `craneWorking` is true
-   * while the crane is lifting a cut or its camera is reading the train.
-   * `reversing` is true on the back-across-into-spares move so the UI can flip
-   * the rake. Null when the lead is idle. UI-only.
+   * The interior maneuver state for the toy-table to render — geometry-free. The
+   * UI maps `phase` + `progress` onto the actual yard centre-line for that move
+   * (so the train follows real rails), parks/works the crane per phase, and draws
+   * the lifted cut. `entrySlotY`/`sparesSlotY` are the chosen slots (local-frame
+   * lane mm, matching RAILYARD_SLOT_YS); `droppedCutIds` is the cut the crane is
+   * currently holding (empty until the crane lifts it, cleared once it becomes
+   * the spares); `trailOffset` is how many wagons are missing from the front
+   * while a cut is lifted, so the UI can hold the remaining rake in place instead
+   * of letting it jump forward. Null when no maneuver is running. UI-only.
    */
   getInteriorState(): {
     trainId: string;
-    step: ShuntStep;
-    depthMm: number;
-    laneMm: number;
-    craneDepthMm: number;
-    craneLaneMm: number;
-    craneWorking: boolean;
-    reversing: boolean;
-    /** Legacy 0..1 depth, kept for callers that only want the pull-in fraction. */
-    depthFraction: number;
+    phase: ShuntPhase;
+    progress: number;
+    swapping: boolean;
+    entrySlotY: number;
+    sparesSlotY: number;
+    droppedCutIds: string[];
+    trailOffset: number;
   } | null {
     const shunt = this.activeShunt;
     if (shunt === null) return null;
+    const cutLifted = shunt.decoupled && !shunt.coupled;
     return {
       trainId: shunt.trainId,
-      step: shunt.step,
-      depthMm: shunt.depthMm,
-      laneMm: shunt.laneMm,
-      craneDepthMm: shunt.craneDepthMm,
-      craneLaneMm: shunt.craneLaneMm,
-      craneWorking: shunt.step === 'decouple' || shunt.step === 'inspect',
-      reversing: shunt.step === 'reverse-pickup',
-      depthFraction: Math.min(1, shunt.depthMm / FORWARD_DEPTH_MM),
+      phase: shunt.phase,
+      progress: shunt.progress,
+      swapping: shunt.swapping,
+      entrySlotY: ENTRY_SLOT_Y,
+      sparesSlotY: SPARES_SLOT_Y,
+      droppedCutIds: cutLifted ? shunt.dropped.map((c) => c.id) : [],
+      trailOffset: cutLifted ? SWAP_PAIR_SIZE : 0,
     };
   }
 

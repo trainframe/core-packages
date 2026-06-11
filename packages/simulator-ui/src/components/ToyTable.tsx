@@ -30,6 +30,7 @@ import {
   RAILYARD_HEAD_Y,
   RAILYARD_RAIL_Y,
   RAILYARD_SLOT_YS,
+  type RailyardJourney,
   type RotationDeg,
   type SupportColumn,
   TOYBOX_TRAYS,
@@ -53,8 +54,10 @@ import {
   liftBridgeGap,
   liftBridgeSpan,
   pieceMarkerKind,
+  railyardInteriorJourney,
   supportColumn,
   turntableDeck,
+  worldHalfPath,
 } from '../track/pieces.js';
 import {
   computeMovePlacement,
@@ -816,9 +819,15 @@ function consistTrails(
   return trails;
 }
 
-/** Park a live railyard's spare wagons in a neat row in front of its shed, so a
- *  carriage the yard is holding (not on any train) renders at the yard rather
- *  than stranded at its placement spot after a swap. */
+/** The local-frame lane the yard parks its spare cut in (matches the device's
+ *  SPARES_SLOT_Y), and where along that slot the contiguous pair rests — east of
+ *  the bump so a visiting train noses up to them to couple. */
+const SPARES_SLOT_Y_UI = -84;
+const SPARES_REST_X = 96;
+
+/** Park a live railyard's spare cut as a contiguous rake in its spares slot, so
+ *  the wagons it holds read as a real cut sitting on a siding (and a visiting
+ *  train drives up to them to couple), not stranded at their placement spot. */
 function placeYardSpares(
   piece: TrackPiece,
   sim: ToySimulation,
@@ -827,19 +836,18 @@ function placeYardSpares(
   const yard = sim.getRailyard(`YARD-${piece.id}`);
   if (yard === undefined) return;
   const spares = yard.getSpares();
-  // Each held wagon sits in its own slot (one of the yard's six pass-through
-  // bays), so a swapped-out carriage reads as parked on yard track rather than
-  // stranded. Slots are local-frame rows; transform to world by the yard's pose.
+  const rad = (piece.rotationDeg * Math.PI) / 180;
+  const flipY = piece.flipped === true ? -1 : 1;
+  const ly = SPARES_SLOT_Y_UI * flipY;
   for (let i = 0; i < spares.length; i++) {
     const id = spares[i]?.id;
     if (id === undefined) continue;
-    const slotY = RAILYARD_SLOT_YS[i % RAILYARD_SLOT_YS.length] ?? 0;
-    const lane = Math.floor(i / RAILYARD_SLOT_YS.length); // 2nd wagon per slot sits west
-    const lx = lane * -CARRIAGE_SPACING_MM;
-    const rad = (piece.rotationDeg * Math.PI) / 180;
-    const x = piece.position.x + lx * Math.cos(rad) - slotY * Math.sin(rad);
-    const y = piece.position.y + lx * Math.sin(rad) + slotY * Math.cos(rad);
-    result.set(id, { x, y, rotationDeg: piece.rotationDeg });
+    const lx = SPARES_REST_X - i * CARRIAGE_SPACING_MM; // contiguous along the slot
+    result.set(id, {
+      x: piece.position.x + lx * Math.cos(rad) - ly * Math.sin(rad),
+      y: piece.position.y + lx * Math.sin(rad) + ly * Math.cos(rad),
+      rotationDeg: piece.rotationDeg,
+    });
   }
 }
 
@@ -870,24 +878,55 @@ function computeRenderPositions(
   // Runs after the train pass so it wins over `placeLiveTrain`.
   for (const piece of pieces) {
     if (piece.type === 'railyard' && liveIds.has(piece.id)) {
-      placeShuntedTrain(piece, sim, trainTrails, result);
+      placeShuntedTrain(piece, sim, result);
     }
   }
   return result;
 }
 
-/** Render the train the yard is currently shunting at its interior pose: the
- *  loco at the device's (depth, lane) in the yard's local frame — so it pulls
- *  off the throat spine INTO a slot, reverses ACROSS into the spares slot, and
- *  returns to the centre — its (current) coupled rake trailing back along the
- *  spine. The rake shortens as the crane decouples and lengthens as the spares
- *  collide on — the wagons visibly move between train and yard. No-op when the
- *  yard isn't shunting anyone. Depth/lane are in mm in the piece's local frame
- *  (depth along its length, lane across its slots); we rotate them into world. */
+type YardInterior = NonNullable<
+  ReturnType<NonNullable<ReturnType<ToySimulation['getRailyard']>>['getInteriorState']>
+>;
+
+/** Which centre-line the train rides this phase, how far along (0..1), and
+ *  whether it is travelling in reverse (loco trailing). Loco-referenced: the
+ *  loco walks each path start→end so its position is continuous across phases;
+ *  only the rake's trailing side flips with `reverse`. Crane phases hold the
+ *  train at the end of the previous drive. */
+function shuntSegment(
+  interior: YardInterior,
+  j: RailyardJourney,
+): {
+  local: ReturnType<typeof railyardInteriorJourney>['enter'];
+  progress: number;
+  reverse: boolean;
+} {
+  switch (interior.phase) {
+    case 'enter':
+      return { local: j.enter, progress: interior.progress, reverse: false };
+    case 'decouple':
+      return { local: j.enter, progress: 1, reverse: false };
+    case 'cross-pull':
+      return { local: j.crossPull, progress: interior.progress, reverse: true };
+    case 'cross-set':
+      return { local: j.crossSet, progress: interior.progress, reverse: false };
+    case 'inspect':
+      return { local: interior.swapping ? j.crossSet : j.enter, progress: 1, reverse: false };
+    case 'release-out':
+      return { local: j.releaseOut, progress: interior.progress, reverse: true };
+  }
+}
+
+/** Render the train the yard is shunting ON THE REAL RAILS: the loco walks the
+ *  current phase's centre-line (spine → ladder leg → slot), its coupled rake
+ *  trailing along the SAME rail behind it (or ahead, when reversing) — so the
+ *  whole train follows the track through the curves rather than floating across
+ *  the body. The rake shortens as the crane lifts a cut (held back by
+ *  `trailOffset` so the remaining wagons don't jump forward) and is made whole
+ *  when the spares couple on. No-op when the yard isn't shunting. */
 function placeShuntedTrain(
   piece: TrackPiece,
   sim: ToySimulation,
-  trainTrails: ReadonlyMap<string, ReadonlyArray<string>>,
   result: Map<string, WorldPosition>,
 ): void {
   const yard = sim.getRailyard(`YARD-${piece.id}`);
@@ -896,38 +935,48 @@ function placeShuntedTrain(
   const trainPieceId = interior.trainId.startsWith('T-')
     ? interior.trainId.slice(2)
     : interior.trainId;
+  const consist = sim.getTrain(interior.trainId)?.getConsist() ?? [];
+
+  const seg = shuntSegment(
+    interior,
+    railyardInteriorJourney(interior.entrySlotY, interior.sparesSlotY),
+  );
+  const path = worldHalfPath(piece, seg.local);
+  const locoArc = seg.progress * path.length;
+  const flip = seg.reverse ? 180 : 0;
+
+  // Vehicles front→rear: loco at offset 0, then each consist wagon a carriage
+  // spacing further back (shifted by trailOffset to hold a gap where a lifted
+  // cut was). Trailing wagons sit BEHIND the loco along the rail — or AHEAD of it
+  // when the train is reversing.
+  const place = (id: string, offsetMm: number): void => {
+    const arc = seg.reverse ? locoArc + offsetMm : locoArc - offsetMm;
+    const pose = path.at(arc);
+    result.set(id, { x: pose.x, y: pose.y, rotationDeg: pose.headingDeg + flip });
+  };
+  place(trainPieceId, 0);
+  for (let i = 0; i < consist.length; i++) {
+    const wagon = consist[i];
+    if (wagon === undefined) continue;
+    place(wagon.id, (i + 1 + interior.trailOffset) * CARRIAGE_SPACING_MM);
+  }
+
+  // The cut the crane has lifted off rides UNDER the crane (a contiguous pair
+  // along the slot), so it visibly travels from the train to the spares slot.
+  const crane = yardCraneState(interior);
   const rad = (piece.rotationDeg * Math.PI) / 180;
-  const dir = { x: Math.cos(rad), y: Math.sin(rad) }; // local +x (depth)
-  const lat = { x: -Math.sin(rad), y: Math.cos(rad) }; // local +y (lane)
-  const local = localToWorld(piece.position, dir, lat, interior.depthMm, interior.laneMm);
-  result.set(trainPieceId, { ...local, rotationDeg: piece.rotationDeg });
-  // The coupled rake trails back along the spine (toward the throat).
-  const carriageIds = trainTrails.get(trainPieceId) ?? [];
-  for (let i = 0; i < carriageIds.length; i++) {
-    const carriageId = carriageIds[i];
-    if (carriageId === undefined) continue;
-    const d = (i + 1) * CARRIAGE_SPACING_MM;
-    result.set(carriageId, {
-      x: local.x - dir.x * d,
-      y: local.y - dir.y * d,
+  const flipY = piece.flipped === true ? -1 : 1;
+  for (let i = 0; i < crane.cutIds.length; i++) {
+    const id = crane.cutIds[i];
+    if (id === undefined) continue;
+    const lx = crane.x - i * CARRIAGE_SPACING_MM;
+    const ly = crane.y * flipY;
+    result.set(id, {
+      x: piece.position.x + lx * Math.cos(rad) - ly * Math.sin(rad),
+      y: piece.position.y + lx * Math.sin(rad) + ly * Math.cos(rad),
       rotationDeg: piece.rotationDeg,
     });
   }
-}
-
-/** Rotate a piece-local (depth, lane) offset into a world point about an origin,
- *  given the piece's local +x (depth) and +y (lane) unit vectors. */
-function localToWorld(
-  origin: { x: number; y: number },
-  dir: { x: number; y: number },
-  lat: { x: number; y: number },
-  depthMm: number,
-  laneMm: number,
-): { x: number; y: number } {
-  return {
-    x: origin.x + dir.x * depthMm + lat.x * laneMm,
-    y: origin.y + dir.y * depthMm + lat.y * laneMm,
-  };
 }
 
 /** Angle for a turntable's confirmed switch position; unknown or not-yet-set
@@ -955,26 +1004,86 @@ function trainUnderSensor(
   return false;
 }
 
-/** The gantry crane's live pose (where its bridge + head sit, and whether it is
- *  working a cut or reading the train), in the yard's local mm frame — the crane
- *  FOLLOWS the work tick by tick. Null when the yard isn't shunting, so the crane
- *  parks at home. The pose is read straight off the device's interior state so
- *  the gantry animates truthfully to the maneuver. */
+/** The gantry crane PARKS while the self-propelled train drives itself; it only
+ *  moves to handle CUTS OF CARRIAGES — never the loco/train. Local-frame work
+ *  points: over the leading cut in the entry slot (to lift it), and over the
+ *  spares slot (to hold the lifted cut, then set it down as the train takes the
+ *  spares, and to read the finished train). Home is the west end. */
+const CRANE_HOME_X = -RAILYARD_GANTRY_X;
+const CRANE_ENTRY_WORK_X = -62;
+const CRANE_SPARES_WORK_X = 20;
+
+const lerp = (a: number, b: number, t: number): number => a + (b - a) * Math.max(0, Math.min(1, t));
+
+/** The crane's local-frame pose + what it is doing this phase: where the bridge
+ *  (`x`) and head (`y`) sit, whether the hook is lowered, whether it is working
+ *  (LED/hum), and the ids of the cut it is currently carrying (drawn under it). */
+interface YardCraneState {
+  readonly x: number;
+  readonly y: number;
+  readonly hookDown: boolean;
+  readonly working: boolean;
+  readonly cutIds: readonly string[];
+}
+
+function yardCraneState(interior: YardInterior): YardCraneState {
+  const entry = { x: CRANE_ENTRY_WORK_X, y: interior.entrySlotY };
+  const spares = {
+    x: CRANE_SPARES_WORK_X,
+    y: interior.swapping ? interior.sparesSlotY : interior.entrySlotY,
+  };
+  switch (interior.phase) {
+    case 'decouple':
+      // Run in from home over the leading cut, lower, and lift it off.
+      return {
+        x: lerp(CRANE_HOME_X, entry.x, interior.progress / 0.45),
+        y: lerp(0, entry.y, interior.progress / 0.45),
+        hookDown: interior.progress > 0.4,
+        working: true,
+        cutIds: interior.droppedCutIds,
+      };
+    case 'cross-pull':
+      // Carry the lifted cut across to the spares slot while the train pulls out.
+      return {
+        x: lerp(entry.x, spares.x, interior.progress),
+        y: lerp(entry.y, spares.y, interior.progress),
+        hookDown: false,
+        working: true,
+        cutIds: interior.droppedCutIds,
+      };
+    case 'cross-set':
+      // Hold over the spares slot; lower the cut as the train bumps the spares.
+      return {
+        x: spares.x,
+        y: spares.y,
+        hookDown: interior.progress > 0.8,
+        working: true,
+        cutIds: interior.droppedCutIds,
+      };
+    case 'inspect':
+      // Camera-read the finished train where it sits.
+      return { x: spares.x, y: spares.y, hookDown: false, working: true, cutIds: [] };
+    default:
+      // enter / release-out: the train drives itself; the crane stays parked.
+      return { x: CRANE_HOME_X, y: 0, hookDown: false, working: false, cutIds: [] };
+  }
+}
+
+/** The crane's pose for the gantry to render (bridge depth + head lane + hook +
+ *  LED). Null when the yard isn't shunting, so the crane parks at home. */
 interface YardCranePose {
   readonly depthMm: number;
   readonly laneMm: number;
   readonly working: boolean;
+  readonly hookDown: boolean;
 }
 
 function yardCranePose(piece: TrackPiece, hardware: ToyHardware | null): YardCranePose | null {
   if (hardware === null) return null;
   const interior = hardware.getSimulation().getRailyard(`YARD-${piece.id}`)?.getInteriorState();
   if (interior == null) return null;
-  return {
-    depthMm: interior.craneDepthMm,
-    laneMm: interior.craneLaneMm,
-    working: interior.craneWorking,
-  };
+  const s = yardCraneState(interior);
+  return { depthMm: s.x, laneMm: s.y, working: s.working, hookDown: s.hookDown };
 }
 
 /** Everything `experimentVisualFor` reads — bundled so the per-piece dispatch
@@ -3215,6 +3324,7 @@ function RailyardCrane({
   const bridgeX = cranePose?.depthMm ?? -GX;
   const headY = cranePose?.laneMm ?? 0;
   const working = cranePose?.working ?? false;
+  const hookDown = cranePose?.hookDown ?? false;
   return (
     <g>
       {/* Bridge rolls along the rails to sit over the crane's working depth;
@@ -3239,7 +3349,7 @@ function RailyardCrane({
             over the coupling while the crane is actually working. */}
         <g transform={`translate(0, ${headY})`}>
           <g>
-            {working && (
+            {hookDown && (
               <animateTransform
                 attributeName="transform"
                 type="translate"

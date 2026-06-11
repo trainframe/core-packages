@@ -155,7 +155,7 @@ async function main() {
   let tick = 0;
   while (Date.now() < deadline && seen.size < 6) {
     const s = await page.evaluate(probe, YARD_DEVICE);
-    const step = s.interior?.step ?? null;
+    const step = s.interior?.phase ?? null;
     if (tick % 12 === 0) {
       log(
         `edge=${s.edge ?? 'none'} occ=${s.occupancy} consist=${s.consist} interior=${step ?? '-'}`,

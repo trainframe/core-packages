@@ -135,7 +135,7 @@ async function main() {
   while (Date.now() < end) {
     const interior = await page.evaluate((dev) => {
       const sim = window.trainframeSim?.getSimulation?.();
-      return sim?.getRailyard?.(dev)?.getInteriorState?.()?.step ?? null;
+      return sim?.getRailyard?.(dev)?.getInteriorState?.()?.phase ?? null;
     }, YARD_DEVICE);
     if (interior && !inMan) {
       inMan = true;
