@@ -77,9 +77,9 @@ waits at the approach while the span is up.
 
 ## How the held state is guaranteed (the cross-cutting question)
 
-This is the **inverse** of the crane ([003](003-crane-cargo-station.md)) and
-decoupler ([004](004-wedge-decoupler.md)): where those pin a train *in place* to
-work on it, the bridge holds trains *out* of a region while it works. Both are the
+This is the **inverse** of the crane ([003](003-crane-cargo-station.md)): where it
+pins a train *in place* to work on it, the bridge holds trains *out* of a region
+while it works. Both are the
 same primitive — withhold clearance — pointed in opposite directions. The bridge's
 safety rule is simply: **never grant entry until the span is down and seated**,
 and **withhold the instant a raise is requested**, with the span only beginning to

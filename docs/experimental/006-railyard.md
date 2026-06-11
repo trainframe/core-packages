@@ -24,9 +24,10 @@ another siding, and leaves — all choreographed by the device, inside its own
 territory. To the rest of the system the yard is one **boundary marker** with a
 capacity; what happens past it is the device's business.
 
-This is the device the decoupler ([004](004-wedge-decoupler.md)) needed: 004
-proves the atomic length-decrease; the railyard is the *territory* that contains
-the back-and-forth shunting 004 deliberately parked.
+The railyard also absorbs the standalone decoupler's job: its wedge unit owns the
+atomic length-decrease (the coupling split), and its delegated territory is what
+contains the back-and-forth shunting a free-standing decoupler would have had to
+park outside its own scope.
 
 ## Capabilities it declares
 
@@ -88,7 +89,7 @@ table: full yard → train waits; slot frees → train enters.
 - **Animation:** two registers. At the **throat**, a waiting train and an
   admit/deny state (the lead's mouth open or barred). On the **lead**, the
   single-mover shuffle — a loco easing back and forth, a carriage detaching
-  ([004]'s wedge) and re-coupling, parked consists sliding into and out of
+  (at the wedge) and re-coupling, parked consists sliding into and out of
   sidings. Only one thing moves on the lead at once, which is also what makes the
   animation legible rather than chaotic.
 - **Hand-wave:** the *interior choreography* — which siding, the coupling

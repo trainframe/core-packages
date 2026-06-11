@@ -97,7 +97,7 @@ when the train leaves, not a guarantee. So the crane **withholds departure
 clearance** for the duration of the lift (`core.gates_clearance`), making "the
 train is held" a fact the scheduler enforces, not a race. The train is pinned the
 moment it is identified at the station and released only when the arm is clear.
-This is the same answer the decoupler ([004](004-wedge-decoupler.md)) needs, and
+This is the same answer any device that works on a held train needs, and
 the inverse of the bridge ([005](005-lift-bridge.md)) which holds a train *out*.
 
 ## Visible goal

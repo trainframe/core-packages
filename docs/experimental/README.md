@@ -82,6 +82,5 @@ bridge). The honest answer is usually `core.gates_clearance`, not a dwell timer.
 | [001](001-vision-length-station.md)        | Vision length station | A device other than the train can report and change `train_length_mm` at runtime    | ADR-023, ADR-007        |
 | [002](002-turntable-junction.md)           | Turntable junction    | The switch seam is already N-way; a 3-way junction needs no core change, only a piece | switch seam (`layout.ts`/`layout-state.ts`) |
 | [003](003-crane-cargo-station.md)          | Crane cargo station   | A device manipulates a train's payload via dwell + identity + clearance, payload stays out of core | ADR-016, ADR-007 |
-| [004](004-wedge-decoupler.md)              | Wedge decoupler       | The decrease direction of ADR-023 (**superseded by 006** — the railyard's wedge owns the split) | ADR-023, ADR-007 |
 | [005](005-lift-bridge.md)                  | Lift bridge           | `core.gates_clearance` carries *physical track availability*, not just traffic policy | ADR-018 (gates)         |
 | [006](006-railyard.md)                     | Railyard              | A device owns a capacity-territory and gates admission by its own asserted occupancy (**graduated → ADR-026, partly built**) | ADR-026, ADR-016, ADR-023 |
