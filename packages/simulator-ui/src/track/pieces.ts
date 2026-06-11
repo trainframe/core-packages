@@ -328,7 +328,7 @@ function hypot(x: number, y: number): number {
  * Rotate a point around the origin by `angleDeg` degrees (clockwise) then
  * translate by `tx, ty`.
  */
-function transformPoint(
+export function transformPoint(
   lx: number,
   ly: number,
   angleDeg: number,
@@ -1175,6 +1175,26 @@ export const VISION_LED = { x: 62.5, y: -16 } as const;
 /** Range (mm, from the piece origin) within which a train counts as "under
  * the sensor" — being measured — so the LED lights. Visual only. */
 export const VISION_SENSOR_RANGE_MM = 55;
+
+/**
+ * The two sensing reference points the vision station OWNS, a known baseline
+ * apart, and the camera footprint between them — the honest two-marker speed
+ * rig of ADR-030 §5. Both reference points lie within the station's own 220 mm
+ * plank (local x along the rail axis), so the piece genuinely carries both; the
+ * baseline is fixed by the device, not derived from the layout. A passing
+ * train's HEAD crossing the two points a fixed distance apart yields its speed
+ * (baseline ÷ crossing interval); the camera at the centre integrates the dwell
+ * the train's body covers it; length = speed × dwell. No train self-report, no
+ * consist read. */
+export const VISION_MARKER_A_LX = -70;
+export const VISION_MARKER_B_LX = 70;
+/** Fixed baseline (mm) between the station's two reference points (their local
+ * x separation). The honest speed divisor — internally set, never the layout's. */
+export const VISION_BASELINE_MM = VISION_MARKER_B_LX - VISION_MARKER_A_LX;
+/** Capture radius (mm) of the camera footprint patch at the station centre. The
+ * dwell-derived span overruns the true span by this at each end — the bounded
+ * over-read a real fixed camera lives with. */
+export const VISION_FOOTPRINT_RADIUS_MM = 12;
 
 function visionStationBody(): PieceBody {
   // An ordinary station plank + platform (shifted west to make room), with the

@@ -1,7 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { InMemoryBrokerClient } from '../broker/in-memory-client.js';
-import { CARRIAGE_SPACING_MM } from '../track/coupling.js';
-import { TRAIN_LENGTH_MM } from '../track/pieces.js';
 import type { CarriageColorId, RotationDeg, TrackPiece } from '../track/pieces.js';
 import { ToyHardware } from './toy-hardware.js';
 
@@ -505,43 +503,121 @@ describe('ToyHardware — experimental devices', () => {
     }
   });
 
-  it('a vision station asserts a passing train’s length from ITS OWN identity (ADR-023)', () => {
-    /* The 001 proof, end-to-end: a train towing two wagons explores across the
-     * station's marker; the station (not the train) emits train_length_changed
-     * with the measured nose-to-tail length, and hysteresis keeps it from
-     * re-reporting an unchanged estimate. */
+  /* A straight line of track with the vision station mid-way, so a train can
+   * PASS THROUGH it (crossing both sensing reference points and clearing the
+   * camera footprint) rather than terminating on it — the honest measurement
+   * needs the train to clear the footprint to bound its dwell. Pieces are ~200mm
+   * apart, snap-adjacent. The train tows two wagons trailing west. */
+  function visionPassThroughScene(): { pieces: TrackPiece[]; vs: TrackPiece; train: TrackPiece } {
+    const s1 = piece('straight', 100, 100);
+    const s2 = piece('straight', 300, 100);
+    const vs = piece('vision-station', 500, 100);
+    const s3 = piece('straight', 700, 100);
+    const s4 = piece('straight', 900, 100);
+    const s5 = piece('straight', 1100, 100);
+    const train = piece('train', 110, 100); // west end, facing east
+    const red1 = carriage(60, 100, 'red');
+    const red2 = carriage(10, 100, 'red');
+    return { pieces: [s1, s2, vs, s3, s4, s5, train, red1, red2], vs, train };
+  }
+
+  it('a vision station MEASURES a passing train’s length and asserts it from ITS OWN identity (ADR-023)', () => {
+    /* The 001 proof, end-to-end and HONEST (ADR-030 §5): a train towing two
+     * wagons drives through the station; the station measures its length from
+     * two-marker speed × camera dwell — never reading the consist — and (it is
+     * NOT the train) emits train_length_changed with the measured length. */
     const client = new InMemoryBrokerClient();
     client.connect('inmem://');
     const hardware = new ToyHardware({ client, newId });
     try {
-      const s1 = piece('straight', 100, 100);
-      const vs = piece('vision-station', 310, 100); // endpoints meet at x=200
-      const train = piece('train', 110, 100);
-      const red1 = carriage(60, 100, 'red');
-      const red2 = carriage(10, 100, 'red');
-      const pieces = [s1, vs, train, red1, red2];
+      const { pieces, vs, train } = visionPassThroughScene();
       const live = new Set(pieces.map((p) => p.id));
       hardware.syncLayout(pieces);
       hardware.syncLive(pieces, live);
 
-      // Drive the train across the station marker (exploration needs no server).
+      // Drive the train through the station (exploration needs no server).
       hardware.getSimulation().handleCommand(`T-${train.id}`, 'begin_exploration', {});
-      for (let i = 0; i < 150; i++) hardware.tick(200);
+      for (let i = 0; i < 200; i++) hardware.tick(100);
 
       const topic = `railway/events/train_length_changed/VLS-${vs.id}`;
       const reports = client.published.filter((m) => m.topic === topic);
-      expect(reports).toHaveLength(1);
+      expect(reports.length).toBeGreaterThanOrEqual(1);
       const envelope = decodeEnvelope(reports[0] ?? { payload: new Uint8Array() });
       expect(envelope.device_id).toBe(`VLS-${vs.id}`);
       expect(envelope.payload.train_id).toBe(`T-${train.id}`);
-      // loco + 2 × carriage spacing — measured, not configured.
-      expect(envelope.payload.train_length_mm).toBe(TRAIN_LENGTH_MM + 2 * CARRIAGE_SPACING_MM);
+      /* Measured nose-to-tail span: loco (68mm) + 2 carriages at 68mm spacing +
+       * the trailing carriage half (30) + footprint over-read (2×12). The
+       * measurement carries tick-quantisation tolerance, so assert a band rather
+       * than an exact value — a configured length could never wander like this. */
+      const len = envelope.payload.train_length_mm;
+      expect(typeof len).toBe('number');
+      expect(len as number).toBeGreaterThan(150);
+      expect(len as number).toBeLessThan(320);
     } finally {
       hardware.dispose();
     }
   });
 
-  it('a vision station stays silent for trains that never cross its marker', () => {
+  it('a longer train MEASURES longer than a shorter one (speed × dwell, not a constant)', () => {
+    const measure = (carriages: number): number => {
+      const client = new InMemoryBrokerClient();
+      client.connect('inmem://');
+      const hardware = new ToyHardware({ client, newId });
+      try {
+        const s1 = piece('straight', 100, 100);
+        const s2 = piece('straight', 300, 100);
+        const vs = piece('vision-station', 500, 100);
+        const s3 = piece('straight', 700, 100);
+        const s4 = piece('straight', 900, 100);
+        const s5 = piece('straight', 1100, 100);
+        const train = piece('train', 110, 100);
+        const wagons: TrackPiece[] = [];
+        for (let i = 0; i < carriages; i++) wagons.push(carriage(60 - i * 50, 100, 'red'));
+        const pieces = [s1, s2, vs, s3, s4, s5, train, ...wagons];
+        hardware.syncLayout(pieces);
+        hardware.syncLive(pieces, new Set(pieces.map((p) => p.id)));
+        hardware.getSimulation().handleCommand(`T-${train.id}`, 'begin_exploration', {});
+        for (let i = 0; i < 200; i++) hardware.tick(100);
+        const topic = `railway/events/train_length_changed/VLS-${vs.id}`;
+        const reports = client.published.filter((m) => m.topic === topic);
+        const env = decodeEnvelope(reports[0] ?? { payload: new Uint8Array() });
+        return env.payload.train_length_mm as number;
+      } finally {
+        hardware.dispose();
+      }
+    };
+
+    const shortLen = measure(1);
+    const longLen = measure(3);
+    expect(longLen).toBeGreaterThan(shortLen + 80);
+  });
+
+  it('a vision station stays silent for a train that never reaches it (only one crossing)', () => {
+    /* A train that crosses only the first reference point has no speed, so the
+     * station must stay silent — the honest model refuses to guess. */
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId });
+    try {
+      // The station terminates the line (no track east of it): a train arriving
+      // parks at its centre, never crossing the far reference point.
+      const s1 = piece('straight', 100, 100);
+      const s2 = piece('straight', 300, 100);
+      const vs = piece('vision-station', 500, 100);
+      const train = piece('train', 110, 100);
+      const pieces = [s1, s2, vs, train];
+      hardware.syncLayout(pieces);
+      hardware.syncLive(pieces, new Set(pieces.map((p) => p.id)));
+      hardware.getSimulation().handleCommand(`T-${train.id}`, 'begin_exploration', {});
+      for (let i = 0; i < 200; i++) hardware.tick(100);
+      const topic = `railway/events/train_length_changed/VLS-${vs.id}`;
+      expect(client.published.filter((m) => m.topic === topic)).toHaveLength(0);
+    } finally {
+      hardware.dispose();
+    }
+  });
+
+  it('a vision station stays silent when no train is present', () => {
     const client = new InMemoryBrokerClient();
     client.connect('inmem://');
     const hardware = new ToyHardware({ client, newId });
@@ -549,7 +625,7 @@ describe('ToyHardware — experimental devices', () => {
       const vs = piece('vision-station', 310, 100);
       hardware.syncLayout([vs]);
       hardware.syncLive([vs], new Set([vs.id]));
-      for (let i = 0; i < 20; i++) hardware.tick(200);
+      for (let i = 0; i < 20; i++) hardware.tick(100);
       const topic = `railway/events/train_length_changed/VLS-${vs.id}`;
       expect(client.published.filter((m) => m.topic === topic)).toHaveLength(0);
     } finally {

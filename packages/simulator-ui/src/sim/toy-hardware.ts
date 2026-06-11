@@ -8,17 +8,27 @@ import {
 } from '@trainframe/simulator';
 import type { BrokerClient } from '../broker/client.js';
 import { encodeDeviceEvent } from '../broker/encode-event.js';
-import {
-  CARRIAGE_SPACING_MM,
-  COUPLING_DISTANCE_MM,
-  computeTrainTrails,
-} from '../track/coupling.js';
+import { COUPLING_DISTANCE_MM, computeTrainTrails } from '../track/coupling.js';
 import { compileLayout } from '../track/layout-from-pieces.js';
 import { TRAIN_LENGTH_MM, type TrackPiece, isDevicePiece, layerOf } from '../track/pieces.js';
 import { nearestMarkerId, nearestStartEdge } from './nearest-edge.js';
+import { ToyVisionStations, type TrainBody, trainBodyPositions } from './toy-vision.js';
 
 /** Slots a toy-table railyard owns. Plenty for a handful of trains + spares. */
 const RAILYARD_CAPACITY = 6;
+
+/** Hysteresis band (mm) for a vision station's length reports: a fresh estimate
+ * within this of the last reported value is treated as unchanged, so a noisy
+ * measurement doesn't emit a stream of `train_length_changed`. Comfortably under
+ * one carriage (~68 mm) so a real coupling/decoupling still crosses it, and well
+ * over the few-mm tick-quantisation noise the measurement carries. */
+const VISION_HYSTERESIS_MM = 30;
+
+/** Sub-step (ms) the sim is advanced in while a vision station is live, so the
+ * fixed camera samples the passing train at a sensible frame rate (~50 ms, per
+ * ADR-030 §2) rather than letting a coarse animation-frame gap skip the train
+ * past the markers and footprint in one jump. */
+const VISION_SAMPLE_MS = 50;
 
 /** Device id for a piece's own broker identity. Must match `ToyTable`. */
 function deviceIdForDevicePiece(piece: TrackPiece): string {
@@ -170,13 +180,13 @@ export class ToyHardware {
   // consists from. Reseeding only when this changes keeps a railyard's swapped
   // consist alive across frames (a swap doesn't change the pieces).
   private lastComposition = '';
-  /* Live vision stations (experimental 001), keyed by the tag id their sensor
-   * watches (in the toy-table, tag ids ARE marker ids) → the station's VLS-
-   * device id. Rebuilt on every syncLive. */
-  private visionStations: ReadonlyMap<string, string> = new Map();
-  // Cursor into the sim's tag_observed stream, so each tick only examines new
-  // observations. Reset when the sim is rebuilt (the stream starts over).
-  private visionCursor = 0;
+  /* The honest vision length stations (experimental 001, ADR-030 §5): each runs
+   * a real `VisionStation` over the toy-table's physical bodies — measuring a
+   * passing train's length from two-marker speed × camera dwell, never from a
+   * consist read. Re-indexed on every syncLive; reset when the sim is rebuilt. */
+  private readonly vision = new ToyVisionStations((stationDeviceId, trainId, lengthMm) =>
+    this.onVisionLength(stationDeviceId, trainId, lengthMm),
+  );
   // Last length each station asserted per train — the hysteresis band that
   // keeps a station from re-emitting an unchanged estimate on every lap.
   private readonly visionReported = new Map<string, number>();
@@ -229,9 +239,9 @@ export class ToyHardware {
     this.lastPoweredOff = new Set();
     // The new Simulation has empty consists; force a reseed on the next syncLive.
     this.lastComposition = '';
-    // The new Simulation's event stream starts over; restart the vision
-    // stations' observation cursor and their per-train hysteresis with it.
-    this.visionCursor = 0;
+    // The new Simulation's clock + event stream start over; reset the vision
+    // stations' in-flight measurements and their per-train hysteresis with it.
+    this.vision.reset();
     this.visionReported.clear();
   }
 
@@ -288,7 +298,7 @@ export class ToyHardware {
 
     this.lastLive = new Set(liveIds);
     this.lastPieces = piecesById;
-    this.indexVisionStations(pieces, liveIds);
+    this.vision.index(pieces, liveIds);
 
     // Re-seed sim consists + yard spares from proximity whenever the COMPOSITION
     // changes (a carriage/train/railyard added, removed, or repositioned) — not
@@ -337,21 +347,6 @@ export class ToyHardware {
     if (state?.kind !== 'gate') return;
     this.pendingDeviceState.delete(deviceId);
     for (const marker of state.withheld) gate.withhold(marker, 'reasserted after rebuild');
-  }
-
-  /** Index the live vision stations by the tag id their sensor watches, so
-   * the per-tick observation scan is a map lookup, not a piece search. */
-  private indexVisionStations(
-    pieces: ReadonlyArray<TrackPiece>,
-    liveIds: ReadonlySet<string>,
-  ): void {
-    const vision = new Map<string, string>();
-    for (const p of pieces) {
-      if (p.type === 'vision-station' && liveIds.has(p.id)) {
-        vision.set(`M-${p.id}`, `VLS-${p.id}`);
-      }
-    }
-    this.visionStations = vision;
   }
 
   /**
@@ -495,8 +490,8 @@ export class ToyHardware {
       }
     }
     // A vision station (experimental 001) needs no sim entity: it is a passive
-    // observer whose length reports are emitted from `reportVisionLengths` as
-    // trains cross its marker.
+    // observer. Its honest length measurement runs in `tick` via the
+    // `ToyVisionStations`, driven off the toy-table's physical bodies.
   }
 
   private despawnPiece(piece: TrackPiece): void {
@@ -552,46 +547,73 @@ export class ToyHardware {
   tick(realElapsedMs: number): void {
     if (realElapsedMs <= 0) return;
     const capped = Math.min(realElapsedMs, this.maxTickMs);
+    /* Experimental 001 (ADR-030 §5): drive the honest vision stations off the
+     * toy-table's physical bodies — they measure a passing train's length from
+     * two-marker speed × camera dwell and report it via `onVisionLength` (no
+     * consist read for the wire length). A fixed camera samples at a finite
+     * rate, so when a station is live we advance the sim in sub-steps no coarser
+     * than that frame interval and sample the bodies each one — otherwise a long
+     * animation-frame gap would skip the train past the markers and footprint in
+     * a single jump. With no live station the sim advances in one cheap step. */
+    if (this.vision.hasLiveStation()) {
+      let remaining = capped;
+      while (remaining > 0) {
+        const step = Math.min(remaining, VISION_SAMPLE_MS);
+        this.simulation.advance(step);
+        this.vision.tick(step, this.collectTrainBodies());
+        remaining -= step;
+      }
+      return;
+    }
     this.simulation.advance(capped);
-    this.reportVisionLengths();
   }
 
   /**
-   * Experimental 001 — the vision length station's measure-on-visit loop.
-   * Scans the sim's new `tag_observed` events for trains crossing a live
-   * vision station's marker, estimates the observed train's nose-to-tail
-   * length from its consist (the simulator's stand-in for the hand-waved
-   * camera — exactly what a calibrated sensor would read off the physical
-   * train), and asserts `train_length_changed` from the STATION's own VLS-
-   * identity. Emits only when the estimate differs from the station's last
-   * report for that train (the hysteresis the design doc asks for). The
-   * producer is a device that is not the train — the seam ADR-023 opened,
-   * closed end-to-end: a railyard swaps carriages, the train visits the
-   * station, its tail-clearance occupancy self-corrects.
+   * Snapshot every live train's physical bodies (loco head + coupled carriages)
+   * in world space — the toy-table analogue of the physics world's `bodies()`,
+   * exactly the positions the renderer draws. This is what the fixed vision
+   * cameras perceive; the carriage COUNT and livery are physical facts a camera
+   * reads, never the wire length. Empty when no vision station is live.
    */
-  private reportVisionLengths(): void {
-    if (this.visionStations.size === 0) return;
-    const observations = this.simulation.getEventsOfType('tag_observed');
-    for (; this.visionCursor < observations.length; this.visionCursor++) {
-      const ev = observations[this.visionCursor];
-      if (ev === undefined) continue;
-      const { tag_id } = ev.payload as { tag_id?: unknown };
-      if (typeof tag_id !== 'string') continue;
-      const stationId = this.visionStations.get(tag_id);
-      if (stationId === undefined) continue;
-      const train = this.simulation.getTrain(ev.device_id);
-      if (train === undefined) continue;
-      const train_length_mm = TRAIN_LENGTH_MM + train.getConsist().length * CARRIAGE_SPACING_MM;
-      if (this.visionReported.get(ev.device_id) === train_length_mm) continue;
-      this.visionReported.set(ev.device_id, train_length_mm);
-      const { topic, payload } = encodeDeviceEvent(
-        'train_length_changed',
-        stationId,
-        { train_id: ev.device_id, train_length_mm },
-        { newId: this.newId },
-      );
-      this.client.publish(topic, payload);
+  private collectTrainBodies(): ReadonlyArray<TrainBody> {
+    const bodies: TrainBody[] = [];
+    for (const piece of this.lastPieces.values()) {
+      if (piece.type !== 'train' || !this.lastLive.has(piece.id)) continue;
+      const deviceId = deviceIdForDevicePiece(piece);
+      /* Carriage ORDER comes from the sim consist (what a railyard swap mutates
+       * and the renderer follows); a camera sees the rake in that physical
+       * order. No fallback to proximity needed — an un-seeded train has none. */
+      const carriageIds =
+        this.simulation
+          .getTrain(deviceId)
+          ?.getConsist()
+          .map((c) => c.id) ?? [];
+      const body = trainBodyPositions(this.simulation, deviceId, carriageIds, this.lastPieces);
+      if (body !== undefined) bodies.push(body);
     }
+    return bodies;
+  }
+
+  /**
+   * A vision station measured a train's length. Assert `train_length_changed`
+   * from the STATION's own VLS- identity (a device that is NOT the train — the
+   * ADR-023 seam, closed end-to-end), with a hysteresis band so a noisy estimate
+   * doesn't emit a stream of events. Closes ADR-023's loop: a railyard swaps
+   * carriages, the train visits the station, its measured length self-corrects.
+   */
+  private onVisionLength(stationDeviceId: string, trainId: string, lengthMm: number): void {
+    const train_length_mm = Math.round(lengthMm);
+    const key = `${stationDeviceId}|${trainId}`;
+    const last = this.visionReported.get(key);
+    if (last !== undefined && Math.abs(last - train_length_mm) < VISION_HYSTERESIS_MM) return;
+    this.visionReported.set(key, train_length_mm);
+    const { topic, payload } = encodeDeviceEvent(
+      'train_length_changed',
+      stationDeviceId,
+      { train_id: trainId, train_length_mm },
+      { newId: this.newId },
+    );
+    this.client.publish(topic, payload);
   }
 
   /** Stop the bridge and detach. Idempotent. */
