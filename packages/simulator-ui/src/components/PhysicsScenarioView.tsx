@@ -1,0 +1,189 @@
+/**
+ * A self-contained view that runs ONE physics acceptance scenario (ADR-030) and
+ * renders it — the toy table's wooden pieces drawn from `getPieceShape`, the
+ * bodies drawn from the authoritative `PhysicsWorld`. No broker, no core: these
+ * scenarios exercise the physical layer in isolation ("no markers required").
+ *
+ * Mounted by `App` when the URL carries `?physics=<name>`. Exposes
+ * `window.__tfPhysics` so the video harness can read body fates/poses and assert.
+ */
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { buildRail } from '../physics/rail.js';
+import { buildScenario } from '../physics/scenarios.js';
+import { type BodyPose, PhysicsWorld } from '../physics/world.js';
+import { type TrackPiece, getEndpoints, getPieceShape } from '../track/pieces.js';
+
+declare global {
+  interface Window {
+    __tfPhysics?:
+      | {
+          name: string;
+          elapsedS: number;
+          bodies: () => readonly BodyPose[];
+        }
+      | undefined;
+  }
+}
+
+const STEP_S = 1 / 120; // fixed physics step
+
+function pieceTransform(p: TrackPiece): string {
+  const flip = p.flipped === true ? ' scale(1,-1)' : '';
+  return `translate(${p.position.x},${p.position.y}) rotate(${p.rotationDeg})${flip}`;
+}
+
+function PieceG({ piece }: { piece: TrackPiece }) {
+  const shape = getPieceShape(piece);
+  return (
+    <g transform={pieceTransform(piece)} data-piece-id={piece.id}>
+      <path d={shape.svgPath} fill="#caa46a" stroke="#9a7b46" strokeWidth={1} />
+      {shape.grooves.map((d, i) => (
+        <path
+          // biome-ignore lint/suspicious/noArrayIndexKey: grooves are a fixed positional list
+          key={i}
+          d={d}
+          fill="none"
+          stroke="#8a6c3e"
+          strokeWidth={2}
+          strokeLinecap="round"
+        />
+      ))}
+    </g>
+  );
+}
+
+function BodyG({ pose }: { pose: BodyPose }) {
+  const halfLen = pose.kind === 'loco' ? 34 : 30;
+  const h = pose.kind === 'loco' ? 20 : 17;
+  const fill = pose.color ?? (pose.kind === 'loco' ? '#c0392b' : '#8e44ad');
+  const stroke = pose.fate === 'on-rail' ? '#222' : '#b00020';
+  return (
+    <g
+      transform={`translate(${pose.x},${pose.y}) rotate(${pose.rotationDeg})`}
+      data-body-id={pose.id}
+      data-fate={pose.fate}
+      data-mode={pose.mode}
+    >
+      <rect
+        x={-halfLen}
+        y={-h / 2}
+        width={halfLen * 2}
+        height={h}
+        rx={4}
+        fill={fill}
+        stroke={stroke}
+        strokeWidth={pose.fate === 'on-rail' ? 1.5 : 3}
+      />
+      {pose.kind === 'loco' && (
+        // a nose mark so facing/direction is legible
+        <rect
+          x={halfLen - 8}
+          y={-h / 2}
+          width={8}
+          height={h}
+          rx={2}
+          fill="#1a1a1a"
+          opacity={0.55}
+        />
+      )}
+    </g>
+  );
+}
+
+function viewBoxFor(pieces: readonly TrackPiece[], pad = 320): string {
+  let minX = 1e9;
+  let minY = 1e9;
+  let maxX = -1e9;
+  let maxY = -1e9;
+  for (const p of pieces) {
+    for (const e of getEndpoints(p)) {
+      minX = Math.min(minX, e.x, p.position.x);
+      minY = Math.min(minY, e.y, p.position.y);
+      maxX = Math.max(maxX, e.x, p.position.x);
+      maxY = Math.max(maxY, e.y, p.position.y);
+    }
+  }
+  return `${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}`;
+}
+
+export function PhysicsScenarioView({ name }: { name: string }) {
+  const scenario = useMemo(() => buildScenario(name), [name]);
+  const [poses, setPoses] = useState<readonly BodyPose[]>([]);
+  const worldRef = useRef<PhysicsWorld | null>(null);
+
+  useEffect(() => {
+    if (scenario === undefined) return;
+    const rail = buildRail(scenario.pieces);
+    const world = new PhysicsWorld(rail);
+    for (const b of scenario.bodies) world.addBody(b);
+    for (const [a, b] of scenario.couples) world.couple(a, b);
+    worldRef.current = world;
+    const fired = new Set<number>();
+    let elapsed = 0;
+    let acc = 0;
+    let last = performance.now();
+    let raf = 0;
+    setPoses(world.bodies());
+    const tick = (now: number) => {
+      acc += Math.min(0.1, (now - last) / 1000);
+      last = now;
+      while (acc >= STEP_S) {
+        elapsed += STEP_S;
+        for (let i = 0; i < scenario.script.length; i++) {
+          const s = scenario.script[i];
+          if (s && !fired.has(i) && elapsed >= s.atS) {
+            world.setMotion(s.id, s.motion);
+            fired.add(i);
+          }
+        }
+        world.step(STEP_S);
+        acc -= STEP_S;
+      }
+      setPoses(world.bodies());
+      window.__tfPhysics = { name, elapsedS: elapsed, bodies: () => world.bodies() };
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.__tfPhysics = undefined;
+    };
+  }, [scenario, name]);
+
+  if (scenario === undefined) {
+    return (
+      <div style={{ padding: 40, fontFamily: 'sans-serif' }}>Unknown physics scenario: {name}</div>
+    );
+  }
+
+  return (
+    <div style={{ width: '100vw', height: '100vh', background: '#efe6d3' }}>
+      <div
+        style={{
+          position: 'absolute',
+          top: 12,
+          left: 16,
+          fontFamily: 'sans-serif',
+          fontSize: 15,
+          color: '#5a4a2a',
+        }}
+        data-testid="physics-title"
+      >
+        {scenario.title}
+      </div>
+      <svg
+        data-testid="physics-canvas"
+        viewBox={viewBoxFor(scenario.pieces, scenario.viewPad)}
+        style={{ width: '100%', height: '100%' }}
+      >
+        <title>{scenario.title}</title>
+        {scenario.pieces.map((p) => (
+          <PieceG key={p.id} piece={p} />
+        ))}
+        {poses.map((pose) => (
+          <BodyG key={pose.id} pose={pose} />
+        ))}
+      </svg>
+    </div>
+  );
+}

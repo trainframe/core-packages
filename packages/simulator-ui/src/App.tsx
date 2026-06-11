@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { BrokerProvider } from './broker/broker-context.js';
 import type { BrokerClient } from './broker/client.js';
 import { MqttBrokerClient } from './broker/mqtt-client.js';
+import { PhysicsScenarioView } from './components/PhysicsScenarioView.js';
 import { ToyTable } from './components/ToyTable.js';
 import './components/ToyTable.css';
 import { loadBrokerUrl } from './config/broker-config.js';
@@ -24,10 +25,20 @@ export function App({ client }: AppProps = {}) {
   const resolvedClient = useMemo(() => client ?? new MqttBrokerClient(), [client]);
   const [initialUrl] = useState(loadBrokerUrl);
 
+  // ADR-030 physics acceptance scenarios run standalone (no broker/core) when the
+  // URL carries `?physics=<name>` — the toy table is bypassed entirely.
+  const physics =
+    typeof window !== 'undefined'
+      ? new URLSearchParams(window.location.search).get('physics')
+      : null;
+
   useEffect(() => {
+    if (physics !== null) return;
     resolvedClient.connect(initialUrl);
     return () => resolvedClient.disconnect();
-  }, [resolvedClient, initialUrl]);
+  }, [resolvedClient, initialUrl, physics]);
+
+  if (physics !== null) return <PhysicsScenarioView name={physics} />;
 
   return (
     <BrokerProvider client={resolvedClient}>
