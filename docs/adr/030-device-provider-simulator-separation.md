@@ -2,7 +2,16 @@
 
 ## Status
 
-Proposed. Establishes the load-bearing separation every custom device will sit on:
+Accepted — partially built. **Done (video-confirmed):** the physical substrate
+(`packages/simulator-ui/src/physics/` — `world.ts`, `rail.ts`) with all seven
+acceptance scenarios passing as both headless unit tests and recorded video
+(`packages/ui-tests/scripts/physics-scenarios-video.mjs` → 8/8), and the CameraProvider
+seam + two-marker vision station (`…/sensors/`) measuring a passing rake's length
+(224 mm vs 224 mm expected). **Remaining:** the railyard rebuilt as a CV-driven
+controller on this substrate (Plan §4) — needs the physics extended from a single
+rail to a switched rail network.
+
+Establishes the load-bearing separation every custom device will sit on:
 
 - A **device** is a portable controller. It runs an event loop, speaks the **core
   protocol** (markers, clearance, go/stop/reverse, `tag_observed`), and perceives /
@@ -157,12 +166,20 @@ This is deliberately **kinematic-lite, not a dynamics engine** — overlap tests
 breakable rail constraint, gravity on slopes, magnetic snap with a strength cap. No
 device knows any of it; they perceive its consequences through sensors.
 
-### 4. Physics + geometry live in `packages/simulator`; the UI is a view
+### 4. Physics + geometry are DOM-free and headless-testable; the UI is a view
 
-Authoritative geometry and the physical-body model move into `packages/simulator`
-(or a shared geometry module that both it and the UI import), so physics is testable
-**headless** (no DOM). `packages/simulator-ui` becomes a pure view of authoritative
-sim state rather than the owner of geometry.
+The authoritative physical-body model must be testable **headless** (no DOM) and
+must own positions; React only reads body poses. Where it lives: the original plan
+said `packages/simulator`, but in practice the track geometry already lives in
+`packages/simulator-ui` (`pieces.ts`, `edge-path.ts`) and `packages/simulator` is
+pure logical/device simulation with **no spatial data** (it operates on the marker
+graph). The toy-table layer in `simulator-ui` *is* the physical-world layer.
+Inverting that — relocating all geometry into `packages/simulator` — would be a large,
+risky churn against the existing "logical graph vs spatial layout" separation, and a
+new shared package needs explicit sign-off. So **the physics layer lives in
+`packages/simulator-ui/src/physics/` (and `…/sensors/`), DOM-free and unit-tested
+headless under vitest** — satisfying the headless requirement without the relocation.
+If a non-UI consumer ever needs the physics, extract a shared geometry package then.
 
 ### 5. The vision station, done honestly (two-marker speed)
 
