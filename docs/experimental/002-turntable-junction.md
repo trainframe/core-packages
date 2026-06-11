@@ -3,6 +3,16 @@
 **Status:** speculative viability test. NOT normative; not expected in a typical
 setup.
 
+**ADR-030 audit (2026-06-11): COMPATIBLE for N-way routing; one small physics gap
+for the loco-reversal trick.** The physics `RailNetwork` already routes an N-way
+junction (multiple switch-gated links off one node — `simulator-ui/src/physics/network.ts`),
+and a `switch-actuator` throws it exactly like a 2-way point; a turntable adds only
+an eased-rotation controller (a small `TurntableActuator` + device, not yet built).
+The one genuine gap: network links are oriented `from.end → to.start` and carry
+facing UNCHANGED (`world.ts` transition), so a turntable's signature 180° loco
+turn-around is NOT expressible today — it would need a `flipsFacing?: boolean`
+option on `NetLink`. Adapting is small (controller + that link flag); not yet built.
+
 **Built (June 2026), untested:** toy-table piece in the Experiments tray (`turntable` in
 `pieces.ts`) — drawn from the real thing (cf. BRIO's 33361 mechanical
 turntable and prototype pits): a beech surround with a dark **recessed pit**,

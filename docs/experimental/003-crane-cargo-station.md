@@ -3,6 +3,16 @@
 **Status:** speculative viability test. NOT normative; not expected in a typical
 setup.
 
+**ADR-030 audit (2026-06-11): ADAPTED — its payload mechanism is now built on the
+physics world.** The crane is a physical gantry (`simulator-ui/src/devices/crane.ts`)
+and now carries a payload (`grab`/`release`); `PhysicsWorld.placeBodyAt(init, x, y)`
+sets a body down on the nearest rail; a body can be flagged `obstacle`. The
+video-confirmed `crane-drop` scenario uses this to set a crate on the line (a train
+then derails on it). A cargo→wagon transfer is the SAME mechanism with a coupling /
+rest target instead of a bare drop, and cargo weight maps onto per-body `mass`
+(a laden wagon is heavier, loading the loco). Outstanding: render a proper crate
+sprite (currently a small carriage body) and wire the lift/place onto a wagon.
+
 **Built (June 2026), untested:** toy-table piece in the Experiments tray (`crane-station`
 in `pieces.ts`) — a station plank with a grey gantry, trolley + hook, and a
 live trackside crate stack. The cargo transfer WORKS: a carriage piece carries

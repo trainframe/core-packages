@@ -3,6 +3,17 @@
 **Status:** speculative viability test. NOT normative; not expected in a typical
 setup.
 
+**ADR-030 audit (2026-06-11): ADAPTABLE (medium) — device already reimplemented;
+toy-table piece needs migration.** The ADR-030-native form is built and
+video-confirmed: `simulator-ui/src/sensors/vision-station.ts` + `camera-provider.ts`
+measure length honestly (speed = baseline ÷ marker-crossing interval, length =
+speed × dwell) over the physics world (the `vision` physics scenario). The legacy
+toy-table piece, by contrast, still derives length by reading the simulator's
+consist directly (`sim/toy-hardware.ts` `reportVisionLengths`) — a ground-truth
+cheat that would not port to real hardware. Outstanding work is migrating the
+toy-table onto the physics world + the new `VisionStation` (cross-cutting; not a
+quick adapt). Nothing is "messed up" — the seam is proven by the new device.
+
 **Built (June 2026), untested:** toy-table piece in the Experiments tray (`vision-station`
 in `pieces.ts`) — station plank + grey sensor mast, with the detection LED lit
 while a live train is under the sensor. The proof itself runs: scanning

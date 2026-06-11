@@ -3,6 +3,16 @@
 **Status:** speculative viability test. NOT normative; not expected in a typical
 setup.
 
+**ADR-030 audit (2026-06-11): NEEDS-PHYSICS-ENHANCEMENT (small, additive).** A
+raised span = a track link that is temporarily DISCONNECTED. The physics
+`RailNetwork` links are static (only switch-gated) — there is no runtime
+connect/disconnect (`simulator-ui/src/physics/network.ts`). Adapting needs a
+`LinkActuator` provider + `PhysicsWorld.setLinkActive(linkId, bool)` + `exit()`
+consulting it; a train then meets a raised gap as an open/buffered rail end
+(`world.ts` already runs a body off an open end or stops it at a buffer). Low-risk,
+backwards-compatible; the device becomes a portable controller over the
+`LinkActuator`. Not yet built — recorded for when a lift-bridge is wanted in physics.
+
 **Built (June 2026), untested:** toy-table piece in the Experiments tray (`lift-bridge`
 in `pieces.ts`) — two fixed wooden approaches with a visible seam, and the
 hinged span as a separate sub-shape. The raised state reads as a LIFT, not a
