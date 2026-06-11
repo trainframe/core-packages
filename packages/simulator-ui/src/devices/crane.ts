@@ -9,8 +9,11 @@
  * jams against its limit switch.
  *
  * Pure kinematics over a virtual clock (no DOM, no Date.now) — `step(dt)`
- * integrates, `moveTo` retargets, `pos`/`arrived` report.
+ * integrates, `moveTo` retargets, `pos`/`arrived` report. It is one concrete
+ * `PayloadCrane`: the gantry mechanism behind the shared payload seam.
  */
+
+import type { PayloadCrane } from './payload-crane.js';
 
 export interface CraneBounds {
   readonly minX: number;
@@ -26,7 +29,7 @@ const MAX_SPEED = 520;
 const ARRIVE_DIST = 4;
 const ARRIVE_SPEED = 12;
 
-export class Crane {
+export class Crane implements PayloadCrane {
   private readonly bounds: CraneBounds;
   private px: number;
   private py: number;
