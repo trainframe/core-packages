@@ -1,21 +1,38 @@
 # Railyard interior shunting — behaviour spec
 
 The authoritative description of how the **railyard interior choreography** must
-look and behave in the simulator + toy-table demo. This is the spec the
-[ADR-029](../adr/029-railyard-interior-shunting.md) implementation must satisfy;
-where the build and this doc disagree, **this doc wins** until it is revised.
+look and behave. The **observable** behaviour below is unchanged from the original
+spec; the **mechanism** is now the [ADR-030](../adr/030-device-provider-simulator-separation.md)
+device/provider/physics model (it supersedes the hand-animated ADR-029 approach).
+Where the build and this doc disagree on observable behaviour, **this doc wins**.
 
-Status: agreed, not yet met. The first cut got the crane wrong (it lifted and
-ferried carriages) and teleported the train at the throat — see "What was wrong"
-at the end.
+Status: observable spec agreed; built on the ADR-030 substrate (physics + the
+device sense/act seams), `YardController` in progress. The first hand-animated cut
+got the crane wrong (it lifted/ferried carriages) and teleported the train at the
+throat — both are gone by construction now (the train self-drives real rails; the
+crane only ever moves itself + splits a coupling).
+
+## Mechanism (ADR-030)
+
+The yard is a **device** on the simulator's physical substrate, exactly like any
+other: it perceives only through a **camera** (footprint-limited — it sees just the
+track beneath the crane) and acts only through **actuators** (the self-propelled
+train's motor, the junction-switch points, and the crane's two gantry axes + wedge).
+Nothing is keyframed: the train drives itself on real rails, junctions switch,
+carriages couple by magnetic proximity and split when the wedge prises them apart —
+all emergent from the physics. The yard **maintains its own internal state by
+looking** (it is never told what is where): it drives the camera along a train to
+read each carriage's colour and over each slot to learn occupancy, and from those
+observations keeps its slot/capacity model.
 
 ## Scope
 
-This is a **simulator + toy-table concern only**. Core and the wire protocol do
-not change: the throat handoff (ADR-027 entry-suspend / `zone_train_released`),
-length reconcile (ADR-023 `train_length_changed`), and carriages-invisible-to-core
-(ADR-016) are all unchanged. The whole point of the exercise is to **stress the
-system** with a believable shunting yard, not to add protocol.
+Core and the wire protocol do not change: the throat handoff (ADR-027 entry-suspend
+/ `zone_train_released`), length reconcile (ADR-023 `train_length_changed`),
+carriages-invisible-to-core (ADR-016), and the **zone capacity the yard reports**
+(`zone_state_changed`, ADR-026 — now derived from what the yard observes) are all
+unchanged. The point is to **stress the system** with a believable, sighted
+shunting yard, not to add protocol.
 
 ## The yard
 
@@ -25,10 +42,17 @@ system** with a believable shunting yard, not to add protocol.
 - When widening, **lengthen the ladder legs / junctions too** — they are
   currently pinched. The legs scale with the slot length so they stay gentle
   crossovers, not tight kinks.
-- **One-way system, like the rest of the track.** A train enters by one throat
-  and leaves by the **opposite** throat. Reversing is allowed *inside* the yard
-  (that is what a yard is for, and admission already requires `core.can_reverse`),
-  but the net flow through the yard is one-way.
+- **Pass-through ladder**: a single running line from each throat, a **diverging
+  ladder** fanning into the slots and a **converging ladder** rejoining them on the
+  far side (the existing drawn `railyard` piece's layout). A train enters by one
+  throat and leaves by the **opposite** throat; reversing is allowed *inside* (that
+  is what a yard is for, and admission requires `core.can_reverse`).
+- **Indifferent to which throat is IN.** The yard does not assume a direction — it
+  services a train from whichever throat it *actually arrived at*, routing it
+  through to the opposite one, and can hold trains arriving from both sides at once
+  (single-lead interior discipline, ADR-026, keeps one moving inside at a time).
+  Keeping global flow one-way is the *operator's* job (placing trains consistently),
+  not the yard's.
 - **Seeded with 2 spare carriages** already sitting in a slot at the start — this
   is the *demo* seeding it, not the device booting with spares.
 
