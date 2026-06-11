@@ -2,7 +2,13 @@
 
 ## Status
 
-Accepted — partially built. **Done (video-confirmed):** the physical substrate
+Accepted — **built, video-confirmed end to end** (substrate + vision station + the
+railyard rebuilt as a CV-driven controller). The railyard (`YardController` over the
+switched-network physics: camera-sense + motor/points/wedge actuators) runs a full
+service — enter a slot, scan + wedge-decouple the rear cut, pull clear, reverse onto
+the spares and couple, exit the opposite throat — rendered as the wooden ladder + XY
+gantry crane (`?physics=railyard`) and asserted by the harness. Earlier substrate
+work, also video-confirmed: the physical substrate
 (`packages/simulator-ui/src/physics/` — `world.ts`, `rail.ts`), now with mass +
 traction-power + ramp-gravity dynamics (`a = netPower/mass − DRAG·v − gravity·slope`,
 top speed `power/(mass·DRAG)`): more carriages → slower, a stronger loco → faster,
@@ -13,9 +19,9 @@ pusher. **Both halves of the device seam exist:** the `CameraProvider` (sense,
 pass (`physics-scenarios-video.mjs` → 10/10): the seven physical behaviours, the
 vision station, plus `load` (5 locos pulling 1–5 carriages — lighter runs ahead)
 and `ramps` (up slower / level / down faster). DOM-free, headless-testable; React is
-a pure view. **Remaining:** the railyard rebuilt as a CV-driven controller on this
-substrate (Plan §4) — needs the physics extended from a single rail to a switched
-rail network.
+a pure view. The switched rail network, the yard layout, and the `YardController`
+(Plan §4) are now built (`packages/simulator-ui/src/physics/{network,yard}.ts`,
+`…/devices/yard-controller.ts`) and video-confirmed (`?physics=railyard`).
 
 Establishes the load-bearing separation every custom device will sit on:
 
