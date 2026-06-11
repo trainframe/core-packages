@@ -38,13 +38,16 @@ function serviceRun(): {
     },
     deckCentre: layout.deckCentre,
     trunkExit: layout.trunk,
-    departExit: 'stub-e',
-    departSensePoint: stubSensePoint(layout, 'stub-e'),
+    departExit: 'stub-w',
+    departSensePoint: stubSensePoint(layout, 'stub-w'),
   });
 
   const dt = 1 / 60;
   for (let i = 0; i < 6000 && ctrl.currentPhase !== 'done'; i++) {
     ctrl.tick(dt);
+    /* Share the deck's live angle with its rotating rail, exactly as the scenario
+     *  does — so a body on the deck pivots with the bridge. */
+    layout.deckAngle.deg = deck.pos;
     w.step(dt);
   }
   return {
@@ -61,13 +64,14 @@ describe('TurntableController — a full turn-around service', () => {
 
     const loco = poseOf('L');
     expect(loco).toBeDefined();
-    // It left via the intended turn-around stub…
-    expect(loco?.segment).toBe('seg-stub-e');
-    // …and is now FACING THE OTHER WAY: it boarded heading east (rotation 0), and
-    // departs reversed (rotation 180), the honest 180° turn-around.
+    // It left via the intended WESTBOUND turn-around stub…
+    expect(loco?.segment).toBe('seg-stub-w');
+    // …and is now FACING THE OTHER WAY: it boarded heading east (rotation 0), the
+    // deck physically carried it round, and it departs reversed (rotation 180) —
+    // the honest 180° turn-around, pose-continuous (no sprite flip).
     expect(loco?.rotationDeg).toBe(180);
-    // It actually drove clear of the deck centre out onto the stub.
-    expect(loco?.x).toBeGreaterThan(800);
+    // It actually drove west, clear of the deck centre out onto the stub.
+    expect(loco?.x).toBeLessThan(600);
   });
 
   it('holds the loco off a moving deck (never released onto/off a mid-swing bridge)', () => {
@@ -95,8 +99,8 @@ describe('TurntableController — a full turn-around service', () => {
       },
       deckCentre: layout.deckCentre,
       trunkExit: layout.trunk,
-      departExit: 'stub-e',
-      departSensePoint: stubSensePoint(layout, 'stub-e'),
+      departExit: 'stub-w',
+      departSensePoint: stubSensePoint(layout, 'stub-w'),
     });
     const dt = 1 / 60;
     /* Tick a few frames while the deck is still swinging toward the trunk. */
