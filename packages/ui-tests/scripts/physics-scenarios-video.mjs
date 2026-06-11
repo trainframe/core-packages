@@ -126,6 +126,13 @@ const CHECKS = {
     const ok = !!t && t.fate === 'on-rail' && t.mode === 'railed' && t.segment === 'far';
     return { ok, why: `T@${t ? t.segment : 'absent'} fate ${t ? t.fate : '?'}` };
   },
+  'bridge-runoff': (b) => {
+    // The CONTRAST to lift-bridge: NO controller holds the train. The span stayed
+    // RAISED (rail broken) and the train drove straight at the open gap — so it
+    // must have RUN OFF (fate `ran-off`), not been held short.
+    const t = b.find((x) => x.id === 'T');
+    return { ok: t?.fate === 'ran-off', why: `T fate ${t ? t.fate : 'absent'}` };
+  },
   railyard: (b) => {
     const coupled = (id) => b.find((x) => x.id === id)?.coupledTo ?? [];
     const seg = (id) => b.find((x) => x.id === id)?.segment;
@@ -165,6 +172,7 @@ const DURATION = {
   turntable: 30,
   'crane-drop': 12,
   'lift-bridge': 14,
+  'bridge-runoff': 8,
 };
 
 async function runScenario(browser, name) {
