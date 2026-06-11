@@ -25,6 +25,11 @@ declare global {
           name: string;
           elapsedS: number;
           bodies: () => readonly BodyPose[];
+          /** Tunnel demo: the marker ids that have fired (entry, exit), in order. */
+          markers?: readonly string[];
+          /** Tunnel demo: whether the in-tunnel camera ever saw a body under the
+           *  roof — stays false for a dark tunnel, true for a lit one. */
+          cameraSawInside?: boolean;
         }
       | undefined;
     __tfVision?: { reportedMm: number | null; expectedMm: number } | undefined;

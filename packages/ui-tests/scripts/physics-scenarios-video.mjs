@@ -144,6 +144,35 @@ const CHECKS = {
     const t = b.find((x) => x.id === 'T');
     return { ok: t?.fate === 'ran-off', why: `T fate ${t ? t.fate : 'absent'}` };
   },
+  tunnel: (b, _v, extra) => {
+    // A roofed stretch of ORDINARY track. The train drives straight through and
+    // EMERGES well past the far portal (exit x = 1350), still on-rail. The entry +
+    // exit MARKER tripwires both fired (the hidden train tracked through the dark),
+    // while the in-tunnel CAMERA stayed BLIND (dark tunnel) — markers worked, the
+    // camera did not. The headline contrast.
+    const t = b.find((x) => x.id === 'T');
+    const markers = extra?.markers ?? [];
+    const tracked = markers.includes('entry') && markers.includes('exit');
+    const emerged = !!t && t.fate === 'on-rail' && t.mode === 'railed' && t.x > 1450;
+    const blind = extra?.cameraSawInside === false;
+    return {
+      ok: emerged && tracked && blind,
+      why: `T@${t ? t.x | 0 : 'absent'} fate ${t ? t.fate : '?'} markers=[${markers.join(',')}] sawInside ${extra?.cameraSawInside}`,
+    };
+  },
+  'tunnel-lit': (b, _v, extra) => {
+    // Same run, but a LIT tunnel: the interior camera DOES see the train under the
+    // roof (`cameraSawInside === true`) — proving occlusion is a per-tunnel
+    // property, not inherent. Markers still fire; the train still emerges.
+    const t = b.find((x) => x.id === 'T');
+    const markers = extra?.markers ?? [];
+    const tracked = markers.includes('entry') && markers.includes('exit');
+    const emerged = !!t && t.fate === 'on-rail' && t.mode === 'railed' && t.x > 1450;
+    return {
+      ok: emerged && tracked && extra?.cameraSawInside === true,
+      why: `T@${t ? t.x | 0 : 'absent'} fate ${t ? t.fate : '?'} markers=[${markers.join(',')}] sawInside ${extra?.cameraSawInside}`,
+    };
+  },
   railyard: (b) => {
     const coupled = (id) => b.find((x) => x.id === id)?.coupledTo ?? [];
     const seg = (id) => b.find((x) => x.id === id)?.segment;
@@ -187,6 +216,8 @@ const DURATION = {
   'crane-drop': 12,
   'lift-bridge': 14,
   'bridge-runoff': 8,
+  tunnel: 18,
+  'tunnel-lit': 18,
 };
 
 async function runScenario(browser, name) {
@@ -207,10 +238,16 @@ async function runScenario(browser, name) {
   await sleep((durS / 2) * 1000);
   const bodies = await page.evaluate(() => window.__tfPhysics?.bodies() ?? []);
   const vision = await page.evaluate(() => window.__tfVision ?? null);
+  /* Extra observers some scenarios surface on __tfPhysics (e.g. the tunnel's
+   *  fired markers + whether the in-tunnel camera saw inside). */
+  const extra = await page.evaluate(() => {
+    const p = window.__tfPhysics;
+    return p ? { markers: p.markers ?? null, cameraSawInside: p.cameraSawInside ?? null } : null;
+  });
   await page.screenshot({ path: `${OUT}${name}-end.png` });
 
   const check = CHECKS[name];
-  const result = check ? check(bodies, vision) : { ok: false, why: 'no check' };
+  const result = check ? check(bodies, vision, extra) : { ok: false, why: 'no check' };
   log(`${result.ok ? 'PASS' : 'FAIL'} ${name} — ${result.why}`);
 
   const video = page.video();
