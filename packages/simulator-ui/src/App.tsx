@@ -4,6 +4,7 @@ import type { BrokerClient } from './broker/client.js';
 import { MqttBrokerClient } from './broker/mqtt-client.js';
 import { PhysicsScenarioView } from './components/PhysicsScenarioView.js';
 import { ToyTable } from './components/ToyTable.js';
+import { YardScenarioView } from './components/YardScenarioView.js';
 import './components/ToyTable.css';
 import { loadBrokerUrl } from './config/broker-config.js';
 
@@ -38,6 +39,7 @@ export function App({ client }: AppProps = {}) {
     return () => resolvedClient.disconnect();
   }, [resolvedClient, initialUrl, physics]);
 
+  if (physics === 'railyard') return <YardScenarioView />;
   if (physics !== null) return <PhysicsScenarioView name={physics} />;
 
   return (

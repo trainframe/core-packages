@@ -82,6 +82,27 @@ export class YardController {
     return this.phase;
   }
 
+  /** Where the crane head currently is on the gantry (for rendering) — over its
+   *  current point of interest: the slot rest, the coupling, the lead, the spares. */
+  get cranePos(): { x: number; y: number } {
+    const entry = this.slot(this.d.entrySlot);
+    const spares = this.slot(this.d.sparesSlot);
+    switch (this.phase) {
+      case 'route-in':
+      case 'rest':
+        return this.slotFarEnd(this.d.entrySlot);
+      case 'decouple':
+        return { x: this.restX - 1.5 * CAR_SPACING, y: entry.by };
+      case 'pull-clear':
+        return this.eastLeadPoint();
+      case 'to-spares':
+      case 'settle':
+        return { x: this.sparesEastX || spares.ax + 200, y: spares.by };
+      default:
+        return { x: this.slot(this.d.layout.leadEast).bx - 60, y: spares.by };
+    }
+  }
+
   /** Geometry of a slot (its world endpoints). */
   private slot(id: string): YardSegGeom {
     const g = this.d.layout.geom.get(id);
@@ -228,13 +249,17 @@ export class YardController {
     if (this.timer > 1.0) this.to('exit');
   }
 
-  /** Drive forward out the opposite throat. */
+  /** Drive forward out the opposite throat, then hand off (stop on the lead so it
+   *  doesn't run off the open end — in the full system core reclaims it here). */
   private exit(): void {
     this.d.eastPoints.set(this.sparesSlotPos());
     this.d.train.forward();
-    // Done once the train has cleared out onto the east lead and beyond.
+    // Done once the train has cleared out onto the east lead.
     const g = this.slot(this.d.layout.leadEast);
-    if (this.d.look(g.bx - 60, g.by).occupied) this.to('done');
+    if (this.d.look(g.bx - 60, g.by).occupied) {
+      this.d.train.stop();
+      this.to('done');
+    }
   }
 
   /** Switch positions: slot ids map to the 'slotA'/'slotB' positions. */

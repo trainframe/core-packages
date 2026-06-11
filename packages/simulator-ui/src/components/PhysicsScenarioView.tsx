@@ -72,7 +72,7 @@ const BODY_SPRITE: Record<
 /** A loco / carriage drawn as the REAL toy-table device sprite (rounded hull,
  *  boiler, windows…) in its livery, at the body's authoritative pose — not a
  *  plain physics rectangle. A red outline marks a body that has left the rails. */
-function BodyG({ pose }: { pose: BodyPose }) {
+export function BodyG({ pose }: { pose: BodyPose }) {
   const spec = BODY_SPRITE[pose.kind];
   const shape = getPieceShape({
     id: pose.id,

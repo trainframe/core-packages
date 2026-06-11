@@ -74,9 +74,23 @@ const CHECKS = {
     const down = sp('down');
     return { ok: up < flat - 5 && flat < down - 5, why: `up ${up | 0} < flat ${flat | 0} < down ${down | 0}` };
   },
+  railyard: (b) => {
+    const coupled = (id) => b.find((x) => x.id === id)?.coupledTo ?? [];
+    const seg = (id) => b.find((x) => x.id === id)?.segment;
+    // Flood-fill the departing loco's rake over its couplings.
+    const seen = new Set(['L']);
+    const stack = ['L'];
+    while (stack.length) {
+      const c = stack.pop();
+      for (const n of coupled(c)) if (!seen.has(n)) { seen.add(n); stack.push(n); }
+    }
+    const ok =
+      seen.has('p0') && !seen.has('a2') && seg('a2') === 'slotA' && ['leadE', 'elegB'].includes(seg('L'));
+    return { ok, why: `rake={${[...seen].sort().join(',')}} a2@${seg('a2')} L@${seg('L')}` };
+  },
 };
 
-const DURATION = { collision: 7, push: 5, terminus: 7, couple: 7, tugofwar: 6, derail: 6, runoff: 6, vision: 9, load: 7, ramps: 7 };
+const DURATION = { collision: 7, push: 5, terminus: 7, couple: 7, tugofwar: 6, derail: 6, runoff: 6, vision: 9, load: 7, ramps: 7, railyard: 32 };
 
 async function runScenario(browser, name) {
   const durS = DURATION[name] ?? 7;
