@@ -46,12 +46,22 @@ const DWELL_TICKS = 4;
  *  centre that the headshunt clears them. Mirror RAILYARD_SLOT_YS. */
 const SLOT_A = 84;
 const SLOT_B = -84;
-/* Ticks each phase takes: drive phases roll the train along their path; the crane
-   phases (decouple split + camera read) are dwells. Tick-based like the rest of
-   the yard's timing (deterministic, no dt threading). */
-const DRIVE_TICKS = 22;
-const DECOUPLE_TICKS = 16;
-const INSPECT_TICKS = 14;
+/* Ticks each phase takes, tuned so the train moves at a roughly CONSTANT speed
+   (counts ∝ each path's rough length, so no phase races) and the crane works
+   SLOWLY (long dwells — a fast crane read as wrong). Combined with the eased
+   progress below, the train accelerates off each stop and decelerates back to
+   rest at the slot ends / reversals. Tick-based, deterministic. */
+const PHASE_TICKS: Record<ShuntPhase, number> = {
+  'lead-out': 30,
+  enter: 26,
+  decouple: 90,
+  'pull-clear': 26,
+  'back-to-spares': 30,
+  settle: 12,
+  inspect: 64,
+  'exit-pull': 26,
+  'exit-home': 30,
+};
 /** Progress within `decouple` at which the crane has split the coupling (the rear
  *  cut sheds), and within `back-to-spares` at which the train has backed onto the
  *  spares and they couple. */
@@ -93,11 +103,17 @@ interface Shunt {
   coupled: boolean;
 }
 
-/** Ticks the given phase runs for (crane phases dwell; drives roll). */
+/** Ticks the given phase runs for. */
 function phaseTicks(phase: ShuntPhase): number {
-  if (phase === 'decouple') return DECOUPLE_TICKS;
-  if (phase === 'inspect') return INSPECT_TICKS;
-  return DRIVE_TICKS;
+  return PHASE_TICKS[phase];
+}
+
+/** Smoothstep easing (0→1) so a phase accelerates off its start and decelerates
+ *  to a stop at its end — the train eases to rest at slot ends / reversals rather
+ *  than snapping. @pure */
+function ease(t: number): number {
+  const c = Math.max(0, Math.min(1, t));
+  return c * c * (3 - 2 * c);
 }
 
 /**
@@ -386,7 +402,9 @@ export class VirtualRailyard {
     return {
       trainId: shunt.trainId,
       phase: shunt.phase,
-      progress: shunt.progress,
+      // Eased for rendering (smooth accel/decel); the raw progress drives the
+      // internal milestones above.
+      progress: ease(shunt.progress),
       swapping: shunt.swapping,
       entrySlotY: shunt.entrySlotY,
       sparesSlotY: shunt.sparesSlotY,

@@ -973,20 +973,25 @@ function placeShuntedTrain(
   const seg = shuntSegment(interior, journey);
   const path = worldHalfPath(piece, seg.local);
   const locoArc = seg.progress * path.length;
+  const loco = path.at(locoArc);
   const flip = seg.reverse ? 180 : 0;
-
-  // The loco at the head; each coupled wagon a carriage-spacing behind it along
-  // the rail (or ahead, when reversing). The loco keeps its facing throughout, so
-  // on a reverse phase its sprite is flipped 180° from the travel tangent.
-  const place = (id: string, offsetMm: number): void => {
-    const arc = seg.reverse ? locoArc + offsetMm : locoArc - offsetMm;
-    const pose = path.at(arc);
-    result.set(id, { x: pose.x, y: pose.y, rotationDeg: pose.headingDeg + flip });
-  };
-  place(trainPieceId, 0);
+  // The loco's heading (its sprite faces forward; on a reverse phase that's 180°
+  // from the travel tangent). The coupled rake is a RIGID line trailing straight
+  // behind the loco along this heading — NOT sampled along the path, which would
+  // pile the wagons up where a slot segment runs out and pop them at each phase
+  // boundary. A rigid trail stays strung out and continuous.
+  const headRad = ((loco.headingDeg + flip) * Math.PI) / 180;
+  const back = { x: -Math.cos(headRad), y: -Math.sin(headRad) };
+  result.set(trainPieceId, { x: loco.x, y: loco.y, rotationDeg: loco.headingDeg + flip });
   for (let i = 0; i < consist.length; i++) {
     const wagon = consist[i];
-    if (wagon !== undefined) place(wagon.id, (i + 1) * CARRIAGE_SPACING_MM);
+    if (wagon === undefined) continue;
+    const d = (i + 1) * CARRIAGE_SPACING_MM;
+    result.set(wagon.id, {
+      x: loco.x + back.x * d,
+      y: loco.y + back.y * d,
+      rotationDeg: loco.headingDeg + flip,
+    });
   }
 
   // The cuts that aren't on the train: the shed rear cut parked in the entry slot,
@@ -1041,12 +1046,12 @@ interface YardCraneState {
 function yardCraneState(interior: YardInterior, journey: RailyardJourney): YardCraneState {
   switch (interior.phase) {
     case 'decouple': {
-      // Run in from home to the coupling (just east of where the shed cut rests)
-      // and lower to split it.
+      // Run in from home to the COUPLING (between the kept rake and the shed cut)
+      // and lower to split it there.
       const t = interior.progress / 0.55;
       return {
-        x: lerp(CRANE_HOME_X, journey.shedPose.x, t),
-        y: lerp(0, journey.shedPose.y, t),
+        x: lerp(CRANE_HOME_X, journey.couplingPose.x, t),
+        y: lerp(0, journey.couplingPose.y, t),
         hookDown: interior.progress > 0.5,
         working: true,
       };

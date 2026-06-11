@@ -1088,6 +1088,9 @@ export interface RailyardJourney {
    *  entry slot) and where the spare cut rests (east end, in the spares slot). */
   readonly shedPose: RailPose;
   readonly sparesPose: RailPose;
+  /** Local pose of the COUPLING the crane splits — between the kept front of the
+   *  rake and the shed rear cut (where the crane lowers to decouple). */
+  readonly couplingPose: RailPose;
 }
 
 /** The east lead the train pulls out to (clear of the slot taps so it can reverse
@@ -1099,8 +1102,10 @@ const RAILYARD_REST_X = RAILYARD_SLOT_HALF_X - 40;
 const RAILYARD_COUPLE_X = 76;
 const RAILYARD_SPARES_X = -60;
 /** East end of the shed cut as it rests in the entry slot (the rear pair, three
- *  carriage-spacings behind the loco's rest). */
+ *  carriage-spacings behind the loco's rest), and the coupling between the kept
+ *  front pair and that shed rear pair (where the crane lowers to split). */
 const RAILYARD_SHED_X = RAILYARD_REST_X - 3 * 68;
+const RAILYARD_COUPLING_X = RAILYARD_REST_X - 2.5 * 68;
 
 /** Reverse a train into a slot from the lead: spine to the slot's east tap, the
  *  east leg to the mouth, then along the slot to `toX`. Heads west throughout. */
@@ -1147,6 +1152,7 @@ export function railyardInteriorJourney(
     exitHome: m(exitHome),
     shedPose: { x: sx * RAILYARD_SHED_X, y: entrySlotY, headingDeg: 0 },
     sparesPose: { x: sx * RAILYARD_SPARES_X, y: sparesSlotY, headingDeg: 0 },
+    couplingPose: { x: sx * RAILYARD_COUPLING_X, y: entrySlotY, headingDeg: 0 },
   };
 }
 
