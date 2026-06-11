@@ -82,6 +82,25 @@ describe('PhysicsWorld — contact', () => {
     expect(c.coupledTo).toHaveLength(0); // pushed, NOT coupled
   });
 
+  it('a shoved carriage carries its momentum when the loco stops, rolling on past it', () => {
+    const w = new PhysicsWorld(straightRail(4000));
+    w.addBody({ id: 'L', kind: 'loco', railPos: 100, facing: 1, motion: 'forward' });
+    w.addBody({ id: 'C', kind: 'carriage', railPos: 300, facing: 1 });
+    run(w, 80); // get the carriage moving under the shove
+    expect(pose(w, 'C').speed).toBeGreaterThan(50);
+    w.setMotion('L', 'stopped'); // cut the loco's power — it brakes to a stand
+    const loStopX = pose(w, 'L').x;
+    const cAtStop = pose(w, 'C').x;
+    run(w, 80); // let both come to rest
+    const c = pose(w, 'C');
+    const l = pose(w, 'L');
+    expect(l.speed).toBeLessThan(1); // the braked loco has halted
+    expect(c.speed).toBeLessThan(1); // the carriage has rolled to rest under friction
+    expect(c.x).toBeGreaterThan(cAtStop + 30); // it trundled ON, not froze with the loco
+    expect(c.x - l.x).toBeGreaterThan(80); // and pulled clear ahead of the stopped loco
+    expect(l.x).toBeGreaterThan(loStopX - 1); // (loco only moved forward, never yanked back)
+  });
+
   it('a loco reversing into a carriage magnetically couples', () => {
     const w = new PhysicsWorld(straightRail(2000));
     w.addBody({ id: 'L', kind: 'loco', railPos: 400, facing: 1, motion: 'reverse' });

@@ -166,8 +166,10 @@ function push(): PhysicsScenario {
       { id: 'wagon', kind: 'carriage', railPos: 500, facing: 1, color: PURPLE },
     ],
     couples: [],
-    script: [{ atS: 4, id: 'red', motion: 'stopped' }], // halt mid-rail, having shoved it along
-    durationS: 5,
+    // Shove it along, then cut the loco's power: the brakeless wagon keeps its
+    // momentum and trundles on, pulling clear of the halted loco.
+    script: [{ atS: 4, id: 'red', motion: 'stopped' }],
+    durationS: 8,
   };
 }
 

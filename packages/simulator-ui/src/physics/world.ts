@@ -105,6 +105,10 @@ const DRAG = 2.6;
 const RAMP_GRAVITY = 250;
 /** Braking deceleration (mm/s²) when a loco is told to stop on the level. */
 const BRAKE = 1100;
+/** Rolling resistance (mm/s²) for a railed group with NO loco — a free-rolling
+ *  carriage or a shed cut has no brakes, so when whatever was pushing it lets go
+ *  it carries its momentum and trundles on, slowing only gently to rest. */
+const ROLL_FRICTION = 320;
 
 export class PhysicsWorld {
   private readonly net: RailNetwork;
@@ -332,10 +336,13 @@ export class PhysicsWorld {
     const slope = this.railOf(lead).slopeAt(lead.railPos);
     const cap = Math.max(...group.map((m) => m.maxSpeed));
     const v = lead.vel;
+    const hasLoco = group.some((m) => m.kind === 'loco');
     let next: number;
     if (!anyDriving && slope === 0) {
-      // Told to stop on the level: brake to rest without overshooting zero.
-      next = Math.abs(v) <= BRAKE * dtS ? 0 : v - Math.sign(v) * BRAKE * dtS;
+      // No traction on the level: a loco brakes itself to rest; a brakeless cut
+      // (no loco) only has rolling resistance, so it coasts on, carrying momentum.
+      const decel = hasLoco ? BRAKE : ROLL_FRICTION;
+      next = Math.abs(v) <= decel * dtS ? 0 : v - Math.sign(v) * decel * dtS;
     } else {
       const a = netPower / mass - DRAG * v - RAMP_GRAVITY * slope;
       next = v + a * dtS;
@@ -464,7 +471,7 @@ export class PhysicsWorld {
     if (gap >= minGap + COUPLE_RANGE) return; // not touching
     if (this.tryCollide(lo, hi, minGap)) return;
     if (this.tryCouple(lo, hi, minGap)) return;
-    if (gap < minGap && !this.tryPush(lo, hi, gap, minGap)) this.separate(lo, hi, minGap);
+    if (gap < minGap && !this.tryPush(lo, hi, minGap)) this.separate(lo, hi, minGap);
   }
 
   /** Two opposed locos closing → stop both and hold them apart. */
@@ -492,7 +499,7 @@ export class PhysicsWorld {
 
   /** A body driving NOSE-first into one ahead → shove it (contact, not coupled).
    *  Returns whether a shove happened. */
-  private tryPush(lo: Body, hi: Body, gap: number, minGap: number): boolean {
+  private tryPush(lo: Body, hi: Body, minGap: number): boolean {
     if (lo.vel > hi.vel && lo.vel > 0 && lo.facing === 1) {
       hi.vel = lo.vel;
       hi.railPos = lo.railPos + minGap;
