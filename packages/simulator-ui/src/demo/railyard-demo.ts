@@ -132,11 +132,16 @@ function corner(pieces: TrackPiece[], cursor: Cursor, idPrefix: string): Cursor 
 // ---------------------------------------------------------------------------
 
 const YARD_ID = 'yard';
-/** Straights between J1 and J2 on the bottom (sets the yard branch spread). */
-const MAIN_STRAIGHTS = 6;
+/** Straights between J1 and J2 on the bottom (sets the yard branch spread). 8 so
+ *  the branch gap fits the now-wider 1000 mm yard (+2 vs the old 600 mm yard). */
+const MAIN_STRAIGHTS = 9;
 /** Straights between each TOP junction pair (J3/J4 and J5/J6) — the two station
- *  branch loops' spread. Two pairs back-to-back = the 8-unit top run. */
+ *  branch loops' spread. Fixed at 2: the station branch (curve+station+curve)
+ *  spans exactly this gap, so it must not change. */
 const TOP_BRANCH_MID = 2;
+/** Straights BETWEEN the two top junction pairs (J4→J5). Carries the top run's
+ *  extra width for the wider yard, without touching the branch-pair spans. */
+const TOP_BETWEEN_PAIRS = 3;
 /** A 45° descent/ascent straight on each side of the yard, so it drops far
  *  enough below the bottom run that its tall gantry clears the track. */
 const YARD_DESCENT = 1;
@@ -360,6 +365,7 @@ export function buildRailyardDemo(): RailyardDemo {
   c = place(pieces, c, 'junction', 'J3');
   for (let i = 0; i < TOP_BRANCH_MID; i++) c = place(pieces, c, 'straight', `m3${i}`);
   c = place(pieces, c, 'junction', 'J4', { flipped: true, connectVia: 1 });
+  for (let i = 0; i < TOP_BETWEEN_PAIRS; i++) c = place(pieces, c, 'straight', `mid${i}`);
   c = place(pieces, c, 'junction', 'J5');
   for (let i = 0; i < TOP_BRANCH_MID; i++) c = place(pieces, c, 'straight', `m5${i}`);
   c = place(pieces, c, 'junction', 'J6', { flipped: true, connectVia: 1 });

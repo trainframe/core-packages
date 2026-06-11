@@ -38,37 +38,56 @@ const DWELL_TICKS = 4;
    where the crane and cuts render) — this file only emits phase + progress +
    slot choices, kept geometry-free. The slot lane values mirror the UI's
    RAILYARD_SLOT_YS so the train lands ON a drawn slot. */
-/** The free slot the train enters, and the slot holding the yard's spares (where
- *  the UI also draws the spare cut). Mirrors RAILYARD_SLOT_YS. */
-const ENTRY_SLOT_Y = 132;
-const SPARES_SLOT_Y = -84;
-/* Ticks each phase takes: drive phases roll the train along their path; crane
-   phases are the lift/read dwell. Tick-based like the rest of the yard's timing
-   (deterministic, no dt threading). */
+/** The two slots the demo's single-lead choreography alternates between: a train
+ *  enters whichever is FREE and reverses into whichever holds the spares; on the
+ *  way out it has shed its cut into the entry slot, so the spares slot rotates to
+ *  the entry slot next visit (the touring swap). Both sit one rank off-centre on
+ *  opposite sides of the spine — far enough off the lead to read, near enough the
+ *  centre that the headshunt clears them. Mirror RAILYARD_SLOT_YS. */
+const SLOT_A = 84;
+const SLOT_B = -84;
+/* Ticks each phase takes: drive phases roll the train along their path; the crane
+   phases (decouple split + camera read) are dwells. Tick-based like the rest of
+   the yard's timing (deterministic, no dt threading). */
 const DRIVE_TICKS = 22;
 const DECOUPLE_TICKS = 16;
 const INSPECT_TICKS = 14;
-/** Progress within `decouple` at which the crane has lifted the cut, and within
- *  `cross-set` at which the train has bumped and coupled the spares. */
-const DECOUPLE_LIFT_AT = 0.5;
-const COUPLE_AT = 0.88;
+/** Progress within `decouple` at which the crane has split the coupling (the rear
+ *  cut sheds), and within `back-to-spares` at which the train has backed onto the
+ *  spares and they couple. */
+const DECOUPLE_SPLIT_AT = 0.55;
+const COUPLE_AT = 0.92;
 
-/** The phases of the single-lead interior maneuver (ADR-026: one mover inside at
- *  a time), in order. See the file-head comment for what each animates. */
-type ShuntPhase = 'enter' | 'decouple' | 'cross-pull' | 'cross-set' | 'inspect' | 'release-out';
+/** The phases of the single-lead interior maneuver (ADR-026), in order. See the
+ *  file-head comment + docs/spec/railyard-shunting-choreography.md. */
+type ShuntPhase =
+  | 'lead-out'
+  | 'enter'
+  | 'decouple'
+  | 'pull-clear'
+  | 'back-to-spares'
+  | 'settle'
+  | 'inspect'
+  | 'exit-pull'
+  | 'exit-home';
 
-/** The single-lead interior maneuver in progress. Geometry-free: just the phase,
- *  its 0..1 progress, the chosen slots, and the consist bookkeeping. */
+/** The single-lead interior maneuver in progress. Geometry-free: the phase, its
+ *  0..1 progress, the slots it chose, and the consist bookkeeping. */
 interface Shunt {
   readonly trainId: string;
   readonly train: VirtualTrain;
+  /** The free slot the train entered, and the slot the spares sit in. Fixed for
+   *  the whole maneuver (the device's persistent spares slot only rotates once
+   *  the maneuver completes). */
+  readonly entrySlotY: number;
+  readonly sparesSlotY: number;
   phase: ShuntPhase;
   /** Progress through the current phase, 0..1. */
   progress: number;
-  /** Whether this visit swaps a cut at all (needs a full leading cut + spares). */
+  /** Whether this visit swaps a cut at all (needs a full rear cut + spares). */
   swapping: boolean;
-  /** The leading cut the crane has lifted off (held until the train picks up the
-   *  spares, then it becomes the next visitor's spares). */
+  /** The rear cut the train sheds (parked in the entry slot; becomes the next
+   *  visitor's spares once this maneuver completes). */
   dropped: VirtualCarriage[];
   decoupled: boolean;
   coupled: boolean;
@@ -113,6 +132,9 @@ export class VirtualRailyard {
    * laps. Holds one yard slot while non-empty.
    */
   private spares: VirtualCarriage[] = [];
+  /** Which slot the spare cut currently rests in (local-frame lane mm). Rotates
+   *  to the entry slot each time a train sheds there (the touring swap). */
+  private sparesSlotY: number = SLOT_B;
   /** Trains serviced since their current arrival (so we swap once per visit),
    *  mapped to the slot they occupy while inside; cleared when they depart. */
   private readonly servicing = new Map<string, number>();
@@ -238,10 +260,16 @@ export class VirtualRailyard {
   private beginShunt(trainId: string, train: VirtualTrain): void {
     this.parkedTicks.delete(trainId);
     const swapping = train.getConsist().length >= SWAP_PAIR_SIZE && this.spares.length > 0;
+    // Enter whichever of the two slots the spares are NOT in (a free slot). A
+    // no-swap visit just enters its slot and leaves from it, so its "spares slot"
+    // is that same entry slot.
+    const entrySlotY = this.sparesSlotY === SLOT_A ? SLOT_B : SLOT_A;
     this.activeShunt = {
       trainId,
       train,
-      phase: 'enter',
+      entrySlotY,
+      sparesSlotY: swapping ? this.sparesSlotY : entrySlotY,
+      phase: 'lead-out',
       progress: 0,
       swapping,
       dropped: [],
@@ -251,18 +279,18 @@ export class VirtualRailyard {
   }
 
   /**
-   * Advance one tick of the single-lead interior maneuver: roll the current
-   * phase's progress, fire its consist milestone (the crane lifting the leading
-   * cut mid-`decouple`; the spares coupling on near the end of `cross-set`), and
-   * step to the next phase when the current one completes.
+   * Advance one tick of the maneuver: roll the current phase's progress, fire its
+   * consist milestone (the crane SPLITTING the coupling mid-`decouple` so the rear
+   * cut sheds; the spares COUPLING on near the end of `back-to-spares`), and step
+   * to the next phase when the current one completes.
    */
   private advanceShunt(shunt: Shunt): void {
     shunt.progress = Math.min(1, shunt.progress + 1 / phaseTicks(shunt.phase));
-    if (shunt.phase === 'decouple' && !shunt.decoupled && shunt.progress >= DECOUPLE_LIFT_AT) {
-      this.decoupleLeadingCut(shunt);
+    if (shunt.phase === 'decouple' && !shunt.decoupled && shunt.progress >= DECOUPLE_SPLIT_AT) {
+      this.shedRearCut(shunt);
       shunt.decoupled = true;
     }
-    if (shunt.phase === 'cross-set' && !shunt.coupled && shunt.progress >= COUPLE_AT) {
+    if (shunt.phase === 'back-to-spares' && !shunt.coupled && shunt.progress >= COUPLE_AT) {
       this.coupleSpares(shunt);
       shunt.coupled = true;
     }
@@ -270,53 +298,66 @@ export class VirtualRailyard {
   }
 
   /** Step to the next phase (resetting progress), or finish the maneuver. A
-   *  no-swap visit skips the crane/cross phases: it enters, is inspected, leaves. */
+   *  no-swap visit skips the swap phases: it enters, is inspected, and leaves. */
   private nextPhase(shunt: Shunt): void {
     shunt.progress = 0;
     switch (shunt.phase) {
+      case 'lead-out':
+        shunt.phase = 'enter';
+        return;
       case 'enter':
         shunt.phase = shunt.swapping ? 'decouple' : 'inspect';
         return;
       case 'decouple':
-        shunt.phase = 'cross-pull';
+        shunt.phase = 'pull-clear';
         return;
-      case 'cross-pull':
-        shunt.phase = 'cross-set';
+      case 'pull-clear':
+        shunt.phase = 'back-to-spares';
         return;
-      case 'cross-set':
+      case 'back-to-spares':
+        shunt.phase = 'settle';
+        return;
+      case 'settle':
         shunt.phase = 'inspect';
         return;
       case 'inspect':
-        shunt.phase = 'release-out';
+        shunt.phase = 'exit-pull';
         return;
-      case 'release-out':
+      case 'exit-pull':
+        shunt.phase = 'exit-home';
+        return;
+      case 'exit-home':
         this.completeShunt(shunt);
         return;
     }
   }
 
-  /** Crane lifts the train's leading cut off; it is held by the crane until it
-   *  becomes the yard's spares at the couple step (the spares already hold a
-   *  slot, so no extra slot is taken here). */
-  private decoupleLeadingCut(shunt: Shunt): void {
+  /** The crane splits the coupling between the kept front of the rake and its rear
+   *  cut; the train will pull forward and leave that cut parked in the entry slot.
+   *  Pure consist mutation — the cut just stays where it was. */
+  private shedRearCut(shunt: Shunt): void {
     const consist = shunt.train.getConsist();
     if (consist.length < SWAP_PAIR_SIZE) return;
-    shunt.dropped = consist.slice(0, SWAP_PAIR_SIZE);
-    shunt.train.setConsist(consist.slice(SWAP_PAIR_SIZE));
+    shunt.dropped = consist.slice(-SWAP_PAIR_SIZE);
+    shunt.train.setConsist(consist.slice(0, -SWAP_PAIR_SIZE));
   }
 
-  /** The waiting spare cut collides with the reversing train and auto-couples
-   *  onto its front; the cut just dropped becomes the spares for the next visitor
-   *  (the FIFO migration). */
+  /** The train has backed onto the spares; they auto-couple onto its rear. (The
+   *  shed cut becomes the next visitor's spares only once the maneuver completes,
+   *  so the spare slot doesn't rotate mid-maneuver.) */
   private coupleSpares(shunt: Shunt): void {
     const incoming = this.spares.slice(0, SWAP_PAIR_SIZE);
-    shunt.train.setConsist([...incoming, ...shunt.train.getConsist()]);
-    this.spares = [...shunt.dropped];
+    shunt.train.setConsist([...shunt.train.getConsist(), ...incoming]);
   }
 
-  /** Finish the maneuver: take the train's slot, hand it back to core (it
-   *  departs under ordinary clearance, ADR-027), and free the lead. */
+  /** Finish the maneuver: the shed cut becomes the new spares, sitting in the
+   *  entry slot (so the spares slot rotates there — the touring swap); take the
+   *  train's slot, hand it back to core (ADR-027), and free the lead. */
   private completeShunt(shunt: Shunt): void {
+    if (shunt.coupled) {
+      this.spares = [...shunt.dropped];
+      this.sparesSlotY = shunt.entrySlotY;
+    }
     this.servicing.set(shunt.trainId, this.occupy(shunt.trainId));
     this.releaseTrain(shunt.trainId);
     this.activeShunt = null;
@@ -325,13 +366,10 @@ export class VirtualRailyard {
   /**
    * The interior maneuver state for the toy-table to render — geometry-free. The
    * UI maps `phase` + `progress` onto the actual yard centre-line for that move
-   * (so the train follows real rails), parks/works the crane per phase, and draws
-   * the lifted cut. `entrySlotY`/`sparesSlotY` are the chosen slots (local-frame
-   * lane mm, matching RAILYARD_SLOT_YS); `droppedCutIds` is the cut the crane is
-   * currently holding (empty until the crane lifts it, cleared once it becomes
-   * the spares); `trailOffset` is how many wagons are missing from the front
-   * while a cut is lifted, so the UI can hold the remaining rake in place instead
-   * of letting it jump forward. Null when no maneuver is running. UI-only.
+   * (so the train follows real rails), positions the decoupler crane, and draws
+   * the two cuts. `shedCutIds` is the rear cut left parked in the entry slot (from
+   * the split until the maneuver ends); `sparesCutIds` is the spare cut waiting in
+   * the spares slot (until the train couples it on). Null when idle. UI-only.
    */
   getInteriorState(): {
     trainId: string;
@@ -340,22 +378,27 @@ export class VirtualRailyard {
     swapping: boolean;
     entrySlotY: number;
     sparesSlotY: number;
-    droppedCutIds: string[];
-    trailOffset: number;
+    shedCutIds: string[];
+    sparesCutIds: string[];
   } | null {
     const shunt = this.activeShunt;
     if (shunt === null) return null;
-    const cutLifted = shunt.decoupled && !shunt.coupled;
     return {
       trainId: shunt.trainId,
       phase: shunt.phase,
       progress: shunt.progress,
       swapping: shunt.swapping,
-      entrySlotY: ENTRY_SLOT_Y,
-      sparesSlotY: SPARES_SLOT_Y,
-      droppedCutIds: cutLifted ? shunt.dropped.map((c) => c.id) : [],
-      trailOffset: cutLifted ? SWAP_PAIR_SIZE : 0,
+      entrySlotY: shunt.entrySlotY,
+      sparesSlotY: shunt.sparesSlotY,
+      shedCutIds: shunt.decoupled ? shunt.dropped.map((c) => c.id) : [],
+      sparesCutIds: shunt.coupled ? [] : this.spares.map((c) => c.id),
     };
+  }
+
+  /** Which slot the spare cut currently rests in (UI renders the resting spares
+   *  there when no maneuver is running). */
+  getSparesSlotY(): number {
+    return this.sparesSlotY;
   }
 
   /** Free the slot a departed/vanished train held and re-arm it for next lap. */

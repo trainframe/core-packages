@@ -445,10 +445,13 @@ describe('rail grooves derive uniformly from each piece’s rail lines', () => {
     }));
   }
 
-  /** Min distance from a point to a finely-sampled rail polyline. */
+  /** Min distance from a point to a finely-sampled rail polyline. Samples are
+   *  spaced ~1 mm (proportional to rail length) so the polyline distance stays
+   *  accurate for long rails (e.g. the 1200 mm railyard spine) — a coarse fixed
+   *  sample count would overestimate the distance and falsely fail. */
   function distToRail(v: { x: number; y: number }, rail: CentreLinePath): number {
     let min = Number.POSITIVE_INFINITY;
-    const N = 120;
+    const N = Math.max(120, Math.ceil(rail.length));
     for (let i = 0; i <= N; i++) {
       const p = rail.at((i / N) * rail.length);
       const d = Math.hypot(p.x - v.x, p.y - v.y);

@@ -140,9 +140,10 @@ describe('Railyard zone under CONCURRENT trains (deadlock probe)', () => {
     await advanceUntil(() => released('T1'), 'T1 released from the yard (concurrent)');
     await advanceUntil(() => released('T2'), 'T2 released from the yard (concurrent)');
 
-    // The headline still holds under contention: T1 dropped its red pair into the
-    // yard; T2 left wearing it. A wagon migrated train→train through the zone.
-    expect(liveriesOf('T1').slice(0, 2)).toEqual(['purple', 'purple']);
-    expect(liveriesOf('T2').slice(0, 2)).toEqual(['red', 'red']);
+    // The headline still holds under contention: T1 shed its red pair into the
+    // yard and left with the purple spares on its rear; T2 then left wearing T1's
+    // red pair. A wagon migrated train→train through the zone.
+    expect(liveriesOf('T1').slice(-2)).toEqual(['purple', 'purple']);
+    expect(liveriesOf('T2').slice(-2)).toEqual(['red', 'red']);
   });
 });

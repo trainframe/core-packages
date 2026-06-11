@@ -819,36 +819,24 @@ function consistTrails(
   return trails;
 }
 
-/** The local-frame lane the yard parks its spare cut in (matches the device's
- *  SPARES_SLOT_Y), and where along that slot the contiguous pair rests — east of
- *  the bump so a visiting train noses up to them to couple. */
-const SPARES_SLOT_Y_UI = -84;
-const SPARES_REST_X = 96;
-
-/** Park a live railyard's spare cut as a contiguous rake in its spares slot, so
- *  the wagons it holds read as a real cut sitting on a siding (and a visiting
- *  train drives up to them to couple), not stranded at their placement spot. */
+/** Park a live railyard's resting spare cut as a contiguous rake in whichever
+ *  slot the spares currently sit in, so they read as a real cut on a siding (and
+ *  a visiting train will reverse onto them). During a maneuver the shunt renders
+ *  the cuts itself, so this stands down. */
 function placeYardSpares(
   piece: TrackPiece,
   sim: ToySimulation,
   result: Map<string, WorldPosition>,
 ): void {
   const yard = sim.getRailyard(`YARD-${piece.id}`);
-  if (yard === undefined) return;
-  const spares = yard.getSpares();
-  const rad = (piece.rotationDeg * Math.PI) / 180;
-  const flipY = piece.flipped === true ? -1 : 1;
-  const ly = SPARES_SLOT_Y_UI * flipY;
-  for (let i = 0; i < spares.length; i++) {
-    const id = spares[i]?.id;
-    if (id === undefined) continue;
-    const lx = SPARES_REST_X - i * CARRIAGE_SPACING_MM; // contiguous along the slot
-    result.set(id, {
-      x: piece.position.x + lx * Math.cos(rad) - ly * Math.sin(rad),
-      y: piece.position.y + lx * Math.sin(rad) + ly * Math.cos(rad),
-      rotationDeg: piece.rotationDeg,
-    });
-  }
+  if (yard === undefined || yard.getInteriorState() != null) return;
+  const ids = yard.getSpares().map((c) => c.id);
+  if (ids.length === 0) return;
+  const sparesSlotY = yard.getSparesSlotY();
+  const mirror = yardMirrorCache.get(piece.id) ?? false;
+  // entrySlotY is irrelevant to sparesPose; pass the spares slot itself.
+  const journey = railyardInteriorJourney(sparesSlotY, sparesSlotY, mirror);
+  placeRestingCut(piece, ids, journey.sparesPose, result);
 }
 
 function computeRenderPositions(
@@ -888,42 +876,84 @@ type YardInterior = NonNullable<
   ReturnType<NonNullable<ReturnType<ToySimulation['getRailyard']>>['getInteriorState']>
 >;
 
+/** Per-yard "did the train enter from the east throat?" — computed by
+ *  placeShuntedTrain (which has the train's throat anchor) each frame and read by
+ *  the crane pose (which runs later the same frame), so both agree on the mirror. */
+const yardMirrorCache = new Map<string, boolean>();
+
 /** Which centre-line the train rides this phase, how far along (0..1), and
- *  whether it is travelling in reverse (loco trailing). Loco-referenced: the
- *  loco walks each path start→end so its position is continuous across phases;
- *  only the rake's trailing side flips with `reverse`. Crane phases hold the
- *  train at the end of the previous drive. */
+ *  whether it is travelling in reverse (rake trailing AHEAD of the loco). Loco-
+ *  referenced: the loco walks each path start→end so its position is continuous
+ *  across phases. The two crane phases hold the train at the previous drive's end. */
 function shuntSegment(
   interior: YardInterior,
   j: RailyardJourney,
-): {
-  local: ReturnType<typeof railyardInteriorJourney>['enter'];
-  progress: number;
-  reverse: boolean;
-} {
+): { local: RailyardJourney['enter']; progress: number; reverse: boolean } {
   switch (interior.phase) {
+    case 'lead-out':
+      return { local: j.leadOut, progress: interior.progress, reverse: false };
     case 'enter':
-      return { local: j.enter, progress: interior.progress, reverse: false };
+      return { local: j.enter, progress: interior.progress, reverse: true };
     case 'decouple':
       return { local: j.enter, progress: 1, reverse: false };
-    case 'cross-pull':
-      return { local: j.crossPull, progress: interior.progress, reverse: true };
-    case 'cross-set':
-      return { local: j.crossSet, progress: interior.progress, reverse: false };
+    case 'pull-clear':
+      return { local: j.pullClear, progress: interior.progress, reverse: false };
+    case 'back-to-spares':
+      return { local: j.backToSpares, progress: interior.progress, reverse: true };
+    case 'settle':
+      return { local: j.settle, progress: interior.progress, reverse: false };
     case 'inspect':
-      return { local: interior.swapping ? j.crossSet : j.enter, progress: 1, reverse: false };
-    case 'release-out':
-      return { local: j.releaseOut, progress: interior.progress, reverse: true };
+      return { local: j.settle, progress: 1, reverse: false };
+    case 'exit-pull':
+      return { local: j.exitPull, progress: interior.progress, reverse: false };
+    case 'exit-home':
+      return { local: j.exitHome, progress: interior.progress, reverse: true };
+  }
+}
+
+/** True when the train parked at the throat is facing INTO the yard from its EAST
+ *  end — so the canonical west-entry journey must be mirrored. Read from the
+ *  train's heading vs the yard's local +x (the spine, west→east). */
+function yardEntryMirrored(piece: TrackPiece, anchor: WorldPosition | undefined): boolean {
+  if (anchor === undefined) return false;
+  const into = ((anchor.rotationDeg - piece.rotationDeg) * Math.PI) / 180;
+  return Math.cos(into) < 0;
+}
+
+/** Transform a yard-local point to world (mirror→rotate→translate, matching the
+ *  renderer + worldHalfPath). */
+function yardLocalToWorld(piece: TrackPiece, lx: number, ly: number): { x: number; y: number } {
+  const rad = (piece.rotationDeg * Math.PI) / 180;
+  const fy = (piece.flipped === true ? -1 : 1) * ly;
+  return {
+    x: piece.position.x + lx * Math.cos(rad) - fy * Math.sin(rad),
+    y: piece.position.y + lx * Math.sin(rad) + fy * Math.cos(rad),
+  };
+}
+
+/** Render a contiguous cut of carriages resting along a slot, from `pose` (the
+ *  east end) running back along the slot. */
+function placeRestingCut(
+  piece: TrackPiece,
+  ids: readonly string[],
+  pose: { x: number; y: number },
+  result: Map<string, WorldPosition>,
+): void {
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    if (id === undefined) continue;
+    const w = yardLocalToWorld(piece, pose.x - i * CARRIAGE_SPACING_MM, pose.y);
+    result.set(id, { x: w.x, y: w.y, rotationDeg: piece.rotationDeg });
   }
 }
 
 /** Render the train the yard is shunting ON THE REAL RAILS: the loco walks the
  *  current phase's centre-line (spine → ladder leg → slot), its coupled rake
- *  trailing along the SAME rail behind it (or ahead, when reversing) — so the
- *  whole train follows the track through the curves rather than floating across
- *  the body. The rake shortens as the crane lifts a cut (held back by
- *  `trailOffset` so the remaining wagons don't jump forward) and is made whole
- *  when the spares couple on. No-op when the yard isn't shunting. */
+ *  trailing along the SAME rail (behind it, or ahead when reversing) — so the
+ *  whole train follows the track through the curves rather than floating. The
+ *  journey is anchored to the throat the train actually parked at (mirrored if it
+ *  entered the east throat) so there's no teleport. The shed rear cut sits parked
+ *  in the entry slot; the spare cut waits in the spares slot. No-op when idle. */
 function placeShuntedTrain(
   piece: TrackPiece,
   sim: ToySimulation,
@@ -937,18 +967,17 @@ function placeShuntedTrain(
     : interior.trainId;
   const consist = sim.getTrain(interior.trainId)?.getConsist() ?? [];
 
-  const seg = shuntSegment(
-    interior,
-    railyardInteriorJourney(interior.entrySlotY, interior.sparesSlotY),
-  );
+  const mirror = yardEntryMirrored(piece, result.get(trainPieceId));
+  yardMirrorCache.set(piece.id, mirror);
+  const journey = railyardInteriorJourney(interior.entrySlotY, interior.sparesSlotY, mirror);
+  const seg = shuntSegment(interior, journey);
   const path = worldHalfPath(piece, seg.local);
   const locoArc = seg.progress * path.length;
   const flip = seg.reverse ? 180 : 0;
 
-  // Vehicles front→rear: loco at offset 0, then each consist wagon a carriage
-  // spacing further back (shifted by trailOffset to hold a gap where a lifted
-  // cut was). Trailing wagons sit BEHIND the loco along the rail — or AHEAD of it
-  // when the train is reversing.
+  // The loco at the head; each coupled wagon a carriage-spacing behind it along
+  // the rail (or ahead, when reversing). The loco keeps its facing throughout, so
+  // on a reverse phase its sprite is flipped 180° from the travel tangent.
   const place = (id: string, offsetMm: number): void => {
     const arc = seg.reverse ? locoArc + offsetMm : locoArc - offsetMm;
     const pose = path.at(arc);
@@ -957,26 +986,13 @@ function placeShuntedTrain(
   place(trainPieceId, 0);
   for (let i = 0; i < consist.length; i++) {
     const wagon = consist[i];
-    if (wagon === undefined) continue;
-    place(wagon.id, (i + 1 + interior.trailOffset) * CARRIAGE_SPACING_MM);
+    if (wagon !== undefined) place(wagon.id, (i + 1) * CARRIAGE_SPACING_MM);
   }
 
-  // The cut the crane has lifted off rides UNDER the crane (a contiguous pair
-  // along the slot), so it visibly travels from the train to the spares slot.
-  const crane = yardCraneState(interior);
-  const rad = (piece.rotationDeg * Math.PI) / 180;
-  const flipY = piece.flipped === true ? -1 : 1;
-  for (let i = 0; i < crane.cutIds.length; i++) {
-    const id = crane.cutIds[i];
-    if (id === undefined) continue;
-    const lx = crane.x - i * CARRIAGE_SPACING_MM;
-    const ly = crane.y * flipY;
-    result.set(id, {
-      x: piece.position.x + lx * Math.cos(rad) - ly * Math.sin(rad),
-      y: piece.position.y + lx * Math.sin(rad) + ly * Math.cos(rad),
-      rotationDeg: piece.rotationDeg,
-    });
-  }
+  // The cuts that aren't on the train: the shed rear cut parked in the entry slot,
+  // and the spare cut waiting in the spares slot (until the train couples it).
+  placeRestingCut(piece, interior.shedCutIds, journey.shedPose, result);
+  placeRestingCut(piece, interior.sparesCutIds, journey.sparesPose, result);
 }
 
 /** Angle for a turntable's confirmed switch position; unknown or not-yet-set
@@ -1004,68 +1020,46 @@ function trainUnderSensor(
   return false;
 }
 
-/** The gantry crane PARKS while the self-propelled train drives itself; it only
- *  moves to handle CUTS OF CARRIAGES — never the loco/train. Local-frame work
- *  points: over the leading cut in the entry slot (to lift it), and over the
- *  spares slot (to hold the lifted cut, then set it down as the train takes the
- *  spares, and to read the finished train). Home is the west end. */
+/** The gantry crane is a DECOUPLER. It PARKS at its home end while the self-
+ *  propelled train drives itself, and only ever moves to (1) the coupling in the
+ *  entry slot, lowering to split it (`decouple`), and (2) over the finished train
+ *  to camera-read it (`inspect`). It never lifts, carries, or couples a carriage. */
 const CRANE_HOME_X = -RAILYARD_GANTRY_X;
-const CRANE_ENTRY_WORK_X = -62;
-const CRANE_SPARES_WORK_X = 20;
 
 const lerp = (a: number, b: number, t: number): number => a + (b - a) * Math.max(0, Math.min(1, t));
 
-/** The crane's local-frame pose + what it is doing this phase: where the bridge
- *  (`x`) and head (`y`) sit, whether the hook is lowered, whether it is working
- *  (LED/hum), and the ids of the cut it is currently carrying (drawn under it). */
+/** The crane's local-frame pose this phase: bridge depth (`x`), head lane (`y`),
+ *  whether the hook is lowered (splitting a coupling), and whether it is working
+ *  (camera/LED). */
 interface YardCraneState {
   readonly x: number;
   readonly y: number;
   readonly hookDown: boolean;
   readonly working: boolean;
-  readonly cutIds: readonly string[];
 }
 
-function yardCraneState(interior: YardInterior): YardCraneState {
-  const entry = { x: CRANE_ENTRY_WORK_X, y: interior.entrySlotY };
-  const spares = {
-    x: CRANE_SPARES_WORK_X,
-    y: interior.swapping ? interior.sparesSlotY : interior.entrySlotY,
-  };
+function yardCraneState(interior: YardInterior, journey: RailyardJourney): YardCraneState {
   switch (interior.phase) {
-    case 'decouple':
-      // Run in from home over the leading cut, lower, and lift it off.
+    case 'decouple': {
+      // Run in from home to the coupling (just east of where the shed cut rests)
+      // and lower to split it.
+      const t = interior.progress / 0.55;
       return {
-        x: lerp(CRANE_HOME_X, entry.x, interior.progress / 0.45),
-        y: lerp(0, entry.y, interior.progress / 0.45),
-        hookDown: interior.progress > 0.4,
+        x: lerp(CRANE_HOME_X, journey.shedPose.x, t),
+        y: lerp(0, journey.shedPose.y, t),
+        hookDown: interior.progress > 0.5,
         working: true,
-        cutIds: interior.droppedCutIds,
       };
-    case 'cross-pull':
-      // Carry the lifted cut across to the spares slot while the train pulls out.
-      return {
-        x: lerp(entry.x, spares.x, interior.progress),
-        y: lerp(entry.y, spares.y, interior.progress),
-        hookDown: false,
-        working: true,
-        cutIds: interior.droppedCutIds,
-      };
-    case 'cross-set':
-      // Hold over the spares slot; lower the cut as the train bumps the spares.
-      return {
-        x: spares.x,
-        y: spares.y,
-        hookDown: interior.progress > 0.8,
-        working: true,
-        cutIds: interior.droppedCutIds,
-      };
-    case 'inspect':
-      // Camera-read the finished train where it sits.
-      return { x: spares.x, y: spares.y, hookDown: false, working: true, cutIds: [] };
+    }
+    case 'inspect': {
+      // Camera-read the finished train where it rests (no hook).
+      const rest = interior.swapping ? journey.settle : journey.enter;
+      const at = rest.at(rest.length);
+      return { x: at.x, y: at.y, hookDown: false, working: true };
+    }
     default:
-      // enter / release-out: the train drives itself; the crane stays parked.
-      return { x: CRANE_HOME_X, y: 0, hookDown: false, working: false, cutIds: [] };
+      // The train drives itself; the crane stays parked at home.
+      return { x: CRANE_HOME_X, y: 0, hookDown: false, working: false };
   }
 }
 
@@ -1082,7 +1076,11 @@ function yardCranePose(piece: TrackPiece, hardware: ToyHardware | null): YardCra
   if (hardware === null) return null;
   const interior = hardware.getSimulation().getRailyard(`YARD-${piece.id}`)?.getInteriorState();
   if (interior == null) return null;
-  const s = yardCraneState(interior);
+  // Same mirror the train used this frame (placeShuntedTrain ran first and cached
+  // it) so the crane's work points line up with the train.
+  const mirror = yardMirrorCache.get(piece.id) ?? false;
+  const journey = railyardInteriorJourney(interior.entrySlotY, interior.sparesSlotY, mirror);
+  const s = yardCraneState(interior, journey);
   return { depthMm: s.x, laneMm: s.y, working: s.working, hookDown: s.hookDown };
 }
 

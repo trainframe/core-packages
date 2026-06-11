@@ -131,10 +131,11 @@ describe('Railyard carriage-swap loop (ADR-026/027, end-to-end)', () => {
     // swapped, and released — all without us touching the carriages.
     await advanceUntil(() => released('T1'), 'T1 released from the yard');
 
-    // T1 now leads with the purple spares; its red pair was dropped in the yard.
-    expect(liveriesOf('T1').slice(0, 2)).toEqual(['purple', 'purple']);
+    // T1 keeps its front pair and leaves with the purple spares coupled on its
+    // REAR; its rear red pair was shed in the yard.
+    expect(liveriesOf('T1').slice(-2)).toEqual(['purple', 'purple']);
     expect(liveriesOf('T1')).toContain('red');
-    // The yard keeps T1's red pair as the next spares.
+    // The yard keeps T1's shed red pair as the next spares.
     expect(yard.getSpares().map((c) => c.colorId)).toEqual(['red', 'red']);
 
     // Release-then-resume (ADR-028): with no operator re-assignment, T1 is
@@ -155,10 +156,11 @@ describe('Railyard carriage-swap loop (ADR-026/027, end-to-end)', () => {
     harness.server.assignSchedule('T2', 't2-loop', ['M1', 'M3']);
     await advanceUntil(() => released('T2'), 'T2 released from the yard');
 
-    // The headline: T2 leaves the yard wearing the RED wagons T1 brought in.
-    // A carriage has migrated from one train to another, via the yard, with
-    // core none the wiser (it only ever saw occupancy + a release).
-    expect(liveriesOf('T2').slice(0, 2)).toEqual(['red', 'red']);
+    // The headline: T2 leaves the yard wearing the RED wagons T1 brought in
+    // (coupled on its rear). A carriage has migrated from one train to another,
+    // via the yard, with core none the wiser (it only ever saw occupancy + a
+    // release).
+    expect(liveriesOf('T2').slice(-2)).toEqual(['red', 'red']);
     expect(liveriesOf('T2')).toContain('green');
   });
 });

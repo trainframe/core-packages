@@ -153,7 +153,7 @@ async function main() {
   const deadline = Date.now() + 260_000;
   let lastStep = null;
   let tick = 0;
-  while (Date.now() < deadline && seen.size < 6) {
+  while (Date.now() < deadline && seen.size < 9) {
     const s = await page.evaluate(probe, YARD_DEVICE);
     const step = s.interior?.phase ?? null;
     if (tick % 12 === 0) {
