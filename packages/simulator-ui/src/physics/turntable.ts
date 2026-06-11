@@ -6,10 +6,17 @@
  * arrival), so a train is held at the approach until the bridge lines up — the
  * capacity-1 zone's clearance falls straight out of the unset switch.
  *
- * The headline stub is the TURN-AROUND (`flipsFacing`): a loco that boarded heading
- * one way leaves it the OTHER way (the deck swung 180°). World mm. The single
- * diverge node is the deck switch `Jt`.
+ * The headline behaviour is the TURN-AROUND. Crucially the DECK ITSELF IS A
+ * ROTATING RAIL: its `at(d)` is computed live from the deck CENTRE plus the
+ * actuator's current angle θ. A body parked at the deck centre therefore PIVOTS IN
+ * PLACE as the deck swings — its rendered heading is the rail heading, which is θ,
+ * so the loco physically turns end-for-end WITH the bridge (no sprite-flip, no
+ * snap). After a half-turn the deck's far end points back WEST, so the loco drives
+ * off heading the OTHER way, onto a westbound turn-around stub collinear with the
+ * lead it arrived on — exactly what a real turntable does (reverse a loco on a
+ * single lead). World mm. The single diverge node is the deck switch `Jt`.
  */
+import type { RailPose } from '../track/pieces.js';
 import { type NetLink, type RailNetwork, buildNetwork } from './network.js';
 import type { Rail } from './rail.js';
 import { straightSeg } from './yard.js';
@@ -24,61 +31,144 @@ export interface TurntableStub {
   readonly endY: number;
 }
 
+/** A mutable angle source shared by the deck rail and the actuator. The actuator
+ *  owns the rotation physics; each tick the scenario copies the actuator's current
+ *  angle into here, so the rotating rail's geometry and the visual deck never
+ *  diverge — both read this one number. */
+export interface DeckAngleHolder {
+  deg: number;
+}
+
 export interface TurntableLayout {
   readonly net: RailNetwork;
-  /** Segment id → world endpoints (for rendering + the controller). */
+  /** Segment id → world endpoints (for rendering + the controller). The deck's
+   *  entry is the static θ=0 geometry; its live geometry comes off `deckAngle`. */
   readonly geom: ReadonlyMap<string, { ax: number; ay: number; bx: number; by: number }>;
   readonly trunk: string;
   readonly deck: string;
   readonly deckCentre: { readonly x: number; readonly y: number };
   /** The deck pit radius (mm) — the rotating bridge spans its diameter. */
   readonly deckRadius: number;
+  /** The drivable deck length (mm) — the body parks at `deckLength / 2` (centre). */
+  readonly deckLength: number;
   readonly switchId: string;
   readonly stubs: readonly TurntableStub[];
+  /** The shared live deck angle (deg). The scenario writes the actuator's angle
+   *  here each tick; the deck rail and the rendered bridge both read it. */
+  readonly deckAngle: DeckAngleHolder;
 }
 
 const SPINE_Y = 600;
 const TRUNK_AX = 150;
-const DECK_WEST_X = 640;
-const DECK_EAST_X = 760;
-const DECK_CENTRE_X = (DECK_WEST_X + DECK_EAST_X) / 2;
-const DECK_RADIUS = (DECK_EAST_X - DECK_WEST_X) / 2;
+const DECK_CENTRE_X = 700;
+const DECK_RADIUS = 60;
+const DECK_LENGTH = 2 * DECK_RADIUS;
+/** West rim of the deck at θ=0 — where the trunk meets the bridge (the deck's
+ *  start, d=0). */
+const DECK_WEST_X = DECK_CENTRE_X - DECK_RADIUS;
+
+/** Build the rotating deck as a custom `Rail`. It is a straight span of length
+ *  `DECK_LENGTH` through the deck centre, but its orientation is the LIVE angle θ
+ *  (read from `angle.deg` every call): a point `d` mm along it sits at distance
+ *  `d − DECK_LENGTH/2` from the centre in direction θ, heading θ. So at d = centre
+ *  the body stays on the centre and its heading IS θ — it pivots in place as the
+ *  deck swings. Zero curvature/slope (a flat bridge); open at both ends (the loco
+ *  drives on from the trunk and off onto a stub via the network, never buffers). */
+function rotatingDeckRail(
+  centre: { readonly x: number; readonly y: number },
+  length: number,
+  angle: DeckAngleHolder,
+): Rail {
+  const at = (d: number): RailPose => {
+    const offset = Math.max(0, Math.min(length, d)) - length / 2;
+    const rad = (angle.deg * Math.PI) / 180;
+    return {
+      x: centre.x + offset * Math.cos(rad),
+      y: centre.y + offset * Math.sin(rad),
+      headingDeg: ((angle.deg % 360) + 360) % 360,
+    };
+  };
+  return {
+    length,
+    at,
+    /* A straight (if swinging) span — no along-track curvature, so a body parked
+     *  on it never derails however fast the deck rotates; the spin is the deck's,
+     *  not the body's path. */
+    curvatureAt: () => 0,
+    pieceTypeAt: () => 'straight',
+    slopeAt: () => 0,
+    startBuffered: false,
+    endBuffered: false,
+  };
+}
 
 /**
- * Build the turntable: a trunk lead → deck → three rim stubs. The east stub is the
- * TURN-AROUND (the deck swings 180° from the boarding angle and the loco leaves
- * reversed); the other two are ordinary radiating exits, present so the deck has
- * real choices to swing between. The deck switch `Jt` carries positions
- * `trunk` + each stub.
+ * Build the turntable: a trunk lead → rotating deck → rim stubs. The headline stub
+ * is the TURN-AROUND: the deck swings 180° from the boarding angle so the loco —
+ * carried round bodily on the bridge — leaves FACING THE OTHER WAY, departing west
+ * along a stub collinear with the lead it arrived on. The other two are ordinary
+ * radiating exits, present so the deck has real choices to swing between. The deck
+ * switch `Jt` carries positions `trunk` + each stub.
  */
 export function buildTurntableLayout(): TurntableLayout {
   const geom = new Map<string, { ax: number; ay: number; bx: number; by: number }>();
   const segments = new Map<string, Rail>();
   const links: NetLink[] = [];
+  const deckCentre = { x: DECK_CENTRE_X, y: SPINE_Y };
+  const deckAngle: DeckAngleHolder = { deg: 0 };
 
-  const add = (id: string, ax: number, ay: number, bx: number, by: number, buffered = false) => {
+  const addStraight = (
+    id: string,
+    ax: number,
+    ay: number,
+    bx: number,
+    by: number,
+    buffered = false,
+  ) => {
     geom.set(id, { ax, ay, bx, by });
     segments.set(id, straightSeg(ax, ay, bx, by, { endBuffered: buffered }));
   };
 
-  /* Trunk runs west→east into the deck's west end; the deck is the short bridge. */
-  add('trunk', TRUNK_AX, SPINE_Y, DECK_WEST_X, SPINE_Y);
-  add('deck', DECK_WEST_X, SPINE_Y, DECK_EAST_X, SPINE_Y);
-  /* Board the deck whenever it is lined up with the trunk. */
+  /* Trunk runs west→east into the deck's west rim. */
+  addStraight('trunk', TRUNK_AX, SPINE_Y, DECK_WEST_X, SPINE_Y);
+  /* The deck is the rotating bridge: its geometry is θ-driven, not a static line.
+   *  We still record a θ=0 entry in `geom` (west→east through the centre) so the
+   *  view has bounds; the LIVE pose comes off the rail. */
+  geom.set('deck', {
+    ax: DECK_WEST_X,
+    ay: SPINE_Y,
+    bx: DECK_CENTRE_X + DECK_RADIUS,
+    by: SPINE_Y,
+  });
+  segments.set('deck', rotatingDeckRail(deckCentre, DECK_LENGTH, deckAngle));
+  /* Board the deck whenever it is lined up with the trunk (θ=0). */
   links.push({ from: 'trunk', to: 'deck', when: { switchId: 'Jt', position: 'trunk' } });
 
   const stubs: TurntableStub[] = [
-    /* The turn-around: collinear east, deck swung a half-turn from the trunk.
-     * A loco driving forward off the deck crosses this flipping link and departs
-     * facing the OTHER way (still rolling east, but now pointing west). */
-    { position: 'stub-e', angleDeg: 180, flipsFacing: true, endX: 1160, endY: SPINE_Y },
-    /* Two ordinary radiating exits the deck can also swing to (no turn). */
-    { position: 'stub-n', angleDeg: 135, flipsFacing: false, endX: 1040, endY: SPINE_Y - 300 },
-    { position: 'stub-s', angleDeg: 225, flipsFacing: false, endX: 1040, endY: SPINE_Y + 300 },
+    /* The turn-around: the deck swung a half-turn from the trunk (θ=180). The
+     *  deck's far end now points WEST, so a loco driving forward off it departs
+     *  heading the OTHER way, onto this westbound stub collinear with the lead.
+     *  No `flipsFacing`: the 180° is REAL — the rotating deck physically carried
+     *  the loco round, so its heading (hence rendered rotation) already reversed
+     *  via the rail. The loco crosses driving forward and keeps driving outward
+     *  (the stub's +d direction is west), so no rail-direction bookkeeping flip is
+     *  needed; a flip here would double-reverse it back to facing east. */
+    { position: 'stub-w', angleDeg: 180, flipsFacing: false, endX: 240, endY: SPINE_Y },
+    /* Two ordinary radiating exits the deck can also swing to (no turn). Their far
+     *  ends sit along the deck angle (315° = up-right, 45° = down-right) so each
+     *  reads as a clean spoke off the rim rather than a kink. */
+    { position: 'stub-n', angleDeg: 315, flipsFacing: false, endX: 1000, endY: SPINE_Y - 300 },
+    { position: 'stub-s', angleDeg: 45, flipsFacing: false, endX: 1000, endY: SPINE_Y + 300 },
   ];
   for (const s of stubs) {
     const id = `seg-${s.position}`;
-    add(id, DECK_EAST_X, SPINE_Y, s.endX, s.endY, true);
+    /* The stub starts at the deck's far END as it sits at this stub's angle, so
+     *  the loco's pose is continuous across the junction (the deck end heading at
+     *  θ matches the stub's heading). */
+    const rad = (s.angleDeg * Math.PI) / 180;
+    const startX = DECK_CENTRE_X + DECK_RADIUS * Math.cos(rad);
+    const startY = SPINE_Y + DECK_RADIUS * Math.sin(rad);
+    addStraight(id, startX, startY, s.endX, s.endY, true);
     const link: NetLink = {
       from: 'deck',
       to: id,
@@ -93,10 +183,12 @@ export function buildTurntableLayout(): TurntableLayout {
     geom,
     trunk: 'trunk',
     deck: 'deck',
-    deckCentre: { x: DECK_CENTRE_X, y: SPINE_Y },
+    deckCentre,
     deckRadius: DECK_RADIUS,
+    deckLength: DECK_LENGTH,
     switchId: 'Jt',
     stubs,
+    deckAngle,
   };
 }
 
@@ -108,6 +200,6 @@ export function stubSensePoint(
 ): { x: number; y: number } {
   const g = layout.geom.get(`seg-${position}`);
   if (g === undefined) throw new Error(`turntable: no stub ${position}`);
-  /* Half-way along the stub: well east of the deck, before the buffer. */
+  /* Half-way along the stub: well clear of the deck, before the buffer. */
   return { x: (g.ax + g.bx) / 2, y: (g.ay + g.by) / 2 };
 }

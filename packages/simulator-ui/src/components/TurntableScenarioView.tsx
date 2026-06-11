@@ -66,7 +66,9 @@ export function TurntableScenarioView() {
 
   useEffect(() => {
     const w = new PhysicsWorld(layout.net);
-    /* The visitor: one loco on the trunk, facing east toward the deck. */
+    /* The visitor: one loco on the trunk, facing east toward the deck. Gentle
+     *  power + a low speed cap so it EASES on and off the bridge rather than
+     *  darting — matching the unhurried deck. */
     w.addBody({
       id: 'L',
       kind: 'loco',
@@ -74,6 +76,8 @@ export function TurntableScenarioView() {
       facing: 1,
       segment: 'trunk',
       color: '#c0392b',
+      power: 280,
+      maxSpeed: 110,
     });
 
     const train = new TrainDevice('L', physicsMotorActuator(w, 'L'));
@@ -96,8 +100,8 @@ export function TurntableScenarioView() {
       },
       deckCentre: layout.deckCentre,
       trunkExit: layout.trunk,
-      departExit: 'stub-e',
-      departSensePoint: stubSensePoint(layout, 'stub-e'),
+      departExit: 'stub-w',
+      departSensePoint: stubSensePoint(layout, 'stub-w'),
     });
 
     let elapsed = 0;
@@ -110,10 +114,15 @@ export function TurntableScenarioView() {
       last = now;
       while (acc >= STEP_S) {
         ctrl.tick(STEP_S);
+        /* Share the actuator's LIVE angle with the rotating deck rail BEFORE the
+         *  world steps, so a body on the deck reads the same θ the bridge is at —
+         *  the deck rail and the visual bridge never diverge. */
+        layout.deckAngle.deg = deck.pos;
         w.step(STEP_S);
         elapsed += STEP_S;
         acc -= STEP_S;
       }
+      layout.deckAngle.deg = deck.pos;
       setPoses(w.bodies());
       setDeckAngle(deck.pos);
       window.__tfPhysics = { name: 'turntable', elapsedS: elapsed, bodies: () => w.bodies() };

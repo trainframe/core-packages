@@ -28,10 +28,12 @@ export interface TurntableExit {
   readonly angleDeg: number;
 }
 
-/** Rotation dynamics (degrees). Visible but unhurried — you can watch the deck
- *  swing round over a few seconds, the turntable's whole legibility point. */
-const ANG_ACCEL = 70; // deg/s²
-const MAX_RATE = 60; // deg/s
+/** Rotation dynamics (degrees). Deliberately LEISURELY — the deck carries a loco
+ *  round bodily, so the swing should be slow enough to watch the loco pivot in
+ *  place over several seconds (a half-turn takes ~7s). The turntable's whole
+ *  legibility point. */
+const ANG_ACCEL = 18; // deg/s²
+const MAX_RATE = 28; // deg/s
 /** How close (deg) and slow (deg/s) counts as "seated" over the target angle. */
 const ARRIVE_ANGLE = 0.4;
 const ARRIVE_RATE = 1.5;
