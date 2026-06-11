@@ -11,6 +11,7 @@ function straightRail(length: number): Rail {
     at: (d) => ({ x: d, y: 0, headingDeg: 0 }),
     curvatureAt: () => 0,
     pieceTypeAt: () => 'straight',
+    slopeAt: () => 0,
     startBuffered: false,
     endBuffered: false,
   };
@@ -39,7 +40,9 @@ function buildRake(
     facing: 1,
     motion: 'forward',
     maxSpeed: opts.maxSpeed,
-    accel: 100_000,
+    // Huge power so it pins to the maxSpeed cap near-instantly → a known constant
+    // speed for the dwell→length maths (the dynamics otherwise vary speed by load).
+    power: 1_000_000,
   });
   let prevCentre = locoCentre;
   let prevHalf = LOCO_HALF;

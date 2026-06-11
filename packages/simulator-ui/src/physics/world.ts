@@ -35,12 +35,16 @@ export interface BodyInit {
   /** Which way the body faces: +1 = along +rail, -1 = against. */
   readonly facing: 1 | -1;
   readonly motion?: Motion;
-  /** Top speed (mm/s) under power. */
+  /** Hard top-speed cap (mm/s). The dynamic top speed (power/(mass·DRAG)) usually
+   *  governs; this only clips extreme cases. */
   readonly maxSpeed?: number;
-  /** Acceleration (mm/s²) toward target speed. */
-  readonly accel?: number;
-  /** Tractive power — decides who wins a tug-of-war. Carriages are 0. */
+  /** Tractive power (force). With mass it sets both acceleration (power/mass) and
+   *  top speed (power/(mass·DRAG)), and decides who wins a tug-of-war. Per-loco,
+   *  so different trains have different pulling capacity. Carriages are 0. */
   readonly power?: number;
+  /** Mass (relative units): loco 1.0, carriage 0.6 by default. More mass → slower
+   *  to accelerate and a lower top speed for the same power. */
+  readonly mass?: number;
   /** Half the body's length (mm) along the rail, for contact. */
   readonly halfLen?: number;
   readonly color?: string;
@@ -55,8 +59,8 @@ interface Body {
   motion: Motion;
   vel: number; // signed mm/s along +rail
   maxSpeed: number;
-  accel: number;
   power: number;
+  mass: number;
   halfLen: number;
   color: string | undefined;
   free: { x: number; y: number; heading: number; vx: number; vy: number };
@@ -82,10 +86,19 @@ export interface BodyPose {
 const DERAIL_LATERAL_LIMIT = 9000;
 /** Coupler capture range (mm) — a reversing loco within this of a carriage snaps on. */
 const COUPLE_RANGE = 10;
-/** Downhill acceleration (mm/s²) a ramp imparts (gravity component, lumped). */
-const RAMP_GRAVITY = 1400;
 /** Free-coast deceleration (mm/s²) once a body has left the rail. */
 const FREE_FRICTION = 600;
+/** Drag coefficient (1/s). A train's top speed settles where its tractive accel
+ *  (power/mass) balances DRAG·v, so v_top = power/(mass·DRAG): more mass (more
+ *  carriages) → lower top speed AND slower acceleration. A more powerful loco
+ *  pulls the same load faster. */
+const DRAG = 2.6;
+/** Gravity along a ramp (mm/s²): subtracted going up (slower — the loco spends
+ *  more of its power fighting gravity, and a weak loco can stall), added coming
+ *  down (a little faster). Mass-independent (it is an acceleration). */
+const RAMP_GRAVITY = 250;
+/** Braking deceleration (mm/s²) when a loco is told to stop on the level. */
+const BRAKE = 1100;
 
 export class PhysicsWorld {
   private readonly rail: Rail;
@@ -105,9 +118,9 @@ export class PhysicsWorld {
       facing: init.facing,
       motion: init.motion ?? 'stopped',
       vel: 0,
-      maxSpeed: init.maxSpeed ?? 320,
-      accel: init.accel ?? 800,
-      power: init.power ?? (init.kind === 'loco' ? 100 : 0),
+      maxSpeed: init.maxSpeed ?? 1200,
+      power: init.power ?? (init.kind === 'loco' ? 900 : 0),
+      mass: init.mass ?? (init.kind === 'loco' ? 1 : 0.6),
       halfLen: init.halfLen ?? (init.kind === 'loco' ? 34 : 30),
       color: init.color,
       free: { x: 0, y: 0, heading: 0, vx: 0, vy: 0 },
@@ -225,40 +238,52 @@ export class PhysicsWorld {
     }
   }
 
-  /** A coupled group's net traction → a common velocity, integrated together. */
+  /** Advance a coupled group as one body under Newton-ish dynamics:
+   *    a = netPower/mass − DRAG·v − RAMP_GRAVITY·slope
+   *  so its top speed is power/(mass·DRAG) — heavier (more carriages, or a
+   *  carriage being pushed) is slower, a stronger loco is faster, and an up-slope
+   *  (slope +1) saps speed while a down-slope adds it. */
   private driveGroup(group: Body[], dtS: number): void {
     const lead = group[0];
     if (lead === undefined) return;
-    const net = group.reduce((s, m) => s + this.tractive(m), 0);
+    const netPower = group.reduce((s, m) => s + this.tractive(m), 0);
     const anyDriving = group.some((m) => m.motion !== 'stopped' && m.kind === 'loco');
-    const top = Math.max(...group.map((m) => m.maxSpeed));
-    const accel = Math.max(...group.map((m) => m.accel));
-    const target = !anyDriving || net === 0 ? 0 : Math.sign(net) * top;
-    const gravity =
-      this.rail.pieceTypeAt(lead.railPos) === 'ramp'
-        ? Math.sign(lead.vel || target || 1) * RAMP_GRAVITY
-        : 0;
-    const next = this.nextVelocity(lead.vel, target, accel, gravity, top, dtS);
+    const mass = group.reduce((s, m) => s + m.mass, 0) + this.pushedMass(group, netPower);
+    const slope = this.rail.slopeAt(lead.railPos);
+    const cap = Math.max(...group.map((m) => m.maxSpeed));
+    const v = lead.vel;
+    let next: number;
+    if (!anyDriving && slope === 0) {
+      // Told to stop on the level: brake to rest without overshooting zero.
+      next = Math.abs(v) <= BRAKE * dtS ? 0 : v - Math.sign(v) * BRAKE * dtS;
+    } else {
+      const a = netPower / mass - DRAG * v - RAMP_GRAVITY * slope;
+      next = v + a * dtS;
+    }
+    if (Math.abs(next) > cap) next = Math.sign(next) * cap;
     for (const m of group) {
       m.vel = next;
       m.railPos += next * dtS;
     }
   }
 
-  /** Ramp current velocity toward its target (plus any ramp gravity), capped. */
-  private nextVelocity(
-    cur: number,
-    target: number,
-    accel: number,
-    gravity: number,
-    top: number,
-    dtS: number,
-  ): number {
-    if (target === 0 && gravity === 0) {
-      return Math.abs(cur) <= accel * dtS ? 0 : cur - Math.sign(cur) * accel * dtS;
+  /** Mass of any body the group is shoving (in contact just ahead in its drive
+   *  direction, uncoupled) — so a pushed carriage's weight slows the pusher. */
+  private pushedMass(group: Body[], netPower: number): number {
+    const dir = Math.sign(netPower) || Math.sign(group[0]?.vel ?? 0);
+    if (dir === 0) return 0;
+    const ids = new Set(group.map((m) => m.id));
+    const edge =
+      dir > 0
+        ? Math.max(...group.map((m) => m.railPos + m.halfLen))
+        : Math.min(...group.map((m) => m.railPos - m.halfLen));
+    let mass = 0;
+    for (const b of this.bodyList) {
+      if (b.mode !== 'railed' || ids.has(b.id)) continue;
+      const gapAhead = dir > 0 ? b.railPos - b.halfLen - edge : edge - (b.railPos + b.halfLen);
+      if (gapAhead >= -2 && gapAhead <= COUPLE_RANGE + 2) mass += b.mass;
     }
-    const next = cur + Math.sign(target - cur || 0) * accel * dtS + gravity * dtS;
-    return gravity === 0 && Math.abs(next) > top ? Math.sign(next) * top : next;
+    return mass;
   }
 
   /** Derail bodies taking a curve too fast; buffer or run off at the rail ends. */

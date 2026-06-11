@@ -94,6 +94,10 @@ export interface Rail {
   curvatureAt(d: number): number;
   /** The track-piece type at `d` (e.g. 'ramp' adds gravity; 'terminus' buffers). */
   pieceTypeAt(d: number): string;
+  /** Slope at `d`: +1 where the rail climbs in the +d direction (a ramp ascended),
+   *  -1 where it descends, 0 on the level. Gravity uses this — a body works harder
+   *  (slower) going up and runs a little faster coming down. */
+  slopeAt(d: number): number;
   /** Whether each rail end is a buffer (terminus → a body stops) or open (a body
    *  runs off into free space). */
   readonly startBuffered: boolean;
@@ -106,30 +110,47 @@ export interface Rail {
  * first piece is entered by its free (non-joined) endpoint and the last left by
  * its free endpoint, so the rail spans the whole chain end to end.
  */
+interface RailSegment {
+  readonly traversal: CentreLinePath;
+  readonly type: string;
+  readonly slope: number;
+}
+
+/** The traversal path + type + slope for one piece in the chain, given its
+ *  neighbours, or null for a degenerate (zero-traversal) piece. */
+function segmentOf(
+  piece: TrackPiece,
+  prev: TrackPiece | undefined,
+  next: TrackPiece | undefined,
+): RailSegment | null {
+  const entryFromPrev = prev ? jointEndpointIndex(piece, prev) : undefined;
+  const exitToNext = next ? jointEndpointIndex(piece, next) : undefined;
+  const epCount = getEndpoints(piece).length;
+  const other = (j: number | undefined): number => {
+    for (let k = 0; k < epCount; k++) if (k !== j) return k;
+    return 0;
+  };
+  const entryIdx = entryFromPrev ?? other(exitToNext);
+  const exitIdx = exitToNext ?? other(entryFromPrev);
+  if (entryIdx === exitIdx) return null;
+  // A ramp's higher endpoint is its `layerDelta` end (index 1, RAMP_ENDPOINTS).
+  // Exiting via index 1 means the rail climbs in +d (+1); via 0 it descends (-1).
+  const slope = piece.type === 'ramp' ? (exitIdx === 1 ? 1 : -1) : 0;
+  return { traversal: pieceTraversal(piece, entryIdx, exitIdx), type: piece.type, slope };
+}
+
 export function buildRail(pieces: ReadonlyArray<TrackPiece>): Rail {
   const traversals: CentreLinePath[] = [];
-  const segs: { type: string; start: number; end: number }[] = [];
+  const segs: { type: string; start: number; end: number; slope: number }[] = [];
   let acc = 0;
   for (let i = 0; i < pieces.length; i++) {
     const piece = pieces[i];
     if (piece === undefined) continue;
-    const prev = i > 0 ? pieces[i - 1] : undefined;
-    const next = i < pieces.length - 1 ? pieces[i + 1] : undefined;
-    const entryFromPrev = prev ? jointEndpointIndex(piece, prev) : undefined;
-    const exitToNext = next ? jointEndpointIndex(piece, next) : undefined;
-    const epCount = getEndpoints(piece).length;
-    // The free endpoint is "the one that isn't the joint" (for end pieces).
-    const other = (j: number | undefined): number => {
-      for (let k = 0; k < epCount; k++) if (k !== j) return k;
-      return 0;
-    };
-    const entryIdx = entryFromPrev ?? other(exitToNext);
-    const exitIdx = exitToNext ?? other(entryFromPrev);
-    if (entryIdx === exitIdx) continue;
-    const t = pieceTraversal(piece, entryIdx, exitIdx);
-    segs.push({ type: piece.type, start: acc, end: acc + t.length });
-    acc += t.length;
-    traversals.push(t);
+    const seg = segmentOf(piece, i > 0 ? pieces[i - 1] : undefined, pieces[i + 1]);
+    if (seg === null) continue;
+    segs.push({ type: seg.type, start: acc, end: acc + seg.traversal.length, slope: seg.slope });
+    acc += seg.traversal.length;
+    traversals.push(seg.traversal);
   }
   const path = concat(traversals);
   const EPS = 0.5;
@@ -141,6 +162,10 @@ export function buildRail(pieces: ReadonlyArray<TrackPiece>): Rail {
     pieceTypeAt(d: number): string {
       const seg = segs.find((s) => d >= s.start && d <= s.end);
       return seg?.type ?? 'straight';
+    },
+    slopeAt(d: number): number {
+      const seg = segs.find((s) => d >= s.start && d <= s.end);
+      return seg?.slope ?? 0;
     },
     startBuffered: first?.type === 'terminus',
     endBuffered: last?.type === 'terminus',

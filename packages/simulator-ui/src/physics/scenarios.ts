@@ -27,15 +27,19 @@ function toRotationDeg(deg: number): RotationDeg {
   return ((((Math.round(deg / 45) * 45) % 360) + 360) % 360) as RotationDeg;
 }
 
-/** Place a piece so its entry (index 0) endpoint lands on `cursor`; return the
- *  cursor at its exit endpoint (or unchanged for a terminal piece). */
+/** Place a piece so its `connectVia` endpoint (default 0) lands on `cursor`;
+ *  return the cursor at the OTHER endpoint (or unchanged for a terminal piece).
+ *  `connectVia: 1` attaches a ramp by its HIGH end, so the rail then descends —
+ *  a down-ramp the physics accelerates a train down. */
 function place(
   pieces: TrackPiece[],
   cursor: Cursor,
   type: TrackPieceType,
   id: string,
-  opts: { flipped?: boolean; radiusMm?: number } = {},
+  opts: { flipped?: boolean; radiusMm?: number; connectVia?: 0 | 1 } = {},
 ): Cursor {
+  const connectVia = opts.connectVia ?? 0;
+  const exitVia = connectVia === 0 ? 1 : 0;
   const extras: Pick<TrackPiece, 'flipped' | 'radiusMm'> = {
     ...(opts.flipped === true ? { flipped: true } : {}),
     ...(opts.radiusMm !== undefined ? { radiusMm: opts.radiusMm } : {}),
@@ -48,8 +52,8 @@ function place(
     tagged: false,
     ...extras,
   };
-  const entry = getEndpoints(probe)[0];
-  if (entry === undefined) throw new Error(`place: ${type} has no entry endpoint`);
+  const entry = getEndpoints(probe)[connectVia];
+  if (entry === undefined) throw new Error(`place: ${type} has no endpoint ${connectVia}`);
   const rotationDeg = toRotationDeg(cursor.dir + 180 - entry.outgoingAngleDeg);
   const rad = (rotationDeg * Math.PI) / 180;
   const cos = Math.cos(rad);
@@ -65,7 +69,7 @@ function place(
     ...extras,
   };
   pieces.push(real);
-  const exit = getEndpoints(real)[1];
+  const exit = getEndpoints(real)[exitVia];
   if (exit === undefined) return cursor; // terminal piece (terminus)
   return { x: exit.x, y: exit.y, dir: exit.outgoingAngleDeg };
 }
@@ -227,7 +231,7 @@ function tugOfWar(): PhysicsScenario {
 function derail(): PhysicsScenario {
   const pieces: TrackPiece[] = [];
   let c = straights(pieces, START, 3, 's');
-  c = place(pieces, c, 'ramp', 'ramp'); // accelerates the body (gravity)
+  c = place(pieces, c, 'ramp', 'ramp', { connectVia: 1 }); // a DOWN ramp — gravity speeds it up
   c = straights(pieces, c, 1, 'm');
   c = place(pieces, c, 'curve-tight', 'cv0'); // 100 mm radius — too tight at speed
   place(pieces, c, 'curve-tight', 'cv1');
@@ -235,6 +239,7 @@ function derail(): PhysicsScenario {
     name: 'derail',
     title: 'A train going too fast (down the ramp) derails on the tight curve',
     pieces,
+    // High-powered loco; the down-ramp adds yet more speed, so it can't hold the curve.
     bodies: [
       {
         id: 'red',
@@ -242,8 +247,7 @@ function derail(): PhysicsScenario {
         railPos: 100,
         facing: 1,
         motion: 'forward',
-        maxSpeed: 1300,
-        accel: 1600,
+        power: 3200,
         color: RED,
       },
     ],
