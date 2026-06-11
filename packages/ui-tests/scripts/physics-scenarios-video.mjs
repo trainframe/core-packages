@@ -118,6 +118,14 @@ const CHECKS = {
     const ok = !!l && l.segment === 'seg-stub-w' && Math.round(l.rotationDeg) === 180;
     return { ok, why: `L@${l ? l.segment : 'absent'} rot ${l ? Math.round(l.rotationDeg) : '?'}` };
   },
+  'lift-bridge': (b) => {
+    // The span started RAISED (rail broken). The train must have HELD short of
+    // the gap (never running off), then crossed once the span lowered — so it ends
+    // ACROSS, on the far approach, on-rail.
+    const t = b.find((x) => x.id === 'T');
+    const ok = !!t && t.fate === 'on-rail' && t.mode === 'railed' && t.segment === 'far';
+    return { ok, why: `T@${t ? t.segment : 'absent'} fate ${t ? t.fate : '?'}` };
+  },
   railyard: (b) => {
     const coupled = (id) => b.find((x) => x.id === id)?.coupledTo ?? [];
     const seg = (id) => b.find((x) => x.id === id)?.segment;
@@ -156,6 +164,7 @@ const DURATION = {
   railyard: 42,
   turntable: 30,
   'crane-drop': 12,
+  'lift-bridge': 14,
 };
 
 async function runScenario(browser, name) {

@@ -125,6 +125,11 @@ export class PhysicsWorld {
   private readonly byId = new Map<string, Body>();
   /** Live junction switch positions the network consults at transitions. */
   private readonly switches = new Map<string, string>();
+  /** Live link-active flags the network consults at transitions. A link id mapped
+   *  to `false` is DISCONNECTED — the rail it represents is physically absent (a
+   *  raised lift-bridge span), so a body reaching it meets the end's buffer/run-off
+   *  instead of crossing. Absent or `true` → connected (the default). */
+  private readonly activeLinks = new Map<string, boolean>();
 
   constructor(railOrNet: Rail | RailNetwork) {
     this.net = 'railOf' in railOrNet ? railOrNet : singleRail(railOrNet);
@@ -133,6 +138,15 @@ export class PhysicsWorld {
   /** Throw a junction switch (a switch actuator's effect). */
   setSwitch(id: string, position: string): void {
     this.switches.set(id, position);
+  }
+
+  /** Connect or DISCONNECT a network link at runtime (a `LinkActuator`'s effect —
+   *  the lift-bridge span lowering or raising). A disconnected link is treated by
+   *  the network as absent: a body reaching its rail end buffers or runs off
+   *  rather than crossing the gap. Backwards-compatible — a link not given an id
+   *  is always connected and never touched here. */
+  setLinkActive(linkId: string, active: boolean): void {
+    this.activeLinks.set(linkId, active);
   }
 
   /** The rail a body is currently on. */
@@ -425,7 +439,7 @@ export class PhysicsWorld {
   /** A body past an end: follow the network to the next segment (carrying the
    *  overshoot), or, if nothing is connected, buffer (terminus) / run off (open). */
   private crossEnd(b: Body, end: SegEnd, rail: Rail): void {
-    const ex = this.net.exit(b.segment, end, this.switches);
+    const ex = this.net.exit(b.segment, end, this.switches, this.activeLinks);
     if (ex === null) {
       const buffered = end === 'end' ? rail.endBuffered : rail.startBuffered;
       this.atEnd(b, buffered, end === 'end' ? rail.length : 0);
