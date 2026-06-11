@@ -32,7 +32,7 @@ function serviceRun(): { world: PhysicsWorld; phase: string } {
     kind: 'carriage',
     railPos: 200,
     facing: 1,
-    segment: 'slotB',
+    segment: 'slot1',
     color: 'purple',
   });
   w.addBody({
@@ -40,7 +40,7 @@ function serviceRun(): { world: PhysicsWorld; phase: string } {
     kind: 'carriage',
     railPos: 132,
     facing: 1,
-    segment: 'slotB',
+    segment: 'slot1',
     color: 'purple',
   });
   w.couple('p0', 'p1');
@@ -59,8 +59,8 @@ function serviceRun(): { world: PhysicsWorld; phase: string } {
     wedgeAt: (x, y) => {
       w.uncoupleAt(x, y);
     },
-    entrySlot: 'slotA',
-    sparesSlot: 'slotB',
+    entrySlot: 'slot0',
+    sparesSlot: 'slot1',
   });
 
   const dt = 1 / 60;
@@ -101,8 +101,8 @@ describe('YardController — a full CV-driven service', () => {
     expect(train.has('a1')).toBe(false);
     expect(train.has('a2')).toBe(false);
     expect(rake(world, 'a1')).toEqual(new Set(['a1', 'a2']));
-    expect(segOf('a2')).toBe('slotA');
+    expect(segOf('a2')).toBe('slot0');
     // And the serviced train left toward the opposite (east) throat.
-    expect(['leadE', 'elegB', 'slotB']).toContain(segOf('L'));
+    expect(['leadE', 'eleg1', 'slot1']).toContain(segOf('L'));
   });
 });

@@ -452,8 +452,11 @@ export class PhysicsWorld {
     }
   }
 
-  /** Resolve one adjacent pair (`lo` lower-railPos, `hi` higher) in contact:
-   *  collide → couple → push, the first that applies. */
+  /** Resolve one adjacent pair (`lo` lower-railPos, `hi` higher) in contact. A
+   *  body meeting another NOSE-first (driving forward into it) pushes it; meeting
+   *  it TAIL-first (backing onto it) magnetically couples — regardless of whether
+   *  either is a loco (couplers are on both ends of everything). Two opposed locos
+   *  closing collide. */
   private resolvePair(lo: Body, hi: Body): void {
     if (lo.coupledTo.has(hi.id)) return; // already coupled: moved as a group
     const gap = hi.railPos - lo.railPos;
@@ -461,7 +464,7 @@ export class PhysicsWorld {
     if (gap >= minGap + COUPLE_RANGE) return; // not touching
     if (this.tryCollide(lo, hi, minGap)) return;
     if (this.tryCouple(lo, hi, minGap)) return;
-    this.tryPush(lo, hi, gap, minGap);
+    if (gap < minGap && !this.tryPush(lo, hi, gap, minGap)) this.separate(lo, hi, minGap);
   }
 
   /** Two opposed locos closing → stop both and hold them apart. */
@@ -475,31 +478,32 @@ export class PhysicsWorld {
     return true;
   }
 
-  /** A loco reversing into a carriage → magnetic couple. */
+  /** A body backing TAIL-first into the other (it faces away from its travel) →
+   *  magnetic couple. Works loco- or carriage-led (couplers on both ends). */
   private tryCouple(lo: Body, hi: Body, minGap: number): boolean {
-    const loReversesIntoHi =
-      lo.kind === 'loco' && lo.facing === -1 && lo.vel > 0 && hi.kind === 'carriage';
-    const hiReversesIntoLo =
-      hi.kind === 'loco' && hi.facing === 1 && hi.vel < 0 && lo.kind === 'carriage';
-    if (!loReversesIntoHi && !hiReversesIntoLo) return false;
+    const loBacksIntoHi = lo.vel > 0.1 && lo.facing === -1; // lo moves +rail, faces -rail
+    const hiBacksIntoLo = hi.vel < -0.1 && hi.facing === 1; // hi moves -rail, faces +rail
+    if (!loBacksIntoHi && !hiBacksIntoLo) return false;
     lo.coupledTo.add(hi.id);
     hi.coupledTo.add(lo.id);
     this.separate(lo, hi, minGap);
     return true;
   }
 
-  /** A loco driving forward into a body ahead → shove it (not coupled). */
-  private tryPush(lo: Body, hi: Body, gap: number, minGap: number): void {
-    if (gap >= minGap) return;
-    if (lo.kind === 'loco' && lo.vel > 0 && hi.kind !== 'loco') {
+  /** A body driving NOSE-first into one ahead → shove it (contact, not coupled).
+   *  Returns whether a shove happened. */
+  private tryPush(lo: Body, hi: Body, gap: number, minGap: number): boolean {
+    if (lo.vel > hi.vel && lo.vel > 0 && lo.facing === 1) {
       hi.vel = lo.vel;
       hi.railPos = lo.railPos + minGap;
-    } else if (hi.kind === 'loco' && hi.vel < 0 && lo.kind !== 'loco') {
+      return true;
+    }
+    if (hi.vel < lo.vel && hi.vel < 0 && hi.facing === -1) {
       lo.vel = hi.vel;
       lo.railPos = hi.railPos - minGap;
-    } else {
-      this.separate(lo, hi, minGap);
+      return true;
     }
+    return false;
   }
 
   /** Push two overlapping bodies apart to exactly `minGap`, splitting the move. */

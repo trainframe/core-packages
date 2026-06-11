@@ -85,7 +85,7 @@ const CHECKS = {
       for (const n of coupled(c)) if (!seen.has(n)) { seen.add(n); stack.push(n); }
     }
     const ok =
-      seen.has('p0') && !seen.has('a2') && seg('a2') === 'slotA' && ['leadE', 'elegB'].includes(seg('L'));
+      seen.has('p0') && !seen.has('a2') && seg('a2') === 'slot0' && ['leadE', 'eleg1'].includes(seg('L'));
     return { ok, why: `rake={${[...seen].sort().join(',')}} a2@${seg('a2')} L@${seg('L')}` };
   },
 };

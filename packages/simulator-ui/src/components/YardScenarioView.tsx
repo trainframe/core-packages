@@ -14,39 +14,75 @@ import { physicsSwitchActuator } from '../devices/switch-actuator.js';
 import { TrainDevice } from '../devices/train-device.js';
 import { YardController } from '../devices/yard-controller.js';
 import { type BodyPose, PhysicsWorld } from '../physics/world.js';
-import { type YardSegGeom, buildYardLayout } from '../physics/yard.js';
+import { buildYardLayout } from '../physics/yard.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 
 const STEP_S = 1 / 120;
 const CAM_R = 20;
 
-/** Draw one rail segment as a wooden plank with a routed groove. */
-function Plank({ seg }: { seg: YardSegGeom }) {
-  const len = Math.hypot(seg.bx - seg.ax, seg.by - seg.ay);
-  const ang = (Math.atan2(seg.by - seg.ay, seg.bx - seg.ax) * 180) / Math.PI;
-  const ph = 7;
+/** An SVG path traced along a rail (straight or curved) by sampling it. */
+function railPath(rail: { length: number; at: (d: number) => { x: number; y: number } }): string {
+  const n = Math.max(8, Math.ceil(rail.length / 14));
+  let d = '';
+  for (let i = 0; i <= n; i++) {
+    const p = rail.at((rail.length * i) / n);
+    d += `${i === 0 ? 'M' : 'L'}${p.x.toFixed(1)} ${p.y.toFixed(1)}`;
+  }
+  return d;
+}
+
+/** A rail segment drawn as a wooden plank band with a routed groove, following
+ *  the real (possibly curved) centre-line. */
+function SegArt({ d }: { d: string }) {
   return (
-    <g transform={`translate(${(seg.ax + seg.bx) / 2},${(seg.ay + seg.by) / 2}) rotate(${ang})`}>
-      <rect
-        x={-len / 2}
-        y={-ph}
-        width={len}
-        height={2 * ph}
-        rx={3}
-        fill="url(#tf-wood)"
-        stroke="#9a7b46"
-        strokeWidth={1}
-      />
-      <line
-        x1={-len / 2}
-        y1={0}
-        x2={len / 2}
-        y2={0}
-        stroke="#6f4c28"
-        strokeWidth={2.4}
+    <>
+      <path
+        d={d}
+        fill="none"
+        stroke="#cba460"
+        strokeWidth={14}
         strokeLinecap="round"
+        strokeLinejoin="round"
       />
+      <path
+        d={d}
+        fill="none"
+        stroke="#9a7b46"
+        strokeWidth={14}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        opacity={0.25}
+      />
+      <path
+        d={d}
+        fill="none"
+        stroke="#6f4c28"
+        strokeWidth={2.6}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </>
+  );
+}
+
+/** A vertical girder truss (two chords + a zig-zag web) — the camera-crane rides
+ *  this across the railing. */
+function Truss({ x, top, bot }: { x: number; top: number; bot: number }) {
+  const w = 9;
+  const bays = Math.max(4, Math.round((bot - top) / 70));
+  const web: string[] = [];
+  for (let i = 0; i < bays; i++) {
+    const y0 = top + ((bot - top) * i) / bays;
+    const y1 = top + ((bot - top) * (i + 1)) / bays;
+    web.push(`M${x - w} ${y0} L${x + w} ${y1}`);
+    web.push(`M${x + w} ${y0} L${x - w} ${y1}`);
+  }
+  return (
+    <g data-testid="yard-truss">
+      <line x1={x - w} y1={top} x2={x - w} y2={bot} stroke="#8893a0" strokeWidth={3} />
+      <line x1={x + w} y1={top} x2={x + w} y2={bot} stroke="#8893a0" strokeWidth={3} />
+      <path d={web.join(' ')} fill="none" stroke="#a7b1bd" strokeWidth={2} />
     </g>
   );
 }
@@ -83,7 +119,7 @@ export function YardScenarioView() {
       kind: 'carriage',
       railPos: 200,
       facing: 1,
-      segment: 'slotB',
+      segment: 'slot1',
       color: '#8e44ad',
     });
     w.addBody({
@@ -91,7 +127,7 @@ export function YardScenarioView() {
       kind: 'carriage',
       railPos: 132,
       facing: 1,
-      segment: 'slotB',
+      segment: 'slot1',
       color: '#8e44ad',
     });
     w.couple('p0', 'p1');
@@ -110,8 +146,8 @@ export function YardScenarioView() {
       wedgeAt: (x, y) => {
         w.uncoupleAt(x, y);
       },
-      entrySlot: 'slotA',
-      sparesSlot: 'slotB',
+      entrySlot: 'slot0',
+      sparesSlot: 'slot1',
     });
 
     let elapsed = 0;
@@ -172,52 +208,53 @@ export function YardScenarioView() {
       >
         <title>Railyard CV-driven service</title>
         <WoodDefs />
-        {segs.map(([id, s]) => (
-          <Plank key={id} seg={s} />
+        {/* Every rail (spine, slots, smooth S-bend legs) traced from its real
+            centre-line, so curved legs render as curves. */}
+        {segs.map(([id]) => (
+          <SegArt key={id} d={railPath(yard.net.railOf(id))} />
         ))}
         {poses.map((p) => (
           <BodyG key={p.id} pose={p} />
         ))}
-        {/* The XY gantry: two foundation rails, the bridge at the crane's x, and the
-            crane head (camera + wedge) at its current working position. */}
-        <line
-          x1={minX + 40}
-          y1={railTop}
-          x2={maxX - 40}
-          y2={railTop}
-          stroke="#9aa6b3"
-          strokeWidth={6}
-        />
-        <line
-          x1={minX + 40}
-          y1={railBot}
-          x2={maxX - 40}
-          y2={railBot}
-          stroke="#9aa6b3"
-          strokeWidth={6}
-        />
-        <line
-          x1={crane.x}
-          y1={railTop}
-          x2={crane.x}
-          y2={railBot}
-          stroke="#b7c0cb"
-          strokeWidth={5}
-        />
+        {/* The XY gantry: two foundation girders the bridge rolls along, a truss
+            bridge at the crane's x, and the crane head (camera + wedge). */}
+        {[railTop, railBot].map((gy) => (
+          <g key={gy}>
+            <rect
+              x={minX + 40}
+              y={gy - 5}
+              width={maxX - minX - 80}
+              height={10}
+              rx={2}
+              fill="#8893a0"
+              stroke="#5e6772"
+              strokeWidth={1}
+            />
+            <line
+              x1={minX + 40}
+              y1={gy}
+              x2={maxX - 40}
+              y2={gy}
+              stroke="#c3cbd4"
+              strokeWidth={1.5}
+            />
+          </g>
+        ))}
+        <Truss x={crane.x} top={railTop} bot={railBot} />
         <g transform={`translate(${crane.x},${crane.y})`} data-testid="yard-crane">
           <rect
-            x={-16}
-            y={-16}
-            width={32}
-            height={32}
+            x={-17}
+            y={-17}
+            width={34}
+            height={34}
             rx={4}
             fill="#5a6470"
             stroke="#39414b"
             strokeWidth={2}
           />
-          <circle cx={0} cy={-4} r={4} fill="#bcdcea" stroke="#5d7f8e" strokeWidth={1} />
-          <line x1={0} y1={6} x2={0} y2={20} stroke="#39414b" strokeWidth={3} />
-          <path d="M -6 20 L 0 30 L 6 20 Z" fill="#caa033" stroke="#8a6c1f" strokeWidth={1} />
+          <circle cx={0} cy={-4} r={4.5} fill="#bcdcea" stroke="#5d7f8e" strokeWidth={1} />
+          <line x1={0} y1={6} x2={0} y2={22} stroke="#39414b" strokeWidth={3} />
+          <path d="M -6 22 L 0 32 L 6 22 Z" fill="#caa033" stroke="#8a6c1f" strokeWidth={1} />
         </g>
       </svg>
     </div>

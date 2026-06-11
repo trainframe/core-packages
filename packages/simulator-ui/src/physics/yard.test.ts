@@ -15,11 +15,11 @@ function visited(w: PhysicsWorld, id: string, steps: number): Set<string> {
 }
 
 describe('yard interior — symmetric pass-through ladder', () => {
-  it('a train from the WEST throat diverts into slot A when the west points select it', () => {
+  it('a train from the WEST throat diverts into slot 0 when the west points select it', () => {
     const yard = buildYardLayout();
     const w = new PhysicsWorld(yard.net);
-    w.setSwitch('Jw', 'slotA');
-    w.setSwitch('Je', 'thru'); // slot A not yet cleared to exit → it stays in the slot
+    w.setSwitch('Jw', 'slot0');
+    w.setSwitch('Je', 'thru'); // slot 0 not yet cleared to exit → it stays in the slot
     w.addBody({
       id: 'T',
       kind: 'loco',
@@ -29,8 +29,8 @@ describe('yard interior — symmetric pass-through ladder', () => {
       segment: 'leadW',
     });
     const seen = visited(w, 'T', 120);
-    expect(seen.has('slotA')).toBe(true);
-    expect(seen.has('slotB')).toBe(false);
+    expect(seen.has('slot0')).toBe(true);
+    expect(seen.has('slot1')).toBe(false);
   });
 
   it('routes straight through when both points are set thru', () => {
@@ -48,14 +48,14 @@ describe('yard interior — symmetric pass-through ladder', () => {
     });
     const seen = visited(w, 'T', 160);
     expect(seen.has('thru')).toBe(true);
-    expect(seen.has('slotA')).toBe(false);
-    expect(seen.has('slotB')).toBe(false);
+    expect(seen.has('slot0')).toBe(false);
+    expect(seen.has('slot1')).toBe(false);
   });
 
-  it('is indifferent to the IN side: a train from the EAST throat diverts into slot B', () => {
+  it('is indifferent to the IN side: a train from the EAST throat diverts into slot 1', () => {
     const yard = buildYardLayout();
     const w = new PhysicsWorld(yard.net);
-    w.setSwitch('Je', 'slotB'); // the east points select slot B for the eastbound arrival
+    w.setSwitch('Je', 'slot1'); // the east points select slot 1 for the eastbound arrival
     // Enter from the east lead facing WEST, driving forward (i.e. westward into the yard).
     w.addBody({
       id: 'T',
@@ -66,7 +66,7 @@ describe('yard interior — symmetric pass-through ladder', () => {
       segment: 'leadE',
     });
     const seen = visited(w, 'T', 160);
-    expect(seen.has('slotB')).toBe(true);
-    expect(seen.has('slotA')).toBe(false);
+    expect(seen.has('slot1')).toBe(true);
+    expect(seen.has('slot0')).toBe(false);
   });
 });
