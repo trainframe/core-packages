@@ -90,7 +90,7 @@ const CHECKS = {
   },
 };
 
-const DURATION = { collision: 7, push: 5, terminus: 7, couple: 7, tugofwar: 6, derail: 6, runoff: 6, vision: 9, load: 7, ramps: 7, railyard: 32 };
+const DURATION = { collision: 7, push: 5, terminus: 7, couple: 7, tugofwar: 6, derail: 6, runoff: 6, vision: 9, load: 7, ramps: 7, railyard: 42 };
 
 async function runScenario(browser, name) {
   const durS = DURATION[name] ?? 7;

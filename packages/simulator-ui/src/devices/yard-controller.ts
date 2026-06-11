@@ -22,6 +22,7 @@
  * a virtual clock; pure (no DOM, no Date.now).
  */
 import type { YardLayout, YardSegGeom } from '../physics/yard.js';
+import { Crane, type CraneBounds } from './crane.js';
 import type { SwitchActuator } from './switch-actuator.js';
 import type { TrainDevice } from './train-device.js';
 
@@ -67,24 +68,35 @@ const REST_INSET = 90;
 
 export class YardController {
   private readonly d: YardControllerDeps;
+  private readonly crane: Crane;
   private phase: Phase = 'route-in';
   private timer = 0;
   /** The loco's sensed rest x in the entry slot (set when it's seen to arrive). */
   private restX = 0;
   /** The sensed east edge of the spares (found by scanning the spares slot). */
   private sparesEastX = 0;
+  /** The cut's world point, once the rake has been scanned (null until then). */
+  private cut: { x: number; y: number } | null = null;
 
   constructor(deps: YardControllerDeps) {
     this.d = deps;
+    const b = craneBounds(deps.layout);
+    this.crane = new Crane(b, { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 });
   }
 
   get currentPhase(): Phase {
     return this.phase;
   }
 
-  /** Where the crane head currently is on the gantry (for rendering) — over its
-   *  current point of interest: the slot rest, the coupling, the lead, the spares. */
+  /** Where the crane head actually is on the gantry (for rendering) — it travels
+   *  there over time, so this trails the point of interest until the head catches up. */
   get cranePos(): { x: number; y: number } {
+    return this.crane.pos;
+  }
+
+  /** The point the crane is currently working over — its commanded target. The head
+   *  takes time to reach it; sensing/wedging waits on `crane.arrived`. */
+  private focus(): { x: number; y: number } {
     const entry = this.slot(this.d.entrySlot);
     const spares = this.slot(this.d.sparesSlot);
     switch (this.phase) {
@@ -92,7 +104,7 @@ export class YardController {
       case 'rest':
         return this.slotFarEnd(this.d.entrySlot);
       case 'decouple':
-        return { x: this.restX - 1.5 * CAR_SPACING, y: entry.by };
+        return this.cut ?? { x: this.restX - 1.5 * CAR_SPACING, y: entry.by };
       case 'pull-clear':
         return this.eastLeadPoint();
       case 'to-spares':
@@ -124,6 +136,10 @@ export class YardController {
 
   tick(dtS: number): void {
     this.timer += dtS;
+    /* Drive the gantry toward the current work point and let it travel. */
+    const f = this.focus();
+    this.crane.moveTo(f.x, f.y);
+    this.crane.step(dtS);
     switch (this.phase) {
       case 'route-in':
         this.routeIn();
@@ -174,11 +190,23 @@ export class YardController {
     }
   }
 
-  /** Let it settle, then split the rear coupling with the wedge — finding the rear
-   *  of the train by SCANNING the camera west along the slot (the yard learns the
-   *  rake's extent by looking, not by being told). */
+  /** Let it settle, scan the rake to locate the cut, then drive the crane over
+   *  that coupling and — once the head has physically arrived — lower the wedge.
+   *  The yard learns the rake's extent by LOOKING, not by being told. */
   private decouple(): void {
     if (this.timer < 0.6) return; // let the train brake to a stand
+    if (this.cut === null) {
+      this.cut = this.findCut();
+      return; // crane now starts travelling toward it (commanded in tick)
+    }
+    /* Wait for the gantry to reach the coupling before splitting it. */
+    if (!this.crane.arrived) return;
+    this.d.wedgeAt(this.cut.x, this.cut.y);
+    this.to('pull-clear');
+  }
+
+  /** Scan the entry slot to find the rear cut's coupling point. */
+  private findCut(): { x: number; y: number } {
     const y = this.slot(this.d.entrySlot).by;
     const r = this.d.cameraRadius;
     // Find the loco's front edge (eastmost occupied) by scanning east→west; its
@@ -191,8 +219,7 @@ export class YardController {
       }
     }
     const locoCentre = frontX - r;
-    // Count carriages by looking at each car centre behind the loco — the yard
-    // learns the rake's length by looking, not by being told.
+    // Count carriages by looking at each car centre behind the loco.
     let cars = 0;
     for (let k = 1; k <= 8; k++) {
       if (this.d.look(locoCentre - k * CAR_SPACING, y).occupied) cars = k;
@@ -200,8 +227,7 @@ export class YardController {
     }
     // Keep the loco + (cars − SHED_CARS) front carriages; split off the rear cut.
     const keptCars = Math.max(0, cars - SHED_CARS);
-    this.d.wedgeAt(locoCentre - (keptCars + 0.5) * CAR_SPACING, y);
-    this.to('pull-clear');
+    return { x: locoCentre - (keptCars + 0.5) * CAR_SPACING, y };
   }
 
   /** Open the slot's east exit and pull forward onto the lead, clear of the slot. */
@@ -269,4 +295,20 @@ export class YardController {
   private sparesSlotPos(): string {
     return this.d.sparesSlot;
   }
+}
+
+/** The crane's physical travel limits (endstops): the bounding box of every yard
+ *  segment, so the gantry can reach any work point but no further. */
+function craneBounds(layout: YardLayout): CraneBounds {
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const g of layout.geom.values()) {
+    minX = Math.min(minX, g.ax, g.bx);
+    maxX = Math.max(maxX, g.ax, g.bx);
+    minY = Math.min(minY, g.ay, g.by);
+    maxY = Math.max(maxY, g.ay, g.by);
+  }
+  return { minX, maxX, minY, maxY };
 }
