@@ -435,6 +435,19 @@ export class PhysicsWorld {
     b.segment = ex.seg;
     b.railPos = ex.dir === 1 ? ex.atDist + overshoot : ex.atDist - overshoot;
     // vel + facing carry over: links are oriented so travel direction is preserved.
+    // A TURN-AROUND link (a turntable deck swung 180°) turns the CROSSING body
+    // PHYSICALLY: its facing reverses, yet it keeps its WORLD travel direction
+    // (velocity and landing are unchanged). Because the body has been spun on the
+    // spot, its motor intent is re-expressed relative to the new facing
+    // (forward↔reverse) so a loco that was driving one world way keeps driving that
+    // same world way after the turn — it just now points the other way (the honest
+    // turn-around; no 180° sprite flip — see ADR-030 Consequences). The flip is
+    // per-body as it transits the link (a capacity-1 deck turns one loco at a time).
+    if (ex.flipsFacing) {
+      b.facing = (b.facing * -1) as 1 | -1;
+      if (b.motion === 'forward') b.motion = 'reverse';
+      else if (b.motion === 'reverse') b.motion = 'forward';
+    }
   }
 
   /** A body reaching an end with nothing connected: a buffer stops it; an open

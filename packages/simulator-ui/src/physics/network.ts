@@ -19,11 +19,15 @@ import type { Rail } from './rail.js';
 export type SegEnd = 'start' | 'end';
 
 /** Where a transitioning body lands: the segment, the distance along it to start
- *  from, and the travel direction (+1 entering at start, -1 entering at end). */
+ *  from, and the travel direction (+1 entering at start, -1 entering at end).
+ *  `flipsFacing` is true when the link the body crossed turns it around (a
+ *  turntable deck rotated 180°): the body keeps its world travel direction but
+ *  comes off the link facing the other way. */
 export interface NetExit {
   readonly seg: string;
   readonly atDist: number;
   readonly dir: 1 | -1;
+  readonly flipsFacing: boolean;
 }
 
 export interface RailNetwork {
@@ -47,11 +51,14 @@ export function singleRail(rail: Rail): RailNetwork {
 
 /** A directed link `from.end → to.start`. When `when` is set the link is active
  *  only while that switch is in that position (a junction branch); an
- *  unconditional link is always active (a plain joint). */
+ *  unconditional link is always active (a plain joint). `flipsFacing` marks a
+ *  TURN-AROUND link — a body crossing it reverses its facing (the turntable deck
+ *  swung 180°), keeping its world travel direction. */
 export interface NetLink {
   readonly from: string;
   readonly to: string;
   readonly when?: { readonly switchId: string; readonly position: string };
+  readonly flipsFacing?: boolean;
 }
 
 /** Build a network from named rail segments + directed links. */
@@ -86,14 +93,23 @@ export function buildNetwork(
           links.filter((l) => l.from === seg),
           switches,
         );
-        return link ? { seg: link.to, atDist: 0, dir: 1 } : null;
+        return link
+          ? { seg: link.to, atDist: 0, dir: 1, flipsFacing: link.flipsFacing ?? false }
+          : null;
       }
       // Reverse off the start: the segment whose (active) forward link feeds it.
       const link = active(
         links.filter((l) => l.to === seg),
         switches,
       );
-      return link ? { seg: link.from, atDist: railOf(link.from).length, dir: -1 } : null;
+      return link
+        ? {
+            seg: link.from,
+            atDist: railOf(link.from).length,
+            dir: -1,
+            flipsFacing: link.flipsFacing ?? false,
+          }
+        : null;
     },
   };
 }

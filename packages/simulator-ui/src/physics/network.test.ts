@@ -71,6 +71,22 @@ describe('rail network — switch traversal', () => {
     expect(pose(w, 'T').segment).toBe('branch');
   });
 
+  it('reports flipsFacing on a turn-around link, false on a plain one', () => {
+    const segments = new Map<string, Rail>([
+      ['trunk', seg(500)],
+      ['deck', seg(500)],
+    ]);
+    const flip = buildNetwork(segments, [{ from: 'trunk', to: 'deck', flipsFacing: true }]);
+    const ex = flip.exit('trunk', 'end', new Map());
+    expect(ex).not.toBeNull();
+    expect(ex?.flipsFacing).toBe(true);
+    // The reverse direction of the same link also flips (the deck is turned either way).
+    expect(flip.exit('deck', 'start', new Map())?.flipsFacing).toBe(true);
+
+    const plain = buildNetwork(segments, [{ from: 'trunk', to: 'deck' }]);
+    expect(plain.exit('trunk', 'end', new Map())?.flipsFacing).toBe(false);
+  });
+
   it('reversing back off the branch returns to the trunk (same switch path)', () => {
     const w = junction();
     w.setSwitch('J', 'branch');
