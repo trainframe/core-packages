@@ -28,4 +28,16 @@ describe('PhysicsScenarioView', () => {
     render(<PhysicsScenarioView name="does-not-exist" />);
     expect(screen.getByText(/Unknown physics scenario/)).toBeTruthy();
   });
+
+  it('mounts the vision station scenario: overlay + live handle', async () => {
+    render(<PhysicsScenarioView name="vision" />);
+    expect(screen.getByTestId('vision-overlay')).toBeTruthy();
+    expect(screen.getByTestId('vision-readout')).toBeTruthy();
+    // The vision handle initialises with the expected (calibrated) length even
+    // before the rake has cleared. (The full measurement is asserted by the
+    // sensors unit tests and the video harness — kept out of this fast render test.)
+    await waitFor(() => {
+      expect(window.__tfVision?.expectedMm).toBe(224);
+    });
+  });
 });

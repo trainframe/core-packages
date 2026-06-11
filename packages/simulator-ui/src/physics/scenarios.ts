@@ -94,6 +94,19 @@ export interface PhysicsScenario {
   /** View-box padding (mm) around the pieces — widen it where a body flies off
    *  the rail (derail/run-off) so the excursion stays on camera. */
   readonly viewPad?: number;
+  /** When present, the view runs a VisionStation over this footprint + two
+   *  markers, firing a crossing when `locoId` passes each marker x, and shows the
+   *  measured length. The y is the rail centre-line. */
+  readonly vision?: {
+    readonly locoId: string;
+    readonly railY: number;
+    readonly markerAx: number;
+    readonly markerBx: number;
+    readonly footprintX: number;
+    readonly footprintRadiusMm: number;
+    /** The rake's true physical span (mm), for the on-screen comparison. */
+    readonly rakeSpanMm: number;
+  };
 }
 
 const RED = '#c0392b';
@@ -255,6 +268,39 @@ function runoff(): PhysicsScenario {
   };
 }
 
+function vision(): PhysicsScenario {
+  const pieces: TrackPiece[] = [];
+  straights(pieces, START, 16, 's'); // 3200 mm; rail d=0 at world x=200
+  // A loco + two carriages, coupled at 68 mm spacing, drive east past the camera.
+  // Rake span = loco half (34) + 2×68 + carriage half (30) = 200 mm.
+  return {
+    name: 'vision',
+    title:
+      'Vision station measures a passing train’s length — speed from two markers, no self-report',
+    pieces,
+    bodies: [
+      { id: 'red', kind: 'loco', railPos: 320, facing: 1, motion: 'forward', color: RED },
+      { id: 'c1', kind: 'carriage', railPos: 252, facing: 1, color: GREEN },
+      { id: 'c2', kind: 'carriage', railPos: 184, facing: 1, color: AMBER },
+    ],
+    couples: [
+      ['red', 'c1'],
+      ['c1', 'c2'],
+    ],
+    script: [{ atS: 7, id: 'red', motion: 'stopped' }],
+    durationS: 8,
+    vision: {
+      locoId: 'red',
+      railY: START.y,
+      markerAx: 800, // railPos 600
+      markerBx: 1200, // railPos 1000 — baseline 400 mm
+      footprintX: 1900, // well past both markers, so speed is known before the rake clears
+      footprintRadiusMm: 12,
+      rakeSpanMm: 200,
+    },
+  };
+}
+
 const BUILDERS: Record<string, () => PhysicsScenario> = {
   collision,
   push,
@@ -263,6 +309,7 @@ const BUILDERS: Record<string, () => PhysicsScenario> = {
   tugofwar: tugOfWar,
   derail,
   runoff,
+  vision,
 };
 
 export const SCENARIO_NAMES = Object.keys(BUILDERS);
@@ -270,5 +317,3 @@ export const SCENARIO_NAMES = Object.keys(BUILDERS);
 export function buildScenario(name: string): PhysicsScenario | undefined {
   return BUILDERS[name]?.();
 }
-
-void AMBER; // reserved livery for future scenarios

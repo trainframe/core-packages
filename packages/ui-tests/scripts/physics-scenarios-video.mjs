@@ -56,9 +56,14 @@ const CHECKS = {
     const r = b.find((x) => x.id === 'red');
     return { ok: r.fate === 'ran-off', why: `fate ${r.fate}` };
   },
+  vision: (_b, vision) => {
+    if (!vision || vision.reportedMm == null) return { ok: false, why: 'no length reported' };
+    const err = Math.abs(vision.reportedMm - vision.expectedMm);
+    return { ok: err < 40, why: `measured ${Math.round(vision.reportedMm)}mm vs expected ${Math.round(vision.expectedMm)}mm (err ${Math.round(err)})` };
+  },
 };
 
-const DURATION = { collision: 7, push: 5, terminus: 7, couple: 7, tugofwar: 6, derail: 6, runoff: 6 };
+const DURATION = { collision: 7, push: 5, terminus: 7, couple: 7, tugofwar: 6, derail: 6, runoff: 6, vision: 9 };
 
 async function runScenario(browser, name) {
   const durS = DURATION[name] ?? 7;
@@ -77,10 +82,11 @@ async function runScenario(browser, name) {
   await page.screenshot({ path: `${OUT}${name}-mid.png` });
   await sleep((durS / 2) * 1000);
   const bodies = await page.evaluate(() => window.__tfPhysics?.bodies() ?? []);
+  const vision = await page.evaluate(() => window.__tfVision ?? null);
   await page.screenshot({ path: `${OUT}${name}-end.png` });
 
   const check = CHECKS[name];
-  const result = check ? check(bodies) : { ok: false, why: 'no check' };
+  const result = check ? check(bodies, vision) : { ok: false, why: 'no check' };
   log(`${result.ok ? 'PASS' : 'FAIL'} ${name} — ${result.why}`);
 
   const video = page.video();
@@ -96,7 +102,7 @@ async function main() {
   mkdirSync(OUT, { recursive: true });
   const names = process.argv.slice(2).length
     ? process.argv.slice(2)
-    : ['collision', 'push', 'terminus', 'couple', 'tugofwar', 'derail', 'runoff'];
+    : ['collision', 'push', 'terminus', 'couple', 'tugofwar', 'derail', 'runoff', 'vision'];
   const browser = await chromium.launch();
   const results = [];
   for (const name of names) results.push(await runScenario(browser, name));
