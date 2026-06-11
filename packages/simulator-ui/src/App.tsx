@@ -4,6 +4,7 @@ import type { BrokerClient } from './broker/client.js';
 import { MqttBrokerClient } from './broker/mqtt-client.js';
 import { BridgeRunoffScenarioView } from './components/BridgeRunoffScenarioView.js';
 import { CraneDropScenarioView } from './components/CraneDropScenarioView.js';
+import { DepotScenarioView } from './components/DepotScenarioView.js';
 import { LiftBridgeScenarioView } from './components/LiftBridgeScenarioView.js';
 import { PhysicsScenarioView } from './components/PhysicsScenarioView.js';
 import { ToyTable } from './components/ToyTable.js';
@@ -45,6 +46,7 @@ export function App({ client }: AppProps = {}) {
 
   if (physics === 'railyard') return <YardScenarioView />;
   if (physics === 'turntable') return <TurntableScenarioView />;
+  if (physics === 'depot') return <DepotScenarioView />;
   if (physics === 'crane-drop') return <CraneDropScenarioView />;
   if (physics === 'lift-bridge') return <LiftBridgeScenarioView />;
   if (physics === 'bridge-runoff') return <BridgeRunoffScenarioView />;
