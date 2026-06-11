@@ -56,39 +56,42 @@ function PieceG({ piece }: { piece: TrackPiece }) {
   );
 }
 
+/** The real device sprite to draw for each body kind, and its native length (mm)
+ *  — `trainBody` spans 80, `carriageBody` 60. We scale the sprite so its visual
+ *  extent matches the body's physics half-length, so contact reads true. */
+const BODY_SPRITE: Record<
+  BodyPose['kind'],
+  { type: TrackPiece['type']; nativeLen: number; halfLen: number }
+> = {
+  loco: { type: 'train', nativeLen: 80, halfLen: 34 },
+  carriage: { type: 'carriage', nativeLen: 60, halfLen: 30 },
+};
+
+/** A loco / carriage drawn as the REAL toy-table device sprite (rounded hull,
+ *  boiler, windows…) in its livery, at the body's authoritative pose — not a
+ *  plain physics rectangle. A red outline marks a body that has left the rails. */
 function BodyG({ pose }: { pose: BodyPose }) {
-  const halfLen = pose.kind === 'loco' ? 34 : 30;
-  const h = pose.kind === 'loco' ? 20 : 17;
+  const spec = BODY_SPRITE[pose.kind];
+  const shape = getPieceShape({
+    id: pose.id,
+    type: spec.type,
+    position: { x: 0, y: 0 },
+    rotationDeg: 0,
+    tagged: false,
+  });
+  const scale = (spec.halfLen * 2) / spec.nativeLen;
   const fill = pose.color ?? (pose.kind === 'loco' ? '#c0392b' : '#8e44ad');
-  const stroke = pose.fate === 'on-rail' ? '#222' : '#b00020';
   return (
     <g
-      transform={`translate(${pose.x},${pose.y}) rotate(${pose.rotationDeg})`}
+      transform={`translate(${pose.x},${pose.y}) rotate(${pose.rotationDeg}) scale(${scale})`}
       data-body-id={pose.id}
       data-fate={pose.fate}
       data-mode={pose.mode}
+      style={{ filter: 'drop-shadow(0 1px 1.4px rgba(63,43,19,0.34))' }}
     >
-      <rect
-        x={-halfLen}
-        y={-h / 2}
-        width={halfLen * 2}
-        height={h}
-        rx={4}
-        fill={fill}
-        stroke={stroke}
-        strokeWidth={pose.fate === 'on-rail' ? 1.5 : 3}
-      />
-      {pose.kind === 'loco' && (
-        // a nose mark so facing/direction is legible
-        <rect
-          x={halfLen - 8}
-          y={-h / 2}
-          width={8}
-          height={h}
-          rx={2}
-          fill="#1a1a1a"
-          opacity={0.55}
-        />
+      <PieceBody shape={shape} bodyFill={fill} tint={null} isDevice={true} dim={1} />
+      {pose.fate !== 'on-rail' && (
+        <path d={shape.svgPath} fill="none" stroke="#b00020" strokeWidth={3} />
       )}
     </g>
   );
