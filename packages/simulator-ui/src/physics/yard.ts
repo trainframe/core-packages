@@ -1,13 +1,17 @@
 /**
  * The railyard interior as a switched rail network (ADR-030 Plan §4). To the
- * physics the yard is ordinary track + junctions: a spine off the throat with two
- * ladder taps, each diverting (when its switch is thrown to `slot`) onto a slot
- * road; the train self-drives it and the yard device throws the points. Core's
- * opaque-zone view (ADR-026/027) is the ONLY thing that treats it specially.
+ * physics the yard is ordinary track + junctions: a single line off EACH throat,
+ * a diverging ladder fanning into the slots and a converging ladder rejoining
+ * them on the far side (the drawn `railyard` piece's layout). A train self-drives
+ * it; the yard device throws the points. It is INDIFFERENT to which throat is IN
+ * — a train is serviced from whichever throat it arrived at, routed through to the
+ * opposite one. Core's opaque-zone view (ADR-026/027) is the only thing that
+ * treats it specially.
  *
- * Geometry here is deliberately simple (straight spine, straight legs + slots) —
- * enough to drive and render the choreography; the drawn wooden ladder is a
- * separate toy-table concern. World-space mm.
+ * Geometry here is simple straights (spine, legs, slots) — enough to drive and
+ * render the choreography; the ornate wooden ladder is a separate rendering
+ * concern. World-space mm. The two diverge/converge nodes are 3-position switches
+ * (`Jw`, `Je`): `thru` runs the spine straight; `slotA` / `slotB` divert.
  */
 import { type NetLink, type RailNetwork, buildNetwork } from './network.js';
 import type { Rail } from './rail.js';
@@ -38,7 +42,7 @@ export function straightSeg(
   };
 }
 
-/** A straight segment's world endpoints — for the view to draw a plank along it. */
+/** A segment's world endpoints — for the view to draw a plank along it. */
 export interface YardSegGeom {
   readonly ax: number;
   readonly ay: number;
@@ -50,51 +54,58 @@ export interface YardLayout {
   readonly net: RailNetwork;
   /** Segment id → world endpoints (for rendering the rails as planks). */
   readonly geom: ReadonlyMap<string, YardSegGeom>;
-  /** Throat (spine entry) segment + the two slot segments + the tap switch ids. */
-  readonly throatSegment: string;
-  readonly entrySlot: string;
-  readonly sparesSlot: string;
-  readonly tapA: string;
-  readonly tapB: string;
+  /** The two throats' lead segments + the slot segments + the two ladder switches. */
+  readonly leadWest: string;
+  readonly leadEast: string;
+  readonly slots: readonly string[];
+  readonly westSwitch: string;
+  readonly eastSwitch: string;
 }
 
-/**
- * Build the yard interior. The spine runs west→east off the throat in three
- * stretches split at the two taps; tap A diverts onto slot A, tap B onto slot B.
- * Each tap is a switch (`through` | `slot`). Slots are buffered dead-ends.
- */
+const SPINE_Y = 600;
+const SLOT_OFFSET = 220;
+
 export function buildYardLayout(): YardLayout {
-  const Y = 600; // spine world-y
-  const defs: Array<readonly [string, YardSegGeom, { endBuffered?: boolean }]> = [
-    ['spine0', { ax: 200, ay: Y, bx: 700, by: Y }, {}],
-    ['spine1', { ax: 700, ay: Y, bx: 1100, by: Y }, {}],
-    ['spine2', { ax: 1100, ay: Y, bx: 1700, by: Y }, {}],
-    ['legA', { ax: 700, ay: Y, bx: 820, by: Y - 200 }, {}],
-    ['slotA', { ax: 820, ay: Y - 200, bx: 1320, by: Y - 200 }, { endBuffered: true }],
-    ['legB', { ax: 1100, ay: Y, bx: 1220, by: Y + 200 }, {}],
-    ['slotB', { ax: 1220, ay: Y + 200, bx: 1720, by: Y + 200 }, { endBuffered: true }],
+  const slotAY = SPINE_Y - SLOT_OFFSET;
+  const slotBY = SPINE_Y + SLOT_OFFSET;
+  const defs: Array<readonly [string, YardSegGeom]> = [
+    ['leadW', { ax: 150, ay: SPINE_Y, bx: 600, by: SPINE_Y }],
+    ['thru', { ax: 600, ay: SPINE_Y, bx: 1600, by: SPINE_Y }],
+    ['leadE', { ax: 1600, ay: SPINE_Y, bx: 2050, by: SPINE_Y }],
+    ['wlegA', { ax: 600, ay: SPINE_Y, bx: 760, by: slotAY }],
+    ['slotA', { ax: 760, ay: slotAY, bx: 1440, by: slotAY }],
+    ['elegA', { ax: 1440, ay: slotAY, bx: 1600, by: SPINE_Y }],
+    ['wlegB', { ax: 600, ay: SPINE_Y, bx: 760, by: slotBY }],
+    ['slotB', { ax: 760, ay: slotBY, bx: 1440, by: slotBY }],
+    ['elegB', { ax: 1440, ay: slotBY, bx: 1600, by: SPINE_Y }],
   ];
   const geom = new Map<string, YardSegGeom>();
   const segments = new Map<string, Rail>();
-  for (const [id, g, ends] of defs) {
+  for (const [id, g] of defs) {
     geom.set(id, g);
-    segments.set(id, straightSeg(g.ax, g.ay, g.bx, g.by, ends));
+    segments.set(id, straightSeg(g.ax, g.ay, g.bx, g.by));
   }
+  // West diverge (Jw) + east converge (Je), each a 3-position switch. The leg→slot
+  // and slot→leg links are unconditional; the spine taps are switch-gated.
   const links: NetLink[] = [
-    { from: 'spine0', to: 'spine1', when: { switchId: 'tapA', position: 'through' } },
-    { from: 'spine0', to: 'legA', when: { switchId: 'tapA', position: 'slot' } },
-    { from: 'legA', to: 'slotA' },
-    { from: 'spine1', to: 'spine2', when: { switchId: 'tapB', position: 'through' } },
-    { from: 'spine1', to: 'legB', when: { switchId: 'tapB', position: 'slot' } },
-    { from: 'legB', to: 'slotB' },
+    { from: 'leadW', to: 'thru', when: { switchId: 'Jw', position: 'thru' } },
+    { from: 'leadW', to: 'wlegA', when: { switchId: 'Jw', position: 'slotA' } },
+    { from: 'leadW', to: 'wlegB', when: { switchId: 'Jw', position: 'slotB' } },
+    { from: 'wlegA', to: 'slotA' },
+    { from: 'wlegB', to: 'slotB' },
+    { from: 'slotA', to: 'elegA' },
+    { from: 'slotB', to: 'elegB' },
+    { from: 'thru', to: 'leadE', when: { switchId: 'Je', position: 'thru' } },
+    { from: 'elegA', to: 'leadE', when: { switchId: 'Je', position: 'slotA' } },
+    { from: 'elegB', to: 'leadE', when: { switchId: 'Je', position: 'slotB' } },
   ];
   return {
     net: buildNetwork(segments, links),
     geom,
-    throatSegment: 'spine0',
-    entrySlot: 'slotA',
-    sparesSlot: 'slotB',
-    tapA: 'tapA',
-    tapB: 'tapB',
+    leadWest: 'leadW',
+    leadEast: 'leadE',
+    slots: ['slotA', 'slotB'],
+    westSwitch: 'Jw',
+    eastSwitch: 'Je',
   };
 }
