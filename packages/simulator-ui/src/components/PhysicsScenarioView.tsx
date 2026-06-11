@@ -13,7 +13,8 @@ import { type PhysicsScenario, buildScenario } from '../physics/scenarios.js';
 import { type BodyPose, PhysicsWorld } from '../physics/world.js';
 import { physicsCameraProvider } from '../sensors/camera-provider.js';
 import { VisionStation } from '../sensors/vision-station.js';
-import { type TrackPiece, getEndpoints, getPieceShape } from '../track/pieces.js';
+import { PIECE_TINT, type TrackPiece, getEndpoints, getPieceShape } from '../track/pieces.js';
+import { PieceBody, WOOD_FILL, WoodDefs } from './piece-art.js';
 
 declare global {
   interface Window {
@@ -35,22 +36,22 @@ function pieceTransform(p: TrackPiece): string {
   return `translate(${p.position.x},${p.position.y}) rotate(${p.rotationDeg})${flip}`;
 }
 
+/** A track piece drawn in the real beech-wood toy-table style (ADR-024), reusing
+ *  the shared `PieceBody`. A soft contact shadow matches the live table. */
 function PieceG({ piece }: { piece: TrackPiece }) {
-  const shape = getPieceShape(piece);
   return (
-    <g transform={pieceTransform(piece)} data-piece-id={piece.id}>
-      <path d={shape.svgPath} fill="#caa46a" stroke="#9a7b46" strokeWidth={1} />
-      {shape.grooves.map((d, i) => (
-        <path
-          // biome-ignore lint/suspicious/noArrayIndexKey: grooves are a fixed positional list
-          key={i}
-          d={d}
-          fill="none"
-          stroke="#8a6c3e"
-          strokeWidth={2}
-          strokeLinecap="round"
-        />
-      ))}
+    <g
+      transform={pieceTransform(piece)}
+      data-piece-id={piece.id}
+      style={{ filter: 'drop-shadow(0 1px 1.4px rgba(63,43,19,0.34))' }}
+    >
+      <PieceBody
+        shape={getPieceShape(piece)}
+        bodyFill={WOOD_FILL}
+        tint={PIECE_TINT[piece.type]}
+        isDevice={false}
+        dim={1}
+      />
     </g>
   );
 }
@@ -246,6 +247,7 @@ export function PhysicsScenarioView({ name }: { name: string }) {
         style={{ width: '100%', height: '100%' }}
       >
         <title>{scenario.title}</title>
+        <WoodDefs />
         {scenario.pieces.map((p) => (
           <PieceG key={p.id} piece={p} />
         ))}
