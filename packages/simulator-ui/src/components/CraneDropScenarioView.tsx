@@ -32,10 +32,13 @@ const DROP_X = 1200; // where the crate is set down on the line, ahead of the tr
 /* The dock tower stands just clear of the line, below it — close enough that the
  * boom is short. Its boom slews up and over to deliver the crate to the rail. */
 const TOWER = { x: DROP_X, y: 800 };
-const DELIVER = { x: DROP_X, y: RAIL_Y };
+/* Deliver the hook to a HOVER just above the rail, so the slung crate sits a
+ * little above the line; the release then drops it the last short gap DOWN onto
+ * the rail (a brief honest fall) rather than teleporting up from below it. */
+const DELIVER = { x: DROP_X, y: RAIL_Y - 55 };
 /* Slew/reach limits: the boom swings across the lower → upper arc on the dock
  * side, reaching from just clear of the tower out to a little past the rail. */
-const JIB_LIMITS = { minAngle: -Math.PI, maxAngle: 0, minReach: 70, maxReach: 250 };
+const JIB_LIMITS = { minAngle: -Math.PI, maxAngle: 0, minReach: 70, maxReach: 290 };
 /* It arrives parked over the dock (boom low and to the left), crate slung. */
 const PARK = { angle: -Math.PI * 0.72, reach: 210 };
 
@@ -134,35 +137,43 @@ export function CraneDropScenarioView() {
     let acc = 0;
     let last = performance.now();
     let raf = 0;
+    /* Set the crate down on the rail under the hook (the world snaps it to the
+     *  nearest rail point — the short gap below the hook becomes the drop). */
+    const setCrateDown = (): void => {
+      w.placeBodyAt(
+        {
+          id: 'crate',
+          kind: 'carriage',
+          facing: 1,
+          color: '#7c5a33',
+          mass: 0.8,
+          halfLen: 18,
+          obstacle: true,
+        },
+        crane.pos.x,
+        crane.pos.y,
+      );
+    };
+    /* One fixed physics step: aim the boom (out to deliver, or back to clear once
+     *  it has let go), advance the crane + world, and trip the drop when seated. */
+    const advance = (): void => {
+      if (dropped) crane.moveTo(PARK.angle, PARK.reach);
+      else crane.aimAt(DELIVER.x, DELIVER.y);
+      crane.step(STEP_S);
+      if (!dropped && crane.carrying && crane.arrived) {
+        if (crane.release()) setCrateDown();
+        train.forward();
+        dropped = true;
+      }
+      w.step(STEP_S);
+      elapsed += STEP_S;
+    };
     setPoses(w.bodies());
     const tick = (now: number) => {
       acc += Math.min(0.1, (now - last) / 1000);
       last = now;
       while (acc >= STEP_S) {
-        crane.aimAt(DELIVER.x, DELIVER.y); // slew the boom out over the rail
-        crane.step(STEP_S);
-        if (!dropped && crane.carrying && crane.arrived) {
-          // Set the crate down on the rail, then send the train off into it.
-          if (crane.release()) {
-            w.placeBodyAt(
-              {
-                id: 'crate',
-                kind: 'carriage',
-                facing: 1,
-                color: '#7c5a33',
-                mass: 0.8,
-                halfLen: 18,
-                obstacle: true,
-              },
-              crane.pos.x,
-              crane.pos.y,
-            );
-          }
-          train.forward();
-          dropped = true;
-        }
-        w.step(STEP_S);
-        elapsed += STEP_S;
+        advance();
         acc -= STEP_S;
       }
       setPoses(w.bodies());

@@ -62,6 +62,22 @@ const SPINE_Y = 600;
 const TRUNK_AX = 150;
 const DECK_CENTRE_X = 700;
 const DECK_RADIUS = 60;
+/** How far each rim stub radiates out from the deck centre (mm). */
+const STUB_LEN = 330;
+/** The eight rim stubs of a full 8-way turntable, evenly spaced at 45° around the
+ *  pit (angles measured from +x, y down). `stub-w` (180°) is collinear with the
+ *  trunk lead — the TURN-AROUND exit, where a loco returns the way it came,
+ *  reversed; `stub-e` (0°) is the straight-through; the rest are radiating stalls. */
+const STUB_DIRS: ReadonlyArray<{ position: string; angleDeg: number }> = [
+  { position: 'stub-e', angleDeg: 0 },
+  { position: 'stub-se', angleDeg: 45 },
+  { position: 'stub-s', angleDeg: 90 },
+  { position: 'stub-sw', angleDeg: 135 },
+  { position: 'stub-w', angleDeg: 180 },
+  { position: 'stub-nw', angleDeg: 225 },
+  { position: 'stub-n', angleDeg: 270 },
+  { position: 'stub-ne', angleDeg: 315 },
+];
 const DECK_LENGTH = 2 * DECK_RADIUS;
 /** West rim of the deck at θ=0 — where the trunk meets the bridge (the deck's
  *  start, d=0). */
@@ -103,12 +119,13 @@ function rotatingDeckRail(
 }
 
 /**
- * Build the turntable: a trunk lead → rotating deck → rim stubs. The headline stub
- * is the TURN-AROUND: the deck swings 180° from the boarding angle so the loco —
- * carried round bodily on the bridge — leaves FACING THE OTHER WAY, departing west
- * along a stub collinear with the lead it arrived on. The other two are ordinary
- * radiating exits, present so the deck has real choices to swing between. The deck
- * switch `Jt` carries positions `trunk` + each stub.
+ * Build the turntable: a trunk lead → rotating deck → eight rim stubs (a full
+ * 8-way table). The headline service is the TURN-AROUND on `stub-w`: the deck
+ * swings 180° from the boarding angle so the loco — carried round bodily on the
+ * bridge — leaves FACING THE OTHER WAY, departing west along the stub collinear
+ * with the lead it arrived on. The other seven are radiating exits the deck can
+ * swing to (`stub-e` straight through, plus the diagonal/orthogonal stalls). The
+ * deck switch `Jt` carries positions `trunk` + each stub.
  */
 export function buildTurntableLayout(): TurntableLayout {
   const geom = new Map<string, { ax: number; ay: number; bx: number; by: number }>();
@@ -144,22 +161,22 @@ export function buildTurntableLayout(): TurntableLayout {
   /* Board the deck whenever it is lined up with the trunk (θ=0). */
   links.push({ from: 'trunk', to: 'deck', when: { switchId: 'Jt', position: 'trunk' } });
 
-  const stubs: TurntableStub[] = [
-    /* The turn-around: the deck swung a half-turn from the trunk (θ=180). The
-     *  deck's far end now points WEST, so a loco driving forward off it departs
-     *  heading the OTHER way, onto this westbound stub collinear with the lead.
-     *  No `flipsFacing`: the 180° is REAL — the rotating deck physically carried
-     *  the loco round, so its heading (hence rendered rotation) already reversed
-     *  via the rail. The loco crosses driving forward and keeps driving outward
-     *  (the stub's +d direction is west), so no rail-direction bookkeeping flip is
-     *  needed; a flip here would double-reverse it back to facing east. */
-    { position: 'stub-w', angleDeg: 180, flipsFacing: false, endX: 240, endY: SPINE_Y },
-    /* Two ordinary radiating exits the deck can also swing to (no turn). Their far
-     *  ends sit along the deck angle (315° = up-right, 45° = down-right) so each
-     *  reads as a clean spoke off the rim rather than a kink. */
-    { position: 'stub-n', angleDeg: 315, flipsFacing: false, endX: 1000, endY: SPINE_Y - 300 },
-    { position: 'stub-s', angleDeg: 45, flipsFacing: false, endX: 1000, endY: SPINE_Y + 300 },
-  ];
+  /* Eight rim stubs radiating at 45° around the pit. Each far end sits along its
+   *  own angle so it reads as a clean spoke. NONE carry `flipsFacing`: any
+   *  reversal is REAL — the rotating deck physically carries the loco round, so
+   *  its heading (hence rendered rotation) already follows the bridge; a
+   *  bookkeeping flip would double-reverse it. The loco always drives FORWARD off
+   *  the deck's far end (whose +d direction is the stub's outward direction). */
+  const stubs: TurntableStub[] = STUB_DIRS.map((dir) => {
+    const rad = (dir.angleDeg * Math.PI) / 180;
+    return {
+      position: dir.position,
+      angleDeg: dir.angleDeg,
+      flipsFacing: false,
+      endX: DECK_CENTRE_X + STUB_LEN * Math.cos(rad),
+      endY: SPINE_Y + STUB_LEN * Math.sin(rad),
+    };
+  });
   for (const s of stubs) {
     const id = `seg-${s.position}`;
     /* The stub starts at the deck's far END as it sits at this stub's angle, so

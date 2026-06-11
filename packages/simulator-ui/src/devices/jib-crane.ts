@@ -40,15 +40,16 @@ export interface JibConfig {
   readonly start: { readonly angle: number; readonly reach: number };
 }
 
-/** Slew dynamics (rad). Visibly unhurried — you can watch the boom swing. */
-const SLEW_ACCEL = 1.4;
-const SLEW_MAX_RATE = 0.9;
+/** Slew dynamics (rad). Gentle accel + a modest top rate, so the boom visibly
+ *  eases into and out of the swing rather than tracking at a constant rate. */
+const SLEW_ACCEL = 0.55;
+const SLEW_MAX_RATE = 0.5;
 const SLEW_ARRIVE_POS = 0.01; // rad
 const SLEW_ARRIVE_RATE = 0.03; // rad/s
 
-/** Reach dynamics (mm) — the trolley running out along the boom. */
-const REACH_ACCEL = 700;
-const REACH_MAX_RATE = 420;
+/** Reach dynamics (mm) — the trolley running out along the boom (also eased). */
+const REACH_ACCEL = 280;
+const REACH_MAX_RATE = 230;
 const REACH_ARRIVE_POS = 4; // mm
 const REACH_ARRIVE_RATE = 12; // mm/s
 
