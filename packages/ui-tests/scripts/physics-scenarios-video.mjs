@@ -110,6 +110,13 @@ const CHECKS = {
       why: `train ${t?.fate} crate ${crate ? crate.fate : 'absent'}`,
     };
   },
+  turntable: (b) => {
+    const l = b.find((x) => x.id === 'L');
+    // The loco boarded heading east (rotation 0) and must leave via the intended
+    // turn-around stub FACING THE OTHER WAY (rotation 180) — the honest 180° turn.
+    const ok = !!l && l.segment === 'seg-stub-e' && Math.round(l.rotationDeg) === 180;
+    return { ok, why: `L@${l ? l.segment : 'absent'} rot ${l ? Math.round(l.rotationDeg) : '?'}` };
+  },
   railyard: (b) => {
     const coupled = (id) => b.find((x) => x.id === id)?.coupledTo ?? [];
     const seg = (id) => b.find((x) => x.id === id)?.segment;
@@ -146,6 +153,7 @@ const DURATION = {
   load: 7,
   ramps: 7,
   railyard: 42,
+  turntable: 16,
   'crane-drop': 12,
 };
 

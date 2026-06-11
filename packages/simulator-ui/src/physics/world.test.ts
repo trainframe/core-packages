@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { buildNetwork } from './network.js';
 import type { Rail } from './rail.js';
 import { PhysicsWorld } from './world.js';
 
@@ -350,6 +351,85 @@ describe('PhysicsWorld — crane sensing + positional wedge', () => {
     w.addBody({ id: 'c', kind: 'carriage', railPos: 500, facing: 1, color: 'green' });
     expect(w.sampleAt(500, 0, 20)?.colour).toBe('green'); // under the footprint
     expect(w.sampleAt(900, 0, 20)).toBeNull(); // empty stretch — sees nothing
+  });
+});
+
+describe('PhysicsWorld — facing flip across a turn-around link (the turntable)', () => {
+  /** Two collinear straight segments (`trunk` 0→500 then `deck` 500→1000 along
+   *  +x), joined by one link. `flip` decides whether crossing it turns the body. */
+  const twoSeg = (flip: boolean): PhysicsWorld => {
+    const straight = (ax: number, bx: number): Rail => ({
+      length: bx - ax,
+      at: (d) => ({ x: ax + d, y: 0, headingDeg: 0 }),
+      curvatureAt: () => 0,
+      pieceTypeAt: () => 'straight',
+      slopeAt: () => 0,
+      startBuffered: false,
+      endBuffered: false,
+    });
+    const segments = new Map<string, Rail>([
+      ['trunk', straight(0, 500)],
+      ['deck', straight(500, 1000)],
+    ]);
+    const net = buildNetwork(segments, [{ from: 'trunk', to: 'deck', flipsFacing: flip }]);
+    return new PhysicsWorld(net);
+  };
+
+  it('a body crossing a PLAIN link keeps its facing (heading continuous)', () => {
+    const w = twoSeg(false);
+    w.addBody({
+      id: 'T',
+      kind: 'loco',
+      railPos: 450,
+      facing: 1,
+      motion: 'forward',
+      segment: 'trunk',
+    });
+    run(w, 40);
+    const t = pose(w, 'T');
+    expect(t.segment).toBe('deck'); // it crossed over
+    expect(t.rotationDeg).toBe(0); // facing +1 → unrotated, still facing +x
+    expect(t.x).toBeGreaterThan(500); // and kept rolling the same world direction
+  });
+
+  it('a body crossing a FLIPPING link reverses its facing while keeping its world direction', () => {
+    const w = twoSeg(true);
+    w.addBody({
+      id: 'T',
+      kind: 'loco',
+      railPos: 450,
+      facing: 1,
+      motion: 'forward',
+      segment: 'trunk',
+    });
+    const before = pose(w, 'T');
+    expect(before.rotationDeg).toBe(0); // entered facing +x
+    run(w, 40);
+    const after = pose(w, 'T');
+    expect(after.segment).toBe('deck'); // it crossed the deck link
+    expect(after.rotationDeg).toBe(180); // now FACING THE OTHER WAY (the turn-around)
+    expect(after.x).toBeGreaterThan(before.x); // yet still travelled the same world direction
+  });
+
+  it('keeps driving the SAME world direction under power after the flip (honest turn)', () => {
+    const w = twoSeg(true);
+    w.addBody({
+      id: 'T',
+      kind: 'loco',
+      railPos: 460,
+      facing: 1,
+      motion: 'forward',
+      segment: 'trunk',
+    });
+    run(w, 20); // cross onto the deck (flips)
+    const justAfter = pose(w, 'T');
+    expect(justAfter.segment).toBe('deck');
+    expect(justAfter.rotationDeg).toBe(180);
+    run(w, 30); // keep driving under power
+    const later = pose(w, 'T');
+    /* Still rolling the same world direction (+x) even though it now faces -x and
+     * the motor intent was re-expressed as reverse — this is the turn-around. */
+    expect(later.x).toBeGreaterThan(justAfter.x);
   });
 });
 
