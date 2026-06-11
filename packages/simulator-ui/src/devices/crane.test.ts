@@ -60,4 +60,14 @@ describe('Crane — a physical XY gantry', () => {
     expect(c.pos.x).toBe(BOUNDS.minX);
     expect(c.pos.y).toBe(BOUNDS.maxY);
   });
+
+  it('carries and releases a payload', () => {
+    const c = new Crane(BOUNDS, { x: 100, y: 100 });
+    expect(c.carrying).toBe(false);
+    c.grab();
+    expect(c.carrying).toBe(true);
+    expect(c.release()).toBe(true); // it WAS carrying → caller drops a body
+    expect(c.carrying).toBe(false);
+    expect(c.release()).toBe(false); // already empty → nothing to drop
+  });
 });

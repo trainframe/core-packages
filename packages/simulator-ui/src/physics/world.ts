@@ -51,6 +51,9 @@ export interface BodyInit {
   /** Which network segment the body starts on (default `main`). */
   readonly segment?: string;
   readonly color?: string;
+  /** Foreign matter fouling the rail (e.g. a crate a crane dropped) rather than
+   *  rolling stock — a train that strikes it at speed derails on it. Default false. */
+  readonly obstacle?: boolean;
 }
 
 interface Body {
@@ -71,6 +74,8 @@ interface Body {
   coupledTo: Set<string>;
   /** Why it left the rail, for the harness to assert on. */
   fate: 'on-rail' | 'derailed' | 'ran-off';
+  /** Foreign matter on the rail — a train hitting it at speed derails. */
+  obstacle: boolean;
 }
 
 export interface BodyPose {
@@ -153,9 +158,30 @@ export class PhysicsWorld {
       free: { x: 0, y: 0, heading: 0, vx: 0, vy: 0 },
       coupledTo: new Set(),
       fate: 'on-rail',
+      obstacle: init.obstacle ?? false,
     };
     this.bodyList.push(b);
     this.byId.set(b.id, b);
+  }
+
+  /** Drop a body onto the rail at the world point nearest (x,y) — the simulator
+   *  side of a crane releasing a payload. Finds the closest segment + distance
+   *  along it, then seeds the body there (railed). Returns its id. */
+  placeBodyAt(init: Omit<BodyInit, 'railPos' | 'segment'>, x: number, y: number): string {
+    let best: { seg: string; dist: number; d2: number } | null = null;
+    for (const seg of this.net.segments()) {
+      const rail = this.net.railOf(seg);
+      const steps = Math.max(8, Math.ceil(rail.length / 10));
+      for (let i = 0; i <= steps; i++) {
+        const d = (rail.length * i) / steps;
+        const p = rail.at(d);
+        const d2 = (p.x - x) ** 2 + (p.y - y) ** 2;
+        if (best === null || d2 < best.d2) best = { seg, dist: d, d2 };
+      }
+    }
+    const at = best ?? { seg: this.net.segments()[0] ?? 'main', dist: 0 };
+    this.addBody({ ...init, segment: at.seg, railPos: at.dist });
+    return init.id;
   }
 
   /** Set a body's motion intent (the only thing a loco device commands). */
@@ -473,9 +499,35 @@ export class PhysicsWorld {
     const gap = hi.railPos - lo.railPos;
     const minGap = lo.halfLen + hi.halfLen;
     if (gap >= minGap + COUPLE_RANGE) return; // not touching
+    if (this.tryHitObstacle(lo, hi)) return;
     if (this.tryCollide(lo, hi, minGap)) return;
     if (this.tryCouple(lo, hi, minGap)) return;
     if (gap < minGap && !this.tryPush(lo, hi, minGap)) this.separate(lo, hi, minGap);
+  }
+
+  /** A moving train meets foreign matter on the rail (a dropped crate): at speed
+   *  it derails on it and scatters the debris; crept up to gently it just shoves
+   *  it (falls through to the push path). Exactly one of the pair is an obstacle. */
+  private tryHitObstacle(lo: Body, hi: Body): boolean {
+    const obst = lo.obstacle ? lo : hi.obstacle ? hi : null;
+    const train = lo.obstacle ? hi : hi.obstacle ? lo : null;
+    if (obst === null || train === null || train.obstacle) return false;
+    const impact = train.vel;
+    if (Math.abs(impact) < 60) return false; // a crawl just nudges it — no wreck
+    obst.vel = impact; // the impact flings the debris along the train's heading
+    this.releaseToFree(train, 'derailed');
+    this.releaseToFree(obst, 'derailed');
+    // …and throws them off the rail to opposite sides, so the wreck reads as one.
+    this.scatter(train, impact * 1.2);
+    this.scatter(obst, -impact * 1.5);
+    return true;
+  }
+
+  /** Add a lateral (perpendicular-to-heading) kick to a freed body. */
+  private scatter(b: Body, lateral: number): void {
+    const perp = (b.free.heading * Math.PI) / 180 + Math.PI / 2;
+    b.free.vx += Math.cos(perp) * lateral;
+    b.free.vy += Math.sin(perp) * lateral;
   }
 
   /** Two opposed locos closing → a head-on collision that CONSERVES MOMENTUM.

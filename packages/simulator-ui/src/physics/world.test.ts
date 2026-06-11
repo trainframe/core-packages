@@ -169,6 +169,37 @@ describe('PhysicsWorld — contact', () => {
     expect(l.x).toBeGreaterThan(loStopX - 1); // (loco only moved forward, never yanked back)
   });
 
+  it('a train striking a dropped obstacle at speed derails on it', () => {
+    const w = new PhysicsWorld(straightRail(3000));
+    w.addBody({ id: 'T', kind: 'loco', railPos: 100, facing: 1, motion: 'forward' });
+    // The crane sets a crate down on the rail ahead.
+    const id = w.placeBodyAt(
+      { id: 'crate', kind: 'carriage', facing: 1, mass: 0.8, halfLen: 18, obstacle: true },
+      1500,
+      0,
+    );
+    expect(id).toBe('crate');
+    expect(pose(w, 'crate').segment).toBe('main');
+    expect(pose(w, 'crate').x).toBeCloseTo(1500, 0); // snapped onto the rail at the drop point
+    run(w, 120);
+    expect(pose(w, 'T').fate).toBe('derailed'); // the train wrecked on it
+    expect(pose(w, 'crate').fate).toBe('derailed'); // and scattered the crate
+  });
+
+  it('a train creeping into a dropped obstacle just nudges it, no wreck', () => {
+    const w = new PhysicsWorld(straightRail(3000));
+    // A barely-moving loco (power low so it crawls) meets a crate just ahead.
+    w.addBody({ id: 'T', kind: 'loco', railPos: 100, facing: 1, motion: 'forward', power: 30 });
+    w.placeBodyAt(
+      { id: 'crate', kind: 'carriage', facing: 1, mass: 0.8, halfLen: 18, obstacle: true },
+      160,
+      0,
+    );
+    run(w, 30);
+    expect(pose(w, 'T').fate).toBe('on-rail'); // crept up — no derailment
+    expect(pose(w, 'crate').fate).toBe('on-rail');
+  });
+
   it('a loco reversing into a carriage magnetically couples', () => {
     const w = new PhysicsWorld(straightRail(2000));
     w.addBody({ id: 'L', kind: 'loco', railPos: 400, facing: 1, motion: 'reverse' });

@@ -34,6 +34,7 @@ export class Crane {
   private vy = 0;
   private tx: number;
   private ty: number;
+  private holding = false;
 
   constructor(bounds: CraneBounds, start: { x: number; y: number }) {
     this.bounds = bounds;
@@ -41,6 +42,24 @@ export class Crane {
     this.py = this.clampY(start.y);
     this.tx = this.px;
     this.ty = this.py;
+  }
+
+  /** Whether the head is currently carrying a payload (for rendering the hook). */
+  get carrying(): boolean {
+    return this.holding;
+  }
+
+  /** Latch a payload onto the hook (the controller spawns/releases the world body). */
+  grab(): void {
+    this.holding = true;
+  }
+
+  /** Let the payload go — returns true if it WAS carrying (so the caller drops a
+   *  body into the world), false if the hook was already empty. */
+  release(): boolean {
+    const had = this.holding;
+    this.holding = false;
+    return had;
   }
 
   get pos(): { x: number; y: number } {

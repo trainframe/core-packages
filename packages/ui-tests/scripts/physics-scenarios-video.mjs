@@ -101,6 +101,15 @@ const CHECKS = {
       why: `up ${up | 0} < flat ${flat | 0} < down ${down | 0}`,
     };
   },
+  'crane-drop': (b) => {
+    const t = b.find((x) => x.id === 'T');
+    const crate = b.find((x) => x.id === 'crate');
+    // The crane set the crate down on the line and the train wrecked on it.
+    return {
+      ok: !!crate && t?.fate === 'derailed' && crate.fate === 'derailed',
+      why: `train ${t?.fate} crate ${crate ? crate.fate : 'absent'}`,
+    };
+  },
   railyard: (b) => {
     const coupled = (id) => b.find((x) => x.id === id)?.coupledTo ?? [];
     const seg = (id) => b.find((x) => x.id === id)?.segment;
@@ -137,6 +146,7 @@ const DURATION = {
   load: 7,
   ramps: 7,
   railyard: 42,
+  'crane-drop': 12,
 };
 
 async function runScenario(browser, name) {
