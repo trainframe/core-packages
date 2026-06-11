@@ -49,6 +49,14 @@ export interface CameraFootprint {
 const HALF_LEN_MM: Record<BodyPose['kind'], number> = { loco: 34, carriage: 30 };
 
 /**
+ * An optional occlusion predicate: `(x, y) => true` when the world point is
+ * hidden from a camera (e.g. under a dark tunnel's roof — see `physics/tunnel`).
+ * A camera consulting this returns EMPTY over an occluded footprint even though a
+ * body is physically there — the honest blind camera, reading no ground truth.
+ */
+export type OcclusionPredicate = (x: number, y: number) => boolean;
+
+/**
  * A sim-backed CameraProvider over a `PhysicsWorld`. It reads `world.bodies()`
  * and reports occupied + colour for the body whose extent covers the footprint.
  *
@@ -59,22 +67,38 @@ const HALF_LEN_MM: Record<BodyPose['kind'], number> = { loco: 34, carriage: 30 }
  * beneath it. Only railed bodies are visible (a derailed / ran-off body has left
  * the footprint's stretch of line). When several bodies overlap, the nearest
  * centre wins, as a single fixed sensor would resolve.
+ *
+ * An optional `occluded` predicate models a covered footprint (a dark tunnel): if
+ * the footprint centre is occluded the camera reports empty regardless of what is
+ * physically beneath it — the sensing is genuinely blind, not a peek at the world.
  */
+/** The railed body whose centre is nearest the footprint AND within reach, or
+ *  undefined when nothing is beneath it. */
+function nearestBodyUnder(
+  world: PhysicsWorld,
+  footprint: CameraFootprint,
+): { colour: string | undefined } | undefined {
+  let nearest: { gap: number; colour: string | undefined } | undefined;
+  for (const body of world.bodies()) {
+    if (body.mode !== 'railed') continue;
+    const gap = Math.hypot(body.x - footprint.x, body.y - footprint.y);
+    const reach = HALF_LEN_MM[body.kind] + footprint.radiusMm;
+    if (gap <= reach && (nearest === undefined || gap < nearest.gap)) {
+      nearest = { gap, colour: body.color };
+    }
+  }
+  return nearest;
+}
+
 export function physicsCameraProvider(
   world: PhysicsWorld,
   footprint: CameraFootprint,
+  occluded?: OcclusionPredicate,
 ): CameraProvider {
   return {
     perceive(): CameraPerception {
-      let nearest: { gap: number; colour: string | undefined } | undefined;
-      for (const body of world.bodies()) {
-        if (body.mode !== 'railed') continue;
-        const gap = Math.hypot(body.x - footprint.x, body.y - footprint.y);
-        const reach = HALF_LEN_MM[body.kind] + footprint.radiusMm;
-        if (gap <= reach && (nearest === undefined || gap < nearest.gap)) {
-          nearest = { gap, colour: body.color };
-        }
-      }
+      if (occluded?.(footprint.x, footprint.y) === true) return { occupied: false };
+      const nearest = nearestBodyUnder(world, footprint);
       if (nearest === undefined) return { occupied: false };
       return nearest.colour === undefined
         ? { occupied: true }
