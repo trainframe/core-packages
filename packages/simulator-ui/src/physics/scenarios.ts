@@ -154,6 +154,42 @@ function collision(): PhysicsScenario {
   };
 }
 
+function headon(): PhysicsScenario {
+  const pieces: TrackPiece[] = [];
+  straights(pieces, START, 10, 's'); // 2000 mm of rail
+  return {
+    name: 'headon',
+    title: 'An uneven head-on: a heavy loco shoves the light one back (momentum conserved)',
+    pieces,
+    bodies: [
+      // Heavy, powerful loco vs a light, weaker one — closing head-on.
+      {
+        id: 'heavy',
+        kind: 'loco',
+        railPos: 200,
+        facing: 1,
+        motion: 'forward',
+        color: RED,
+        mass: 2.4,
+        power: 1600,
+      },
+      {
+        id: 'light',
+        kind: 'loco',
+        railPos: 1700,
+        facing: -1,
+        motion: 'forward',
+        color: AMBER,
+        mass: 0.6,
+        power: 520,
+      },
+    ],
+    couples: [],
+    script: [],
+    durationS: 7,
+  };
+}
+
 function push(): PhysicsScenario {
   const pieces: TrackPiece[] = [];
   straights(pieces, START, 12, 's');
@@ -417,6 +453,7 @@ function ramps(): PhysicsScenario {
 
 const BUILDERS: Record<string, () => PhysicsScenario> = {
   collision,
+  headon,
   push,
   terminus,
   couple,

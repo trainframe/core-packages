@@ -109,6 +109,10 @@ const BRAKE = 1100;
  *  carriage or a shed cut has no brakes, so when whatever was pushing it lets go
  *  it carries its momentum and trundles on, slowing only gently to rest. */
 const ROLL_FRICTION = 320;
+/** Coefficient of restitution for a head-on collision (0 = perfectly inelastic,
+ *  1 = perfectly elastic). A little bounce, so the bodies recoil apart by momentum
+ *  rather than freezing dead — the lighter/slower one is flung back the hardest. */
+const RESTITUTION = 0.35;
 
 export class PhysicsWorld {
   private readonly net: RailNetwork;
@@ -474,11 +478,20 @@ export class PhysicsWorld {
     if (gap < minGap && !this.tryPush(lo, hi, minGap)) this.separate(lo, hi, minGap);
   }
 
-  /** Two opposed locos closing → stop both and hold them apart. */
+  /** Two opposed locos closing → a head-on collision that CONSERVES MOMENTUM.
+   *  Both halt their motors (crashed) and exchange velocities by the 1-D
+   *  collision law with restitution: equal-and-opposite locos cancel to rest, but
+   *  a heavier or faster one carries the pair its way and flings the lighter one
+   *  back. The residual momentum then bleeds off as the wrecked locos brake. */
   private tryCollide(lo: Body, hi: Body, minGap: number): boolean {
     if (lo.kind !== 'loco' || hi.kind !== 'loco' || lo.vel - hi.vel <= 1) return false;
-    lo.vel = 0;
-    hi.vel = 0;
+    const { m1, m2 } = { m1: lo.mass, m2: hi.mass };
+    const v1 = lo.vel;
+    const v2 = hi.vel;
+    const total = m1 + m2;
+    /* v1' = (m1·v1 + m2·v2 − m2·e·(v1−v2)) / (m1+m2); v2' symmetric. */
+    lo.vel = (m1 * v1 + m2 * v2 - m2 * RESTITUTION * (v1 - v2)) / total;
+    hi.vel = (m1 * v1 + m2 * v2 + m1 * RESTITUTION * (v1 - v2)) / total;
     lo.motion = 'stopped';
     hi.motion = 'stopped';
     this.separate(lo, hi, minGap);

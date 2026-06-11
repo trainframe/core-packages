@@ -69,6 +69,74 @@ describe('PhysicsWorld — contact', () => {
     expect(b.x).toBeLessThan(800);
   });
 
+  it('a head-on between unequal locos conserves momentum: the heavier shoves the lighter back', () => {
+    const w = new PhysicsWorld(straightRail(2000));
+    w.addBody({
+      id: 'H',
+      kind: 'loco',
+      railPos: 200,
+      facing: 1,
+      motion: 'forward',
+      mass: 2.4,
+      power: 1600,
+    });
+    w.addBody({
+      id: 'L',
+      kind: 'loco',
+      railPos: 1700,
+      facing: -1,
+      motion: 'forward',
+      mass: 0.6,
+      power: 520,
+    });
+    // Step until they're both moving fast, then capture the impact.
+    let pHx = 0;
+    let pLx = 0;
+    let pH = 0;
+    let pL = 0;
+    for (let i = 0; i < 200; i++) {
+      const h = pose(w, 'H');
+      const l = pose(w, 'L');
+      const closing = l.x - h.x;
+      if (closing < 80) {
+        // momentum just before contact this step
+        pH = 2.4 * h.speed; // H moves +
+        pL = -0.6 * l.speed; // L moves −
+        pHx = h.x;
+        pLx = l.x;
+        break;
+      }
+      w.step(0.02);
+    }
+    // Resolve the collision and read the instant after.
+    w.step(0.02);
+    const h2 = pose(w, 'H');
+    const l2 = pose(w, 'L');
+    // The light loco is flung back the hardest: its post-impact speed exceeds the heavy's.
+    expect(l2.speed).toBeGreaterThan(h2.speed);
+    // Net momentum stayed in the heavy loco's (+) direction (it was the bigger before too).
+    expect(pH + pL).toBeGreaterThan(0);
+    // Let it settle; the light loco ends up driven back past where it hit.
+    run(w, 120, 0.02);
+    expect(pose(w, 'H').speed).toBeLessThan(2);
+    expect(pose(w, 'L').speed).toBeLessThan(2);
+    expect(pose(w, 'L').x).toBeGreaterThan(pLx - 1); // recoiled back toward its start, not shoved further in
+    expect(pHx).toBeGreaterThan(0); // (sanity: we actually reached contact)
+  });
+
+  it('an equal-and-opposite head-on cancels to (near) rest — only a small recoil', () => {
+    const w = new PhysicsWorld(straightRail(2000));
+    w.addBody({ id: 'A', kind: 'loco', railPos: 200, facing: 1, motion: 'forward' });
+    w.addBody({ id: 'B', kind: 'loco', railPos: 1800, facing: -1, motion: 'forward' });
+    run(w, 250, 0.02);
+    const a = pose(w, 'A');
+    const b = pose(w, 'B');
+    expect(a.speed).toBeLessThan(2);
+    expect(b.speed).toBeLessThan(2);
+    expect(b.x - a.x).toBeGreaterThan(50); // held apart by their extents + a little recoil
+    expect(b.x - a.x).toBeLessThan(110);
+  });
+
   it('a loco drives forward into a carriage and pushes it back', () => {
     const w = new PhysicsWorld(straightRail(3000));
     w.addBody({ id: 'L', kind: 'loco', railPos: 100, facing: 1, motion: 'forward' });

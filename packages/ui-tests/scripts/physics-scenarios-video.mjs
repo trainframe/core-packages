@@ -30,6 +30,19 @@ const CHECKS = {
       why: `red@${r.x | 0} blue@${bl.x | 0} spd ${r.speed | 0}/${bl.speed | 0}`,
     };
   },
+  headon: (b) => {
+    const h = b.find((x) => x.id === 'heavy');
+    const l = b.find((x) => x.id === 'light');
+    // Both wrecked to a stand, still apart; the light loco was driven BACK toward
+    // its own start (recoiled) while the heavy barely shifted — momentum's winner.
+    const stopped = h.speed < 5 && l.speed < 5;
+    const apart = l.x - h.x > 50;
+    const lightDrivenBack = l.x > 1000; // shoved back toward where it came from
+    return {
+      ok: stopped && apart && lightDrivenBack,
+      why: `heavy@${h.x | 0} light@${l.x | 0} spd ${h.speed | 0}/${l.speed | 0}`,
+    };
+  },
   push: (b) => {
     const r = b.find((x) => x.id === 'red');
     const w = b.find((x) => x.id === 'wagon');
@@ -113,6 +126,7 @@ const CHECKS = {
 
 const DURATION = {
   collision: 7,
+  headon: 7,
   push: 8,
   terminus: 7,
   couple: 7,
@@ -164,6 +178,7 @@ async function main() {
     ? process.argv.slice(2)
     : [
         'collision',
+        'headon',
         'push',
         'terminus',
         'couple',
