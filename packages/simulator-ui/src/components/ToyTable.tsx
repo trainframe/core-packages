@@ -833,9 +833,8 @@ function placeYardSpares(
   const ids = yard.getSpares().map((c) => c.id);
   if (ids.length === 0) return;
   const sparesSlotY = yard.getSparesSlotY();
-  const mirror = yardMirrorCache.get(piece.id) ?? false;
   // entrySlotY is irrelevant to sparesPose; pass the spares slot itself.
-  const journey = railyardInteriorJourney(sparesSlotY, sparesSlotY, mirror);
+  const journey = railyardInteriorJourney(sparesSlotY, sparesSlotY);
   placeRestingCut(piece, ids, journey.sparesPose, result);
 }
 
@@ -876,11 +875,6 @@ type YardInterior = NonNullable<
   ReturnType<NonNullable<ReturnType<ToySimulation['getRailyard']>>['getInteriorState']>
 >;
 
-/** Per-yard "did the train enter from the east throat?" — computed by
- *  placeShuntedTrain (which has the train's throat anchor) each frame and read by
- *  the crane pose (which runs later the same frame), so both agree on the mirror. */
-const yardMirrorCache = new Map<string, boolean>();
-
 /** Which centre-line the train rides this phase, how far along (0..1), and
  *  whether it is travelling in reverse (rake trailing AHEAD of the loco). Loco-
  *  referenced: the loco walks each path start→end so its position is continuous
@@ -890,12 +884,10 @@ function shuntSegment(
   j: RailyardJourney,
 ): { local: RailyardJourney['enter']; progress: number; reverse: boolean } {
   switch (interior.phase) {
-    case 'lead-out':
-      return { local: j.leadOut, progress: interior.progress, reverse: false };
     case 'enter':
       return { local: j.enter, progress: interior.progress, reverse: true };
     case 'decouple':
-      return { local: j.enter, progress: 1, reverse: false };
+      return { local: j.enter, progress: 1, reverse: true };
     case 'pull-clear':
       return { local: j.pullClear, progress: interior.progress, reverse: false };
     case 'back-to-spares':
@@ -904,20 +896,9 @@ function shuntSegment(
       return { local: j.settle, progress: interior.progress, reverse: false };
     case 'inspect':
       return { local: j.settle, progress: 1, reverse: false };
-    case 'exit-pull':
-      return { local: j.exitPull, progress: interior.progress, reverse: false };
-    case 'exit-home':
-      return { local: j.exitHome, progress: interior.progress, reverse: true };
+    case 'exit':
+      return { local: j.exit, progress: interior.progress, reverse: false };
   }
-}
-
-/** True when the train parked at the throat is facing INTO the yard from its EAST
- *  end — so the canonical west-entry journey must be mirrored. Read from the
- *  train's heading vs the yard's local +x (the spine, west→east). */
-function yardEntryMirrored(piece: TrackPiece, anchor: WorldPosition | undefined): boolean {
-  if (anchor === undefined) return false;
-  const into = ((anchor.rotationDeg - piece.rotationDeg) * Math.PI) / 180;
-  return Math.cos(into) < 0;
 }
 
 /** Transform a yard-local point to world (mirror→rotate→translate, matching the
@@ -967,9 +948,7 @@ function placeShuntedTrain(
     : interior.trainId;
   const consist = sim.getTrain(interior.trainId)?.getConsist() ?? [];
 
-  const mirror = yardEntryMirrored(piece, result.get(trainPieceId));
-  yardMirrorCache.set(piece.id, mirror);
-  const journey = railyardInteriorJourney(interior.entrySlotY, interior.sparesSlotY, mirror);
+  const journey = railyardInteriorJourney(interior.entrySlotY, interior.sparesSlotY);
   const seg = shuntSegment(interior, journey);
   const path = worldHalfPath(piece, seg.local);
   const locoArc = seg.progress * path.length;
@@ -1081,10 +1060,7 @@ function yardCranePose(piece: TrackPiece, hardware: ToyHardware | null): YardCra
   if (hardware === null) return null;
   const interior = hardware.getSimulation().getRailyard(`YARD-${piece.id}`)?.getInteriorState();
   if (interior == null) return null;
-  // Same mirror the train used this frame (placeShuntedTrain ran first and cached
-  // it) so the crane's work points line up with the train.
-  const mirror = yardMirrorCache.get(piece.id) ?? false;
-  const journey = railyardInteriorJourney(interior.entrySlotY, interior.sparesSlotY, mirror);
+  const journey = railyardInteriorJourney(interior.entrySlotY, interior.sparesSlotY);
   const s = yardCraneState(interior, journey);
   return { depthMm: s.x, laneMm: s.y, working: s.working, hookDown: s.hookDown };
 }

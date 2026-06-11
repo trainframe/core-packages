@@ -1043,47 +1043,29 @@ function railyardEastLeg(slotY: number): CentreLinePath {
   return railyardLeg(railyardEastTapX(slotY), RAILYARD_SLOT_HALF_X, slotY);
 }
 
-/** The same rail mirrored across the spine's mid (x → −x), heading flipped — used
- *  to build the interior journey for a train entering from the EAST throat from
- *  the canonical west-entry construction. @pure */
-function mirrorXPath(path: CentreLinePath): CentreLinePath {
-  return {
-    length: path.length,
-    at(distFromStart: number): RailPose {
-      const p = path.at(distFromStart);
-      return { x: -p.x, y: p.y, headingDeg: 180 - p.headingDeg };
-    },
-  };
-}
-
 /**
  * The interior shunting journey (docs/spec/railyard-shunting-choreography.md) as
- * directed, on-rail phase paths in the yard's local frame. The train suspends at
- * the yard MARKER — the piece CENTRE (local 0,0) — so the journey starts AND ends
- * there: no teleport when the interior render takes over from / hands back to the
- * main line. The train keeps its heading; each path is a single physical
- * direction (forward = onto the lead; reverse = backing into a slot), and
+ * directed, on-rail phase paths in the yard's local frame. The yard's throat is
+ * its EXIT endpoint (+HALF) — the train transits the spine and suspends THERE
+ * (see the railyard `centreLine`), so the journey starts and ends at the throat:
+ * no teleport handing off to/from the main line, and no pull-onto-the-lead before
+ * entering or return to the centre. Each path is a single physical direction and
  * consecutive paths share the loco's endpoint, so the loco moves continuously:
  *
- *   leadOut   centre → pull forward onto the (east) lead, clear of the slots;
- *   enter     reverse into the free entry slot, rest at its far end;
- *   pullClear pull forward back onto the lead (leaving the shed cut parked);
+ *   enter        reverse straight off the throat into the free entry slot, rest;
+ *   pullClear    pull forward back toward the throat lead (leaving the shed cut);
  *   backToSpares reverse into the spares slot until the rake couples;
- *   settle    pull forward to the stable rest, rake contained in the slot;
- *   exitPull  pull forward back onto the lead;
- *   exitHome  reverse back to the centre, where core reclaims the train.
+ *   settle       pull forward to the stable rest, rake contained in the slot;
+ *   exit         pull forward straight out to the throat, where core reclaims it.
  *
- * `mirror` builds it for a train facing the other way at the centre. The crane
- * only ever decouples; it is not part of these paths.
+ * The crane only decouples; it is not part of these paths.
  */
 export interface RailyardJourney {
-  readonly leadOut: CentreLinePath;
   readonly enter: CentreLinePath;
   readonly pullClear: CentreLinePath;
   readonly backToSpares: CentreLinePath;
   readonly settle: CentreLinePath;
-  readonly exitPull: CentreLinePath;
-  readonly exitHome: CentreLinePath;
+  readonly exit: CentreLinePath;
   /** Local pose where the shed cut rests (east end of the dropped pair, in the
    *  entry slot) and where the spare cut rests (east end, in the spares slot). */
   readonly shedPose: RailPose;
@@ -1093,11 +1075,12 @@ export interface RailyardJourney {
   readonly couplingPose: RailPose;
 }
 
-/** The east lead the train pulls out to (clear of the slot taps so it can reverse
- *  into a slot), loco rest (far/east end of a slot, rake contained), where the
- *  loco sits when the rake couples deep, and where the spare cut rests — all local
- *  x (mm). Tuned for the 400 mm slots + ~330 mm rake in the 1200 mm yard. */
-const RAILYARD_LEAD_X = RAILYARD_HALF_LENGTH_MM - 40;
+/** The throat (exit endpoint = where the train suspends), the headshunt lead just
+ *  inside it, loco rest (far end of a slot, rake contained), where the loco sits
+ *  when the rake couples deep, and where the spare cut rests — all local x (mm).
+ *  Tuned for the 400 mm slots + ~330 mm rake in the 1200 mm yard. */
+const RAILYARD_THROAT_X = RAILYARD_HALF_LENGTH_MM;
+const RAILYARD_LEAD_X = RAILYARD_HALF_LENGTH_MM - 30;
 const RAILYARD_REST_X = RAILYARD_SLOT_HALF_X - 40;
 const RAILYARD_COUPLE_X = 76;
 const RAILYARD_SPARES_X = -60;
@@ -1127,32 +1110,18 @@ function railyardPullToLead(fromX: number, slotY: number, toX: number): CentreLi
   ]);
 }
 
-export function railyardInteriorJourney(
-  entrySlotY: number,
-  sparesSlotY: number,
-  mirror = false,
-): RailyardJourney {
-  const lead = RAILYARD_LEAD_X;
-  const leadOut = segmentPath(0, 0, lead, 0);
-  const enter = railyardReverseIntoSlot(lead, entrySlotY, RAILYARD_REST_X);
-  const pullClear = railyardPullToLead(RAILYARD_REST_X, entrySlotY, lead);
-  const backToSpares = railyardReverseIntoSlot(lead, sparesSlotY, RAILYARD_COUPLE_X);
-  const settle = segmentPath(RAILYARD_COUPLE_X, sparesSlotY, RAILYARD_REST_X, sparesSlotY);
-  const exitPull = railyardPullToLead(RAILYARD_REST_X, sparesSlotY, lead);
-  const exitHome = segmentPath(lead, 0, 0, 0);
-  const m = (p: CentreLinePath): CentreLinePath => (mirror ? mirrorXPath(p) : p);
-  const sx = mirror ? -1 : 1;
+export function railyardInteriorJourney(entrySlotY: number, sparesSlotY: number): RailyardJourney {
   return {
-    leadOut: m(leadOut),
-    enter: m(enter),
-    pullClear: m(pullClear),
-    backToSpares: m(backToSpares),
-    settle: m(settle),
-    exitPull: m(exitPull),
-    exitHome: m(exitHome),
-    shedPose: { x: sx * RAILYARD_SHED_X, y: entrySlotY, headingDeg: 0 },
-    sparesPose: { x: sx * RAILYARD_SPARES_X, y: sparesSlotY, headingDeg: 0 },
-    couplingPose: { x: sx * RAILYARD_COUPLING_X, y: entrySlotY, headingDeg: 0 },
+    // Reverse straight off the throat into the entry slot — no lead-out.
+    enter: railyardReverseIntoSlot(RAILYARD_THROAT_X, entrySlotY, RAILYARD_REST_X),
+    pullClear: railyardPullToLead(RAILYARD_REST_X, entrySlotY, RAILYARD_LEAD_X),
+    backToSpares: railyardReverseIntoSlot(RAILYARD_LEAD_X, sparesSlotY, RAILYARD_COUPLE_X),
+    settle: segmentPath(RAILYARD_COUPLE_X, sparesSlotY, RAILYARD_REST_X, sparesSlotY),
+    // Pull forward straight out to the throat to leave — no return to the centre.
+    exit: railyardPullToLead(RAILYARD_REST_X, sparesSlotY, RAILYARD_THROAT_X),
+    shedPose: { x: RAILYARD_SHED_X, y: entrySlotY, headingDeg: 0 },
+    sparesPose: { x: RAILYARD_SPARES_X, y: sparesSlotY, headingDeg: 0 },
+    couplingPose: { x: RAILYARD_COUPLING_X, y: entrySlotY, headingDeg: 0 },
   };
 }
 
@@ -1708,9 +1677,15 @@ const PIECES: Record<TrackPieceType, PieceDescriptor> = {
     tint: '#caa46a',
     markerKind: 'block_boundary',
     endpoints: () => RAILYARD_ENDPOINTS,
+    // The yard's logical position (its zone throat) is its EXIT endpoint (+HALF),
+    // not its centre — so a train routed to the yard transits the spine and stops
+    // AT the throat, and the interior choreography reverses it straight off the
+    // throat into a slot and pulls it straight back out to leave (no centre stop).
+    // composeEdgePath builds the train's rendered path from this, so anchoring
+    // the half here puts the suspended/departing train at the throat — no teleport.
     centreLine: (index) => {
       const e = RAILYARD_ENDPOINTS[index];
-      return e === undefined ? undefined : linearHalfPath(e.lx, e.ly);
+      return e === undefined ? undefined : segmentPath(RAILYARD_HALF_LENGTH_MM, 0, e.lx, e.ly);
     },
     railLines: railyardRailLines,
     body: railyardBody,

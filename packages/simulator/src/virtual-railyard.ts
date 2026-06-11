@@ -52,15 +52,13 @@ const SLOT_B = -84;
    progress below, the train accelerates off each stop and decelerates back to
    rest at the slot ends / reversals. Tick-based, deterministic. */
 const PHASE_TICKS: Record<ShuntPhase, number> = {
-  'lead-out': 30,
-  enter: 26,
+  enter: 34,
   decouple: 90,
   'pull-clear': 26,
   'back-to-spares': 30,
   settle: 12,
   inspect: 64,
-  'exit-pull': 26,
-  'exit-home': 30,
+  exit: 34,
 };
 /** Progress within `decouple` at which the crane has split the coupling (the rear
  *  cut sheds), and within `back-to-spares` at which the train has backed onto the
@@ -71,15 +69,13 @@ const COUPLE_AT = 0.92;
 /** The phases of the single-lead interior maneuver (ADR-026), in order. See the
  *  file-head comment + docs/spec/railyard-shunting-choreography.md. */
 type ShuntPhase =
-  | 'lead-out'
   | 'enter'
   | 'decouple'
   | 'pull-clear'
   | 'back-to-spares'
   | 'settle'
   | 'inspect'
-  | 'exit-pull'
-  | 'exit-home';
+  | 'exit';
 
 /** The single-lead interior maneuver in progress. Geometry-free: the phase, its
  *  0..1 progress, the slots it chose, and the consist bookkeeping. */
@@ -285,7 +281,7 @@ export class VirtualRailyard {
       train,
       entrySlotY,
       sparesSlotY: swapping ? this.sparesSlotY : entrySlotY,
-      phase: 'lead-out',
+      phase: 'enter',
       progress: 0,
       swapping,
       dropped: [],
@@ -318,9 +314,6 @@ export class VirtualRailyard {
   private nextPhase(shunt: Shunt): void {
     shunt.progress = 0;
     switch (shunt.phase) {
-      case 'lead-out':
-        shunt.phase = 'enter';
-        return;
       case 'enter':
         shunt.phase = shunt.swapping ? 'decouple' : 'inspect';
         return;
@@ -337,12 +330,9 @@ export class VirtualRailyard {
         shunt.phase = 'inspect';
         return;
       case 'inspect':
-        shunt.phase = 'exit-pull';
+        shunt.phase = 'exit';
         return;
-      case 'exit-pull':
-        shunt.phase = 'exit-home';
-        return;
-      case 'exit-home':
+      case 'exit':
         this.completeShunt(shunt);
         return;
     }

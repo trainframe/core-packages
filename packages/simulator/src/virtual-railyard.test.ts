@@ -292,15 +292,13 @@ describe('VirtualRailyard carriage swap (the opaque-interior rearrange)', () => 
     // the crane decouples, pull out onto the lead, reverse into the spares slot,
     // settle, the camera reads it, then it pulls out and returns to the centre.
     expect(phaseOrder).toEqual([
-      'lead-out',
       'enter',
       'decouple',
       'pull-clear',
       'back-to-spares',
       'settle',
       'inspect',
-      'exit-pull',
-      'exit-home',
+      'exit',
     ]);
     // The rake was SHORTER (rear cut shed) before being made whole — a timed
     // maneuver, not an instant swap — with a parked shed cut and a waiting spare
