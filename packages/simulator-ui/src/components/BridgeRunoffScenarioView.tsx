@@ -22,7 +22,7 @@ import { physicsMotorActuator } from '../devices/motor-actuator.js';
 import { TrainDevice } from '../devices/train-device.js';
 import { buildLiftBridgeLayout } from '../physics/lift-bridge.js';
 import { type BodyPose, PhysicsWorld } from '../physics/world.js';
-import { BridgeDefs, LiftBridgeArt } from './LiftBridgeArt.js';
+import { LiftBridgeArt } from './LiftBridgeArt.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 
@@ -128,8 +128,7 @@ export function BridgeRunoffScenarioView() {
       >
         <title>Bridge run-off — an unheld train drives off the raised span into the gap</title>
         <WoodDefs />
-        <BridgeDefs />
-        {/* The same polished bridge as the controlled demo (shared art). */}
+        {/* The same bridge as the controlled demo (shared art). */}
         <LiftBridgeArt
           hingeX={layout.spanStart.x}
           freeX={layout.spanEnd.x}

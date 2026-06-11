@@ -92,24 +92,6 @@ function Pier({ box }: { box: PierBox }) {
   );
 }
 
-/** A stone abutment where a fixed approach meets a pier — a short masonry wing
- *  wall, tinted like the pier so the bank reads as built-up to the gap edge. */
-function Abutment({ x, y, w }: { x: number; y: number; w: number }) {
-  return (
-    <rect
-      x={x}
-      y={y - 16}
-      width={w}
-      height={32}
-      rx={3}
-      fill="url(#tf-pier)"
-      stroke="#5d3f1c"
-      strokeWidth={1.2}
-      opacity={0.92}
-    />
-  );
-}
-
 /** The liftable leaf, drawn at its REAL raise fraction `r` (0 down … 1 up). It is
  *  track, so it stays wooden (ADR-024 §4). The hinge is at the NEAR (left) gap
  *  edge; the free (right) end tilts up. In top-down we fake the lift by
@@ -215,49 +197,33 @@ export interface LiftBridgeArtProps {
 }
 
 /**
- * The whole polished bridge: the dark water channel beneath the gap, the two
- * piers flanking the span with their abutments, the lift tower + counterweight on
- * the hinge pier, and the liftable leaf drawn at the real raise fraction. Drawn
+ * The whole bridge: two short support piers at the gap edges, the lift tower +
+ * counterweight on the hinge pier, and the liftable leaf drawn at the real raise
+ * fraction over a soft recess shadow (generic ground, no waterway implied). Drawn
  * BENEATH the approach rails + bodies by the caller, except the leaf which the
- * caller layers last (so a raised leaf reads above the water).
+ * caller layers last.
  */
 export function LiftBridgeArt({ hingeX, freeX, y, raise }: LiftBridgeArtProps) {
-  /* Pier footprint: each tower straddles its gap edge, standing down from the
-   *  deck into the bank. */
-  const pierW = 30;
+  /* Pier footprint: each tower stands just below its gap edge as a support — kept
+   *  SHORT (not a deep wall) so the piece stays generic, not a waterway crossing. */
+  const pierW = 28;
   const pierTop = y + DECK_HALF_W + 2;
-  const pierH = 150;
+  const pierH = 58;
   const nearPier: PierBox = { x: hingeX - pierW / 2, y: pierTop, w: pierW, h: pierH };
   const farPier: PierBox = { x: freeX - pierW / 2, y: pierTop, w: pierW, h: pierH };
   return (
     <g data-testid="lift-bridge-art">
-      {/* The dark channel/water under the gap — a shaded void the leaf bridges. */}
+      {/* A soft recess shadow in the gap so the break reads as a drop, with no
+          waterway implied — generic ground, not a canal. */}
       <rect
-        x={hingeX - 6}
-        y={y - DECK_HALF_W - 4}
-        width={freeX - hingeX + 12}
-        height={2 * DECK_HALF_W + 8 + pierH}
-        fill="url(#tf-channel)"
+        x={hingeX - 4}
+        y={y - DECK_HALF_W - 3}
+        width={freeX - hingeX + 8}
+        height={2 * DECK_HALF_W + 6}
+        rx={3}
+        fill="rgba(63,43,19,0.18)"
       />
-      {/* Faint waterline ripples across the channel. */}
-      <path
-        d={`M${hingeX} ${y + 40} q ${(freeX - hingeX) / 4} 6 ${(freeX - hingeX) / 2} 0 t ${(freeX - hingeX) / 2} 0`}
-        fill="none"
-        stroke="#9fb6c4"
-        strokeOpacity={0.35}
-        strokeWidth={1.5}
-      />
-      <path
-        d={`M${hingeX} ${y + 74} q ${(freeX - hingeX) / 4} 6 ${(freeX - hingeX) / 2} 0 t ${(freeX - hingeX) / 2} 0`}
-        fill="none"
-        stroke="#9fb6c4"
-        strokeOpacity={0.28}
-        strokeWidth={1.5}
-      />
-      {/* Stone abutments where the fixed approaches butt the piers. */}
-      <Abutment x={hingeX - pierW / 2 - 22} y={y} w={24} />
-      <Abutment x={freeX + pierW / 2 - 2} y={y} w={24} />
-      {/* The two piers. */}
+      {/* The two support piers at the gap edges. */}
       <Pier box={nearPier} />
       <Pier box={farPier} />
       {/* The lift tower + counterweight on the hinge (near) pier. */}
@@ -265,21 +231,5 @@ export function LiftBridgeArt({ hingeX, freeX, y, raise }: LiftBridgeArtProps) {
       {/* The liftable leaf, last, at the real raise fraction. */}
       <Leaf hingeX={hingeX} freeX={freeX} y={y} r={raise} />
     </g>
-  );
-}
-
-/** SVG defs unique to the bridge (the channel water gradient). Render alongside
- *  `WoodDefs` in any view that draws the bridge. */
-export function BridgeDefs() {
-  return (
-    <defs>
-      {/* The channel water: a cool, deep gradient so the gap beneath the raised
-          leaf reads as a drop into water rather than a flat band. */}
-      <linearGradient id="tf-channel" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0" stopColor="#3c5560" />
-        <stop offset="0.5" stopColor="#2b424c" />
-        <stop offset="1" stopColor="#1d2f37" />
-      </linearGradient>
-    </defs>
   );
 }

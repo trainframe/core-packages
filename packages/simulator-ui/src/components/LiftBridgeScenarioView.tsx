@@ -25,7 +25,7 @@ import { physicsMotorActuator } from '../devices/motor-actuator.js';
 import { TrainDevice } from '../devices/train-device.js';
 import { buildLiftBridgeLayout } from '../physics/lift-bridge.js';
 import { type BodyPose, PhysicsWorld } from '../physics/world.js';
-import { BridgeDefs, LiftBridgeArt } from './LiftBridgeArt.js';
+import { LiftBridgeArt } from './LiftBridgeArt.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 
@@ -143,9 +143,8 @@ export function LiftBridgeScenarioView() {
       >
         <title>Lift bridge — a span that raises to break the track and lowers to complete it</title>
         <WoodDefs />
-        <BridgeDefs />
-        {/* The polished bridge furniture (channel, piers, tower) sits BENEATH the
-            approach rails; the leaf is drawn inside LiftBridgeArt at the real raise. */}
+        {/* The bridge furniture (piers, tower) sits BENEATH the approach rails; the
+            leaf is drawn inside LiftBridgeArt at the real raise. */}
         <LiftBridgeArt
           hingeX={layout.spanStart.x}
           freeX={layout.spanEnd.x}
