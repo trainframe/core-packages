@@ -6,88 +6,64 @@
  * visually identical; only the behaviour (a train held vs. a train running off)
  * differs.
  *
- * It reads as a real bascule/lift bridge: masonry/timber PIERS (the towers the
- * leaf pivots against) flank the span, with stone abutments where the fixed
- * approaches meet the piers, a lift-tower hint + counterweight on the hinge pier,
- * the steel pivot bosses, the dark water in the channel beneath, and a cast
- * shadow that lengthens as the leaf rises. The raised leaf is FORESHORTENED toward
- * its hinge (plan-view cos of the tilt) so the lift reads from above — the same
- * trick the toy-table lift bridge uses (`LIFT_BRIDGE_FORESHORTEN`).
+ * Drawn entirely in PLAN VIEW to match the rest of the toy table — it is a
+ * bascule that seesaws about a transverse hinge across the track:
+ *   - the DECK LEAF (one arm of the seesaw) foreshortens toward the hinge as it
+ *     lifts (drawn length × cos(tilt)), revealing its dark underside end-face and
+ *     casting a lengthening shadow — the lift read from above;
+ *   - the COUNTERWEIGHT (the opposite, shorter arm) foreshortens the SAME way, so
+ *     the whole assembly pulls in toward the pivot as it rises (both ends tilt out
+ *     of the ground plane together);
+ *   - a steel BEARING SEAT sits across the track at the pivot (and a landing seat
+ *     at the far gap edge), each on a low timber footing — machinery seen from
+ *     directly above, no elevation-only columns or masts.
  *
  * Pure presentation: SVG only, no sim, no state. The caller passes the span
  * endpoints, the rail Y, and the live `raise` it read off its `LinkActuator`.
  */
 
 /** Max tilt the leaf reaches at full raise, degrees. Drives the plan-view
- *  foreshortening (drawn length × cos(tilt)) so the deck compresses toward the
- *  hinge as it lifts. */
+ *  foreshortening (drawn length × cos(tilt)) of BOTH seesaw arms. */
 const MAX_TILT_DEG = 75;
 /** Half-width of the wooden deck band (matches the approach plank stroke). */
 const DECK_HALF_W = 7;
 
-interface PierBox {
-  readonly x: number;
-  readonly y: number;
-  readonly w: number;
-  readonly h: number;
+/** Foreshortening of a seesaw arm of full length `full` at raise `r`: full when
+ *  flat (in the ground plane), shrinking toward the hinge as it tilts up/down. */
+function drawnArm(full: number, r: number): number {
+  return full * Math.cos((r * MAX_TILT_DEG * Math.PI) / 180);
 }
 
-/** A masonry/timber pier: a coursed-stone tower the leaf pivots on / rests
- *  against. Drawn as a recessed wood column (the `tf-pier` gradient — darker,
- *  in-shadow wood than the deck) with horizontal courses routed across it and a
- *  capping stone, so it reads as the standing support beneath the deck. */
-function Pier({ box }: { box: PierBox }) {
-  const { x, y, w, h } = box;
-  const courses = Math.max(2, Math.round(h / 22));
-  const lines: string[] = [];
-  for (let i = 1; i < courses; i++) {
-    const ly = y + (h * i) / courses;
-    lines.push(`M${x + 3} ${ly} L${x + w - 3} ${ly}`);
-  }
+/** A bearing seat across the track — in plan view, the steel axle the leaf pivots
+ *  on (at the hinge) or the seat it lands on (at the far gap edge), each on a low
+ *  timber footing straddling the rails. Reads as machinery from directly above. */
+function BearingSeat({ x, y }: { x: number; y: number }) {
   return (
-    <g data-testid="lift-bridge-pier">
-      {/* Contact shadow the pier casts onto the bank. */}
-      <rect x={x + 3} y={y + h - 2} width={w} height={8} rx={3} fill="rgba(63,43,19,0.22)" />
-      {/* The pier column, in-shadow wood. */}
+    <g data-testid="lift-bridge-bearing">
+      {/* Timber footing pad straddling the track. */}
       <rect
-        x={x}
-        y={y}
-        width={w}
-        height={h}
+        x={x - 10}
+        y={y - 19}
+        width={20}
+        height={38}
         rx={3}
         fill="url(#tf-pier)"
         stroke="#5d3f1c"
-        strokeWidth={1.4}
-      />
-      {/* A soft rim light down the lit (left) edge for a bevelled, raised feel. */}
-      <line
-        x1={x + 2}
-        y1={y + 3}
-        x2={x + 2}
-        y2={y + h - 3}
-        stroke="#d8b070"
-        strokeOpacity={0.5}
-        strokeWidth={2}
-      />
-      {/* Routed stone courses. */}
-      <path
-        d={lines.join(' ')}
-        fill="none"
-        stroke="#4a3216"
-        strokeOpacity={0.55}
         strokeWidth={1.2}
       />
-      {/* The capping stone the deck seats against. */}
+      {/* The steel axle / landing bar across the rails. */}
       <rect
-        x={x - 3}
-        y={y - 6}
-        width={w + 6}
-        height={9}
+        x={x - 6}
+        y={y - 15}
+        width={12}
+        height={30}
         rx={2}
-        fill="#9a6c2c"
-        stroke="#5d3f1c"
-        strokeWidth={1.2}
+        fill="#8a929b"
+        stroke="#4a4f55"
+        strokeWidth={1.6}
       />
+      {/* A rivet line down the bar's centre. */}
+      <line x1={x} y1={y - 12} x2={x} y2={y + 12} stroke="#5b626a" strokeWidth={1.4} />
     </g>
   );
 }
@@ -95,12 +71,10 @@ function Pier({ box }: { box: PierBox }) {
 /** The liftable leaf, drawn at its REAL raise fraction `r` (0 down … 1 up). It is
  *  track, so it stays wooden (ADR-024 §4). The hinge is at the NEAR (left) gap
  *  edge; the free (right) end tilts up. In top-down we fake the lift by
- *  FORESHORTENING the plank toward its hinge (drawn length × cos(tilt)),
- *  revealing the dark underside end-face and casting a lengthening shadow. */
+ *  FORESHORTENING the plank toward its hinge, revealing the dark underside
+ *  end-face and casting a lengthening shadow. */
 function Leaf({ hingeX, freeX, y, r }: { hingeX: number; freeX: number; y: number; r: number }) {
-  const full = freeX - hingeX;
-  const tiltRad = (r * MAX_TILT_DEG * Math.PI) / 180;
-  const drawnLen = full * Math.cos(tiltRad);
+  const drawnLen = drawnArm(freeX - hingeX, r);
   const tipX = hingeX + drawnLen;
   /* The raised deck floats on a longer cast shadow, offset down-right. */
   const shadowOff = r * 18;
@@ -132,55 +106,48 @@ function Leaf({ hingeX, freeX, y, r }: { hingeX: number; freeX: number; y: numbe
           strokeWidth={1}
         />
       )}
-      {/* The pivot fitting — a steel boss at the hinge. */}
-      <circle cx={hingeX} cy={y} r={5} fill="#8a929b" stroke="#4a4f55" strokeWidth={1.5} />
     </g>
   );
 }
 
-/** The hinge-pier's lift gear: a short steel tower above the pivot carrying a
- *  COUNTERWEIGHT that descends as the leaf rises (a bascule's balance), with a
- *  tie line back to the leaf root — a hint of the lifting mechanism. */
-function LiftTower({ pierX, deckY, r }: { pierX: number; deckY: number; r: number }) {
-  const towerTop = deckY - 70;
-  /* The counterweight rides down its guide as the leaf goes up. */
-  const cwY = towerTop + 14 + r * 30;
+/** The COUNTERWEIGHT arm — the seesaw's other side, reaching BACK over the near
+ *  approach from the hinge and ending in a heavy block. It foreshortens toward the
+ *  hinge exactly as the leaf does (both arms tilt out of the plane together), so as
+ *  the leaf rises the weight is drawn pulling in toward the pivot — the bascule
+ *  balance, read from above. Steel arm + dark cast block. */
+function Counterweight({
+  hingeX,
+  y,
+  full,
+  r,
+}: { hingeX: number; y: number; full: number; r: number }) {
+  const drawn = drawnArm(full, r);
+  const tailX = hingeX - drawn;
   return (
-    <g data-testid="lift-bridge-tower">
-      {/* The steel mast above the pivot pier. */}
-      <rect
-        x={pierX - 5}
-        y={towerTop}
-        width={10}
-        height={deckY - towerTop}
-        fill="#7a838f"
-        stroke="#4c545d"
-        strokeWidth={1.6}
+    <g data-testid="lift-bridge-counterweight">
+      {/* The balance arm from the pivot back to the weight. */}
+      <line
+        x1={hingeX}
+        y1={y}
+        x2={tailX}
+        y2={y}
+        stroke="#7a838f"
+        strokeWidth={8}
+        strokeLinecap="round"
       />
-      {/* The cross-head the counterweight hangs from. */}
+      <line x1={hingeX} y1={y} x2={tailX} y2={y} stroke="#4c545d" strokeWidth={2} />
+      {/* The counterweight block at the tail end. */}
       <rect
-        x={pierX - 16}
-        y={towerTop - 4}
-        width={32}
-        height={8}
-        rx={2}
-        fill="#6b7480"
-        stroke="#444c55"
-        strokeWidth={1.4}
-      />
-      {/* The counterweight block, lower when the leaf is higher. */}
-      <rect
-        x={pierX - 12}
-        y={cwY}
-        width={24}
-        height={18}
+        x={tailX - 11}
+        y={y - 12}
+        width={22}
+        height={24}
         rx={2}
         fill="#5a6470"
         stroke="#39414b"
         strokeWidth={1.6}
       />
-      {/* The tie/guide line from the cross-head down to the weight. */}
-      <line x1={pierX} y1={towerTop} x2={pierX} y2={cwY} stroke="#39414b" strokeWidth={2} />
+      <line x1={tailX - 11} y1={y} x2={tailX + 11} y2={y} stroke="#39414b" strokeWidth={1.2} />
     </g>
   );
 }
@@ -197,24 +164,17 @@ export interface LiftBridgeArtProps {
 }
 
 /**
- * The whole bridge: two short support piers at the gap edges, the lift tower +
- * counterweight on the hinge pier, and the liftable leaf drawn at the real raise
- * fraction over a soft recess shadow (generic ground, no waterway implied). Drawn
- * BENEATH the approach rails + bodies by the caller, except the leaf which the
- * caller layers last.
+ * The whole bridge in plan view: a soft recess shadow in the gap (generic ground,
+ * no waterway implied), the pivot + landing bearing seats across the track, the
+ * counterweight seesaw arm behind the hinge, and the liftable leaf — all drawn at
+ * the real raise fraction. Drawn BENEATH the approach rails + bodies by the caller,
+ * except the leaf which the caller layers last.
  */
 export function LiftBridgeArt({ hingeX, freeX, y, raise }: LiftBridgeArtProps) {
-  /* Pier footprint: each tower stands just below its gap edge as a support — kept
-   *  SHORT (not a deep wall) so the piece stays generic, not a waterway crossing. */
-  const pierW = 28;
-  const pierTop = y + DECK_HALF_W + 2;
-  const pierH = 58;
-  const nearPier: PierBox = { x: hingeX - pierW / 2, y: pierTop, w: pierW, h: pierH };
-  const farPier: PierBox = { x: freeX - pierW / 2, y: pierTop, w: pierW, h: pierH };
   return (
     <g data-testid="lift-bridge-art">
       {/* A soft recess shadow in the gap so the break reads as a drop, with no
-          waterway implied — generic ground, not a canal. */}
+          waterway implied — generic ground. */}
       <rect
         x={hingeX - 4}
         y={y - DECK_HALF_W - 3}
@@ -223,11 +183,11 @@ export function LiftBridgeArt({ hingeX, freeX, y, raise }: LiftBridgeArtProps) {
         rx={3}
         fill="rgba(63,43,19,0.18)"
       />
-      {/* The two support piers at the gap edges. */}
-      <Pier box={nearPier} />
-      <Pier box={farPier} />
-      {/* The lift tower + counterweight on the hinge (near) pier. */}
-      <LiftTower pierX={hingeX} deckY={y} r={raise} />
+      {/* The counterweight (beneath the leaf, so the leaf reads on top at the hinge). */}
+      <Counterweight hingeX={hingeX} y={y} full={(freeX - hingeX) * 0.42} r={raise} />
+      {/* Pivot bearing at the hinge, landing seat at the far gap edge. */}
+      <BearingSeat x={hingeX} y={y} />
+      <BearingSeat x={freeX} y={y} />
       {/* The liftable leaf, last, at the real raise fraction. */}
       <Leaf hingeX={hingeX} freeX={freeX} y={y} r={raise} />
     </g>
