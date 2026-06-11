@@ -1,5 +1,10 @@
 # ADR-029: Real railyard interior — device-driven shunting
 
+> **Behaviour spec:** the agreed, authoritative description of how the interior
+> choreography must look and behave lives in
+> [`docs/spec/railyard-shunting-choreography.md`](../spec/railyard-shunting-choreography.md).
+> Where the build and that spec disagree, the spec wins.
+
 ## Status
 
 Accepted — built. Makes the railyard **interior** real: the zone device drives a
