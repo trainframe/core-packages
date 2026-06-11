@@ -1,25 +1,22 @@
 /**
- * The lift-bridge service, rendered (ADR-030, ADR-031, experimental/005). Builds
- * two fixed approach rails joined by a liftable SPAN (a disconnectable network
- * link), stages a train on the near approach, and runs the `LiftBridgeController`
- * — which holds the train OUT while the span is raised (the rail is physically
- * broken, so a wrongly-released train would run off the gap), lowers the span,
- * awaits it physically seating, then releases the train to cross onto the far
- * approach.
+ * The CONTRASTING lift-bridge demo (ADR-030, ADR-031, experimental/005). It is the
+ * `?physics=lift-bridge` scene with the safety taken away: there is NO
+ * `LiftBridgeController` holding the train out. The span is staged RAISED (its
+ * link disconnected via the `LinkActuator`) so the rail is physically broken, and
+ * an uncontrolled train simply drives forward. With nothing withholding it, it
+ * reaches the open gap and RUNS OFF into the channel (fate `ran-off`, mode
+ * `free`) — proving the hold in the controlled demo is doing real work.
  *
- * Nothing here is keyframed: the span is drawn at the actuator's REAL raise
- * fraction (read off it, never animated) and the train at its authoritative
- * physics pose. The polished bridge art (piers, abutments, lift tower +
- * counterweight, the dark channel, the cast shadow) is the shared `LiftBridgeArt`
- * — the SAME component the contrasting `?physics=bridge-runoff` demo draws, so the
- * two read identically and only the behaviour differs.
+ * Nothing is keyframed: the leaf is drawn at the actuator's REAL raise fraction
+ * (read off, never animated) via the SHARED `LiftBridgeArt` — the same polished
+ * bridge the controlled demo renders — and the train at its authoritative physics
+ * pose. The run-off is the world's ordinary open-end coast (no controller, no
+ * marker), and the dark channel beneath the raised leaf makes it read as a plunge.
  *
- * Mounted by `App` on `?physics=lift-bridge`. Exposes `window.__tfPhysics` so the
- * video harness can assert the train ended up ACROSS (on the far approach,
- * on-rail) and never ran off the gap.
+ * Mounted by `App` on `?physics=bridge-runoff`. Exposes `window.__tfPhysics` so
+ * the harness can assert the train's fate is `ran-off` (it was NOT held).
  */
 import { useEffect, useMemo, useState } from 'react';
-import { LiftBridgeController } from '../devices/lift-bridge-controller.js';
 import { type LinkActuator, physicsLinkActuator } from '../devices/link-actuator.js';
 import { physicsMotorActuator } from '../devices/motor-actuator.js';
 import { TrainDevice } from '../devices/train-device.js';
@@ -30,7 +27,6 @@ import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 
 const STEP_S = 1 / 120;
-const CAM_R = 22;
 
 /** A rail drawn as a wooden plank band with a routed groove (matches the other
  *  physics scenes). */
@@ -44,15 +40,14 @@ function SegArt({ ax, ay, bx, by }: { ax: number; ay: number; bx: number; by: nu
   );
 }
 
-export function LiftBridgeScenarioView() {
+export function BridgeRunoffScenarioView() {
   const layout = useMemo(() => buildLiftBridgeLayout(), []);
   const [poses, setPoses] = useState<readonly BodyPose[]>([]);
   const [raise, setRaise] = useState(1);
 
   useEffect(() => {
     const w = new PhysicsWorld(layout.net);
-    /* The visitor: one loco on the near approach, facing east toward the span.
-     *  Gentle power + a low speed cap so it eases up to the gap and across. */
+    /* The same visitor as the controlled demo — but with NO controller to hold it. */
     w.addBody({
       id: 'T',
       kind: 'loco',
@@ -65,30 +60,20 @@ export function LiftBridgeScenarioView() {
     });
 
     const train = new TrainDevice('T', physicsMotorActuator(w, 'T'));
+    /* Stage the span RAISED and leave it there — the link stays disconnected, so
+     *  the near approach's gap end is open. No controller will ever lower it. */
     const span: LinkActuator = physicsLinkActuator(w, layout.linkId, { startRaised: true });
-    const ctrl = new LiftBridgeController({
-      train,
-      span,
-      look: (x, y) => {
-        const s = w.sampleAt(x, y, CAM_R);
-        return s === null ? { occupied: false } : { occupied: true, colour: s.colour };
-      },
-      farSensePoint: layout.farSensePoint,
-      /* Hold the span up a beat (the out-of-scope boat passing under), then lower. */
-      holdRaisedS: 2.2,
-    });
-    /* The train wants to go from the start; the controller's withhold (stop) is the
-     *  only thing keeping it short of the gap while the span is up. */
+    /* The train just drives. Nothing withholds it, so it runs off into the gap. */
     train.forward();
 
     let elapsed = 0;
     let acc = 0;
     let last = performance.now();
     let raf = 0;
-    /* One fixed physics step: the controller commands intent (withhold / lower /
-     *  release), the span owns its own raise physics, the world advances. */
+    /* One fixed physics step: the span owns its (static, raised) state, the world
+     *  advances the uncontrolled train toward — and over — the open gap. */
     const advance = (): void => {
-      ctrl.tick(STEP_S);
+      span.step(STEP_S);
       w.step(STEP_S);
       elapsed += STEP_S;
     };
@@ -103,7 +88,7 @@ export function LiftBridgeScenarioView() {
       }
       setPoses(w.bodies());
       setRaise(span.raise);
-      window.__tfPhysics = { name: 'lift-bridge', elapsedS: elapsed, bodies: () => w.bodies() };
+      window.__tfPhysics = { name: 'bridge-runoff', elapsedS: elapsed, bodies: () => w.bodies() };
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -133,19 +118,18 @@ export function LiftBridgeScenarioView() {
         }}
         data-testid="physics-title"
       >
-        Lift bridge — the span is up so the rail is broken; the train waits, the span lowers and
-        seats, then the train crosses
+        Bridge run-off — NO controller holds the train; the span is up so the rail is broken, and
+        the train drives straight off into the gap
       </div>
       <svg
         data-testid="physics-canvas"
         viewBox={`${minX} ${minY} ${maxX - minX} ${maxY - minY}`}
         style={{ width: '100%', height: '100%' }}
       >
-        <title>Lift bridge — a span that raises to break the track and lowers to complete it</title>
+        <title>Bridge run-off — an unheld train drives off the raised span into the gap</title>
         <WoodDefs />
         <BridgeDefs />
-        {/* The polished bridge furniture (channel, piers, tower) sits BENEATH the
-            approach rails; the leaf is drawn inside LiftBridgeArt at the real raise. */}
+        {/* The same polished bridge as the controlled demo (shared art). */}
         <LiftBridgeArt
           hingeX={layout.spanStart.x}
           freeX={layout.spanEnd.x}

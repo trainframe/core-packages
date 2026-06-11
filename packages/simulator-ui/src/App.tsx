@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { BrokerProvider } from './broker/broker-context.js';
 import type { BrokerClient } from './broker/client.js';
 import { MqttBrokerClient } from './broker/mqtt-client.js';
+import { BridgeRunoffScenarioView } from './components/BridgeRunoffScenarioView.js';
 import { CraneDropScenarioView } from './components/CraneDropScenarioView.js';
 import { LiftBridgeScenarioView } from './components/LiftBridgeScenarioView.js';
 import { PhysicsScenarioView } from './components/PhysicsScenarioView.js';
@@ -46,6 +47,7 @@ export function App({ client }: AppProps = {}) {
   if (physics === 'turntable') return <TurntableScenarioView />;
   if (physics === 'crane-drop') return <CraneDropScenarioView />;
   if (physics === 'lift-bridge') return <LiftBridgeScenarioView />;
+  if (physics === 'bridge-runoff') return <BridgeRunoffScenarioView />;
   if (physics !== null) return <PhysicsScenarioView name={physics} />;
 
   return (
