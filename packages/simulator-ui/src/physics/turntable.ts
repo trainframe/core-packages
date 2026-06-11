@@ -61,9 +61,12 @@ export interface TurntableLayout {
 const SPINE_Y = 600;
 const TRUNK_AX = 150;
 const DECK_CENTRE_X = 700;
-const DECK_RADIUS = 60;
-/** How far each rim stub radiates out from the deck centre (mm). */
-const STUB_LEN = 330;
+/** A chunky pit so the bridge + the loco riding it read clearly (the deck is the
+ *  star of the scene; the radiating stubs are supporting cast). */
+const DECK_RADIUS = 88;
+/** How far each rim stub radiates out from the deck centre (mm) — kept short so
+ *  the 8-spoke sunburst stays compact and the view frames the pit large. */
+const STUB_LEN = 250;
 /** The eight rim stubs of a full 8-way turntable, evenly spaced at 45° around the
  *  pit (angles measured from +x, y down). `stub-w` (180°) is collinear with the
  *  trunk lead — the TURN-AROUND exit, where a loco returns the way it came,
