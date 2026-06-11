@@ -118,6 +118,17 @@ const CHECKS = {
     const ok = !!l && l.segment === 'seg-stub-w' && Math.round(l.rotationDeg) === 180;
     return { ok, why: `L@${l ? l.segment : 'absent'} rot ${l ? Math.round(l.rotationDeg) : '?'}` };
   },
+  depot: (b) => {
+    // ADR-032 nested zone: the depot turned each visiting loco on its interior
+    // turntable and routed it onto a stall. Both locos must end PARKED on DISTINCT
+    // stall parking tracks (`track-N`) — routed correctly, the turntable serving
+    // one at a time. (The stalls are `track-0..3`; A→track-0, B→track-2.)
+    const segA = b.find((x) => x.id === 'A')?.segment;
+    const segB = b.find((x) => x.id === 'B')?.segment;
+    const onStall = (s) => typeof s === 'string' && s.startsWith('track-');
+    const ok = onStall(segA) && onStall(segB) && segA !== segB;
+    return { ok, why: `A@${segA ?? 'absent'} B@${segB ?? 'absent'}` };
+  },
   'lift-bridge': (b) => {
     // The span started RAISED (rail broken). The train must have HELD short of
     // the gap (never running off), then crossed once the span lowered — so it ends
@@ -170,6 +181,9 @@ const DURATION = {
   ramps: 7,
   railyard: 42,
   turntable: 30,
+  /* Two full board→turn→park cycles, the deck swinging slowly and serialised —
+   *  budget generously. */
+  depot: 60,
   'crane-drop': 12,
   'lift-bridge': 14,
   'bridge-runoff': 8,
