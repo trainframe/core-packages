@@ -1,5 +1,12 @@
+import type { CoreCommand, CoreEvent, ZoneStateChanged } from '@trainframe/protocol';
 import { describe, expect, it } from 'vitest';
 import { type DepotLayout, buildDepotLayout } from '../physics/depot.js';
+
+/** Discriminate a zone report off the seam by its event_type literal (sound; the
+ *  payload shape follows from the type at runtime). */
+function isZoneStateChanged(e: CoreEvent): e is ZoneStateChanged {
+  return e.event_type === 'zone_state_changed';
+}
 import { PhysicsWorld } from '../physics/world.js';
 import { DepotController } from './depot-controller.js';
 import { physicsMotorActuator } from './motor-actuator.js';
@@ -148,5 +155,56 @@ describe('DepotController — a nested capacity-N zone around a capacity-1 turnt
     expect(d.poseOf('B')?.segment).toBe(stallB.stallSeg);
     // The two stalls are genuinely different bays.
     expect(stallA.stallSeg).not.toBe(stallB.stallSeg);
+  });
+});
+
+describe('DepotController — parent-as-core nesting seam (ADR-031 + ADR-032)', () => {
+  it('reports the inner turntable occupancy UP and answers clearance DOWN through the platform seam', () => {
+    const d = makeDepot();
+
+    /* The turntable child is wired from the depot's own platform provider — to it
+     *  the depot IS core. We observe both directions of the seam: the events the
+     *  depot publishes up (as the turntable would), and the commands the depot
+     *  sends down (clearance for the inner capacity-1 zone). */
+    const childProvider = d.ctrl.platformFor();
+    const childGot: CoreCommand[] = [];
+    childProvider.onCommand((c) => childGot.push(c));
+    const parentSaw: CoreEvent[] = [];
+    d.ctrl.onTurntableEvent((e) => parentSaw.push(e));
+
+    const train = d.addLoco('L', '#c0392b');
+    const target = d.layout.stalls[0];
+    if (target === undefined) return;
+    d.ctrl.arrive({ train, stallId: target.id });
+    runUntil(d.step, () => d.ctrl.isOccupied(target.id));
+    /* A couple more ticks so the seam observes the deck FREEING (the free flip is
+     *  reported on the tick after `park` releases the deck). */
+    d.step();
+    d.step();
+
+    /* Upward: the inner zone reported BUSY (occupancy 1) while a loco was on the
+     *  deck, then FREE (occupancy 0) once it parked and the deck released. */
+    const zoneReports = parentSaw.flatMap((e) => (isZoneStateChanged(e) ? [e.payload] : []));
+    const occupancies = zoneReports.map((p) => p.occupancy);
+    expect(occupancies).toContain(1);
+    expect(occupancies[occupancies.length - 1]).toBe(0);
+    /* The capacity the child asserts is 1 — it is a capacity-1 zone. */
+    for (const p of zoneReports) expect(p.capacity).toBe(1);
+
+    /* Downward: the depot withheld clearance while busy and granted it when free —
+     *  the inner zone's clearance, answered by the parent exactly as core would. */
+    const commands = childGot.map((c) => c.command_type);
+    expect(commands).toContain('revoke_clearance');
+    expect(commands).toContain('grant_clearance');
+  });
+
+  it('the seam is edge-triggered: a quiescent depot emits nothing', () => {
+    const d = makeDepot();
+    const parentSaw: CoreEvent[] = [];
+    d.ctrl.onTurntableEvent((e) => parentSaw.push(e));
+    /* Tick an empty depot: the deck never goes busy, so no occupancy flip, so the
+     *  seam stays silent (no spurious per-tick chatter). */
+    for (let i = 0; i < 50; i++) d.step();
+    expect(parentSaw).toHaveLength(0);
   });
 });

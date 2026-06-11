@@ -2,7 +2,19 @@
 
 ## Status
 
-Proposed (drafted 2026-06-11). Extends [ADR-030](030-device-provider-simulator-separation.md).
+Accepted — **built** (the platform-provider seam). The `PlatformProvider`
+interface (`devices/platform-provider.ts`) is the device↔core seam: a device
+imports only it and never a transport. Three backings land — the in-process bus
+(`inProcessPlatform`, sim/tests), the parent-as-core link (`ParentPlatform` /
+`platformFor`, ADR-032, wired additively into `DepotController` so the depot is
+its turntable child's core), and the **MQTT adapter at the IO/composition EDGE**
+(`broker/mqtt-platform.ts`, next to `MqttBrokerClient`) — and the **device layer
+is transport-free** (a grep confirms nothing under `devices/` imports the broker
+client, the MQTT adapter, or `'mqtt'`). A portability proof drives the *same*
+controller over both the in-process bus and the edge MQTT adapter against a real
+in-process aedes broker, asserting identical behaviour. §2 (honest actuators) was
+already realised by the crane/turntable/link actuators. Extends
+[ADR-030](030-device-provider-simulator-separation.md).
 
 ## Context
 

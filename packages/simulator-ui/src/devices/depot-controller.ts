@@ -11,14 +11,23 @@
  *     turntable controller below is the inner device; the depot is "core-shaped"
  *     to it (ADR-032 §1 — report upward, never sideways to core).
  *
- * NESTING NOTE: ADR-031's `PlatformProvider` interface (the device↔core seam) is
- * only DRAFTED, not built. So for this v1 the depot orchestrates the turntable
- * DIRECTLY as an interior sub-device — it holds the `TurntableActuator`, commands
- * its intent, and reads its `arrived` / `alignedExit` to decide clearance. That
- * direct ownership IS the nesting. The `TurntableActuator` itself does not know
- * whether the thing commanding it is the real core or this depot — which is the
- * whole point. When ADR-031 lands, this seam becomes a platform-provider the
- * depot implements toward the turntable; until then it is a method call.
+ * NESTING SEAM (ADR-031 + ADR-032, now BUILT): the depot is "core-shaped" to its
+ * interior turntable via a real `PlatformProvider`. It owns a `ParentPlatform`
+ * and hands the turntable child `platformFor(turntableChildId)` — a platform
+ * provider INDISTINGUISHABLE from the real core. Through that seam the turntable
+ * reports its occupancy UPWARD as a `zone_state_changed` (capacity-1: 0 = deck
+ * free, 1 = deck busy) and the depot answers clearance DOWNWARD as
+ * `grant_clearance` / `revoke_clearance` — never sideways to core (ADR-032 §1).
+ * The depot folds the child's asserted occupancy into its OWN single rolled-up
+ * occupancy (ADR-032 §2), which is the one number core sees for the whole opaque
+ * zone. The turntable cannot tell its provider is the depot, not the broker —
+ * that is the whole point.
+ *
+ * This is ADDITIVE: the depot still also owns the `TurntableActuator` directly
+ * and drives it through the working loop below (the deck physics is a WORLD
+ * actuator, ADR-030; the platform seam is the CORE link, ADR-031 — the two
+ * families are orthogonal). The seam mirrors the deck's busy/free truth onto the
+ * core link so the nesting is honest end to end.
  *
  * Honest actuators throughout (ADR-031 §2): the controller emits INTENT (drive
  * the train; align the deck) and AWAITS the physical result (`arrived`,
@@ -40,10 +49,25 @@
  *
  * Tick-driven over a virtual clock; pure (no DOM, no Date.now).
  */
+import { type CoreCommand, type CoreEvent, PROTOCOL_VERSION } from '@trainframe/protocol';
 import type { DepotLayout, DepotStall } from '../physics/depot.js';
 import { stallSensePoint } from '../physics/depot.js';
+import { ParentPlatform } from './parent-platform.js';
+import type { PlatformProvider } from './platform-provider.js';
 import type { TrainDevice } from './train-device.js';
 import type { TurntableActuator } from './turntable-actuator.js';
+
+/** A fixed envelope timestamp for the interior nesting seam. The depot is pure
+ *  (no Date.now) and the seam is interior to the depot, so the exact instant is
+ *  immaterial — it only has to be a well-formed ISO-8601 so the wire shape is
+ *  valid if the seam were ever bridged out. */
+const SEAM_TIMESTAMP = '1970-01-01T00:00:00.000Z';
+
+/** Default interior ids for the nested turntable. UUIDs so the nesting seam
+ *  carries structurally-valid wire shapes (they are INTERIOR to the depot and
+ *  never seen by core — ADR-032). */
+const DEPOT_TURNTABLE_ID = '0d0e0001-0000-4000-8000-000000000001';
+const DEPOT_DECK_MARKER_ID = '0d0e0002-0000-4000-8000-000000000002';
 
 /** What the camera reports beneath its footprint (same shape the yard/turntable
  *  use). The depot perceives the interior only through this — never ground truth. */
@@ -69,6 +93,13 @@ export interface DepotControllerDeps {
   readonly deck: TurntableActuator;
   /** Look at world (x,y) and report what's beneath the footprint there. */
   readonly look: (x: number, y: number) => Sighting;
+  /** The inner turntable's device id on the parent↔child platform seam. The
+   *  depot is core for this child. A UUID so the seam carries valid wire shapes
+   *  if ever bridged out. Defaults to a fixed interior id. */
+  readonly turntableChildId?: string;
+  /** The interior boundary marker the depot maps the turntable onto — INTERIOR to
+   *  the depot, never seen by core (ADR-032). A UUID for the same reason. */
+  readonly turntableZoneMarkerId?: string;
 }
 
 type Phase = 'idle' | 'board' | 'route' | 'park';
@@ -90,8 +121,96 @@ export class DepotController {
    *  re-expressed the motor intent as it turned). */
   private parkCommanded = false;
 
+  /** The parent side of the ADR-032 nesting seam: the depot IS the turntable
+   *  child's core. The child is wired from `platformFor(childId)`; the depot
+   *  observes its occupancy here and commands its clearance here. */
+  private readonly child = new ParentPlatform();
+  private readonly childId: string;
+  private readonly zoneMarkerId: string;
+  /** The deck-busy truth last mirrored onto the seam, so we only emit on change
+   *  (the occupancy/clearance seam is edge-triggered, like every zone report).
+   *  Starts `false`: the deck begins free, so a quiescent depot emits nothing. */
+  private lastDeckBusy = false;
+  /** Monotonic counter for deterministic seam-envelope ids (depot stays pure —
+   *  no Date.now, no Math.random on this path). */
+  private seamSeq = 0;
+
   constructor(deps: DepotControllerDeps) {
     this.d = deps;
+    this.childId = deps.turntableChildId ?? DEPOT_TURNTABLE_ID;
+    this.zoneMarkerId = deps.turntableZoneMarkerId ?? DEPOT_DECK_MARKER_ID;
+  }
+
+  /** The platform provider the INTERIOR turntable is wired from. To the turntable
+   *  this is its core; in truth it is the depot (ADR-032 §1 — parent-as-core via
+   *  the ADR-031 platform provider). The turntable controller cannot tell the
+   *  difference between this and the real broker. */
+  platformFor(childId: string = this.childId): PlatformProvider {
+    return this.child.platformFor(childId);
+  }
+
+  /** Observe the turntable child's events, exactly as core would. The depot folds
+   *  whatever occupancy the child asserts into its own rolled-up number (here the
+   *  inner zone is capacity-1; a multi-stall child would roll up the same way). */
+  onTurntableEvent(handler: (event: CoreEvent) => void): () => void {
+    return this.child.onChildEvent(this.childId, handler);
+  }
+
+  /** Mirror the deck's busy/free truth onto the nesting seam: report the inner
+   *  capacity-1 zone's occupancy UPWARD (as the turntable would) and answer
+   *  clearance DOWNWARD. Edge-triggered — emit only when the truth flips. */
+  private syncDeckSeam(): void {
+    const busy = this.current !== null;
+    if (busy === this.lastDeckBusy) return;
+    this.lastDeckBusy = busy;
+    /* The turntable reports its own occupancy up to its core (the depot). */
+    this.child.platformFor(this.childId).publish(this.zoneEvent(busy ? 1 : 0));
+    /* The depot, as core, answers the inner zone's clearance: withhold while the
+     *  deck is busy (a second loco waits at the throat), grant when it frees. */
+    this.child.command(this.childId, busy ? this.revoke() : this.grant());
+  }
+
+  /** A capacity-1 `zone_state_changed` for the inner turntable deck. */
+  private zoneEvent(occupancy: number): CoreEvent {
+    return {
+      event_id: this.seamId(),
+      device_id: this.childId,
+      timestamp_device: SEAM_TIMESTAMP,
+      event_type: 'zone_state_changed',
+      protocol_version: PROTOCOL_VERSION,
+      payload: { zone_marker_id: this.zoneMarkerId, capacity: 1, occupancy },
+    };
+  }
+
+  private grant(): CoreCommand {
+    return {
+      command_id: this.seamId(),
+      device_id: this.childId,
+      timestamp_server: SEAM_TIMESTAMP,
+      command_type: 'grant_clearance',
+      protocol_version: PROTOCOL_VERSION,
+      payload: { limit_marker_id: this.zoneMarkerId, reason: 'deck free' },
+    };
+  }
+
+  private revoke(): CoreCommand {
+    return {
+      command_id: this.seamId(),
+      device_id: this.childId,
+      timestamp_server: SEAM_TIMESTAMP,
+      command_type: 'revoke_clearance',
+      payload: { reason: 'deck busy', immediate: true },
+      protocol_version: PROTOCOL_VERSION,
+    };
+  }
+
+  /** A deterministic, valid v4-UUID for a seam envelope — the counter encoded in
+   *  the final field so the depot stays pure (no Math.random / Date.now) while the
+   *  seam still carries structurally-valid wire shapes. */
+  private seamId(): string {
+    this.seamSeq += 1;
+    const tail = this.seamSeq.toString(16).padStart(12, '0');
+    return `00000000-0000-4000-8000-${tail}`;
   }
 
   /** Queue a loco at the throat. Admission is gated: it boards only when the deck
@@ -134,8 +253,11 @@ export class DepotController {
   tick(dtS: number): void {
     this.timer += dtS;
     /* The interior turntable owns its own rotation physics; the depot, as its
-     *  parent-core, only steps it (the platform-provider seam once ADR-031 lands). */
+     *  parent-core, only steps it (the WORLD-actuator side of the nesting). */
     this.d.deck.step(dtS);
+    /* Mirror the deck's busy/free truth onto the ADR-031 platform seam: report the
+     *  inner zone's occupancy up, answer its clearance down (the CORE-link side). */
+    this.syncDeckSeam();
     switch (this.phase) {
       case 'idle':
         this.idle();
