@@ -8,7 +8,13 @@ import { nearestStartEdge } from '../sim/nearest-edge.js';
 import type { ToyHardware } from '../sim/toy-hardware.js';
 import { useToyHardware } from '../sim/use-toy-hardware.js';
 import { CARRIAGE_SPACING_MM, type WorldPosition, computeTrainTrails } from '../track/coupling.js';
-import { type EdgePath, composeEdgePath } from '../track/edge-path.js';
+import {
+  type EdgePath,
+  composeEdgePath,
+  pieceIdFromMarkerId,
+  poseAt,
+  trailingCarriagePose,
+} from '../track/edge-path.js';
 import { SNAP_DISTANCE, compileLayout } from '../track/layout-from-pieces.js';
 import { detectSameLayerOverlaps, pierSuppressed } from '../track/overlap.js';
 import {
@@ -389,14 +395,6 @@ function deviceIdForDevicePiece(piece: TrackPiece): string {
 }
 
 /**
- * Extract the piece id from a marker id of the form `M-{pieceId}`.
- * Returns undefined when the id doesn't match the expected prefix.
- */
-function pieceIdFromMarkerId(markerId: string): string | undefined {
-  return markerId.startsWith('M-') ? markerId.slice(2) : undefined;
-}
-
-/**
  * Attempt to resolve the edge endpoints for a given sim train. Returns
  * `undefined` when the train is deferred (no current edge) or when either
  * endpoint marker can't be matched to a placed piece.
@@ -465,73 +463,6 @@ function spawnOrientationDeg(
   const toPiece = pieces.find((p) => p.id === toId);
   if (fromPiece === undefined || toPiece === undefined) return undefined;
   return toRotationDeg(composeEdgePath(fromPiece, toPiece).at(0).headingDeg);
-}
-
-/** Sample a composite edge path at distance `d`, returning a `WorldPosition`
- * (the path's heading is already in the SVG clockwise-from-east convention). */
-function poseAt(path: EdgePath, d: number): WorldPosition {
-  const clamped = Math.max(0, Math.min(d, path.length));
-  const pose = path.at(clamped);
-  return { x: pose.x, y: pose.y, rotationDeg: pose.headingDeg };
-}
-
-/**
- * The minimal structural seam `trailingCarriagePose` needs from a sim train.
- * `VirtualTrain` satisfies it structurally — no cast required.
- */
-export interface TrailingPositionSource {
-  getTrailingPosition(offset_mm: number): {
-    edge: { from_marker_id: string; to_marker_id: string };
-    distance_into_edge_mm: number;
-  } | null;
-}
-
-/**
- * Resolve the world pose for a trailing carriage at `offset_mm` behind the
- * head. Walks back through the sim's traversal history via `getTrailingPosition`
- * and maps the resulting (edge, distance_into_edge_mm) to a world-space pose.
- *
- * The path cache is keyed by `${from_marker_id}->${to_marker_id}` and should
- * be seeded with the train's current-edge path before the carriage loop so
- * current-edge carriages hit the cache rather than recomposing.
- *
- * Returns `undefined` when:
- *   - `getTrailingPosition` returns null (train off track),
- *   - either endpoint marker cannot be mapped to a `TrackPiece` in `piecesById`.
- *
- * The `estimatedLengthMm` callback resolves each edge's declared physical
- * length so the sim-space mm → world-path-fraction rescaling stays correct.
- *
- * @pure (given a stable cache — mutates the cache for memoisation only)
- */
-export function trailingCarriagePose(
-  simTrain: TrailingPositionSource,
-  offset_mm: number,
-  piecesById: ReadonlyMap<string, TrackPiece>,
-  estimatedLengthMm: (fromMarkerId: string, toMarkerId: string) => number,
-  pathCache: Map<string, EdgePath>,
-): WorldPosition | undefined {
-  const pos = simTrain.getTrailingPosition(offset_mm);
-  if (pos === null) return undefined;
-
-  const { edge, distance_into_edge_mm } = pos;
-  const cacheKey = `${edge.from_marker_id}->${edge.to_marker_id}`;
-
-  let path = pathCache.get(cacheKey);
-  if (path === undefined) {
-    const fromPieceId = pieceIdFromMarkerId(edge.from_marker_id);
-    const toPieceId = pieceIdFromMarkerId(edge.to_marker_id);
-    if (fromPieceId === undefined || toPieceId === undefined) return undefined;
-    const fromPiece = piecesById.get(fromPieceId);
-    const toPiece = piecesById.get(toPieceId);
-    if (fromPiece === undefined || toPiece === undefined) return undefined;
-    path = composeEdgePath(fromPiece, toPiece);
-    pathCache.set(cacheKey, path);
-  }
-
-  const estLen = estimatedLengthMm(edge.from_marker_id, edge.to_marker_id);
-  const t = estLen > 0 ? distance_into_edge_mm / estLen : 0;
-  return poseAt(path, t * path.length);
 }
 
 /**
@@ -865,7 +796,8 @@ function turntableAngleFor(position: string | undefined): number {
 
 /** True when any live train currently renders within the station's sensor
  * range — "a train is under the sensor, being measured". Visual only; the
- * wire-real measurement is ToyHardware's `reportVisionLengths`. */
+ * wire-real measurement is the honest `ToyVisionStations` driven from
+ * `ToyHardware.tick`. */
 function trainUnderSensor(
   station: TrackPiece,
   pieces: ReadonlyArray<TrackPiece>,

@@ -3,25 +3,29 @@
 **Status:** speculative viability test. NOT normative; not expected in a typical
 setup.
 
-**ADR-030 audit (2026-06-11): ADAPTABLE (medium) — device already reimplemented;
-toy-table piece needs migration.** The ADR-030-native form is built and
-video-confirmed: `simulator-ui/src/sensors/vision-station.ts` + `camera-provider.ts`
-measure length honestly (speed = baseline ÷ marker-crossing interval, length =
-speed × dwell) over the physics world (the `vision` physics scenario). The legacy
-toy-table piece, by contrast, still derives length by reading the simulator's
-consist directly (`sim/toy-hardware.ts` `reportVisionLengths`) — a ground-truth
-cheat that would not port to real hardware. Outstanding work is migrating the
-toy-table onto the physics world + the new `VisionStation` (cross-cutting; not a
-quick adapt). Nothing is "messed up" — the seam is proven by the new device.
+**ADR-030 audit (2026-06-11): MIGRATED — the toy-table cheat is gone.** The
+ground-truth read is removed: the toy-table now drives the SAME honest
+`VisionStation` (`simulator-ui/src/sensors/vision-station.ts` + `camera-provider.ts`)
+as the `vision` physics scenario. `sim/toy-vision.ts` (`ToyVisionStations`) feeds
+it from the toy-table's physical bodies — a passing train's loco head + coupled
+carriages, placed exactly as the renderer places them (`trailingCarriagePose`),
+the toy-table analogue of the physics world's `world.bodies()`. The station owns
+two sensing reference points a fixed baseline apart and a camera footprint between
+them (geometry in `pieces.ts`); the head crossing the two points gives speed
+(baseline ÷ interval), the camera integrates the dwell, and length = speed × dwell.
+No train self-report; no consist read for the wire length (the consist is read only
+as a physical body — count + livery a camera sees). `ToyHardware.tick` sub-steps the
+sim at ~50 ms while a station is live so the fixed camera samples the pass. Unit-
+tested (`toy-vision.test.ts`) and integration-tested end-to-end through the bus
+(`toy-hardware.test.ts`).
 
-**Built (June 2026), untested:** toy-table piece in the Experiments tray (`vision-station`
+**Built (June 2026):** toy-table piece in the Experiments tray (`vision-station`
 in `pieces.ts`) — station plank + grey sensor mast, with the detection LED lit
-while a live train is under the sensor. The proof itself runs: scanning
-registers `VLS-{piece.id}` with `core.reports_length`, and
-`ToyHardware.reportVisionLengths` watches `tag_observed` at the station's
-marker, measures the observed train from its sim consist (the camera
-hand-wave), and asserts `train_length_changed` with hysteresis — a device that
-is not the train, changing the length on the wire, end-to-end.
+while a live train is under the sensor. Scanning registers `VLS-{piece.id}` with
+`core.reports_length`; as a train passes through, the honest `VisionStation`
+measures its length and the station (not the train) asserts
+`train_length_changed` with hysteresis — a device that is not the train, changing
+the length on the wire, end-to-end, with no ground-truth cheat.
 
 **Proves:** that a train's length can be *reported and changed at runtime by a
 device that is not the train* — the seam [ADR-023](../adr/023-coupling-and-decoupling.md)
