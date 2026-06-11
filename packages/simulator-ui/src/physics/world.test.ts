@@ -194,6 +194,24 @@ describe('PhysicsWorld — load (carriage weight)', () => {
   });
 });
 
+describe('PhysicsWorld — uncouple (the crane wedge)', () => {
+  it('splitting a coupling leaves the rear cut behind as the loco pulls away', () => {
+    const w = new PhysicsWorld(straightRail(4000));
+    w.addBody({ id: 'L', kind: 'loco', railPos: 300, facing: 1, motion: 'forward' });
+    w.addBody({ id: 'c0', kind: 'carriage', railPos: 232, facing: 1 });
+    w.addBody({ id: 'c1', kind: 'carriage', railPos: 164, facing: 1 });
+    w.couple('L', 'c0');
+    w.couple('c0', 'c1');
+    w.uncouple('c0', 'c1'); // the wedge prises the rear coupling apart
+    const c1Before = pose(w, 'c1').x;
+    run(w, 60);
+    expect(pose(w, 'L').coupledTo).toEqual(['c0']); // loco + front car still a unit
+    expect(pose(w, 'c0').coupledTo).not.toContain('c1');
+    expect(pose(w, 'L').x).toBeGreaterThan(360); // pulled forward, away from the cut
+    expect(Math.abs(pose(w, 'c1').x - c1Before)).toBeLessThan(5); // shed cut sits put
+  });
+});
+
 describe('PhysicsWorld — gravity on ramps', () => {
   /** Steady speed of an identical loco on a rail of the given slope. */
   const steadySpeed = (slope: number): number => {

@@ -167,6 +167,20 @@ export class PhysicsWorld {
     }
   }
 
+  /** Split a coupling between two bodies — the physical effect of the railyard
+   *  crane's wedge prising the coupler faces apart (mechanical separation, not a
+   *  traction contest). Symmetric; a no-op if they weren't coupled. */
+  uncouple(a: string, b: string): void {
+    this.byId.get(a)?.coupledTo.delete(b);
+    this.byId.get(b)?.coupledTo.delete(a);
+  }
+
+  /** The ids currently coupled to `id` (for a device to read its rake makeup
+   *  only by sensing/inspection, never to drive logic off ground truth). */
+  coupledTo(id: string): readonly string[] {
+    return [...(this.byId.get(id)?.coupledTo ?? [])];
+  }
+
   bodies(): readonly BodyPose[] {
     return this.bodyList.map((b) => this.poseOf(b));
   }
