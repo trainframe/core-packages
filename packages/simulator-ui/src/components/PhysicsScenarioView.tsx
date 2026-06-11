@@ -7,9 +7,11 @@
  * Mounted by `App` when the URL carries `?physics=<name>`. Exposes
  * `window.__tfPhysics` so the video harness can read body fates/poses and assert.
  */
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { physicsMotorActuator } from '../devices/motor-actuator.js';
+import { TrainDevice } from '../devices/train-device.js';
 import { buildRail } from '../physics/rail.js';
-import { type PhysicsScenario, buildScenario } from '../physics/scenarios.js';
+import { type PhysicsScenario, type TrackSpec, buildScenario } from '../physics/scenarios.js';
 import { type BodyPose, PhysicsWorld } from '../physics/world.js';
 import { physicsCameraProvider } from '../sensors/camera-provider.js';
 import { VisionStation } from '../sensors/vision-station.js';
@@ -115,18 +117,38 @@ function viewBoxFor(pieces: readonly TrackPiece[], pad = 320): string {
 
 type VisionConfig = NonNullable<PhysicsScenario['vision']>;
 
-/** Apply any script motion-intents now due (the device's only command). */
-function fireDueScripts(
-  scenario: PhysicsScenario,
-  world: PhysicsWorld,
-  elapsedS: number,
-  fired: Set<number>,
-): void {
-  for (let i = 0; i < scenario.script.length; i++) {
-    const s = scenario.script[i];
-    if (s !== undefined && !fired.has(i) && elapsedS >= s.atS) {
-      world.setMotion(s.id, s.motion);
-      fired.add(i);
+/** A track being run: its world, the TrainDevice per loco (the scenario commands
+ *  these, not the world directly), its script, and which steps have fired. */
+interface RunningTrack {
+  readonly world: PhysicsWorld;
+  readonly devices: Map<string, TrainDevice>;
+  readonly script: TrackSpec['script'];
+  readonly fired: Set<number>;
+}
+
+/** Stage one track: build its rail + world, seed bodies + couplings, and wire a
+ *  TrainDevice (over a sim-backed motor actuator) for each loco. */
+function buildTrack(spec: TrackSpec): RunningTrack {
+  const world = new PhysicsWorld(buildRail(spec.pieces));
+  for (const b of spec.bodies) world.addBody(b);
+  for (const [a, b] of spec.couples ?? []) world.couple(a, b);
+  const devices = new Map<string, TrainDevice>();
+  for (const b of spec.bodies) {
+    if (b.kind === 'loco')
+      devices.set(b.id, new TrainDevice(b.id, physicsMotorActuator(world, b.id)));
+  }
+  return { world, devices, script: spec.script, fired: new Set() };
+}
+
+/** Apply any script intents now due by COMMANDING THE TRAIN DEVICE (forward/
+ *  stop/reverse) — the device acts on the world through its motor actuator. */
+function fireTrackScripts(track: RunningTrack, elapsedS: number): void {
+  const script = track.script ?? [];
+  for (let i = 0; i < script.length; i++) {
+    const s = script[i];
+    if (s !== undefined && !track.fired.has(i) && elapsedS >= s.atS) {
+      track.devices.get(s.id)?.drive(s.motion);
+      track.fired.add(i);
     }
   }
 }
@@ -173,45 +195,62 @@ function makeVisionRunner(
 
 export function PhysicsScenarioView({ name }: { name: string }) {
   const scenario = useMemo(() => buildScenario(name), [name]);
+  const allPieces = useMemo(
+    () =>
+      scenario
+        ? [scenario.pieces, ...(scenario.moreTracks?.map((t) => t.pieces) ?? [])].flat()
+        : [],
+    [scenario],
+  );
   const [poses, setPoses] = useState<readonly BodyPose[]>([]);
   const [visionMm, setVisionMm] = useState<number | null>(null);
-  const worldRef = useRef<PhysicsWorld | null>(null);
 
   useEffect(() => {
     if (scenario === undefined) return;
-    const rail = buildRail(scenario.pieces);
-    const world = new PhysicsWorld(rail);
-    for (const b of scenario.bodies) world.addBody(b);
-    for (const [a, b] of scenario.couples) world.couple(a, b);
-    worldRef.current = world;
+    const specs: TrackSpec[] = [
+      {
+        pieces: scenario.pieces,
+        bodies: scenario.bodies,
+        couples: scenario.couples,
+        script: scenario.script,
+      },
+      ...(scenario.moreTracks ?? []),
+    ];
+    const tracks = specs.map(buildTrack);
+    const first = tracks[0];
+    if (first === undefined) return;
+    const allBodies = (): readonly BodyPose[] => tracks.flatMap((t) => t.world.bodies());
+
     const v = scenario.vision;
     let reported: number | null = null;
     const runVision = v
-      ? makeVisionRunner(v, world, (mm) => {
+      ? makeVisionRunner(v, first.world, (mm) => {
           reported = mm;
           setVisionMm(mm);
         })
       : null;
     const expectedMm = v ? v.rakeSpanMm + 2 * v.footprintRadiusMm : 0;
     if (v) window.__tfVision = { reportedMm: null, expectedMm };
-    const fired = new Set<number>();
+
     let elapsed = 0;
     let acc = 0;
     let last = performance.now();
     let raf = 0;
-    setPoses(world.bodies());
+    setPoses(allBodies());
     const tick = (now: number) => {
       acc += Math.min(0.1, (now - last) / 1000);
       last = now;
       while (acc >= STEP_S) {
         elapsed += STEP_S;
-        fireDueScripts(scenario, world, elapsed, fired);
-        world.step(STEP_S);
+        for (const t of tracks) {
+          fireTrackScripts(t, elapsed);
+          t.world.step(STEP_S);
+        }
         runVision?.(elapsed);
         acc -= STEP_S;
       }
-      setPoses(world.bodies());
-      window.__tfPhysics = { name, elapsedS: elapsed, bodies: () => world.bodies() };
+      setPoses(allBodies());
+      window.__tfPhysics = { name, elapsedS: elapsed, bodies: allBodies };
       if (v) window.__tfVision = { reportedMm: reported, expectedMm };
       raf = requestAnimationFrame(tick);
     };
@@ -246,12 +285,12 @@ export function PhysicsScenarioView({ name }: { name: string }) {
       </div>
       <svg
         data-testid="physics-canvas"
-        viewBox={viewBoxFor(scenario.pieces, scenario.viewPad)}
+        viewBox={viewBoxFor(allPieces, scenario.viewPad)}
         style={{ width: '100%', height: '100%' }}
       >
         <title>{scenario.title}</title>
         <WoodDefs />
-        {scenario.pieces.map((p) => (
+        {allPieces.map((p) => (
           <PieceG key={p.id} piece={p} />
         ))}
         {scenario.vision && <VisionOverlay v={scenario.vision} measuredMm={visionMm} />}

@@ -61,9 +61,22 @@ const CHECKS = {
     const err = Math.abs(vision.reportedMm - vision.expectedMm);
     return { ok: err < 40, why: `measured ${Math.round(vision.reportedMm)}mm vs expected ${Math.round(vision.expectedMm)}mm (err ${Math.round(err)})` };
   },
+  load: (b) => {
+    // L0..L4 pull 1..5 carriages; fewer carriages → travels further.
+    const xs = [0, 1, 2, 3, 4].map((i) => b.find((x) => x.id === `L${i}`)?.x ?? Number.NaN);
+    const strictlyDescending = xs.every((x, i) => i === 0 || xs[i - 1] > x + 5);
+    return { ok: strictlyDescending, why: `x: ${xs.map((x) => Math.round(x)).join(' > ')}` };
+  },
+  ramps: (b) => {
+    const sp = (id) => b.find((x) => x.id === id)?.speed ?? Number.NaN;
+    const up = sp('up');
+    const flat = sp('flat');
+    const down = sp('down');
+    return { ok: up < flat - 5 && flat < down - 5, why: `up ${up | 0} < flat ${flat | 0} < down ${down | 0}` };
+  },
 };
 
-const DURATION = { collision: 7, push: 5, terminus: 7, couple: 7, tugofwar: 6, derail: 6, runoff: 6, vision: 9 };
+const DURATION = { collision: 7, push: 5, terminus: 7, couple: 7, tugofwar: 6, derail: 6, runoff: 6, vision: 9, load: 7, ramps: 7 };
 
 async function runScenario(browser, name) {
   const durS = DURATION[name] ?? 7;
@@ -102,7 +115,7 @@ async function main() {
   mkdirSync(OUT, { recursive: true });
   const names = process.argv.slice(2).length
     ? process.argv.slice(2)
-    : ['collision', 'push', 'terminus', 'couple', 'tugofwar', 'derail', 'runoff', 'vision'];
+    : ['collision', 'push', 'terminus', 'couple', 'tugofwar', 'derail', 'runoff', 'vision', 'load', 'ramps'];
   const browser = await chromium.launch();
   const results = [];
   for (const name of names) results.push(await runScenario(browser, name));

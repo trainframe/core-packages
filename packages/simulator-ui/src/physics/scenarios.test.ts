@@ -4,7 +4,7 @@ import { SCENARIO_NAMES, buildScenario } from './scenarios.js';
 import { PhysicsWorld } from './world.js';
 
 describe('physics scenarios', () => {
-  it('exposes the seven physics scenarios plus the vision station', () => {
+  it('exposes the seven physics scenarios, the vision station, and the load/ramp demos', () => {
     expect(SCENARIO_NAMES).toEqual(
       expect.arrayContaining([
         'collision',
@@ -15,9 +15,11 @@ describe('physics scenarios', () => {
         'derail',
         'runoff',
         'vision',
+        'load',
+        'ramps',
       ]),
     );
-    expect(SCENARIO_NAMES).toHaveLength(8);
+    expect(SCENARIO_NAMES).toHaveLength(10);
   });
 
   it('an unknown scenario is undefined', () => {

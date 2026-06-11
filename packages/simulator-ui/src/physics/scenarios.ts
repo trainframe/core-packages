@@ -81,6 +81,23 @@ function straights(pieces: TrackPiece[], cursor: Cursor, n: number, prefix: stri
   return c;
 }
 
+/** A motion-intent change a TrainDevice applies at `atS` (the device's only
+ *  command). */
+export interface ScriptStep {
+  readonly atS: number;
+  readonly id: string;
+  readonly motion: Motion;
+}
+
+/** One independent rail + its bodies (a separate world). Parallel tracks (the
+ *  load and ramp demos) are extra tracks the view runs side by side. */
+export interface TrackSpec {
+  readonly pieces: TrackPiece[];
+  readonly bodies: BodyInit[];
+  readonly couples?: ReadonlyArray<readonly [string, string]>;
+  readonly script?: ReadonlyArray<ScriptStep>;
+}
+
 export interface PhysicsScenario {
   readonly name: string;
   readonly title: string;
@@ -89,11 +106,10 @@ export interface PhysicsScenario {
   /** Pairs to pre-couple at stage time (a seeded rake). */
   readonly couples: ReadonlyArray<readonly [string, string]>;
   /** Timed motion-intent changes (the device's only command). */
-  readonly script: ReadonlyArray<{
-    readonly atS: number;
-    readonly id: string;
-    readonly motion: Motion;
-  }>;
+  readonly script: ReadonlyArray<ScriptStep>;
+  /** Additional independent rails rendered alongside (each its own world) — for
+   *  the parallel-track comparison demos (load, ramps). */
+  readonly moreTracks?: ReadonlyArray<TrackSpec>;
   readonly durationS: number;
   /** View-box padding (mm) around the pieces — widen it where a body flies off
    *  the rail (derail/run-off) so the excursion stays on camera. */
@@ -283,7 +299,17 @@ function vision(): PhysicsScenario {
       'Vision station measures a passing train’s length — speed from two markers, no self-report',
     pieces,
     bodies: [
-      { id: 'red', kind: 'loco', railPos: 320, facing: 1, motion: 'forward', color: RED },
+      // Brisk power so the laden rake still clears the camera promptly; the
+      // measured length is speed-independent (speed × dwell), so this is fine.
+      {
+        id: 'red',
+        kind: 'loco',
+        railPos: 320,
+        facing: 1,
+        motion: 'forward',
+        power: 2400,
+        color: RED,
+      },
       { id: 'c1', kind: 'carriage', railPos: 252, facing: 1, color: GREEN },
       { id: 'c2', kind: 'carriage', railPos: 184, facing: 1, color: AMBER },
     ],
@@ -305,6 +331,88 @@ function vision(): PhysicsScenario {
   };
 }
 
+const PALETTE = [RED, BLUE, GREEN, AMBER, PURPLE];
+
+/** One straight track with an identical loco pulling `carriages` wagons, at world
+ *  `y`. Identical power across tracks — only the load differs. */
+function pullTrack(y: number, carriages: number, idx: number): TrackSpec {
+  const pieces: TrackPiece[] = [];
+  straights(pieces, { x: 200, y, dir: 0 }, 13, `t${idx}`); // 2600 mm
+  const loco = `L${idx}`;
+  const color = PALETTE[idx % PALETTE.length] ?? RED;
+  const bodies: BodyInit[] = [
+    { id: loco, kind: 'loco', railPos: 420, facing: 1, motion: 'forward', color },
+  ];
+  const couples: [string, string][] = [];
+  for (let j = 0; j < carriages; j++) {
+    const cid = `L${idx}c${j}`;
+    bodies.push({ id: cid, kind: 'carriage', railPos: 420 - (j + 1) * 68, facing: 1, color });
+    couples.push([j === 0 ? loco : `L${idx}c${j - 1}`, cid]);
+  }
+  return { pieces, bodies, couples };
+}
+
+function load(): PhysicsScenario {
+  // Five identical locos (same power), pulling 1,2,3,4,5 carriages, on parallel
+  // tracks. They start together; the lighter trains pull ahead.
+  const t0 = pullTrack(280, 1, 0);
+  const rest = [470, 660, 850, 1040].map((yPos, i) => pullTrack(yPos, i + 2, i + 1));
+  return {
+    name: 'load',
+    title: 'Five identical locos, each pulling one more carriage — fewer carriages run faster',
+    pieces: t0.pieces,
+    bodies: t0.bodies,
+    couples: t0.couples ?? [],
+    script: [],
+    moreTracks: rest,
+    durationS: 7,
+  };
+}
+
+/** A flat / uphill / downhill track with one identical loco. `kind` picks the
+ *  grade: a chain of straights, up-ramps (slope +1), or down-ramps (slope -1). */
+function gradeTrack(y: number, kind: 'flat' | 'up' | 'down', idx: number): TrackSpec {
+  const pieces: TrackPiece[] = [];
+  const start: Cursor = { x: 200, y, dir: 0 };
+  if (kind === 'flat') {
+    straights(pieces, start, 20, `g${idx}`);
+  } else {
+    let c = start;
+    for (let i = 0; i < 20; i++) {
+      c = place(pieces, c, 'ramp', `g${idx}_${i}`, kind === 'down' ? { connectVia: 1 } : {});
+    }
+  }
+  return {
+    pieces,
+    bodies: [
+      {
+        id: kind,
+        kind: 'loco',
+        railPos: 150,
+        facing: 1,
+        motion: 'forward',
+        color: PALETTE[idx] ?? RED,
+      },
+    ],
+  };
+}
+
+function ramps(): PhysicsScenario {
+  const flat = gradeTrack(320, 'flat', 0);
+  const up = gradeTrack(560, 'up', 1);
+  const down = gradeTrack(800, 'down', 2);
+  return {
+    name: 'ramps',
+    title: 'Identical locos on a level, an up-ramp (slower), and a down-ramp (faster)',
+    pieces: flat.pieces,
+    bodies: flat.bodies,
+    couples: [],
+    script: [],
+    moreTracks: [up, down],
+    durationS: 7,
+  };
+}
+
 const BUILDERS: Record<string, () => PhysicsScenario> = {
   collision,
   push,
@@ -314,6 +422,8 @@ const BUILDERS: Record<string, () => PhysicsScenario> = {
   derail,
   runoff,
   vision,
+  load,
+  ramps,
 };
 
 export const SCENARIO_NAMES = Object.keys(BUILDERS);
