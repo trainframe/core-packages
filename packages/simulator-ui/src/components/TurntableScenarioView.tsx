@@ -173,43 +173,67 @@ export function TurntableScenarioView() {
           .map(([id]) => (
             <SegArt key={id} d={railPath(layout.net.railOf(id))} />
           ))}
-        {/* The fixed turntable pit: a recessed dark disc with a steel ring rail. */}
-        <circle cx={c.x} cy={c.y} r={r + 36} fill="#d8c79f" stroke="#9a7b46" strokeWidth={3} />
-        <circle cx={c.x} cy={c.y} r={r + 22} fill="#3a3128" stroke="#241f18" strokeWidth={2} />
-        <circle cx={c.x} cy={c.y} r={r + 14} fill="none" stroke="#7d8893" strokeWidth={2.5} />
-        {/* The rotating bridge deck — drawn at the actuator's REAL angle (read off
-            it, never animated). This is the only piece whose decoration moves
-            relative to its body. */}
+        {/* The turntable pit: a beech surround, a recessed WOOD DECK DISC (the
+            bridge's deck, filling the pit), and a steel ring rail around the rim. */}
+        <circle cx={c.x} cy={c.y} r={r + 30} fill="#d8c79f" stroke="#9a7b46" strokeWidth={3} />
+        <circle cx={c.x} cy={c.y} r={r + 19} fill="#3a3128" stroke="#241f18" strokeWidth={2} />
+        <circle cx={c.x} cy={c.y} r={r + 14} fill="#7a5836" stroke="#5d4326" strokeWidth={1.5} />
+        <circle cx={c.x} cy={c.y} r={r + 12} fill="none" stroke="#aab4bf" strokeWidth={2} />
+        {/* The rotating bridge — at the actuator's REAL angle (read off it, never
+            animated): a planked deck strip carrying the twin running rails, with an
+            end-carriage clamp riding the ring rail at each end. */}
         <g
           transform={`translate(${c.x},${c.y}) rotate(${deckAngle})`}
           data-testid="turntable-deck"
           data-deck-angle={deckAngle.toFixed(1)}
         >
           <rect
-            x={-r - 18}
-            y={-15}
-            width={2 * (r + 18)}
-            height={30}
-            rx={4}
-            fill="#cba460"
+            x={-r - 14}
+            y={-17}
+            width={2 * (r + 14)}
+            height={34}
+            rx={3}
+            fill="#caa56a"
             stroke="#6f4c28"
-            strokeWidth={2}
+            strokeWidth={1.5}
           />
-          <line x1={-r - 18} y1={-7} x2={r + 18} y2={-7} stroke="#6f4c28" strokeWidth={2} />
-          <line x1={-r - 18} y1={7} x2={r + 18} y2={7} stroke="#6f4c28" strokeWidth={2} />
+          {/* the twin running rails the loco sits between */}
+          <line x1={-r - 14} y1={-6} x2={r + 14} y2={-6} stroke="#5d4326" strokeWidth={2} />
+          <line x1={-r - 14} y1={6} x2={r + 14} y2={6} stroke="#5d4326" strokeWidth={2} />
+          {/* end-carriage clamps where the bridge meets the ring rail */}
+          <rect
+            x={-r - 17}
+            y={-13}
+            width={15}
+            height={26}
+            rx={2}
+            fill="#8893a0"
+            stroke="#5e6772"
+            strokeWidth={1.5}
+          />
+          <rect
+            x={r + 2}
+            y={-13}
+            width={15}
+            height={26}
+            rx={2}
+            fill="#8893a0"
+            stroke="#5e6772"
+            strokeWidth={1.5}
+          />
         </g>
+        {poses.map((p) => (
+          <BodyG key={p.id} pose={p} />
+        ))}
         {/* A red operating knob on the surround (cf. the BRIO mechanical turntable). */}
         <circle
           cx={c.x}
-          cy={c.y - r - 36}
-          r={7}
+          cy={c.y + r + 24}
+          r={6}
           fill="#c0392b"
           stroke="#7d2418"
           strokeWidth={1.5}
         />
-        {poses.map((p) => (
-          <BodyG key={p.id} pose={p} />
-        ))}
       </svg>
     </div>
   );
