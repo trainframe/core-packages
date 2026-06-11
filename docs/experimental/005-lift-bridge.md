@@ -3,15 +3,24 @@
 **Status:** speculative viability test. NOT normative; not expected in a typical
 setup.
 
-**ADR-030 audit (2026-06-11): NEEDS-PHYSICS-ENHANCEMENT (small, additive).** A
-raised span = a track link that is temporarily DISCONNECTED. The physics
-`RailNetwork` links are static (only switch-gated) — there is no runtime
-connect/disconnect (`simulator-ui/src/physics/network.ts`). Adapting needs a
-`LinkActuator` provider + `PhysicsWorld.setLinkActive(linkId, bool)` + `exit()`
-consulting it; a train then meets a raised gap as an open/buffered rail end
-(`world.ts` already runs a body off an open end or stops it at a buffer). Low-risk,
-backwards-compatible; the device becomes a portable controller over the
-`LinkActuator`. Not yet built — recorded for when a lift-bridge is wanted in physics.
+**Built in physics (2026-06-11).** The ADR-030 audit's small additive enhancement
+is done. A raised span is now a track link that is temporarily DISCONNECTED:
+`NetLink` gained an optional `id`, `RailNetwork.exit()` consults an `activeLinks`
+map (threaded alongside `switches`; a link with no id / not in the map stays active,
+fully backwards-compatible), and `PhysicsWorld.setLinkActive(linkId, active)` flips
+it. A body reaching a disconnected link meets the gap as the rail end's
+buffer/run-off (`world.ts`, unchanged). On top sit a physically-honest
+`LinkActuator` (`devices/link-actuator.ts` — the span takes TIME to raise/lower at
+a fixed rate, owns its own `raise` fraction, connects the link only when fully
+seated and breaks it the instant a raise begins; ADR-031 §2) and a portable
+`LiftBridgeController` (`devices/lift-bridge-controller.ts` — withholds the train
+out while the span is up, lowers it, awaits physical seating, then releases). A
+`?physics=lift-bridge` scenario + view (`components/LiftBridgeScenarioView.tsx`,
+`physics/lift-bridge.ts`) demonstrate a train held short of a raised gap (never
+running off), the span lowering, and the train crossing — drawn from the actuator's
+real raise fraction, never animated. Unit-tested (`network.test.ts`, `world.test.ts`,
+`link-actuator.test.ts`, `lift-bridge-controller.test.ts`) and harnessed
+(`physics-scenarios-video.mjs` → `lift-bridge`: train ends ACROSS, on-rail).
 
 **Built (June 2026), untested:** toy-table piece in the Experiments tray (`lift-bridge`
 in `pieces.ts`) — two fixed wooden approaches with a visible seam, and the

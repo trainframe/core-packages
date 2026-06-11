@@ -5,15 +5,15 @@ import { PhysicsWorld } from './world.js';
 
 /** A synthetic straight segment of the given length (geometry irrelevant to the
  *  traversal logic; we assert on which segment the body ends up). */
-function seg(length: number): Rail {
+function seg(length: number, ends: { startBuffered?: boolean; endBuffered?: boolean } = {}): Rail {
   return {
     length,
     at: (d) => ({ x: d, y: 0, headingDeg: 0 }),
     curvatureAt: () => 0,
     pieceTypeAt: () => 'straight',
     slopeAt: () => 0,
-    startBuffered: false,
-    endBuffered: false,
+    startBuffered: ends.startBuffered ?? false,
+    endBuffered: ends.endBuffered ?? false,
   };
 }
 
@@ -85,6 +85,23 @@ describe('rail network — switch traversal', () => {
 
     const plain = buildNetwork(segments, [{ from: 'trunk', to: 'deck' }]);
     expect(plain.exit('trunk', 'end', new Map())?.flipsFacing).toBe(false);
+  });
+
+  it('an id-bearing link is active by default and absent when marked inactive', () => {
+    const segments = new Map<string, Rail>([
+      ['near', seg(500)],
+      ['far', seg(500)],
+    ]);
+    const net = buildNetwork(segments, [{ from: 'near', to: 'far', id: 'BRIDGE' }]);
+    /* No activeLinks map → connected (backwards-compatible). */
+    expect(net.exit('near', 'end', new Map())?.seg).toBe('far');
+    /* Explicitly active → connected. */
+    expect(net.exit('near', 'end', new Map(), new Map([['BRIDGE', true]]))?.seg).toBe('far');
+    /* Marked inactive → absent (the gap; nothing connected). */
+    expect(net.exit('near', 'end', new Map(), new Map([['BRIDGE', false]]))).toBeNull();
+    /* The reverse direction is gated by the same id. */
+    expect(net.exit('far', 'start', new Map(), new Map([['BRIDGE', false]]))).toBeNull();
+    expect(net.exit('far', 'start', new Map(), new Map([['BRIDGE', true]]))?.seg).toBe('near');
   });
 
   it('reversing back off the branch returns to the trunk (same switch path)', () => {

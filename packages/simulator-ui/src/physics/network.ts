@@ -36,7 +36,12 @@ export interface RailNetwork {
   /** Where a body leaving `seg` at `end` goes next given the live switch
    *  positions, or null when nothing is connected (the rail's own buffer/run-off
    *  applies). */
-  exit(seg: string, end: SegEnd, switches: ReadonlyMap<string, string>): NetExit | null;
+  exit(
+    seg: string,
+    end: SegEnd,
+    switches: ReadonlyMap<string, string>,
+    activeLinks?: ReadonlyMap<string, boolean>,
+  ): NetExit | null;
 }
 
 /** The trivial one-segment network around a single rail (segment id `main`,
@@ -49,6 +54,16 @@ export function singleRail(rail: Rail): RailNetwork {
   };
 }
 
+/** Whether a link is connected RIGHT NOW. A link with no `id`, or one absent
+ *  from the `activeLinks` map, is connected (the default — backwards-compatible
+ *  with every static link). A link whose id maps to `false` is DISCONNECTED: the
+ *  rail it represents is physically absent (a raised lift-bridge span), so the
+ *  network treats it as not there and a body meets the rail end's buffer/run-off. */
+function linkConnected(link: NetLink, activeLinks: ReadonlyMap<string, boolean>): boolean {
+  if (link.id === undefined) return true;
+  return activeLinks.get(link.id) !== false;
+}
+
 /** A directed link `from.end → to.start`. When `when` is set the link is active
  *  only while that switch is in that position (a junction branch); an
  *  unconditional link is always active (a plain joint). `flipsFacing` marks a
@@ -59,6 +74,10 @@ export interface NetLink {
   readonly to: string;
   readonly when?: { readonly switchId: string; readonly position: string };
   readonly flipsFacing?: boolean;
+  /** A stable id by which the world can DISCONNECT this link at runtime (a
+   *  lift-bridge span raising breaks the rail). When set and the world has marked
+   *  it inactive, the link is treated as absent. Unset → always connected. */
+  readonly id?: string;
 }
 
 /** Build a network from named rail segments + directed links. */
@@ -72,26 +91,32 @@ export function buildNetwork(
     return r;
   };
   /** The currently-active link among `candidates`: a switch-matched one if any,
-   *  else the first unconditional one, else undefined. */
+   *  else the first unconditional one, else undefined. A DISCONNECTED link (its
+   *  id marked inactive — a raised span) is filtered out first, so it never wins
+   *  selection: the body then meets the rail end as if nothing were connected. */
   const active = (
     candidates: NetLink[],
     switches: ReadonlyMap<string, string>,
+    activeLinks: ReadonlyMap<string, boolean>,
   ): NetLink | undefined => {
-    const matched = candidates.find(
+    const connected = candidates.filter((l) => linkConnected(l, activeLinks));
+    const matched = connected.find(
       (l) => l.when !== undefined && switches.get(l.when.switchId) === l.when.position,
     );
     if (matched !== undefined) return matched;
-    return candidates.find((l) => l.when === undefined);
+    return connected.find((l) => l.when === undefined);
   };
+  const NONE: ReadonlyMap<string, boolean> = new Map();
   return {
     railOf,
     segments: () => [...segments.keys()],
-    exit(seg, end, switches): NetExit | null {
+    exit(seg, end, switches, activeLinks = NONE): NetExit | null {
       if (end === 'end') {
         // Forward: links leaving this segment's end.
         const link = active(
           links.filter((l) => l.from === seg),
           switches,
+          activeLinks,
         );
         return link
           ? { seg: link.to, atDist: 0, dir: 1, flipsFacing: link.flipsFacing ?? false }
@@ -101,6 +126,7 @@ export function buildNetwork(
       const link = active(
         links.filter((l) => l.to === seg),
         switches,
+        activeLinks,
       );
       return link
         ? {

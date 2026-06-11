@@ -433,6 +433,60 @@ describe('PhysicsWorld — facing flip across a turn-around link (the turntable)
   });
 });
 
+describe('PhysicsWorld — disconnectable link (lift bridge)', () => {
+  /** A near approach → span via a disconnectable link `BRIDGE`. The near end at the
+   *  gap is `endBuffered` so a train held by a raised span comes to rest cleanly. */
+  const bridgeWorld = (nearGapBuffered: boolean): PhysicsWorld => {
+    const segments = new Map<string, Rail>([
+      ['near', straightRail(600, { endBuffered: nearGapBuffered })],
+      ['span', straightRail(600, { endBuffered: true })],
+    ]);
+    const net = buildNetwork(segments, [{ from: 'near', to: 'span', id: 'BRIDGE' }]);
+    const w = new PhysicsWorld(net);
+    w.addBody({
+      id: 'T',
+      kind: 'loco',
+      railPos: 200,
+      facing: 1,
+      motion: 'forward',
+      segment: 'near',
+    });
+    return w;
+  };
+
+  it('a train reaching a DISCONNECTED link buffers at the gap and does not cross', () => {
+    const w = bridgeWorld(true);
+    w.setLinkActive('BRIDGE', false);
+    run(w, 120);
+    const t = pose(w, 'T');
+    expect(t.segment).toBe('near'); // held this side of the gap
+    expect(t.fate).toBe('on-rail'); // it did NOT run off
+    expect(t.speed).toBeLessThan(1); // stopped at the buffer
+  });
+
+  it('a train reaching a DISCONNECTED link at an OPEN gap runs off into the void', () => {
+    const w = bridgeWorld(false);
+    w.setLinkActive('BRIDGE', false);
+    run(w, 120);
+    const t = pose(w, 'T');
+    expect(t.fate).toBe('ran-off');
+    expect(t.mode).toBe('free');
+  });
+
+  it('reconnecting the link lets the held train cross onto the span', () => {
+    const w = bridgeWorld(true);
+    w.setLinkActive('BRIDGE', false);
+    run(w, 120); // held at the gap (buffered → its motor brakes to a stand)
+    expect(pose(w, 'T').segment).toBe('near');
+    /* Lower the span: reconnect and drive on again — the loco rolls across. */
+    w.setLinkActive('BRIDGE', true);
+    w.setMotion('T', 'forward');
+    run(w, 120);
+    expect(pose(w, 'T').segment).toBe('span');
+    expect(pose(w, 'T').fate).toBe('on-rail');
+  });
+});
+
 describe('PhysicsWorld — gravity on ramps', () => {
   /** Steady speed of an identical loco on a rail of the given slope. */
   const steadySpeed = (slope: number): number => {
