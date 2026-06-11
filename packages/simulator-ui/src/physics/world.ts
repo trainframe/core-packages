@@ -22,6 +22,7 @@
  * sensors (the CameraProvider). DOM-free and deterministic — unit-tested headless.
  */
 
+import { type RailNetwork, type SegEnd, singleRail } from './network.js';
 import type { Rail } from './rail.js';
 
 export type Motion = 'forward' | 'stopped' | 'reverse';
@@ -47,6 +48,8 @@ export interface BodyInit {
   readonly mass?: number;
   /** Half the body's length (mm) along the rail, for contact. */
   readonly halfLen?: number;
+  /** Which network segment the body starts on (default `main`). */
+  readonly segment?: string;
   readonly color?: string;
 }
 
@@ -58,6 +61,7 @@ interface Body {
   facing: 1 | -1;
   motion: Motion;
   vel: number; // signed mm/s along +rail
+  segment: string;
   maxSpeed: number;
   power: number;
   mass: number;
@@ -80,6 +84,8 @@ export interface BodyPose {
   readonly fate: 'on-rail' | 'derailed' | 'ran-off';
   readonly speed: number;
   readonly coupledTo: readonly string[];
+  /** The network segment the body is on (`main` for a single rail). */
+  readonly segment: string;
 }
 
 /** Lateral acceleration (mm/s²) a body tolerates on a curve before it derails. */
@@ -101,12 +107,24 @@ const RAMP_GRAVITY = 250;
 const BRAKE = 1100;
 
 export class PhysicsWorld {
-  private readonly rail: Rail;
+  private readonly net: RailNetwork;
   private readonly bodyList: Body[] = [];
   private readonly byId = new Map<string, Body>();
+  /** Live junction switch positions the network consults at transitions. */
+  private readonly switches = new Map<string, string>();
 
-  constructor(rail: Rail) {
-    this.rail = rail;
+  constructor(railOrNet: Rail | RailNetwork) {
+    this.net = 'railOf' in railOrNet ? railOrNet : singleRail(railOrNet);
+  }
+
+  /** Throw a junction switch (a switch actuator's effect). */
+  setSwitch(id: string, position: string): void {
+    this.switches.set(id, position);
+  }
+
+  /** The rail a body is currently on. */
+  private railOf(b: Body): Rail {
+    return this.net.railOf(b.segment);
   }
 
   addBody(init: BodyInit): void {
@@ -118,6 +136,7 @@ export class PhysicsWorld {
       facing: init.facing,
       motion: init.motion ?? 'stopped',
       vel: 0,
+      segment: init.segment ?? 'main',
       maxSpeed: init.maxSpeed ?? 1200,
       power: init.power ?? (init.kind === 'loco' ? 900 : 0),
       mass: init.mass ?? (init.kind === 'loco' ? 1 : 0.6),
@@ -165,9 +184,10 @@ export class PhysicsWorld {
         fate: b.fate,
         speed: Math.hypot(b.free.vx, b.free.vy),
         coupledTo: [...b.coupledTo],
+        segment: b.segment,
       };
     }
-    const p = this.rail.at(b.railPos);
+    const p = this.railOf(b).at(b.railPos);
     return {
       id: b.id,
       x: p.x,
@@ -179,6 +199,7 @@ export class PhysicsWorld {
       fate: b.fate,
       speed: Math.abs(b.vel),
       coupledTo: [...b.coupledTo],
+      segment: b.segment,
     };
   }
 
@@ -249,7 +270,7 @@ export class PhysicsWorld {
     const netPower = group.reduce((s, m) => s + this.tractive(m), 0);
     const anyDriving = group.some((m) => m.motion !== 'stopped' && m.kind === 'loco');
     const mass = group.reduce((s, m) => s + m.mass, 0) + this.pushedMass(group, netPower);
-    const slope = this.rail.slopeAt(lead.railPos);
+    const slope = this.railOf(lead).slopeAt(lead.railPos);
     const cap = Math.max(...group.map((m) => m.maxSpeed));
     const v = lead.vel;
     let next: number;
@@ -277,31 +298,51 @@ export class PhysicsWorld {
       dir > 0
         ? Math.max(...group.map((m) => m.railPos + m.halfLen))
         : Math.min(...group.map((m) => m.railPos - m.halfLen));
+    const seg = group[0]?.segment;
     let mass = 0;
     for (const b of this.bodyList) {
-      if (b.mode !== 'railed' || ids.has(b.id)) continue;
+      if (b.mode !== 'railed' || ids.has(b.id) || b.segment !== seg) continue;
       const gapAhead = dir > 0 ? b.railPos - b.halfLen - edge : edge - (b.railPos + b.halfLen);
       if (gapAhead >= -2 && gapAhead <= COUPLE_RANGE + 2) mass += b.mass;
     }
     return mass;
   }
 
-  /** Derail bodies taking a curve too fast; buffer or run off at the rail ends. */
+  /** Derail bodies taking a curve too fast; otherwise handle each end — transition
+   *  to the connected segment (a junction takes the switched branch), or buffer /
+   *  run off where nothing is connected. */
   private applyRailEnds(): void {
     for (const b of this.bodyList) {
       if (b.mode !== 'railed') continue;
-      const kappa = Math.abs(this.rail.curvatureAt(b.railPos));
+      const rail = this.railOf(b);
+      const kappa = Math.abs(rail.curvatureAt(b.railPos));
       if (kappa > 0 && b.vel * b.vel * kappa > DERAIL_LATERAL_LIMIT) {
         this.releaseToFree(b, 'derailed');
-      } else if (b.railPos > this.rail.length) {
-        this.atEnd(b, this.rail.endBuffered, this.rail.length);
+      } else if (b.railPos > rail.length) {
+        this.crossEnd(b, 'end', rail);
       } else if (b.railPos < 0) {
-        this.atEnd(b, this.rail.startBuffered, 0);
+        this.crossEnd(b, 'start', rail);
       }
     }
   }
 
-  /** A body reaching an end: a buffer stops it; an open end runs it off. */
+  /** A body past an end: follow the network to the next segment (carrying the
+   *  overshoot), or, if nothing is connected, buffer (terminus) / run off (open). */
+  private crossEnd(b: Body, end: SegEnd, rail: Rail): void {
+    const ex = this.net.exit(b.segment, end, this.switches);
+    if (ex === null) {
+      const buffered = end === 'end' ? rail.endBuffered : rail.startBuffered;
+      this.atEnd(b, buffered, end === 'end' ? rail.length : 0);
+      return;
+    }
+    const overshoot = end === 'end' ? b.railPos - rail.length : -b.railPos;
+    b.segment = ex.seg;
+    b.railPos = ex.dir === 1 ? ex.atDist + overshoot : ex.atDist - overshoot;
+    // vel + facing carry over: links are oriented so travel direction is preserved.
+  }
+
+  /** A body reaching an end with nothing connected: a buffer stops it; an open
+   *  end runs it off. */
   private atEnd(b: Body, buffered: boolean, clampTo: number): void {
     if (buffered) {
       b.railPos = clampTo;
@@ -314,8 +355,9 @@ export class PhysicsWorld {
 
   /** Move a body off the rail into free ballistic motion at its current pose. */
   private releaseToFree(b: Body, fate: 'derailed' | 'ran-off'): void {
-    const clamped = Math.max(0, Math.min(this.rail.length, b.railPos));
-    const p = this.rail.at(clamped);
+    const rail = this.railOf(b);
+    const clamped = Math.max(0, Math.min(rail.length, b.railPos));
+    const p = rail.at(clamped);
     const headRad = (p.headingDeg * Math.PI) / 180;
     b.mode = 'free';
     b.fate = fate;
@@ -333,13 +375,21 @@ export class PhysicsWorld {
   }
 
   private resolveContacts(): void {
-    const railed = this.bodyList
-      .filter((b) => b.mode === 'railed')
-      .sort((a, b) => a.railPos - b.railPos);
-    for (let i = 0; i < railed.length - 1; i++) {
-      const lo = railed[i];
-      const hi = railed[i + 1];
-      if (lo !== undefined && hi !== undefined) this.resolvePair(lo, hi);
+    // Bodies only contact within the same segment (sorted along it).
+    const bySeg = new Map<string, Body[]>();
+    for (const b of this.bodyList) {
+      if (b.mode !== 'railed') continue;
+      const arr = bySeg.get(b.segment);
+      if (arr) arr.push(b);
+      else bySeg.set(b.segment, [b]);
+    }
+    for (const arr of bySeg.values()) {
+      arr.sort((a, b) => a.railPos - b.railPos);
+      for (let i = 0; i < arr.length - 1; i++) {
+        const lo = arr[i];
+        const hi = arr[i + 1];
+        if (lo !== undefined && hi !== undefined) this.resolvePair(lo, hi);
+      }
     }
   }
 
