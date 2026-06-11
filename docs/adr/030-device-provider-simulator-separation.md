@@ -3,13 +3,19 @@
 ## Status
 
 Accepted — partially built. **Done (video-confirmed):** the physical substrate
-(`packages/simulator-ui/src/physics/` — `world.ts`, `rail.ts`) with all seven
-acceptance scenarios passing as both headless unit tests and recorded video
-(`packages/ui-tests/scripts/physics-scenarios-video.mjs` → 8/8), and the CameraProvider
-seam + two-marker vision station (`…/sensors/`) measuring a passing rake's length
-(224 mm vs 224 mm expected). **Remaining:** the railyard rebuilt as a CV-driven
-controller on this substrate (Plan §4) — needs the physics extended from a single
-rail to a switched rail network.
+(`packages/simulator-ui/src/physics/` — `world.ts`, `rail.ts`), now with mass +
+traction-power + ramp-gravity dynamics (`a = netPower/mass − DRAG·v − gravity·slope`,
+top speed `power/(mass·DRAG)`): more carriages → slower, a stronger loco → faster,
+up-ramps sap speed while down-ramps add it, and a pushed carriage's weight loads the
+pusher. **Both halves of the device seam exist:** the `CameraProvider` (sense,
+`…/sensors/`, backing the two-marker vision station — 224 mm measured) and the
+`MotorActuator` + portable `TrainDevice` (act, `…/devices/`). 10 acceptance videos
+pass (`physics-scenarios-video.mjs` → 10/10): the seven physical behaviours, the
+vision station, plus `load` (5 locos pulling 1–5 carriages — lighter runs ahead)
+and `ramps` (up slower / level / down faster). DOM-free, headless-testable; React is
+a pure view. **Remaining:** the railyard rebuilt as a CV-driven controller on this
+substrate (Plan §4) — needs the physics extended from a single rail to a switched
+rail network.
 
 Establishes the load-bearing separation every custom device will sit on:
 
@@ -219,9 +225,16 @@ device API goes away.
    device; retire `reportVisionLengths`' ground-truth cheat.
 3. **Physics substrate** (§3), in parallel — built to satisfy the acceptance videos
    below.
-4. **Railyard last** — rebuilt as a `CameraProvider`-driven controller commanding a
-   self-propelled train + a decoupler actuator on the physical layer, against the
-   unchanged behaviour spec. It only works once 2 and 3 are real.
+4. **Railyard last** — rebuilt as a `CameraProvider`-driven controller against the
+   unchanged behaviour spec. The crane is an **XY gantry = three actuators**: a
+   linear actuator moving the **bridge along the rails** (long axis), one moving the
+   **camera/wedge head along the truss** (cross axis), and the **wedge** (a small
+   down/up actuator that splits a coupling). Each axis has **physical travel limits
+   (endstops)** — the actuator clamps at its bounds and the controller must cope (it
+   cannot command past the rail ends; it repositions or recognises it can't reach),
+   exactly as real hardware does. To the physics the railyard is then ordinary
+   track + junctions + coupling; its only specialness is core's opaque-zone view. It
+   only works once the substrate (2, 3) is real, and needs switch traversal added.
 
 ## Acceptance (physics substrate)
 
