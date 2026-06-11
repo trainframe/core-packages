@@ -29,15 +29,15 @@ const RAIL_X0 = 150;
 const RAIL_X1 = 2050;
 const DROP_X = 1200; // where the crate is set down on the line, ahead of the train
 
-/* The dock tower stands clear of the line, below it. Its boom slews up and over
- * to deliver the crate to the drop point on the rail. */
-const TOWER = { x: DROP_X, y: 940 };
+/* The dock tower stands just clear of the line, below it — close enough that the
+ * boom is short. Its boom slews up and over to deliver the crate to the rail. */
+const TOWER = { x: DROP_X, y: 800 };
 const DELIVER = { x: DROP_X, y: RAIL_Y };
 /* Slew/reach limits: the boom swings across the lower → upper arc on the dock
- * side, reaching from just clear of the tower out to past the rail. */
-const JIB_LIMITS = { minAngle: -Math.PI, maxAngle: 0, minReach: 120, maxReach: 420 };
+ * side, reaching from just clear of the tower out to a little past the rail. */
+const JIB_LIMITS = { minAngle: -Math.PI, maxAngle: 0, minReach: 70, maxReach: 250 };
 /* It arrives parked over the dock (boom low and to the left), crate slung. */
-const PARK = { angle: -Math.PI * 0.78, reach: 300 };
+const PARK = { angle: -Math.PI * 0.72, reach: 210 };
 
 /** The jib's lattice boom, drawn from the tower pivot out to the hook along the
  *  actuator's real slew angle + reach (read off, never animated). */
@@ -73,6 +73,42 @@ function Boom({
       <line x1={a0.x} y1={a0.y} x2={a1.x} y2={a1.y} stroke="#8893a0" strokeWidth={3} />
       <line x1={b0.x} y1={b0.y} x2={b1.x} y2={b1.y} stroke="#8893a0" strokeWidth={3} />
       <path d={web.join(' ')} fill="none" stroke="#a7b1bd" strokeWidth={2} />
+    </g>
+  );
+}
+
+/** The crate — ONE consistent object whether it's slung on the hook, set on the
+ *  rail, or tumbling after the strike. Rendered the same everywhere so it never
+ *  "pops" into a different sprite. Centred on (x,y); reddens when off the rail. */
+function Crate({
+  x,
+  y,
+  rot = 0,
+  derailed = false,
+}: {
+  x: number;
+  y: number;
+  rot?: number;
+  derailed?: boolean;
+}) {
+  return (
+    <g
+      transform={`translate(${x},${y}) rotate(${rot})`}
+      data-testid="crate"
+      style={{ filter: 'drop-shadow(0 1px 1.4px rgba(63,43,19,0.34))' }}
+    >
+      <rect
+        x={-18}
+        y={-13}
+        width={36}
+        height={26}
+        rx={2}
+        fill="#7c5a33"
+        stroke={derailed ? '#b00020' : '#523a20'}
+        strokeWidth={derailed ? 3 : 1.5}
+      />
+      <line x1={-18} y1={0} x2={18} y2={0} stroke="#5d4326" strokeWidth={1} />
+      <line x1={0} y1={-13} x2={0} y2={13} stroke="#5d4326" strokeWidth={1} />
     </g>
   );
 }
@@ -146,6 +182,7 @@ export function CraneDropScenarioView() {
     };
   }, []);
 
+  const cratePose = poses.find((p) => p.id === 'crate');
   const minX = RAIL_X0 - 160;
   const maxX = RAIL_X1 + 160;
   const minY = RAIL_Y - 320;
@@ -188,9 +225,13 @@ export function CraneDropScenarioView() {
           strokeWidth={2.6}
           strokeLinecap="round"
         />
-        {poses.map((p) => (
-          <BodyG key={p.id} pose={p} />
-        ))}
+        {/* Everything but the crate renders as a physics sprite; the crate is drawn
+            by <Crate> below so it looks identical on the hook and on the ground. */}
+        {poses
+          .filter((p) => p.id !== 'crate')
+          .map((p) => (
+            <BodyG key={p.id} pose={p} />
+          ))}
         {/* The dock tower: a foundation pad, a lattice mast, and the slew bearing. */}
         <g data-testid="jib-tower">
           <rect
@@ -223,23 +264,23 @@ export function CraneDropScenarioView() {
           />
         </g>
         <Boom pivot={TOWER} angle={jib.angle} reach={jib.reach} />
-        {/* The hook + slung crate at the boom tip, at the actuator's real pose. */}
+        {/* The hook at the boom tip, at the actuator's real pose. */}
         <g transform={`translate(${jib.hook.x},${jib.hook.y})`} data-testid="jib-hook">
           <circle cx={0} cy={0} r={6} fill="#5a6470" stroke="#39414b" strokeWidth={2} />
-          <line x1={0} y1={0} x2={0} y2={jib.carrying ? 12 : 8} stroke="#39414b" strokeWidth={3} />
-          {jib.carrying && (
-            <rect
-              x={-16}
-              y={12}
-              width={32}
-              height={22}
-              rx={2}
-              fill="#7c5a33"
-              stroke="#523a20"
-              strokeWidth={1.5}
-            />
-          )}
+          <line x1={0} y1={0} x2={0} y2={jib.carrying ? 14 : 8} stroke="#39414b" strokeWidth={3} />
         </g>
+        {/* The crate: slung under the hook while carried, then the physics body once
+            set down (and tumbling once struck) — the same graphic throughout. */}
+        {cratePose ? (
+          <Crate
+            x={cratePose.x}
+            y={cratePose.y}
+            rot={cratePose.rotationDeg}
+            derailed={cratePose.fate !== 'on-rail'}
+          />
+        ) : (
+          jib.carrying && <Crate x={jib.hook.x} y={jib.hook.y + 27} />
+        )}
       </svg>
     </div>
   );
