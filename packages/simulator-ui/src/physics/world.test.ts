@@ -212,6 +212,29 @@ describe('PhysicsWorld — uncouple (the crane wedge)', () => {
   });
 });
 
+describe('PhysicsWorld — crane sensing + positional wedge', () => {
+  it('uncoupleAt splits the coupling under the wedge (by position, not id)', () => {
+    const w = new PhysicsWorld(straightRail(4000));
+    w.addBody({ id: 'L', kind: 'loco', railPos: 300, facing: 1 });
+    w.addBody({ id: 'c0', kind: 'carriage', railPos: 232, facing: 1, color: 'red' });
+    w.addBody({ id: 'c1', kind: 'carriage', railPos: 164, facing: 1, color: 'blue' });
+    w.couple('L', 'c0');
+    w.couple('c0', 'c1');
+    // The c0–c1 coupling sits at world x ≈ 198 (midpoint of 232 and 164), y 0.
+    const split = w.uncoupleAt(198, 0);
+    expect(split).not.toBeNull();
+    expect(pose(w, 'c0').coupledTo).not.toContain('c1');
+    expect(pose(w, 'L').coupledTo).toEqual(['c0']); // the front coupling is untouched
+  });
+
+  it('sampleAt reads the colour of the body beneath a camera footprint, nothing beyond it', () => {
+    const w = new PhysicsWorld(straightRail(2000));
+    w.addBody({ id: 'c', kind: 'carriage', railPos: 500, facing: 1, color: 'green' });
+    expect(w.sampleAt(500, 0, 20)?.colour).toBe('green'); // under the footprint
+    expect(w.sampleAt(900, 0, 20)).toBeNull(); // empty stretch — sees nothing
+  });
+});
+
 describe('PhysicsWorld — gravity on ramps', () => {
   /** Steady speed of an identical loco on a rail of the given slope. */
   const steadySpeed = (slope: number): number => {

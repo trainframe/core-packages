@@ -181,6 +181,51 @@ export class PhysicsWorld {
     return [...(this.byId.get(id)?.coupledTo ?? [])];
   }
 
+  /** Split the coupling whose midpoint is nearest world `(x, y)` within `range` —
+   *  the crane wedge's positional effect (it splits whatever is under it; the
+   *  controller positions it by camera, not by knowing body ids). Returns the
+   *  split pair's ids, or null if no coupling is under the wedge. */
+  uncoupleAt(x: number, y: number, range = 45): readonly [string, string] | null {
+    let best: [string, string] | null = null;
+    let bestD = range;
+    for (const a of this.bodyList) {
+      const pa = this.poseOf(a);
+      for (const bid of a.coupledTo) {
+        if (a.id >= bid) continue; // each pair once
+        const b = this.byId.get(bid);
+        if (b === undefined) continue;
+        const pb = this.poseOf(b);
+        const d = Math.hypot((pa.x + pb.x) / 2 - x, (pa.y + pb.y) / 2 - y);
+        if (d <= bestD) {
+          bestD = d;
+          best = [a.id, bid];
+        }
+      }
+    }
+    if (best) this.uncouple(best[0], best[1]);
+    return best;
+  }
+
+  /** The world position + colour of the body whose centre is nearest `(x, y)`
+   *  within `radius` — what a camera at that footprint sees (sense-only). */
+  sampleAt(
+    x: number,
+    y: number,
+    radius: number,
+  ): { x: number; y: number; colour: string | undefined } | null {
+    let best: { x: number; y: number; colour: string | undefined } | null = null;
+    let bestD = radius;
+    for (const b of this.bodyList) {
+      const p = this.poseOf(b);
+      const d = Math.hypot(p.x - x, p.y - y);
+      if (d <= bestD) {
+        bestD = d;
+        best = { x: p.x, y: p.y, colour: b.color };
+      }
+    }
+    return best;
+  }
+
   bodies(): readonly BodyPose[] {
     return this.bodyList.map((b) => this.poseOf(b));
   }
