@@ -2,15 +2,17 @@
 
 ## Status
 
-Accepted — built. Makes the railyard **interior** real: the zone device drives an
-admitted train forward and back between interior slots (a 2D depth/lane frame), the
-crane decouples its leading cut and the train reverses across into the spares slot
-to collide-and-couple, the crane's camera reads the train before release, and the
-gantry follows the live interior pose. Replaces the instantaneous `swapLeadingPair`
-consist-array swap that [ADR-027](027-zone-interior-handoff.md) deliberately
-hand-waved. Verified by `virtual-railyard.test.ts` (the 5-step maneuver, the
-collision pickup, the no-swap path) and a yard-framed screenshot pass
-(`scripts/railyard-yard-capture.mjs`).
+Accepted — built. Makes the railyard **interior** real: the zone device drives a
+SELF-PROPELLED train along the yard's actual interior rails (spine → ladder leg →
+slot) — enter a free slot, the crane lifts its leading cut, pull back onto the lead
+and drive into the spares slot to couple, the crane reads it, then drive back out —
+and the gantry crane only ever handles CUTS OF CARRIAGES, never the loco/train.
+Replaces the instantaneous `swapLeadingPair` consist-array swap that
+[ADR-027](027-zone-interior-handoff.md) deliberately hand-waved. The device is
+geometry-free (phase + progress + slot choices); the toy-table maps each phase onto
+its centre-line path. Verified by `virtual-railyard.test.ts` (phase order, cut
+lift/hold, no-swap path) and a yard-framed screenshot + video pass
+(`scripts/railyard-yard-capture.mjs`, `scripts/railyard-single-video.mjs`).
 
 **Scope boundary (the load-bearing decision): this is entirely a simulator +
 toy-table concern. Core and the wire protocol do not change.** ADR-026/027 already
@@ -110,28 +112,32 @@ here precludes it.
 ### 3. Coupling/decoupling is a timed, crane-tied maneuver — not a swap
 
 `swapLeadingPair` is replaced by a **choreography** the device runs while it holds
-the train (after suspend, before release). The interior is a 2D frame (depth along
-the yard from the throat; lane across the slots). The shipped sequence:
+the train (after suspend, before release). The **self-propelled** train drives
+itself along the yard's REAL interior rails (the toy-table's spine + ladder legs +
+slots) — it does not float across the body. The shipped sequence:
 
-1. **enter** — pull off the throat into a free slot (a lane), officially entering
-   the yard;
-2. **decouple** — the yard decides whether a swap is needed (it is when the train
-   has a full leading cut to give and the yard holds spares); if so the **crane**
-   travels over the cut, lowers, and decouples it — the consist shortens;
-3. **pull-forward** then **reverse-pickup** — the train pulls forward, then
-   *reverses across* into the slot holding the spare cut, which collides and
-   magnetically auto-couples onto its front (simulator-only); the consist lengthens;
-4. **return** — neutralise in a slot so the yard can queue the next action;
-5. **inspect** then **release** — the crane's **camera reads** the train; once it
-   has dwelt over it ("correct to the camera"), the device reconciles length
-   (ADR-023 `train_length_changed` if it changed) and emits `zone_train_released`
-   (ADR-027).
+1. **enter** — the train drives in off the throat, along the spine and out a ladder
+   leg, onto a free slot;
+2. **decouple** — it sits while the **crane** travels over its leading cut, lowers,
+   and lifts that cut off (the crane only ever handles CUTS OF CARRIAGES, never the
+   loco/train); the consist shortens;
+3. **cross-pull** then **cross-set** — the train pulls back out onto the spine lead,
+   then drives into the spares slot; as it arrives the spares couple onto it and the
+   consist is whole again. Meanwhile the crane carries the lifted cut across and sets
+   it down in the spares slot, where it becomes the next visitor's spares;
+4. **inspect** — the train sits in the slot it ended up in (no return-to-neutral)
+   while the crane's **camera reads** it correct;
+5. **release-out** — the train drives itself back to the throat; the device
+   reconciles length (ADR-023 `train_length_changed` if it changed) and emits
+   `zone_train_released` (ADR-027), and core reclaims it.
 
 A train with nothing to swap still enters and is inspected, but the crane lifts no
 cut. Each step takes sim time and is observable; the consist changes **incrementally**
-(a cut at a time) rather than in one instant. The exact program (which slot, how
-many cuts) is the device's business; the demo uses the "drop the leading pair, pick
-up the spares" goal, now actually performed by driving between slots.
+(a cut at a time) rather than in one instant. The interior is **geometry-free in the
+device** (it emits phase + 0..1 progress + slot choices); the toy-table maps each
+phase onto its centre-line path and owns where the train, crane, and cuts render.
+The demo uses the "swap the leading pair" goal, now actually performed by driving
+the train between real slots while the crane works the cuts.
 
 ### 4. Interior occupancy ⇒ collision-free, by construction
 
@@ -142,12 +148,14 @@ Together these make the interior collision-free without a physics engine — the
 
 ### 5. The crane is driven by the work
 
-The crane's motion is a function of the current maneuver step: its bridge + head
-follow the live interior pose (`getInteriorState().craneDepthMm/craneLaneMm`),
-travelling over the cut being decoupled and then over the train as it moves and is
-read, lowering its hook only while working, and parking at home when no maneuver
-runs. The toy-table drives the gantry straight off that pose (re-rendered each sim
-tick, like the trains) — not a fixed timer.
+The crane **parks while the self-propelled train drives itself** and only ever
+moves to handle CUTS OF CARRIAGES — never the loco or the whole train (the bug the
+first cut of this had). Per phase: it runs in over the leading cut to lift it
+(`decouple`), carries that cut across to the spares slot and sets it down as the
+train takes the spares (`cross-pull`/`cross-set`), reads the finished train
+(`inspect`), and otherwise sits at its home end. The toy-table derives the gantry
+pose from the device's phase + progress (re-rendered each sim tick, like the
+trains), lowering the hook only while actually working a cut.
 
 ## What this ADR deliberately does NOT do
 
