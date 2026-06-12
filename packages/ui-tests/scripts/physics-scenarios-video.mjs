@@ -144,6 +144,36 @@ const CHECKS = {
     const t = b.find((x) => x.id === 'T');
     return { ok: t?.fate === 'ran-off', why: `T fate ${t ? t.fate : 'absent'}` };
   },
+  spectacle: (b) => {
+    // Multi-train loop + serialised yard. Flood-fill each serviced loco's rake;
+    // assert the train→train swap (LA picked up the gold spare cut g0; LB picked
+    // up a former-A car), that everything stayed railed (no collision/derail), and
+    // that nothing floats (every body railed). The view tallies services in the
+    // title; we read body state from the world handle.
+    const rake = (loco) => {
+      const seen = new Set([loco]);
+      const stack = [loco];
+      while (stack.length) {
+        const c = stack.pop();
+        for (const n of b.find((x) => x.id === c)?.coupledTo ?? [])
+          if (!seen.has(n)) {
+            seen.add(n);
+            stack.push(n);
+          }
+      }
+      return seen;
+    };
+    const laRake = rake('LA');
+    const lbRake = rake('LB');
+    const allRailed = b.every((x) => x.mode === 'railed');
+    const noWreck = b.every((x) => x.fate === 'on-rail');
+    const gotGold = laRake.has('g0');
+    const migrated = ['LAc0', 'LAc1', 'LAc2'].some((c) => lbRake.has(c));
+    return {
+      ok: allRailed && noWreck && gotGold && migrated,
+      why: `LA={${[...laRake].sort().join(',')}} LB={${[...lbRake].sort().join(',')}} railed=${allRailed} onRail=${noWreck}`,
+    };
+  },
   railyard: (b) => {
     const coupled = (id) => b.find((x) => x.id === id)?.coupledTo ?? [];
     const seg = (id) => b.find((x) => x.id === id)?.segment;
@@ -180,6 +210,9 @@ const DURATION = {
   load: 7,
   ramps: 7,
   railyard: 42,
+  /* Three trains circulating + two full yard services (each ~60 s of shunting),
+   *  the trains held on block clearance between — budget generously. */
+  spectacle: 250,
   turntable: 30,
   /* Two full board→turn→park cycles, the deck swinging slowly and serialised —
    *  budget generously. */
