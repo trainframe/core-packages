@@ -7,6 +7,7 @@ import { CraneDropScenarioView } from './components/CraneDropScenarioView.js';
 import { DepotScenarioView } from './components/DepotScenarioView.js';
 import { LiftBridgeScenarioView } from './components/LiftBridgeScenarioView.js';
 import { PhysicsScenarioView } from './components/PhysicsScenarioView.js';
+import { SpectacleScenarioView } from './components/SpectacleScenarioView.js';
 import { ToyTable } from './components/ToyTable.js';
 import { TurntableScenarioView } from './components/TurntableScenarioView.js';
 import { YardScenarioView } from './components/YardScenarioView.js';
@@ -44,6 +45,7 @@ export function App({ client }: AppProps = {}) {
     return () => resolvedClient.disconnect();
   }, [resolvedClient, initialUrl, physics]);
 
+  if (physics === 'spectacle') return <SpectacleScenarioView />;
   if (physics === 'railyard') return <YardScenarioView />;
   if (physics === 'turntable') return <TurntableScenarioView />;
   if (physics === 'depot') return <DepotScenarioView />;
