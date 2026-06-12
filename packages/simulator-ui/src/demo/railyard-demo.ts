@@ -1,29 +1,49 @@
 /**
- * The RAILYARD SPECTACLE demo: a main loop with the pass-through railyard hung
- * OFF it as a branch (not on the main path), reached through two junctions —
- * J1 (diverge) and J2 (merge). Four trains circulate, each homed at its OWN
- * station, and each calls at the yard every lap. The yard swaps an incoming
- * train's leading pair for its spares, so coloured carriages MIGRATE from train
- * to train over the laps — the thing the demo exists to show.
+ * The RAILYARD SPECTACLE demo: a large single main loop with the pass-through
+ * railyard spliced INLINE into it, plus two further experimental pieces sitting
+ * LIVE on the running line — a TURNTABLE (an N-way junction the scheduler throws
+ * like a point) and a LIFT-BRIDGE (a clearance gate). FOUR trains circulate, each
+ * homed at its OWN station, each calling at the yard so coloured carriages
+ * MIGRATE from train to train over the laps — the thing the demo exists to show.
+ *
+ * ── Why four trains circulate without deadlock ──────────────────────────────
+ * Trains rely on the scheduler's section-exclusivity (one-block separation) to
+ * space themselves; the planner is purely structural and does NOT route around
+ * occupied blocks, so a deadlock-free demo needs ROOM and must avoid trains
+ * fouling each other at a shared bottleneck:
+ *   - The yard sits INLINE on the main loop, NOT hung off it as a diverge/merge
+ *     branch. Its throat (`M-yard`) is a marker ON the ring, and the yard is a
+ *     ZONE: a train routed to the throat is SUSPENDED there holding no block
+ *     (ADR-027), so a queue of trains waiting their turn at the yard never
+ *     deadlocks the line. This is EXACTLY the topology `railyard-swap-concurrent`
+ *     proves safe under concurrent trains — an in-line zone, no branch to foul.
+ *     (The old branch-hung yard, reached through two junctions, was the deadlock
+ *     source: a re-merging train, plus a rake trailing back over a junction,
+ *     jammed the throat. Splicing the yard in-line removes the branch entirely.)
+ *   - The loop is ENLARGED — long straight runs between every feature, so the
+ *     four trains keep one clear block between them and a parked rake never
+ *     trails back into the next train's path.
+ *   - The four trains' yard visits are STAGGERED: each inserts its yard call at a
+ *     DIFFERENT point in its stop cycle, so they reach the single-marker throat
+ *     spread out in time rather than all converging at once.
+ *   - The turntable and lift-bridge are also INLINE (not on dead-end branches),
+ *     so every lap traverses them without creating a foul-prone spur.
  *
  * Topology (built with the same turtle as `bridge-demo`, pure geometry):
- *   - A rectangular main loop. Its bottom run carries J1 … straights … J2; the
- *     straights between them are the through "main" path the yard hangs below.
- *   - The yard is a BYPASS branch: J1.branch → level curve → yard → climb curve
- *     → J2.branch. It is reachable ONLY through the junctions, so a schedule that
- *     calls at the yard forces the scheduler to throw J1 to divert (the bridge-
- *     demo mechanism). The branch lands on J2.branch within the 30 mm snap.
- *   - Four station pieces, two on each vertical side (every train traverses both
- *     sides each lap), give each train a distinct home/stop. Two per side keeps
- *     the 200 mm grid balanced so the loop still closes.
+ *   - A large rectangular main loop, generously blocked, that CLOSES exactly
+ *     (the turtle returns to its start within < 1 mm — solved counts below).
+ *   - Bottom run: straights … the inline RAILYARD … straights.
+ *   - Right run: stn-amber … run … the inline LIFT-BRIDGE … run … stn-blue.
+ *   - Top run: run … the inline TURNTABLE (trunk in → east stub out) … run.
+ *   - Left run: stn-red … run … stn-green, spread for separation.
  *
  * Each train's rake is placed within coupling distance behind it and the spares
  * by the yard, so ToyHardware.reseedConsists seeds them deterministically from
  * these static positions at stage time. The carriage-swap, the ADR-027 handoff,
  * and concurrent trains queueing through the single-marker zone without deadlock
- * are proven in `packages/integration` (railyard-swap-loop + -concurrent); this
- * module is the live, watchable staging of it. Geometry validated by
- * `railyard-demo.test.ts` (closes, no overlaps, all stations + yard reachable).
+ * are proven in `packages/integration` (railyard-swap-loop, -concurrent, and
+ * railyard-demo-4train — the four-train deadlock-free + migration + traversal
+ * proof on THIS compiled layout). Geometry validated by `railyard-demo.test.ts`.
  */
 
 import { compileLayout } from '../track/layout-from-pieces.js';
@@ -38,8 +58,9 @@ import {
 type CompiledLayout = ReturnType<typeof compileLayout>;
 
 // ---------------------------------------------------------------------------
-// Turtle (a trimmed copy of bridge-demo's — adds flipped + connectVia so it can
-// place reversed/branch-side junctions, plus an endpoint reader for the branch)
+// Turtle (a trimmed copy of bridge-demo's — places straights, curves, stations
+// and the inline device pieces along a continuous rail, returning the cursor at
+// each piece's far endpoint).
 // ---------------------------------------------------------------------------
 
 interface Cursor {
@@ -48,48 +69,22 @@ interface Cursor {
   readonly dir: number;
 }
 
-interface PlaceOpts {
-  readonly flipped?: boolean;
-  /** Which local endpoint connects to the cursor (default 0); the other exits.
-   *  `connectVia: 1` attaches a junction by its through end so its trunk becomes
-   *  the exit — used to place the MERGE junction reversed. */
-  readonly connectVia?: 0 | 1;
-  /** Curve radius override (mm). The top station-branch legs use a non-default
-   *  radius to land the 220 mm station back on its junction within snap. */
-  readonly radiusMm?: number;
-}
-
-const extrasOf = (opts: PlaceOpts): Pick<TrackPiece, 'flipped' | 'radiusMm'> => ({
-  ...(opts.flipped === true ? { flipped: true } : {}),
-  ...(opts.radiusMm !== undefined ? { radiusMm: opts.radiusMm } : {}),
-});
-
 function toRotationDeg(deg: number): RotationDeg {
   return ((((Math.round(deg / 45) * 45) % 360) + 360) % 360) as RotationDeg;
 }
 
-/** Place a track piece so its `connectVia` endpoint lands on `cursor`, rail
- *  continuing, and return the new cursor at the OTHER endpoint's world pose. */
-function place(
-  pieces: TrackPiece[],
-  cursor: Cursor,
-  type: TrackPieceType,
-  id: string,
-  opts: PlaceOpts = {},
-): Cursor {
-  const connectVia = opts.connectVia ?? 0;
-  const exitVia = connectVia === 0 ? 1 : 0;
-  const extras = extrasOf(opts);
+/** Place a track piece so its FIRST endpoint lands on `cursor`, rail continuing,
+ *  and return the new cursor at the OTHER endpoint's world pose. */
+function place(pieces: TrackPiece[], cursor: Cursor, type: TrackPieceType, id: string): Cursor {
   const probe: TrackPiece = {
     id: '__probe__',
     type,
     position: { x: 0, y: 0 },
     rotationDeg: 0,
     tagged: false,
-    ...extras,
   };
-  const connectLocal = getEndpoints(probe)[connectVia];
-  if (connectLocal === undefined) throw new Error(`place: ${type} has no endpoint ${connectVia}`);
+  const connectLocal = getEndpoints(probe)[0];
+  if (connectLocal === undefined) throw new Error(`place: ${type} has no endpoint 0`);
   const rotationDeg = toRotationDeg(cursor.dir + 180 - connectLocal.outgoingAngleDeg);
   const rad = (rotationDeg * Math.PI) / 180;
   const cos = Math.cos(rad);
@@ -102,22 +97,18 @@ function place(
     position: { x: cursor.x - rotatedX, y: cursor.y - rotatedY },
     rotationDeg,
     tagged: false,
-    ...extras,
   };
   pieces.push(real);
-  const exit = getEndpoints(real)[exitVia];
+  const exit = getEndpoints(real)[1];
   if (exit === undefined) throw new Error(`place: ${type} has no exit endpoint`);
   return { x: exit.x, y: exit.y, dir: exit.outgoingAngleDeg };
 }
 
-/** Read endpoint `n` of an already-placed piece as a fresh cursor (used to seed
- *  the yard bypass from a junction's branch endpoint). */
-function endpointCursor(pieces: ReadonlyArray<TrackPiece>, id: string, n: number): Cursor {
-  const piece = pieces.find((p) => p.id === id);
-  if (piece === undefined) throw new Error(`endpointCursor: no piece ${id}`);
-  const ep = getEndpoints(piece)[n];
-  if (ep === undefined) throw new Error(`endpointCursor: piece ${id} has no endpoint ${n}`);
-  return { x: ep.x, y: ep.y, dir: ep.outgoingAngleDeg };
+/** Place `n` straights in a row. */
+function straights(pieces: TrackPiece[], cursor: Cursor, n: number, idPrefix: string): Cursor {
+  let c = cursor;
+  for (let i = 0; i < n; i++) c = place(pieces, c, 'straight', `${idPrefix}${i}`);
+  return c;
 }
 
 /** Two same-chirality 45° curves = a 90° corner. */
@@ -132,42 +123,41 @@ function corner(pieces: TrackPiece[], cursor: Cursor, idPrefix: string): Cursor 
 // ---------------------------------------------------------------------------
 
 const YARD_ID = 'yard';
-/** Straights between J1 and J2 on the bottom (sets the yard branch spread). 8 so
- *  the branch gap fits the now-wider 1000 mm yard (+2 vs the old 600 mm yard). */
-const MAIN_STRAIGHTS = 9;
-/** Straights between each TOP junction pair (J3/J4 and J5/J6) — the two station
- *  branch loops' spread. Fixed at 2: the station branch (curve+station+curve)
- *  spans exactly this gap, so it must not change. */
-const TOP_BRANCH_MID = 2;
-/** Straights BETWEEN the two top junction pairs (J4→J5). Carries the top run's
- *  extra width for the wider yard, without touching the branch-pair spans. */
-const TOP_BETWEEN_PAIRS = 3;
-/** A 45° descent/ascent straight on each side of the yard, so it drops far
- *  enough below the bottom run that its tall gantry clears the track. */
-const YARD_DESCENT = 1;
-/** Yard bypass leg curve radius (mm) — lands the 600 mm yard on J2 within snap. */
-const YARD_LEG_RADIUS = 265;
-/** Station-branch leg curve radius (mm) — lands the 220 mm station on its merge
- *  junction within snap (the station is off the 200 mm grid). */
-const BRANCH_LEG_RADIUS = 170;
-/** The two branch-loop stations — stops only some trains call at. */
-const BRANCH_A_ID = 'stn-A';
-const BRANCH_B_ID = 'stn-B';
+const TURNTABLE_ID = 'turntable';
+const LIFT_BRIDGE_ID = 'lift-bridge';
+
+/**
+ * Straight counts that close the rectangular loop EXACTLY (verified: the turtle
+ * returns to its start within < 1 mm) while giving every run generous block
+ * separation — a parked rake never trails back into the next train's path, one
+ * of the fixes that breaks the old four-train deadlock. Do not retune one
+ * without re-solving the loop (bottom span == top span, right span == left span;
+ * the 1200 mm inline yard and the 200 mm turntable/lift-bridge each occupy their
+ * run like the pieces around them).
+ */
+const BOTTOM_WEST = 3;
+const BOTTOM_EAST = 3;
+const RIGHT_TO_BRIDGE = 3;
+const BRIDGE_TO_BLUE = 3;
+const BLUE_TO_TOP = 2;
+const TOP_WEST = 6;
+const TOP_EAST = 5;
+const TOP_TO_RED = 3;
+const RED_TO_GREEN = 3;
+const GREEN_TO_BOTTOM = 3;
 
 /**
  * A train's livery and its CYCLIC schedule, in forward (build) order. `stops[0]`
  * is the home station; every train calls at the yard. Forward ordering seeds the
  * initial heading; the directional planner keeps it one-way.
  *
- * TEMPORARY SCALE-BACK. With trains now occupying their true loco+rake length
- * (ADR-029 §0, so they no longer drive through each other), this point-train-
- * sized layout is too tight for the original four-trains-via-branches spectacle:
- * a full rake parked at a branch station trails back across the junction and
- * fouls the main line, and four long trains jam at the single yard-entry
- * junction. So the active schedules are main-line + yard only (no branch
- * dwells), which circulates cleanly. The branch journeys (and the fourth train)
- * are kept here, INACTIVE, and come back once the layout is enlarged (longer
- * runs/branches, more room at the throat) — see ADR-029's "enlarge the layout".
+ * The four stops cycle each train the SAME way round the loop (the order the four
+ * homes appear going one way — amber → blue → red → green), with the yard call
+ * STAGGERED across the cycle so the four don't all converge on the single-marker
+ * throat at once. Two trains homed on OPPOSITE sides of the loop (amber, green)
+ * call the yard FIRST: being half a loop apart they reach the throat well spaced
+ * in time, so a wagon migrates train → train early; the other two (blue, red)
+ * call it later in their cycles, spreading the load further.
  */
 interface TrainSpec {
   readonly id: string;
@@ -176,31 +166,37 @@ interface TrainSpec {
 }
 
 const ALL_TRAIN_SPECS: readonly TrainSpec[] = [
-  // Stops in CCW CIRCULATION ORDER (amber → yard → blue → red → green → …, the
-  // order computed from the loop geometry), each train starting at its home.
-  // Every leg is therefore a SHORT FORWARD hop, so the planner never routes a
-  // train the short way backwards and the yard visit (a forward stop on the
-  // bottom run) never reverses a train's loop direction. Trains placed all one
-  // way (circulationFacingDeg) + stops ordered = a valid one-way scenario.
   {
     id: 'amber',
     color: 'amber',
     stops: ['stn-amber', YARD_ID, 'stn-blue', 'stn-red', 'stn-green'],
   },
   {
+    id: 'blue',
+    color: 'blue',
+    stops: ['stn-blue', 'stn-red', YARD_ID, 'stn-green', 'stn-amber'],
+  },
+  {
+    id: 'red',
+    color: 'red',
+    stops: ['stn-red', 'stn-green', 'stn-amber', YARD_ID, 'stn-blue'],
+  },
+  {
     id: 'green',
     color: 'green',
-    stops: ['stn-green', 'stn-amber', YARD_ID, 'stn-blue', 'stn-red'],
+    stops: ['stn-green', YARD_ID, 'stn-amber', 'stn-blue', 'stn-red'],
   },
-  { id: 'red', color: 'red', stops: ['stn-red', 'stn-green', 'stn-amber', YARD_ID, 'stn-blue'] },
-  { id: 'blue', color: 'blue', stops: ['stn-blue', 'stn-red', 'stn-green', 'stn-amber', YARD_ID] },
 ];
 
-/** How many trains circulate (one per home station). Three full-rake trains on
- *  main-line + yard schedules circulate this layout without deadlock; four (or
- *  any branch dwell) does not, until the layout is enlarged. */
-const ACTIVE_TRAINS = 1;
+/** How many trains circulate (one per home station). FOUR trains on the enlarged
+ *  loop with the in-line yard and staggered yard visits circulate deadlock-free —
+ *  proven headlessly by `packages/integration/src/railyard-demo-4train.test.ts`. */
+const ACTIVE_TRAINS = 4;
 const TRAIN_SPECS: readonly TrainSpec[] = ALL_TRAIN_SPECS.slice(0, ACTIVE_TRAINS);
+
+/** Wagons per rake. Three (swap a leading pair, keep one) — short enough to sit
+ *  clear between trains, long enough to show migration with a kept car. */
+const RAKE_SIZE = 3;
 
 export interface DemoCarriage {
   readonly id: string;
@@ -222,11 +218,16 @@ export interface RailyardDemo {
   readonly pieces: TrackPiece[];
   /** Every piece id that should go live (all track + yard + trains + carriages). */
   readonly liveIds: string[];
-  /** The yard's zone marker (`M-{yardPieceId}`) — its throat. */
+  /** The yard's zone marker (`M-{yardPieceId}`) — its throat, in-line on the loop. */
   readonly yardMarker: string;
   readonly yardDeviceId: string;
-  /** The junction switch device ids (`SWITCH-{pieceId}`) the scheduler throws. */
+  /** The switch device ids (`SWITCH-{pieceId}`) the scheduler throws — the inline
+   *  turntable (a junction with three positions). */
   readonly switchDeviceIds: string[];
+  /** The lift-bridge's clearance-gate device id (`BRIDGE-{pieceId}`). */
+  readonly liftBridgeDeviceId: string;
+  /** The lift-bridge's marker (`M-{pieceId}`) — an inline block boundary. */
+  readonly liftBridgeMarker: string;
   /** Spare wagons to seed into the yard via `loadSpares`. */
   readonly yardSpares: DemoCarriage[];
   readonly trains: DemoTrain[];
@@ -241,9 +242,9 @@ const rake = (color: string, n: number): DemoCarriage[] =>
  * consistently (an opposed train is a real operator error the scheduler rightly
  * deadlocks); the station PIECE's own rotation does NOT encode a consistent
  * travel direction (corners/flips turn the piece, not the line), so we compute
- * it from geometry: of the station's two loop neighbours, pick the one whose
- * travel direction gives the same rotational sense (negative radius × travel)
- * for every train. Both sides of the loop then drive one way.
+ * it from geometry: of the station's loop neighbours, pick the one whose travel
+ * direction gives the same rotational sense for every train. Both sides drive
+ * one way.
  */
 function circulationFacingDeg(
   homeId: string,
@@ -279,7 +280,7 @@ function placeTrainWithRake(
   home: TrackPiece,
   facingDeg: RotationDeg,
 ): DemoTrain {
-  const consist = rake(spec.color, 4);
+  const consist = rake(spec.color, RAKE_SIZE);
   pieces.push({
     id: spec.id,
     type: 'train',
@@ -316,9 +317,7 @@ function placeTrainWithRake(
  *  the same circulation sense (computed from the loop geometry). */
 function placeAllTrains(pieces: TrackPiece[]): DemoTrain[] {
   const layout = compileLayout(pieces, 'railyard-demo-orient');
-  const ring = layout.markers.filter(
-    (m) => m.position !== undefined && !/yard|by-|stn-A|stn-B/.test(m.id),
-  );
+  const ring = layout.markers.filter((m) => m.position !== undefined);
   const centre = {
     x: ring.reduce((s, m) => s + (m.position?.x_mm ?? 0), 0) / ring.length,
     y: ring.reduce((s, m) => s + (m.position?.y_mm ?? 0), 0) / ring.length,
@@ -338,65 +337,46 @@ function placeAllTrains(pieces: TrackPiece[]): DemoTrain[] {
 }
 
 /**
- * Build the railyard demo: a closed main loop with two junctions and the yard
- * hung off it as a bypass branch. Pure geometry — given no input it always
- * returns the same pieces.
+ * Build the railyard demo: a single closed main loop with the railyard, a
+ * turntable, and a lift-bridge all spliced in-line, plus four home stations.
+ * Pure geometry — given no input it always returns the same pieces.
  */
 export function buildRailyardDemo(): RailyardDemo {
   const pieces: TrackPiece[] = [];
 
-  // Main loop, starting at the bottom-left heading EAST so the BOTTOM junctions'
-  // branch legs fall BELOW the loop (the yard) and the TOP junctions' legs rise
-  // ABOVE it (the two station branches).
-  const start: Cursor = { x: 200, y: 1100, dir: 0 };
+  // Main loop, starting at the bottom-left heading EAST.
+  const start: Cursor = { x: 200, y: 1500, dir: 0 };
   let c: Cursor = start;
-  // Bottom: J1 (diverge) … straights … J2 (merge, attached by its through end +
-  // flipped so its branch faces back toward the climbing yard bypass).
-  c = place(pieces, c, 'junction', 'J1');
-  for (let i = 0; i < MAIN_STRAIGHTS; i++) c = place(pieces, c, 'straight', `mb${i}`);
-  c = place(pieces, c, 'junction', 'J2', { flipped: true, connectVia: 1 });
+  // Bottom run: straights … the inline RAILYARD (its throat marker M-yard is ON
+  // the running line — a zone, not a branch) … straights.
+  c = straights(pieces, c, BOTTOM_WEST, 'mb');
+  c = place(pieces, c, 'railyard', YARD_ID);
+  c = straights(pieces, c, BOTTOM_EAST, 'mc');
   c = corner(pieces, c, 'cBR'); // → heading north up the right side
+
+  // Right run: stn-amber, a run, the inline LIFT-BRIDGE, a run, stn-blue.
   c = place(pieces, c, 'station', 'stn-amber');
-  c = place(pieces, c, 'station', 'stn-green');
-  c = place(pieces, c, 'straight', 'r0');
-  c = corner(pieces, c, 'cTR'); // → heading west across the top
-  // Top: two branch junction pairs back-to-back — J3/J4 (branch A) then J5/J6
-  // (branch B). Together they span the 8-unit top run, matching the bottom.
-  c = place(pieces, c, 'junction', 'J3');
-  for (let i = 0; i < TOP_BRANCH_MID; i++) c = place(pieces, c, 'straight', `m3${i}`);
-  c = place(pieces, c, 'junction', 'J4', { flipped: true, connectVia: 1 });
-  for (let i = 0; i < TOP_BETWEEN_PAIRS; i++) c = place(pieces, c, 'straight', `mid${i}`);
-  c = place(pieces, c, 'junction', 'J5');
-  for (let i = 0; i < TOP_BRANCH_MID; i++) c = place(pieces, c, 'straight', `m5${i}`);
-  c = place(pieces, c, 'junction', 'J6', { flipped: true, connectVia: 1 });
-  c = corner(pieces, c, 'cTL'); // → heading south down the left side
-  c = place(pieces, c, 'station', 'stn-red');
+  c = straights(pieces, c, RIGHT_TO_BRIDGE, 'r0');
+  c = place(pieces, c, 'lift-bridge', LIFT_BRIDGE_ID);
+  c = straights(pieces, c, BRIDGE_TO_BLUE, 'r1');
   c = place(pieces, c, 'station', 'stn-blue');
-  c = place(pieces, c, 'straight', 'l0');
-  corner(pieces, c, 'cBL'); // → closes onto the start at J1's trunk
+  c = straights(pieces, c, BLUE_TO_TOP, 'tr');
+  c = corner(pieces, c, 'cTR'); // → heading west across the top
 
-  // Yard bypass (below): J1.branch → 45° descent → level curve → yard → climb
-  // curve → 45° ascent → J2.branch. The descent drops the yard far enough that
-  // its tall gantry clears the bottom run; the 265 mm legs land it on J2 cleanly.
-  let b = endpointCursor(pieces, 'J1', 2);
-  for (let i = 0; i < YARD_DESCENT; i++) b = place(pieces, b, 'straight', `by-d${i}`);
-  b = place(pieces, b, 'curve', 'by-level', { flipped: true, radiusMm: YARD_LEG_RADIUS });
-  b = place(pieces, b, 'railyard', YARD_ID);
-  b = place(pieces, b, 'curve', 'by-climb', { flipped: true, radiusMm: YARD_LEG_RADIUS });
-  for (let i = 0; i < YARD_DESCENT; i++) b = place(pieces, b, 'straight', `by-a${i}`);
+  // Top run: a run, the inline TURNTABLE (trunk in → east stub out; the scheduler
+  // throws it to 'stub-a' as a circulating train routes trunk → stub), a run.
+  c = straights(pieces, c, TOP_WEST, 't0');
+  c = place(pieces, c, 'turntable', TURNTABLE_ID);
+  c = straights(pieces, c, TOP_EAST, 't1');
+  c = corner(pieces, c, 'cTL'); // → heading south down the left side
 
-  // Two station branches (above): each J?.branch → curve → station → curve →
-  // J?.branch. The 170 mm leg radius lands the 220 mm station within snap.
-  for (const [div, stn, mrg] of [
-    ['J3', BRANCH_A_ID, 'J4'],
-    ['J5', BRANCH_B_ID, 'J6'],
-  ] as const) {
-    let t = endpointCursor(pieces, div, 2);
-    t = place(pieces, t, 'curve', `${stn}-l`, { flipped: true, radiusMm: BRANCH_LEG_RADIUS });
-    t = place(pieces, t, 'station', stn);
-    place(pieces, t, 'curve', `${stn}-c`, { flipped: true, radiusMm: BRANCH_LEG_RADIUS });
-    void mrg;
-  }
+  // Left run: stn-red, a run, stn-green, a run, close onto the start.
+  c = straights(pieces, c, TOP_TO_RED, 'tl');
+  c = place(pieces, c, 'station', 'stn-red');
+  c = straights(pieces, c, RED_TO_GREEN, 'l0');
+  c = place(pieces, c, 'station', 'stn-green');
+  c = straights(pieces, c, GREEN_TO_BOTTOM, 'l1');
+  corner(pieces, c, 'cBL'); // → closes onto the start
 
   // Trains: one per spec, homed on its station, all placed facing the SAME way
   // round the loop (computed from the geometry).
@@ -404,7 +384,7 @@ export function buildRailyardDemo(): RailyardDemo {
 
   // Two purple spares parked at the yard centre — claimed by no train, so
   // reseedConsists makes them the yard's spare cut (what the first train leaves
-  // wearing). The yard sits well below the loop, far from any train.
+  // wearing).
   const yardSpares = rake('purple', 2);
   const yard = pieces.find((p) => p.id === YARD_ID);
   if (yard === undefined) throw new Error('buildRailyardDemo: yard piece missing');
@@ -428,7 +408,9 @@ export function buildRailyardDemo(): RailyardDemo {
     liveIds,
     yardMarker: `M-${YARD_ID}`,
     yardDeviceId: `YARD-${YARD_ID}`,
-    switchDeviceIds: ['SWITCH-J1', 'SWITCH-J2', 'SWITCH-J3', 'SWITCH-J4', 'SWITCH-J5', 'SWITCH-J6'],
+    switchDeviceIds: [`SWITCH-${TURNTABLE_ID}`],
+    liftBridgeDeviceId: `BRIDGE-${LIFT_BRIDGE_ID}`,
+    liftBridgeMarker: `M-${LIFT_BRIDGE_ID}`,
     yardSpares,
     trains,
   };

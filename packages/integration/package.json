@@ -14,6 +14,7 @@
     "@trainframe/protocol": "workspace:*",
     "@trainframe/server": "workspace:*",
     "@trainframe/simulator": "workspace:*",
+    "@trainframe/simulator-ui": "workspace:*",
     "aedes": "^1.0.2",
     "mqtt": "^5.10.0"
   },
