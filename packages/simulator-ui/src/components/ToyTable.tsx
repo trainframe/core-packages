@@ -1108,6 +1108,9 @@ declare global {
     /** DEV-only seed hook: stages the multi-train railyard spectacle on the
      * table. Registered behind `import.meta.env.DEV`; absent in production. */
     __tfLoadRailyardDemo?: (() => void) | undefined;
+    /** DEV-only: frame the whole live layout in the viewport (for demo capture).
+     * Registered behind `import.meta.env.DEV`; absent in production builds. */
+    __tfFitView?: (() => void) | undefined;
   }
 }
 
@@ -2345,6 +2348,48 @@ function Table({
     ro.observe(svg);
     return () => ro.disconnect();
   }, []);
+
+  /* DEV-only: frame the whole live layout in view. Used by the demo capture
+     harness after `__tfLoadRailyardDemo()` so a large layout is actually visible
+     (the toy-table otherwise keeps the operator's pan/zoom). Pure geometry: the
+     bounding box of every piece's endpoints, padded, fitted to the canvas box. */
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    window.__tfFitView = () => {
+      const xs: number[] = [];
+      const ys: number[] = [];
+      for (const p of pieces) {
+        xs.push(p.position.x);
+        ys.push(p.position.y);
+        for (const e of getEndpoints(p)) {
+          xs.push(e.x);
+          ys.push(e.y);
+        }
+      }
+      if (xs.length === 0) return;
+      const pad = 160;
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      const bw = maxX - minX + 2 * pad;
+      const bh = maxY - minY + 2 * pad;
+      const zoom = Math.min(
+        MAX_ZOOM,
+        Math.max(MIN_ZOOM, Math.min(CANVAS_W_MM / bw, (CANVAS_W_MM * boxAspect) / bh)),
+      );
+      const visW = CANVAS_W_MM / zoom;
+      const visH = visW * boxAspect;
+      setViewport({
+        x: (minX + maxX) / 2 - visW / 2,
+        y: (minY + maxY) / 2 - visH / 2,
+        zoom,
+      });
+    };
+    return () => {
+      window.__tfFitView = undefined;
+    };
+  }, [pieces, boxAspect]);
 
   /** The open endpoint a dragged toybox piece will snap onto, highlighted
    * during dragover. */
