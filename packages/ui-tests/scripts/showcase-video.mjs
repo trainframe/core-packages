@@ -74,10 +74,15 @@ async function recordScene(browser, scene, index) {
 }
 
 async function main() {
-  /* Names on the CLI override the reel (a quick way to smoke-test the tooling):
-     `node showcase-video.mjs headon derail` records just those at 5s each. */
+  /* Names on the CLI override the reel; `name:secs` sets a per-scene duration
+     (e.g. `node showcase-video.mjs spectacle:160` records spectacle for 160s). */
   const argv = process.argv.slice(2);
-  const reel = argv.length ? argv.map((name) => ({ name, secs: 5, caption: name })) : REEL;
+  const reel = argv.length
+    ? argv.map((arg) => {
+        const [name, s] = arg.split(':');
+        return { name, secs: s ? Number(s) : 5, caption: name };
+      })
+    : REEL;
   /* Fresh output dir so stale per-scene clips never sneak into the concat. */
   rmSync(OUT, { recursive: true, force: true });
   mkdirSync(OUT, { recursive: true });
