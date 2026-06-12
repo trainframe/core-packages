@@ -54,6 +54,9 @@ importers:
       '@trainframe/simulator':
         specifier: workspace:*
         version: link:../simulator
+      '@trainframe/simulator-ui':
+        specifier: workspace:*
+        version: link:../simulator-ui
       aedes:
         specifier: ^1.0.2
         version: 1.0.2

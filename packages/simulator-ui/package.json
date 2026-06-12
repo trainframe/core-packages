@@ -4,6 +4,10 @@
   "version": "0.1.0",
   "description": "Browser simulator UI. Runs a Trainframe simulation in the browser and publishes events to an MQTT broker.",
   "type": "module",
+  "exports": {
+    "./demo": "./src/demo/index.ts",
+    "./track": "./src/track/index.ts"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
