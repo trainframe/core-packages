@@ -1105,7 +1105,7 @@ declare global {
     /** DEV-only seed hook: stages the two-train bridge demo on the table.
      * Registered behind `import.meta.env.DEV`; absent in production builds. */
     __tfLoadBridgeDemo?: (() => void) | undefined;
-    /** DEV-only seed hook: stages the multi-train railyard spectacle on the
+    /** DEV-only seed hook: stages the multi-train railyard railyard demo on the
      * table. Registered behind `import.meta.env.DEV`; absent in production. */
     __tfLoadRailyardDemo?: (() => void) | undefined;
     /** DEV-only: frame the whole live layout in the viewport (for demo capture).
@@ -1344,7 +1344,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     };
   }, [client]);
 
-  // DEV-only: stage the multi-train railyard spectacle — a main loop with the
+  // DEV-only: stage the multi-train railyard railyard demo — a main loop with the
   // yard hung off it as a junction branch, trains each with a coloured rake, and
   // purple spares in the yard. Marks every piece live and scans it onto the bus
   // (like the scan-box) so an external server resolves the trains' marker

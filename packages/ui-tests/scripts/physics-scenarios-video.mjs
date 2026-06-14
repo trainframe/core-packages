@@ -144,8 +144,8 @@ const CHECKS = {
     const t = b.find((x) => x.id === 'T');
     return { ok: t?.fate === 'ran-off', why: `T fate ${t ? t.fate : 'absent'}` };
   },
-  spectacle: (b) => {
-    // Multi-train loop + serialised yard. Flood-fill each serviced loco's rake;
+  'railyard-demo': (b) => {
+    // Multi-loop layout + serialised yard. Flood-fill each serviced loco's rake;
     // assert the train→train swap (LA picked up the gold spare cut g0; LB picked
     // up a former-A car), that everything stayed railed (no collision/derail), and
     // that nothing floats (every body railed). The view tallies services in the
@@ -210,9 +210,9 @@ const DURATION = {
   load: 7,
   ramps: 7,
   railyard: 42,
-  /* Three trains circulating + two full yard services (each ~60 s of shunting),
-   *  the trains held on block clearance between — budget generously. */
-  spectacle: 250,
+  /* Five trains across two loops + three full yard services (svc at ~47/96/144 s),
+   *  the main-loop trains held on block clearance between — budget past the third. */
+  'railyard-demo': 165,
   turntable: 30,
   /* Two full board→turn→park cycles, the deck swinging slowly and serialised —
    *  budget generously. */

@@ -1,5 +1,5 @@
 /**
- * The RAILYARD SPECTACLE demo: a large single main loop with the pass-through
+ * The RAILYARD RAILYARD DEMO demo: a large single main loop with the pass-through
  * railyard spliced INLINE into it, plus two further experimental pieces sitting
  * LIVE on the running line — a TURNTABLE (an N-way junction the scheduler throws
  * like a point) and a LIFT-BRIDGE (a clearance gate). FOUR trains circulate, each
