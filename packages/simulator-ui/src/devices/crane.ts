@@ -22,12 +22,13 @@ export interface CraneBounds {
   readonly maxY: number;
 }
 
-/** Gantry dynamics (world mm). Visible but unhurried — you can watch it travel. */
-const ACCEL = 900;
-const MAX_SPEED = 520;
+/** Gantry dynamics (world mm). Deliberately slow — a heavy yard crane creeps over
+ *  the wagons, so you watch it travel rather than it appearing to jump. */
+const ACCEL = 95;
+const MAX_SPEED = 52;
 /** How close (mm) and slow (mm/s) counts as "arrived" over the target. */
 const ARRIVE_DIST = 4;
-const ARRIVE_SPEED = 12;
+const ARRIVE_SPEED = 6;
 
 export class Crane implements PayloadCrane {
   private readonly bounds: CraneBounds;

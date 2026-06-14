@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { PhysicsWorld } from '../physics/world.js';
 import { buildYardLayout } from '../physics/yard.js';
+import { Crane } from './crane.js';
 import { physicsMotorActuator } from './motor-actuator.js';
 import { physicsSwitchActuator } from './switch-actuator.js';
 import { TrainDevice } from './train-device.js';
-import { YardController } from './yard-controller.js';
+import { YardController, craneBounds } from './yard-controller.js';
 
 /** Stage a yard, a visiting loco+3 rake on the west lead, and a 2-car spare cut in
  *  slot B, then run the CV controller to completion (or a step cap). */
@@ -46,6 +47,8 @@ function serviceRun(): { world: PhysicsWorld; phase: string } {
   w.couple('p0', 'p1');
 
   const train = new TrainDevice('L', physicsMotorActuator(w, 'L'));
+  const b = craneBounds(yard);
+  const crane = new Crane(b, { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 });
   const ctrl = new YardController({
     layout: yard,
     train,
@@ -59,6 +62,7 @@ function serviceRun(): { world: PhysicsWorld; phase: string } {
     wedgeAt: (x, y) => {
       w.uncoupleAt(x, y);
     },
+    crane,
     entrySlot: 'slot0',
     sparesSlot: 'slot1',
   });
@@ -66,6 +70,7 @@ function serviceRun(): { world: PhysicsWorld; phase: string } {
   const dt = 1 / 60;
   for (let i = 0; i < 4000 && ctrl.currentPhase !== 'done'; i++) {
     ctrl.tick(dt);
+    crane.step(dt);
     w.step(dt);
   }
   return { world: w, phase: ctrl.currentPhase };

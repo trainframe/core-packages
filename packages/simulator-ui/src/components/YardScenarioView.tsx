@@ -9,10 +9,11 @@
  * video harness can assert the service happened.
  */
 import { useEffect, useMemo, useState } from 'react';
+import { Crane } from '../devices/crane.js';
 import { physicsMotorActuator } from '../devices/motor-actuator.js';
 import { physicsSwitchActuator } from '../devices/switch-actuator.js';
 import { TrainDevice } from '../devices/train-device.js';
-import { YardController } from '../devices/yard-controller.js';
+import { YardController, craneBounds } from '../devices/yard-controller.js';
 import { type BodyPose, PhysicsWorld } from '../physics/world.js';
 import { buildYardLayout } from '../physics/yard.js';
 import { BodyG } from './PhysicsScenarioView.js';
@@ -133,6 +134,8 @@ export function YardScenarioView() {
     w.couple('p0', 'p1');
 
     const train = new TrainDevice('L', physicsMotorActuator(w, 'L'));
+    const b = craneBounds(yard);
+    const crane = new Crane(b, { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 });
     const ctrl = new YardController({
       layout: yard,
       train,
@@ -146,6 +149,7 @@ export function YardScenarioView() {
       wedgeAt: (x, y) => {
         w.uncoupleAt(x, y);
       },
+      crane,
       entrySlot: 'slot0',
       sparesSlot: 'slot1',
     });
@@ -160,6 +164,7 @@ export function YardScenarioView() {
       last = now;
       while (acc >= STEP_S) {
         ctrl.tick(STEP_S);
+        crane.step(STEP_S);
         w.step(STEP_S);
         elapsed += STEP_S;
         acc -= STEP_S;

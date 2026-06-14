@@ -27,9 +27,10 @@
  */
 import type { RailyardScene } from '../physics/railyard-scene.js';
 import type { BodyPose } from '../physics/world.js';
+import { Crane } from './crane.js';
 import type { SwitchActuator } from './switch-actuator.js';
 import type { TrainDevice } from './train-device.js';
-import { type Sighting, YardController } from './yard-controller.js';
+import { type Sighting, YardController, craneBounds } from './yard-controller.js';
 
 /** A train under the controller's command: its lead loco device plus the ids of
  *  every body in its rake (loco + carriages), so the controller can find which
@@ -88,6 +89,10 @@ export class RailyardDemoController {
   private readonly mainOrder: readonly string[];
   /** Where the crane head parks when the yard is idle (yard footprint centre). */
   private readonly craneHome: { x: number; y: number };
+  /** The ONE physical gantry crane, owned for the whole demo and shared across
+   *  every yard service. Because it is a single persistent actuator that is always
+   *  stepped, its head can only ever travel — it never jumps between services. */
+  private readonly crane: Crane;
   /** Pending yard jobs, serviced one at a time in order. */
   private readonly jobs: YardJob[];
   /** The yard service in flight, or null when the yard is idle. */
@@ -103,6 +108,7 @@ export class RailyardDemoController {
     this.mainOrder = deps.layout.loop.map((b) => b.id);
     this.jobs = [...deps.yardJobs];
     this.craneHome = yardCentre(deps.layout);
+    this.crane = new Crane(craneBounds(deps.layout.yard), this.craneHome);
     /* Loop points default to through (loop) and yard ladder to through (dead-end
      *  the slots until a service routes them). */
     deps.loopPoints.set(deps.layout.loopThruPos);
@@ -118,10 +124,9 @@ export class RailyardDemoController {
     return this.yardPhase;
   }
 
-  /** Where the crane head is, for rendering: the live position of the in-flight
-   *  yard service's gantry, or its parked home over the yard when idle. */
+  /** Where the crane head physically is, for rendering — the live actuator position. */
   get cranePos(): { x: number; y: number } {
-    return this.yard?.ctrl.cranePos ?? this.craneHome;
+    return this.crane.pos;
   }
 
   /** All trains across every loop (for yard-job lookup by loco id). */
@@ -132,6 +137,11 @@ export class RailyardDemoController {
   tick(dtS: number): void {
     this.driveLoopTrains();
     this.driveYard(dtS);
+    /* When no service is in flight, send the crane home; an active YardController
+     *  has already commanded it this tick. Either way step the ONE shared actuator
+     *  so it travels physically — it never teleports. */
+    if (this.yard === null) this.crane.moveTo(this.craneHome.x, this.craneHome.y);
+    this.crane.step(dtS);
   }
 
   /** Grant each free-running train block clearance: drive it forward only while
@@ -253,6 +263,7 @@ export class RailyardDemoController {
         look: this.d.look,
         cameraRadius: this.d.cameraRadius,
         wedgeAt: this.d.wedgeAt,
+        crane: this.crane,
         entrySlot: job.entrySlot,
         sparesSlot: job.sparesSlot,
       }),

@@ -22,7 +22,7 @@
  * a virtual clock; pure (no DOM, no Date.now).
  */
 import type { YardLayout, YardSegGeom } from '../physics/yard.js';
-import { Crane, type CraneBounds } from './crane.js';
+import type { Crane, CraneBounds } from './crane.js';
 import type { SwitchActuator } from './switch-actuator.js';
 import type { TrainDevice } from './train-device.js';
 
@@ -45,6 +45,12 @@ export interface YardControllerDeps {
   readonly cameraRadius: number;
   /** Lower the wedge at world (x,y) to split the coupling there. */
   readonly wedgeAt: (x: number, y: number) => void;
+  /** The gantry crane actuator. INJECTED and owned by the caller — a single
+   *  persistent physical crane is shared across successive services and stepped by
+   *  the owner, so its head only ever travels (never jumps between services). The
+   *  controller commands it (`moveTo`) and reads it (`pos`/`arrived`) but does not
+   *  create or step it. */
+  readonly crane: Crane;
   /** Which slot the visitor enters, and which holds the spares. */
   readonly entrySlot: string;
   readonly sparesSlot: string;
@@ -80,8 +86,7 @@ export class YardController {
 
   constructor(deps: YardControllerDeps) {
     this.d = deps;
-    const b = craneBounds(deps.layout);
-    this.crane = new Crane(b, { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 });
+    this.crane = deps.crane;
   }
 
   get currentPhase(): Phase {
@@ -102,7 +107,11 @@ export class YardController {
     switch (this.phase) {
       case 'route-in':
       case 'rest':
-        return this.slotFarEnd(this.d.entrySlot);
+        /* Stay put while the train routes in and settles — the crane has no
+         *  business over the slot until it has SOMETHING to work. It only commits
+         *  to a position once it has scanned the arrived rake (decouple), so it
+         *  reacts to what it senses rather than anticipating the route. */
+        return this.crane.pos;
       case 'decouple':
         return this.cut ?? { x: this.restX - 1.5 * CAR_SPACING, y: entry.by };
       case 'pull-clear':
@@ -136,10 +145,10 @@ export class YardController {
 
   tick(dtS: number): void {
     this.timer += dtS;
-    /* Drive the gantry toward the current work point and let it travel. */
+    /* Command the gantry toward the current work point. The owner steps the shared
+     *  crane actuator (it travels physically there over time). */
     const f = this.focus();
     this.crane.moveTo(f.x, f.y);
-    this.crane.step(dtS);
     switch (this.phase) {
       case 'route-in':
         this.routeIn();
@@ -298,8 +307,9 @@ export class YardController {
 }
 
 /** The crane's physical travel limits (endstops): the bounding box of every yard
- *  segment, so the gantry can reach any work point but no further. */
-function craneBounds(layout: YardLayout): CraneBounds {
+ *  segment, so the gantry can reach any work point but no further. Exported so the
+ *  owner can build the single shared `Crane` actuator with the right bounds. */
+export function craneBounds(layout: YardLayout): CraneBounds {
   let minX = Number.POSITIVE_INFINITY;
   let maxX = Number.NEGATIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;

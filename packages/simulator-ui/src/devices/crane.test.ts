@@ -3,8 +3,10 @@ import { Crane, type CraneBounds } from './crane.js';
 
 const BOUNDS: CraneBounds = { minX: 0, maxX: 1000, minY: 0, maxY: 500 };
 
-/** Run the crane to a commanded target for up to `cap` seconds (1ms steps). */
-function settle(crane: Crane, cap = 10): number {
+/** Run the crane to a commanded target for up to `cap` seconds (1ms steps). The
+ *  cap is generous: the gantry is deliberately slow, so a full-width traverse
+ *  takes tens of seconds. */
+function settle(crane: Crane, cap = 40): number {
   let t = 0;
   for (; t < cap && !crane.arrived; t += 0.001) crane.step(0.001);
   return t;
