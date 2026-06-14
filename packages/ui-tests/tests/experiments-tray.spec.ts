@@ -51,6 +51,13 @@ test.describe
       browser,
     }) => {
       const sim = await openSimulatorUi(browser, { brokerUrl: harness.brokerWsUrl });
+      /* Give the page a tall (≈3:2) window so the toy-table canvas adopts the
+       * legacy 900×600 mm world these placements were authored against: the
+       * canvas world HEIGHT follows the box aspect (see ToyTable's `clientToMm`),
+       * so the default Playwright viewport (1280×720) yields a wide, short canvas
+       * whose world is only ~300 mm tall — the y≈480 pieces would fall off the
+       * bottom edge and never place. */
+      await sim.setViewportSize({ width: 1280, height: 1120 });
 
       /* Lift bridge in a line of track, scanned live. The span starts seated;
        * the explicit affordance raises it (a real clearance withhold across

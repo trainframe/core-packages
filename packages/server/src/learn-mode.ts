@@ -196,6 +196,14 @@ export class LearnMode {
 
   private stop(): void {
     if (!this.session) return;
+    // Revoke the open-ended exploration clearance so the train actually halts.
+    // Without this the loco keeps its `begin_exploration` grant and wanders on
+    // after the operator clicks "Stop learning", leaving the scheduler unable
+    // to cleanly route it (it never parks at a known marker to plan from).
+    // The terminus/completion paths already release; the manual-stop path must
+    // too. Guarded on `exploring` so stopping a session that never started
+    // driving (waiting_for_train) doesn't emit a spurious revoke.
+    if (this.session.exploring) this.releaseTrain();
     this.session = null;
     this.ports.publishState({ state: 'idle' });
   }

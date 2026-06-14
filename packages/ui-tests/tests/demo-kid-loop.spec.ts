@@ -45,9 +45,14 @@ test.describe
     test('the full kid loop, captured as screenshots', async ({ browser }) => {
       test.setTimeout(120_000);
 
-      // Wider viewports so the layout-grew screenshots aren't all cramped.
+      /* Wider viewports so the layout-grew screenshots aren't all cramped. The
+       * sim window is also TALL (≈3:2) so the toy-table canvas adopts the legacy
+       * ~900×600 mm world: the canvas world HEIGHT follows its box aspect (see
+       * ToyTable's `clientToMm`), so a short 1280×800 window gives a ~360 mm-tall
+       * world that pushes the y=300 carriages down into the bottom-left scan-box
+       * drop zone, where the click never reaches the canvas. */
       const sim = await openSimulatorUi(browser, { brokerUrl: harness.brokerWsUrl });
-      await sim.setViewportSize({ width: 1280, height: 800 });
+      await sim.setViewportSize({ width: 1280, height: 1120 });
       const vis = await openVisualiser(browser, { brokerUrl: harness.brokerWsUrl });
       await vis.setViewportSize({ width: 1280, height: 800 });
 

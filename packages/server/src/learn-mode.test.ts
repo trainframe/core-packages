@@ -323,6 +323,43 @@ describe('LearnMode — learn_track_stop returns to idle', () => {
     publishOperatorCommand(client, 'learn_track_stop', {});
     expect(latestLearnState(client)?.state).toBe('idle');
   });
+
+  it('releases a driving train so it halts (revokes its exploration clearance)', () => {
+    const { client } = makeServer(SIMPLE_LOOP);
+    publishWireEvent(client, 'device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    publishWireEvent(client, 'device_registered', 'GARAGE', {
+      capabilities: ['core.assigns_tags'],
+    });
+    for (const m of ['M1', 'M2', 'M3', 'M4']) {
+      publishWireEvent(client, 'tag_assignment', 'GARAGE', {
+        tag_id: m,
+        assigned_kind: 'marker',
+        target_id: m,
+      });
+    }
+    publishOperatorCommand(client, 'learn_track_start', {});
+    // The train starts driving (open exploration clearance issued).
+    publishWireEvent(client, 'tag_observed', 'T1', { tag_id: 'M1' });
+    expect(commandsFor(client, 'T1', 'begin_exploration')).toHaveLength(1);
+    // Operator clicks "Stop learning" mid-lap: the train must be released,
+    // not left wandering on its open clearance.
+    publishOperatorCommand(client, 'learn_track_stop', {});
+    expect(commandsFor(client, 'T1', 'revoke_clearance').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('does not emit a spurious revoke when stopping before any train drove', () => {
+    const { client } = makeServer(SIMPLE_LOOP);
+    publishWireEvent(client, 'device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    // Start then immediately stop: the session never left waiting_for_train,
+    // so no exploration was granted and none should be revoked.
+    publishOperatorCommand(client, 'learn_track_start', {});
+    publishOperatorCommand(client, 'learn_track_stop', {});
+    expect(commandsFor(client, 'T1', 'revoke_clearance')).toHaveLength(0);
+  });
 });
 
 describe('LearnMode — junctions under exploration', () => {
