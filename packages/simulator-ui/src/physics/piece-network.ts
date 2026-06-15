@@ -103,7 +103,12 @@ function placePiece(
     ...lengthExtra,
   };
   const exitEp = getEndpoints(piece)[1];
-  if (exitEp === undefined) throw new Error(`piece-network: ${spec.type} has no endpoint 1`);
+  if (exitEp === undefined) {
+    /* A dead-end piece (a terminus has only its connect endpoint): nothing runs
+     * on past it, so the turtle stops here — the exit cursor is the entry, never
+     * consumed (a run must not place anything after a buffer). */
+    return { piece, exit: cursor };
+  }
   return {
     piece,
     exit: { x: exitEp.x, y: exitEp.y, dir: exitEp.outgoingAngleDeg, layer: exitEp.layer },
