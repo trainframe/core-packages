@@ -25,8 +25,12 @@
 import type { Cursor, PieceNetworkBuilder, PieceSpec } from './piece-network.js';
 
 const STRAIGHT: PieceSpec = { type: 'straight' };
-const CURVE: PieceSpec = { type: 'curve' };
-const FLIP: PieceSpec = { type: 'curve', flipped: true };
+/* The outer-corner curves match a TURNOUT's 45° branch radius (241 mm, not the plain
+ *  curve's 200 mm) so they land exactly where the inner slots' junction branches do —
+ *  otherwise a 200 mm curve leaves a ~12 mm jog against the merge-built bottom lead. */
+const TURNOUT_BRANCH_RADIUS_MM = 241;
+const CURVE: PieceSpec = { type: 'curve', radiusMm: TURNOUT_BRANCH_RADIUS_MM };
+const FLIP: PieceSpec = { type: 'curve', flipped: true, radiusMm: TURNOUT_BRANCH_RADIUS_MM };
 
 function side(n: number): PieceSpec[] {
   return Array.from({ length: n }, () => STRAIGHT);
