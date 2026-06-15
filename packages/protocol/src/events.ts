@@ -40,6 +40,17 @@ const DeviceRegisteredPayload = Type.Object({
    * declaring `core.controls_motion`.
    */
   priority: Type.Optional(Type.Number()),
+  /**
+   * Markers a zone-like device (`core.gates_zone`) declares as the opaque INTERIOR
+   * it owns — the track "under the frame" (ADR-034). Core RECORDS the list; it
+   * never computes which markers these are (the device derives them from its own
+   * physical footprint, never published as geometry — the world/core boundary of
+   * ADR-031). Used to enforce single ownership (no other device may control a
+   * marker the frame owns) and to keep core from treating an interior marker as
+   * routable. OPTIONAL and additive: a device that omits it owns nothing beyond
+   * its zone boundary. Only meaningful for devices declaring `core.gates_zone`.
+   */
+  owned_marker_ids: Type.Optional(Type.Array(Uuid)),
 });
 
 export const DeviceRegistered = eventEnvelope('device_registered', DeviceRegisteredPayload);

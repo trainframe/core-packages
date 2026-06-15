@@ -123,6 +123,15 @@ export class Scheduler {
    */
   private readonly zoneBoundaries = new Map<string, string>();
   /**
+   * Interior marker id → owning `core.gates_zone` device id (ADR-034). Populated
+   * from `owned_marker_ids` on `device_registered` — the track "under the frame".
+   * Core only RECORDS the declared list; it never computes which markers fall
+   * under a frame (the device derives that from its own footprint, ADR-031). The
+   * scheduler uses it to enforce single ownership: nothing else may control a
+   * marker a frame owns.
+   */
+  private readonly zoneOwnedMarkers = new Map<string, string>();
+  /**
    * Monotonic counter handed to each train the first time it registers, the
    * source of the FIFO-by-arrival floor in the total order over trains
    * (ADR-017). Increments per fresh registration; re-registration of an
@@ -232,8 +241,12 @@ export class Scheduler {
       this.initTrainState(deviceId, payload);
     }
 
+    const ownership: SchedulerEffect[] = [];
+    if (capabilities.includes('core.gates_zone')) {
+      ownership.push(...this.recordZoneOwnership(deviceId, payload));
+    }
     if (capabilities.includes('core.controls_switch')) {
-      this.maybeRecordSwitchPairing(deviceId, payload);
+      ownership.push(...this.maybeRecordSwitchPairing(deviceId, payload));
     }
 
     const trainLengthMm = (payload as { train_length_mm?: number }).train_length_mm;
@@ -241,7 +254,7 @@ export class Scheduler {
       typeof trainLengthMm === 'number' && trainLengthMm > 0
         ? { capabilities, train_length_mm: trainLengthMm }
         : { capabilities };
-    return [effects.updateState('devices', deviceId, deviceState)];
+    return [...ownership, effects.updateState('devices', deviceId, deviceState)];
   }
 
   /**
@@ -269,13 +282,67 @@ export class Scheduler {
   /**
    * Record the junction marker → switch device pairing when a device declares
    * `core.controls_switch` with a `controls_marker_id` field. The field is
-   * optional and non-breaking for devices that omit it.
+   * optional and non-breaking for devices that omit it. A marker a `core.gates_zone`
+   * frame already owns (ADR-034) is NOT routable from outside: the pairing is
+   * refused and an anomaly raised, so nothing fights the frame for a switch under it.
    */
-  private maybeRecordSwitchPairing(deviceId: string, payload: unknown): void {
+  private maybeRecordSwitchPairing(
+    deviceId: string,
+    payload: unknown,
+  ): ReadonlyArray<SchedulerEffect> {
     const controlsMarkerId = (payload as { controls_marker_id?: unknown }).controls_marker_id;
-    if (typeof controlsMarkerId === 'string') {
-      this.layout.recordSwitchPairing(deviceId, controlsMarkerId);
+    if (typeof controlsMarkerId !== 'string') return [];
+    const owner = this.zoneOwnedMarkers.get(controlsMarkerId);
+    if (owner !== undefined && owner !== deviceId) {
+      return [
+        effects.publishEvent('anomaly', {
+          severity: 'warning',
+          description: `Device ${deviceId} cannot control marker ${controlsMarkerId}: it is owned by zone device ${owner}`,
+        }),
+      ];
     }
+    this.layout.recordSwitchPairing(deviceId, controlsMarkerId);
+    return [];
+  }
+
+  /**
+   * Record the interior markers a `core.gates_zone` device declares it owns
+   * (ADR-034) — the track "under the frame". Core only records the declared list;
+   * it never computes which markers these are. Single ownership is enforced: a
+   * marker already owned by another device (a second frame, or a switch device
+   * already controlling it) is refused with an anomaly and left with its first
+   * owner — two things cannot own the same piece of track.
+   */
+  private recordZoneOwnership(deviceId: string, payload: unknown): ReadonlyArray<SchedulerEffect> {
+    const owned = (payload as { owned_marker_ids?: unknown }).owned_marker_ids;
+    if (!Array.isArray(owned)) return [];
+    const anomalies: SchedulerEffect[] = [];
+    for (const markerId of owned) {
+      if (typeof markerId !== 'string') continue;
+      const zoneOwner = this.zoneOwnedMarkers.get(markerId);
+      const switchOwner = this.layout.switchDeviceForMarker(markerId);
+      const conflict =
+        (zoneOwner !== undefined && zoneOwner !== deviceId) ||
+        (switchOwner !== undefined && switchOwner !== deviceId);
+      if (conflict) {
+        const other = zoneOwner ?? switchOwner;
+        anomalies.push(
+          effects.publishEvent('anomaly', {
+            severity: 'warning',
+            description: `Device ${deviceId} cannot own marker ${markerId}: already owned by ${other}`,
+          }),
+        );
+        continue;
+      }
+      this.zoneOwnedMarkers.set(markerId, deviceId);
+    }
+    return anomalies;
+  }
+
+  /** The `core.gates_zone` device that owns `markerId` as interior (under its
+   *  frame, ADR-034), or undefined if no frame has declared it. */
+  ownerOfZoneMarker(markerId: string): string | undefined {
+    return this.zoneOwnedMarkers.get(markerId);
   }
 
   // ---------- device disconnect ----------

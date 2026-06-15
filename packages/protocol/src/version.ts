@@ -46,5 +46,11 @@
  * releases a held train back to core authority with `zone_train_released`, and
  * the train departs only under ordinary clearance. TCF registry epoch bumped
  * 4 → 5 (event appended). Backward-compatible additions.
+ * 0.11.0 — optional `owned_marker_ids` on `device_registered` (ADR-034): a
+ * `core.gates_zone` device declares the interior markers it owns — the track
+ * "under the frame". Core records ownership (it never computes the list — the
+ * device derives it from its own footprint, ADR-031) and enforces that nothing
+ * else controls a marker the frame owns. Backward-compatible addition; a device
+ * that omits it owns nothing beyond its zone boundary, exactly as before.
  */
-export const PROTOCOL_VERSION = '0.10.0' as const;
+export const PROTOCOL_VERSION = '0.11.0' as const;

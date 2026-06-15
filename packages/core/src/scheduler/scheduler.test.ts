@@ -2721,6 +2721,73 @@ describe('Scheduler — switch device pairing', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Zone owned-marker declaration (ADR-034): a gates_zone frame declares the
+// interior markers it owns; core records ownership and enforces it.
+// ---------------------------------------------------------------------------
+
+describe('Scheduler — zone owned-marker declaration (ADR-034)', () => {
+  const registerYardOwning = (scheduler: Scheduler, deviceId: string, owned: readonly string[]) =>
+    scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: deviceId,
+      payload: { capabilities: ['core.gates_zone'], owned_marker_ids: owned },
+    });
+  const anomalyIn = (effects: ReadonlyArray<SchedulerEffect>) =>
+    effects.find((e) => e.kind === 'publish_event' && e.event_type === 'anomaly');
+
+  it('records the interior markers a gates_zone device declares it owns', () => {
+    const { scheduler } = setup();
+    const effects = registerYardOwning(scheduler, 'YARD-1', ['M-throat', 'M-lad0', 'M-lad1']);
+    expect(anomalyIn(effects)).toBeUndefined(); // a clean declaration raises nothing
+    expect(scheduler.ownerOfZoneMarker('M-lad0')).toBe('YARD-1');
+    expect(scheduler.ownerOfZoneMarker('M-lad1')).toBe('YARD-1');
+    expect(scheduler.ownerOfZoneMarker('M-unowned')).toBeUndefined();
+  });
+
+  it('ignores owned_marker_ids from a device that is not a gates_zone', () => {
+    const { scheduler } = setup();
+    scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'NOT-A-ZONE',
+      payload: { capabilities: ['core.controls_motion'], owned_marker_ids: ['M-lad0'] },
+    });
+    expect(scheduler.ownerOfZoneMarker('M-lad0')).toBeUndefined();
+  });
+
+  it('refuses a second frame claiming a marker already owned, keeping the first owner', () => {
+    const { scheduler } = setup();
+    registerYardOwning(scheduler, 'YARD-1', ['M-lad0']);
+    const effects = registerYardOwning(scheduler, 'YARD-2', ['M-lad0']);
+    expect(anomalyIn(effects)).toBeDefined();
+    expect(scheduler.ownerOfZoneMarker('M-lad0')).toBe('YARD-1'); // unchanged
+  });
+
+  it('refuses a switch device that tries to control a marker the frame owns', () => {
+    const { scheduler } = setup();
+    registerYardOwning(scheduler, 'YARD-1', ['M-lad0']);
+    const effects = scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'SWITCH-rogue',
+      payload: { capabilities: ['core.controls_switch'], controls_marker_id: 'M-lad0' },
+    });
+    expect(anomalyIn(effects)).toBeDefined();
+    expect(scheduler.getLayout().switchDeviceForMarker('M-lad0')).toBeUndefined();
+  });
+
+  it('refuses a frame claiming a marker a switch device already controls', () => {
+    const { scheduler } = setup();
+    scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'SWITCH-M1',
+      payload: { capabilities: ['core.controls_switch'], controls_marker_id: 'M1' },
+    });
+    const effects = registerYardOwning(scheduler, 'YARD-1', ['M1']);
+    expect(anomalyIn(effects)).toBeDefined();
+    expect(scheduler.ownerOfZoneMarker('M1')).toBeUndefined(); // not taken from the switch
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Scheduler throws the switch for a scheduled route (the actuation keystone).
 //
 // A diverge junction J fed from two approaches A1, A2 with two branches:
