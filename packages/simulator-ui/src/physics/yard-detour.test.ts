@@ -17,6 +17,18 @@ function buildScene(slots = 4) {
   return { net: b.build().net, detour };
 }
 
+/** Point the yard's two ladders to route a train through slot `i`. */
+function pointToSlot(
+  w: PhysicsWorld,
+  sl: ReturnType<typeof buildScene>['detour']['segments']['yard'],
+  i: number,
+) {
+  for (const [k, sw] of sl.topSwitches.entries())
+    if (sw !== undefined) w.setSwitch(sw, k === i ? sl.slotPos : sl.thruPos);
+  for (const [k, sw] of sl.bottomSwitches.entries())
+    if (sw !== undefined) w.setSwitch(sw, k === i ? sl.slotPos : sl.thruPos);
+}
+
 /** Run a forward loco from `main` and return the segments it visits. */
 function drive(net: ReturnType<typeof buildScene>['net'], setup: (w: PhysicsWorld) => void) {
   const w = new PhysicsWorld(net);
@@ -51,11 +63,7 @@ describe('addYardDetour — drive-through yard off a running line', () => {
     const sl = detour.segments.yard;
     const visited = drive(net, (w) => {
       w.setSwitch(detour.segments.divertSwitch, detour.segments.divertPos);
-      /* Route through slot 1 (both ladders). */
-      for (const [k, sw] of sl.topSwitches.entries())
-        if (sw !== undefined) w.setSwitch(sw, k === 1 ? sl.slotPos : sl.thruPos);
-      for (const [k, sw] of sl.bottomSwitches.entries())
-        if (sw !== undefined) w.setSwitch(sw, k === 1 ? sl.slotPos : sl.thruPos);
+      pointToSlot(w, sl, 1);
     });
     expect(visited.has('YD-leadin')).toBe(true); // pulled onto the entry lead-in
     expect(visited.has('YD-slot1')).toBe(true); // a stabling road through the yard
