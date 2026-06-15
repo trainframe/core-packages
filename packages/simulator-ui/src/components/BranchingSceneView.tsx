@@ -1,33 +1,37 @@
 /**
  * The BRANCHING layout, RENDERED (FROZEN SPEC §5). This view is the BROWSER-side
- * composition root for `?physics=branching`: it builds the SAME branching scene +
- * compiled `Layout` as the Node gate (Engineer A's `buildBranchingScene` /
- * `sceneToLayout`), stages a `PhysicsWorld` from `scene.net`, and RENDERS it in the
- * ADR-024 workshop aesthetic (reusing `railPath`, `SegArt`, `Platform`,
- * `YardGantry`/`Truss`, `BodyG` from `RailyardDemoScenarioView`).
+ * DEVICE composition root for `?physics=branching`: it builds the REAL
+ * `buildBranchingDemo` assembly — ONE `PhysicsWorld`, a `ScheduledTrainDevice` per
+ * loco, the `Jspur` `SwitchDevice`, and the `YardZoneDevice` — each wired over
+ * `mqttPlatform` to the configured broker (URL from `localStorage`). It `start()`s
+ * those devices, steps `demo.step(STEP_S)` every `requestAnimationFrame`, and
+ * RENDERS the authoritative `demo.world.bodies()` poses in the ADR-024 workshop
+ * aesthetic (the local `railPath`/`SegArt`/`Platform`/`YardGantry`/`Truss` plus
+ * `BodyG`).
  *
- * Unlike the bespoke `RailyardDemoScenarioView`, NOTHING here drives logic: routing,
- * clearance and occupancy all come from the REAL `@trainframe/server` scheduler
- * running in Node (the harness / the render script), which talks to the devices over
- * MQTT. This view connects to that broker via `mqttPlatform` (URL from
- * `localStorage`), so the live switch positions it draws are the scheduler's, and it
- * NEVER assigns a route. It is a pure consumer of the spatial layout (`scene.geom`)
- * plus the authoritative `world.bodies()` poses each `requestAnimationFrame`.
+ * The browser is the DEVICE side, exactly as the headless gate and the render
+ * script are: routing, clearance, switch resolution and yard occupancy all come
+ * from the REAL `@trainframe/server` scheduler running in Node (the harness / the
+ * render script). The devices here register over the bus and execute the routes
+ * the scheduler assigns — this view NEVER assigns a route. If the broker is
+ * unreachable (e.g. the jsdom unit test, or a standalone preview) the devices
+ * simply receive no commands and the world renders idle.
  *
  * Exposes `window.__tfPhysics` (world handle, for assertions), and the DEV hooks
- * `window.__tfLoadBranching()` (seed/restart the world) + `window.__tfFitView()`
+ * `window.__tfLoadBranching()` (rebuild/restart the demo) + `window.__tfFitView()`
  * (frame the whole layout) the render script calls before scheduling.
  */
 import { useEffect, useMemo, useState } from 'react';
 import { MqttBrokerClient } from '../broker/mqtt-client.js';
 import { mqttPlatform } from '../broker/mqtt-platform.js';
 import { loadBrokerUrl } from '../config/broker-config.js';
+import { type BranchingDemo, buildBranchingDemo } from '../demo/branching-demo.js';
 import {
   type BranchingScene,
   type Station,
   buildBranchingScene,
 } from '../physics/branching-scene.js';
-import { type BodyPose, PhysicsWorld } from '../physics/world.js';
+import type { BodyPose } from '../physics/world.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 
@@ -41,6 +45,9 @@ declare global {
 }
 
 const STEP_S = 1 / 120;
+/* The slot count the demo composition root uses (`branching-demo.ts`); the
+ * furniture scene drawn here is built with the same value so its geometry matches
+ * the device-side world exactly. */
 const SLOT_COUNT = 3;
 
 /* The following presentational SVG helpers render the ADR-024 workshop aesthetic
@@ -227,86 +234,6 @@ function Platform({ station }: { station: Station }) {
   );
 }
 
-const RED = '#c0392b';
-const BLUE = '#2d6cdf';
-const GREEN = '#27ae60';
-const ORANGE = '#d4761e';
-const GOLD = '#e0a81e';
-
-/** The four scheduler-driven trains, with the segment + rail position each is
- *  seeded at and a livery. These match §8's roster (T1 Express, T2 Yard turn, T3
- *  Branch local, T4 Yard reliever). The Node scheduler routes them; this view only
- *  renders where physics puts them. */
-const TRAIN_SEED: ReadonlyArray<{
-  id: string;
-  color: string;
-  segment: string;
-  railPos: number;
-  cars: number;
-}> = [
-  { id: 'T1', color: RED, segment: 'top', railPos: 1500, cars: 3 },
-  { id: 'T2', color: BLUE, segment: 'bottom', railPos: 900, cars: 3 },
-  { id: 'T3', color: GREEN, segment: 'rightA', railPos: 120, cars: 2 },
-  { id: 'T4', color: ORANGE, segment: 'leftB', railPos: 200, cars: 3 },
-];
-
-/** Seed a loco + its rake of carriages onto the world, coupled head-to-tail. */
-function seedTrain(
-  world: PhysicsWorld,
-  spec: { id: string; color: string; segment: string; railPos: number; cars: number },
-): void {
-  world.addBody({
-    id: spec.id,
-    kind: 'loco',
-    railPos: spec.railPos,
-    facing: 1,
-    segment: spec.segment,
-    color: spec.color,
-    power: 820,
-    maxSpeed: 300,
-  });
-  for (let i = 0; i < spec.cars; i++) {
-    const id = `${spec.id}c${i}`;
-    world.addBody({
-      id,
-      kind: 'carriage',
-      railPos: spec.railPos - (i + 1) * 68,
-      facing: 1,
-      segment: spec.segment,
-      color: spec.color,
-    });
-    world.couple(i === 0 ? spec.id : `${spec.id}c${i - 1}`, id);
-  }
-}
-
-/** Stage the branching world: the four trains spaced around the layout and a gold
- *  spares cut pre-parked in the yard's entry slot (what the crane migrates). */
-function buildBranchingWorld(scene: BranchingScene): PhysicsWorld {
-  const world = new PhysicsWorld(scene.net);
-  for (const t of TRAIN_SEED) seedTrain(world, t);
-
-  /* A gold spares cut in the entry slot — the interior service's pick-up. */
-  const slot = scene.entrySlot;
-  world.addBody({
-    id: 'g0',
-    kind: 'carriage',
-    railPos: 200,
-    facing: 1,
-    segment: slot,
-    color: GOLD,
-  });
-  world.addBody({
-    id: 'g1',
-    kind: 'carriage',
-    railPos: 132,
-    facing: 1,
-    segment: slot,
-    color: GOLD,
-  });
-  world.couple('g0', 'g1');
-  return world;
-}
-
 /** The yard footprint (for the gantry frame): the bbox of its segments + a margin
  *  so the foundation rails clear the slots. */
 function yardBounds(scene: BranchingScene): {
@@ -361,29 +288,47 @@ function sceneViewBox(scene: BranchingScene): string {
   return `${minX} ${minY} ${maxX - minX} ${maxY - minY}`;
 }
 
-/** Open a broker connection over `mqttPlatform` so the view participates on the bus
- *  the Node scheduler drives (the spec's "browser subscribes via mqttPlatform").
- *  Returns the client so the caller can disconnect on cleanup. The view never
- *  publishes a route — it only listens. A connect failure (no broker yet) is
- *  non-fatal: the world still renders. */
-function connectBroker(): MqttBrokerClient {
-  const client = new MqttBrokerClient();
-  try {
-    client.connect(loadBrokerUrl());
-    /* Touch `mqttPlatform` at the IO edge so the view is wired exactly as a device
-     *  composition root would be (the same adapter the gate/script use). We
-     *  subscribe to commands for a non-device id only to exercise the seam; the
-     *  view itself never acts on them. */
-    mqttPlatform(client, 'branching-view').onCommand(() => {});
-  } catch {
-    /* No broker reachable (e.g. standalone preview) — render the world anyway. */
-  }
-  return client;
+/** A built demo together with the broker clients it wired — one `MqttBrokerClient`
+ *  per device (the same per-device wiring the headless gate uses). */
+interface BuiltDemo {
+  readonly demo: BranchingDemo;
+  readonly clients: readonly MqttBrokerClient[];
 }
 
-/** The live world subtree: builds + steps a `PhysicsWorld`, opens the broker, and
- *  renders the poses. The parent gives it a `key` so a reseed (the DEV hook) simply
- *  remounts this — a clean teardown/rebuild without a nonce in the effect deps. */
+/** Build the REAL branching demo as the DEVICE side: a `ScheduledTrainDevice` per
+ *  loco + the `Jspur` `SwitchDevice` + the `YardZoneDevice`, each on its own broker
+ *  client wired through `mqttPlatform`. Connecting is guarded: a broker that can't
+ *  be reached (the jsdom unit test, a standalone preview) is non-fatal — the
+ *  devices simply receive no routes and the world renders idle. `start()` is
+ *  likewise guarded so a transport hiccup never breaks the render or the test. */
+function buildDemo(): BuiltDemo {
+  const clients: MqttBrokerClient[] = [];
+  const url = loadBrokerUrl();
+  const demo = buildBranchingDemo((deviceId) => {
+    const client = new MqttBrokerClient();
+    clients.push(client);
+    try {
+      client.connect(url);
+    } catch {
+      /* No broker reachable — render idle; the device just never gets commands. */
+    }
+    return mqttPlatform(client, deviceId);
+  });
+  try {
+    demo.start();
+  } catch {
+    /* A transport hiccup at register time is non-fatal: the world still renders. */
+  }
+  return { demo, clients };
+}
+
+/** The live world subtree: builds the REAL demo (device side) inside the mount
+ *  effect, steps it, and renders the authoritative world poses. The furniture
+ *  (rails/stations/junctions/gantry) is drawn from the SAME pure `scene` geometry
+ *  the demo's world is built on — `buildBranchingScene` is pure, so the independent
+ *  copy used for furniture is identical to `demo.scene`. The parent gives this a
+ *  `key` so the DEV reseed hook simply remounts it — a clean teardown (devices
+ *  stopped, clients disconnected) + rebuild. */
 function BranchingWorld({ scene }: { scene: BranchingScene }) {
   const [poses, setPoses] = useState<readonly BodyPose[]>([]);
 
@@ -393,8 +338,10 @@ function BranchingWorld({ scene }: { scene: BranchingScene }) {
   const segIds = useMemo(() => [...scene.geom.keys()], [scene]);
 
   useEffect(() => {
-    const world = buildBranchingWorld(scene);
-    const client = connectBroker();
+    /* Build + start the device-side demo here (an effect, not render) so a double
+     *  mount under React StrictMode is matched by a clean teardown each time. */
+    const { demo, clients } = buildDemo();
+    const world = demo.world;
 
     let elapsed = 0;
     let acc = 0;
@@ -405,7 +352,7 @@ function BranchingWorld({ scene }: { scene: BranchingScene }) {
       acc += Math.min(0.1, (now - last) / 1000);
       last = now;
       while (acc >= STEP_S) {
-        world.step(STEP_S);
+        demo.step(STEP_S);
         elapsed += STEP_S;
         acc -= STEP_S;
       }
@@ -421,9 +368,10 @@ function BranchingWorld({ scene }: { scene: BranchingScene }) {
     return () => {
       cancelAnimationFrame(raf);
       window.__tfPhysics = undefined;
-      client.disconnect();
+      demo.stop();
+      for (const c of clients) c.disconnect();
     };
-  }, [scene]);
+  }, []);
 
   return (
     <div style={{ width: '100vw', height: '100vh', background: '#efe6d3' }}>

@@ -84,8 +84,11 @@ export interface BranchingDemo {
 const SLOT_COUNT = 3;
 const YARD_CAPACITY = 1;
 
-const YARD_DEVICE_ID = 'YARD-1';
-const SPUR_SWITCH_ID = 'SWITCH-spur';
+/** The yard zone's device id, exported so the render script can wait for it to
+ *  register (the browser owns the device; the script only assigns + watches). */
+export const YARD_DEVICE_ID = 'YARD-1';
+/** The spur junction switch device id, exported for the same reason. */
+export const SPUR_SWITCH_ID = 'SWITCH-spur';
 
 /** Two carriages behind a yard-visiting loco, for the train→train migration. */
 const VISITOR_CARS = 2;
@@ -153,6 +156,14 @@ const TRAINS: readonly TrainPlacement[] = [
     cars: VISITOR_CARS,
   },
 ];
+
+/** The per-train route plan (train id → its cyclic route), exported so an operator
+ *  (the render script) can `assignSchedule` each train WITHOUT building a world or
+ *  its devices — the browser owns those. Derived from the single `TRAINS` source so
+ *  it can never drift from what the devices believe their routes are. */
+export const DEMO_ROUTES: ReadonlyMap<string, DemoRoute> = new Map(
+  TRAINS.map((t) => [t.id, t.route]),
+);
 
 /** Project every scene marker to its world point (where the loco's tag reader
  *  physically meets it) — the sensor input the device needs but does not own. */
@@ -265,7 +276,7 @@ export function buildBranchingDemo(platformFactory: PlatformFactory): BranchingD
     yardTap: physicsSwitchActuator(world, 'Jloop'),
   });
 
-  const routes = new Map<string, DemoRoute>(TRAINS.map((t) => [t.id, t.route]));
+  const routes = DEMO_ROUTES;
 
   let started = false;
   return {

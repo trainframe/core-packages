@@ -10,7 +10,12 @@ export type { DemoCarriage, DemoTrain, RailyardDemo } from './railyard-demo.js';
 /* The branching demo (FROZEN SPEC) — driven by the REAL scheduler. The headless
  * integration gate and the render script build the SAME assembly through this
  * composition root, varying only the device transport. */
-export { buildBranchingDemo } from './branching-demo.js';
+export {
+  buildBranchingDemo,
+  DEMO_ROUTES,
+  YARD_DEVICE_ID,
+  SPUR_SWITCH_ID,
+} from './branching-demo.js';
 export type { BranchingDemo, DemoRoute, PlatformFactory } from './branching-demo.js';
 export { buildBranchingScene } from '../physics/branching-scene.js';
 export type { BranchingScene, SceneMarker } from '../physics/branching-scene.js';

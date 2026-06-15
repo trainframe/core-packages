@@ -21,9 +21,10 @@ describe('BranchingSceneView', () => {
     expect(screen.getByTestId('yard-gantry')).toBeTruthy();
 
     await waitFor(() => {
-      /* Four locos + their rakes + the gold spares cut render as bodies, and the
+      /* The real demo world: four locos + their rakes (T2/T4 carry two cars each)
+       *  + the two-carriage spares cut render as bodies — ten in all — and the
        *  world handle is exposed under the `branching` name. */
-      expect(document.querySelectorAll('[data-body-id]').length).toBeGreaterThan(10);
+      expect(document.querySelectorAll('[data-body-id]').length).toBeGreaterThanOrEqual(10);
       expect(window.__tfPhysics?.name).toBe('branching');
     });
 
@@ -32,7 +33,7 @@ describe('BranchingSceneView', () => {
     expect(ids).toContain('T2');
     expect(ids).toContain('T3');
     expect(ids).toContain('T4');
-    expect(ids).toContain('g0');
+    expect(ids).toContain('spare0');
   });
 
   it('exposes the DEV hooks the render script calls before scheduling', () => {

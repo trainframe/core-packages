@@ -2,20 +2,25 @@
 /**
  * Record the live BRANCHING RAILYARD SPECTACLE in Chrome.
  *
- * Boots the in-process harness (aedes broker + the real `@trainframe/server`
- * scheduler) on a free WS port, then builds the branching demo's ONE physics
- * world + its scheduler-driven devices ALL IN NODE over `mqttPlatform` on that
- * broker (the devices are DOM-free, so the same assembly the headless gate runs
- * drives the recording). A `setInterval` steps the world + the yard zone + every
- * train and pumps the harness clock. The simulator-ui DEV page is opened at
- * `?physics=branching` pointed at the same broker, so the browser renders the
- * world it reads off the bus while the Node scheduler owns routing, clearance and
- * the opaque yard.
+ * The Node side here runs ONLY the harness: an in-process aedes broker + the real
+ * `@trainframe/server` scheduler, on a free WS port, against the branching layout
+ * (the physics scene compiled to the protocol `Layout`). It builds NO devices and
+ * NO physics world — the BROWSER owns those. The simulator-ui DEV page is opened at
+ * `?physics=branching` with `localStorage` pointed at the harness broker, so the
+ * browser builds the REAL `buildBranchingDemo` device side (one physics world +
+ * `ScheduledTrainDevice` per loco + the `Jspur` `SwitchDevice` + the
+ * `YardZoneDevice`) over `mqttPlatform`, registers on the bus, and steps the world
+ * each frame.
  *
- * Once every device has registered and each train has declared a heading, the
- * four cyclic schedules (FROZEN SPEC §8) are assigned: T1 the express, T2 a yard
- * turn, T3 the branch local, T4 the yard reliever queueing behind T2. Records the
- * whole run to one MP4.
+ * Once every device has registered, this script assigns each train its cyclic
+ * schedule from the exported `DEMO_ROUTES` (FROZEN SPEC §8): T1 the express, T2 a
+ * yard turn, T3 the branch local, T4 the yard reliever queueing behind T2. (A
+ * `ScheduledTrainDevice` seeds its heading from its route's first edge — the home
+ * stop its body is parked at — so the planner routes it the correct way the moment
+ * the route lands; it cannot declare a heading BEFORE a route, so registration is
+ * the right gate, exactly as the headless integration gate assigns.) The scheduler
+ * then routes, clears and resolves switches; the browser renders the trains it
+ * drives. Records the whole run to one MP4.
  *
  *   node packages/ui-tests/scripts/branching-spectacle-video.mjs
  *
@@ -28,9 +33,11 @@ import process from 'node:process';
 import { chromium } from '@playwright/test';
 import { MqttBrokerClient } from '@trainframe/server';
 import {
-  MqttBrokerClient as SimMqttClient,
-  buildBranchingDemo,
-  mqttPlatform,
+  DEMO_ROUTES,
+  SPUR_SWITCH_ID,
+  YARD_DEVICE_ID,
+  buildBranchingScene,
+  sceneToLayout,
 } from '../../simulator-ui/src/demo/index.ts';
 import { startUiHarness } from '../src/test-harness.ts';
 
@@ -39,7 +46,6 @@ const WS_PORT = Number(process.env.TF_WS_PORT ?? 9112);
 const OUT = new URL('../videos/spectacle/', import.meta.url).pathname;
 const RECORD_S = Number(process.env.TF_RECORD_S ?? 120);
 const STEP_MS = 1000 / 60;
-const DT_S = STEP_MS / 1000;
 const W = 1920;
 const H = 1080;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -50,46 +56,34 @@ async function main() {
   mkdirSync(OUT, { recursive: true });
 
   /* Harness = aedes broker + the real server scheduler, on a free WS port. The
-     layout is the physics scene compiled to the protocol Layout. */
-  const probe = buildBranchingDemo(() => mqttPlatform(new SimMqttClient(), 'probe'));
-  const layout = probe.layout;
-  log(`layout: ${layout.markers.length} markers, ${layout.edges.length} edges`);
+     layout is the branching physics scene compiled to the protocol Layout. We
+     build only the layout here — no world, no devices (the browser owns those). */
+  const layout = sceneToLayout(buildBranchingScene(3), 'branching');
+  const trainIds = [...DEMO_ROUTES.keys()];
+  log(
+    `layout: ${layout.markers.length} markers, ${layout.edges.length} edges; ${trainIds.length} trains`,
+  );
   const harness = await startUiHarness({ layout, wsPort: WS_PORT });
   log(`harness broker ${harness.brokerWsUrl}, scheduler up`);
 
-  /* The DEVICE side, IN NODE: one MQTT client per device over the harness broker.
-     The browser only renders; these devices are the live citizens of core. */
-  const deviceClients = [];
-  const demo = buildBranchingDemo((deviceId) => {
-    const client = new SimMqttClient();
-    deviceClients.push(client);
-    client.connect(harness.brokerWsUrl);
-    return mqttPlatform(client, deviceId);
-  });
-  await sleep(500);
-  demo.start();
+  /* Pump the harness clock so the scheduler's dwell/clearance timing advances with
+     wall time. (The browser steps the physics world; this only drives core's
+     virtual clock.) */
+  const ticker = setInterval(() => harness.advance(STEP_MS), STEP_MS);
 
-  /* Step the world + zone + trains in real time; pump the harness clock so the
-     scheduler's dwell/clearance timing advances with wall time. */
-  const ticker = setInterval(() => {
-    demo.step(DT_S);
-    harness.advance(STEP_MS);
-  }, STEP_MS);
-
-  /* Wait for every device to register AND each train to declare a heading before
-     scheduling — so the planner routes each the correct way round. */
-  const required = new Set([demo.yardDeviceId, ...demo.switchDeviceIds, ...demo.trainIds]);
-  const trainIds = new Set(demo.trainIds);
+  /* Wait for every device to register before scheduling — the devices live in the
+     BROWSER; we observe their `device_registered` events on the bus. (A
+     `ScheduledTrainDevice` only declares a heading AFTER it has a route, so the
+     route assignment is what seeds its facing; registration is the right gate.) */
+  const required = new Set([YARD_DEVICE_ID, SPUR_SWITCH_ID, ...trainIds]);
   const seen = new Set();
-  const facing = new Set();
   let scheduled = false;
   const watch = new MqttBrokerClient();
   await watch.connect(harness.brokerWsUrl);
   const trySchedule = () => {
     if (scheduled || seen.size < required.size) return;
-    if (![...trainIds].every((id) => facing.has(id))) return;
     scheduled = true;
-    for (const [id, route] of demo.routes) {
+    for (const [id, route] of DEMO_ROUTES) {
       harness.server.assignSchedule(id, route.routeId, [...route.stops]);
     }
     log('schedules assigned — express, yard turn, branch local, yard reliever');
@@ -102,21 +96,8 @@ async function main() {
       trySchedule();
     }
   });
-  watch.subscribe('railway/events/train_status/+', (msg) => {
-    const id = msg.topic.split('/').pop();
-    if (!id || !trainIds.has(id) || facing.has(id)) return;
-    try {
-      const edge = JSON.parse(new TextDecoder().decode(msg.payload))?.payload?.current_edge;
-      if (edge) {
-        facing.add(id);
-        trySchedule();
-      }
-    } catch {
-      /* ignore decode hiccups */
-    }
-  });
 
-  /* The browser = the RENDER side, pointed at the same broker. */
+  /* The browser = the DEVICE + RENDER side, pointed at the same broker. */
   const browser = await chromium.launch();
   const context = await browser.newContext({
     viewport: { width: W, height: H },
@@ -127,10 +108,10 @@ async function main() {
   }, harness.brokerWsUrl);
   const page = await context.newPage();
   await page.goto(`${SIM}?physics=branching`, { waitUntil: 'networkidle' });
-  await page.waitForFunction(() => typeof window.__tfLoadBranching === 'function', undefined, {
+  await page.waitForFunction(() => typeof window.__tfFitView === 'function', undefined, {
     timeout: 15000,
   });
-  await page.evaluate(() => window.__tfLoadBranching?.());
+  /* Let the device-side demo build + register, then frame the whole layout. */
   await sleep(800);
   await page.evaluate(() => window.__tfFitView?.());
   log('scene framed; waiting for schedules then recording…');
@@ -143,8 +124,6 @@ async function main() {
   await context.close();
   await browser.close();
   watch.disconnect();
-  demo.stop();
-  for (const c of deviceClients) c.disconnect();
   await harness.shutdown();
 
   if (!video) throw new Error('no video captured');
