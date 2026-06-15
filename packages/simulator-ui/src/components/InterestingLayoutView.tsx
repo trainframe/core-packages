@@ -33,6 +33,19 @@ function railPath(rail: { length: number; at: (d: number) => { x: number; y: num
 function SegArt({ d, raised = false }: { d: string; raised?: boolean }) {
   return (
     <>
+      {/* A raised deck (a bridge) clears the track it passes over: a background-colour
+       *  halo breaks the LOWER rail beneath the span, so the crossing reads as
+       *  over-and-under rather than a flat X. */}
+      {raised && (
+        <path
+          d={d}
+          fill="none"
+          stroke="#efe6d3"
+          strokeWidth={26}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      )}
       <path
         d={d}
         fill="none"
