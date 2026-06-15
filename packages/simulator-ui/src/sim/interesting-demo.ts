@@ -30,7 +30,7 @@ export interface InterestingDemo {
 
 /** The bottom-left siding-fan bounds, by sampling the siding rails. */
 function yardBounds(scene: Scene): Rect {
-  const pts = scene.yard.sidings.flatMap((id) => {
+  const pts = scene.yard.slots.flatMap((id) => {
     const r = scene.net.railOf(id);
     const out: { x: number; y: number }[] = [];
     const n = Math.max(2, Math.ceil(r.length / 30));
@@ -48,7 +48,7 @@ function yardBounds(scene: Scene): Rect {
 /** Stable a rake (loco + two carriages) in the first yard siding, so the yard reads
  *  as in use. Static — no service drives it yet. */
 function stableYardStock(world: PhysicsWorld, scene: Scene): void {
-  const road = scene.yard.sidings[0];
+  const road = scene.yard.slots[0];
   if (road === undefined) return;
   const locoPos = scene.net.railOf(road).length - 120;
   world.addBody({

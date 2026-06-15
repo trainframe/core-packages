@@ -19,9 +19,9 @@
  */
 import { type CrossoverLoopSegments, addCrossoverLoop } from './crossover-loop.js';
 import type { RailNetwork } from './network.js';
+import { type ParallelogramYardSegments, addParallelogramYard } from './parallelogram-yard.js';
 import { type Cursor, PieceNetworkBuilder, type PieceSpec } from './piece-network.js';
 import { type SatelliteLoopSegments, addSatelliteLoop } from './satellite-loop.js';
-import { type TrapezoidYardSegments, addTrapezoidYard } from './trapezoid-yard.js';
 
 const STRAIGHT: PieceSpec = { type: 'straight' };
 const CURVE: PieceSpec = { type: 'curve' };
@@ -91,8 +91,8 @@ export interface MainLoopScene {
   readonly pieces: ReturnType<PieceNetworkBuilder['build']>['pieces'];
   readonly geom: ReturnType<PieceNetworkBuilder['build']>['geom'];
   readonly branches: MainLoopBranches;
-  /** The trapezoid yard hanging off the bottom-left tap. */
-  readonly yard: TrapezoidYardSegments;
+  /** The parallelogram yard hanging off the bottom-left tap. */
+  readonly yard: ParallelogramYardSegments;
   /** A segment a train can spawn on to lap the main loop. */
   readonly startSegment: string;
   /** End-to-start closure gap (mm). */
@@ -178,10 +178,12 @@ export function buildMainLoopScene(): MainLoopScene {
   const afterBotHumps = b.run('bot-b', afterBotA, botSpecs.length > 0 ? botSpecs : [STRAIGHT]);
   b.link('bot-a', 'bot-b');
 
-  /* YARD tap near the left + the trapezoid yard hanging below (bottom-left). */
+  /* YARD tap near the left + the parallelogram yard hanging below (bottom-left). The
+   *  divert branch feeds the yard's TOP lead; the bottom lead is the yard's internal
+   *  run-around (it does not rejoin the loop). */
   const yard = tap(b, 'bot-b', afterBotHumps, 'yard', true);
-  const trap = addTrapezoidYard(b, yard.taps.branchExit, { prefix: 'YD', sidings: 3 });
-  b.link(yard.taps.branchSeg, trap.inbound);
+  const pgYard = addParallelogramYard(b, yard.taps.branchExit, { prefix: 'YD', slots: 5 });
+  b.link(yard.taps.branchSeg, pgYard.topLeadIn);
 
   /* Close the running line from the yard tap's through back to the start x. */
   const closeRemaining = yard.onward.x - start.x;
@@ -208,7 +210,7 @@ export function buildMainLoopScene(): MainLoopScene {
     pieces: built.pieces,
     geom: built.geom,
     branches: { yard: yard.taps, satA: satA.segments, satB: satB.segments },
-    yard: trap.segments,
+    yard: pgYard.segments,
     startSegment,
     closureGapMm,
   };
