@@ -178,12 +178,17 @@ export function buildMainLoopScene(): MainLoopScene {
   const afterBotHumps = b.run('bot-b', afterBotA, botSpecs.length > 0 ? botSpecs : [STRAIGHT]);
   b.link('bot-a', 'bot-b');
 
-  /* YARD tap near the left + the parallelogram yard hanging below (bottom-left). The
-   *  divert branch feeds the yard's TOP lead; the bottom lead is the yard's internal
-   *  run-around (it does not rejoin the loop). */
+  /* YARD tap near the left. The divert drops onto a BUFFERED LEAD-IN — a holding
+   *  siding, leveled off the 45° divert and run clear of the running line — so a train
+   *  bound for the yard pulls FULLY off the main loop before any slow shunting; the
+   *  yard never blocks the running line. The parallelogram yard (flipped, so it hangs
+   *  BELOW the westbound run) grows off the end of the lead-in. */
   const yard = tap(b, 'bot-b', afterBotHumps, 'yard', true);
-  const pgYard = addParallelogramYard(b, yard.taps.branchExit, { prefix: 'YD', slots: 5 });
-  b.link(yard.taps.branchSeg, pgYard.topLeadIn);
+  const LEVEL: PieceSpec = { type: 'curve', radiusMm: 241 };
+  const leadInEnd = b.run('yard-leadin', yard.taps.branchExit, [LEVEL, STRAIGHT, STRAIGHT, STRAIGHT]);
+  b.link(yard.taps.branchSeg, 'yard-leadin');
+  const pgYard = addParallelogramYard(b, leadInEnd, { prefix: 'YD', slots: 5, flipped: true });
+  b.link('yard-leadin', pgYard.topLeadIn);
 
   /* Close the running line from the yard tap's through back to the start x. */
   const closeRemaining = yard.onward.x - start.x;
