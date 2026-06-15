@@ -165,10 +165,22 @@ export class PhysicsWorld {
     this.byId.set(b.id, b);
   }
 
-  /** Drop a body onto the rail at the world point nearest (x,y) — the simulator
-   *  side of a crane releasing a payload. Finds the closest segment + distance
-   *  along it, then seeds the body there (railed). Returns its id. */
-  placeBodyAt(init: Omit<BodyInit, 'railPos' | 'segment'>, x: number, y: number): string {
+  /** Remove a body from the world — the simulator side of a crane LIFTING a payload
+   *  off the rails (it is then in the air, off the network, until placed again with
+   *  `placeBodyAt`). Uncouples it from anything first. No-op for an unknown id. */
+  removeBody(id: string): void {
+    const b = this.byId.get(id);
+    if (b === undefined) return;
+    for (const other of [...b.coupledTo]) this.uncouple(id, other);
+    const idx = this.bodyList.indexOf(b);
+    if (idx !== -1) this.bodyList.splice(idx, 1);
+    this.byId.delete(id);
+  }
+
+  /** The segment + distance-along-it of the rail point nearest world (x,y). The
+   *  geometric query a crane uses to set a payload down (or seed a spaced rake):
+   *  it knows a world footprint, not a segment id. */
+  nearestRail(x: number, y: number): { segment: string; railPos: number } {
     let best: { seg: string; dist: number; d2: number } | null = null;
     for (const seg of this.net.segments()) {
       const rail = this.net.railOf(seg);
@@ -181,7 +193,15 @@ export class PhysicsWorld {
       }
     }
     const at = best ?? { seg: this.net.segments()[0] ?? 'main', dist: 0 };
-    this.addBody({ ...init, segment: at.seg, railPos: at.dist });
+    return { segment: at.seg, railPos: at.dist };
+  }
+
+  /** Drop a body onto the rail at the world point nearest (x,y) — the simulator
+   *  side of a crane releasing a payload. Finds the closest segment + distance
+   *  along it, then seeds the body there (railed). Returns its id. */
+  placeBodyAt(init: Omit<BodyInit, 'railPos' | 'segment'>, x: number, y: number): string {
+    const at = this.nearestRail(x, y);
+    this.addBody({ ...init, segment: at.segment, railPos: at.railPos });
     return init.id;
   }
 
