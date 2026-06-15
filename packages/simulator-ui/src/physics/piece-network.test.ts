@@ -9,7 +9,16 @@ function ovalBuilder(): PieceNetworkBuilder {
   const start: Cursor = { x: 0, y: 0, dir: 0, layer: 0 };
   const side = [{ type: 'straight' as const }, { type: 'straight' as const }];
   const corner = [{ type: 'curve' as const }, { type: 'curve' as const }];
-  b.run('loop', start, [...side, ...corner, ...side, ...corner, ...side, ...corner, ...side, ...corner]);
+  b.run('loop', start, [
+    ...side,
+    ...corner,
+    ...side,
+    ...corner,
+    ...side,
+    ...corner,
+    ...side,
+    ...corner,
+  ]);
   /* Close the loop: the run's END links back to its own START. */
   b.link('loop', 'loop');
   return b;
@@ -69,11 +78,7 @@ describe('PieceNetworkBuilder — a layout from real track pieces', () => {
     const b = new PieceNetworkBuilder();
     const start: Cursor = { x: 0, y: 0, dir: 0, layer: 0 };
     const after = b.run('main', start, [{ type: 'straight' }, { type: 'straight' }]);
-    const { thruExit, branchExit } = b.junction('jt', 'jb', after, {
-      switchId: 'J',
-      thruPos: 'thru',
-      branchPos: 'branch',
-    });
+    const { thruExit, branchExit } = b.junction('jt', 'jb', after);
     b.run('thruRun', thruExit, [{ type: 'straight' }, { type: 'straight' }]);
     b.run('branchRun', branchExit, [{ type: 'straight' }, { type: 'straight' }]);
     b.link('main', 'jt', { switchId: 'J', position: 'thru' });

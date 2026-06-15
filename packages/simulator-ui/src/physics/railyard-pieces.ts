@@ -14,7 +14,7 @@
  * Pure geometry/topology: no DOM, no clock, no randomness.
  */
 import type { RailNetwork } from './network.js';
-import { type Cursor, type PieceSpec, PieceNetworkBuilder } from './piece-network.js';
+import { type Cursor, PieceNetworkBuilder, type PieceSpec } from './piece-network.js';
 
 const STRAIGHT: PieceSpec = { type: 'straight' };
 const CURVE: PieceSpec = { type: 'curve' };

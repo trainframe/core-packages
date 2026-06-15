@@ -174,6 +174,19 @@ export interface TrackPiece {
    */
   readonly radiusMm?: number;
   /**
+   * Length override (mm) for a `straight` piece. Absent ⇒ the default 200 mm.
+   * Two uses: (1) the IKEA LILLABO straight-length family (30 / 60 / 110 / 150 /
+   * 200 mm) so a layout can be built from real-world straight variants, and (2)
+   * the same close-a-chain-exactly role `radiusMm` plays for curves — a turnout's
+   * 45° branch (a 241 mm-radius bezier) plus a 200 mm-radius curve do not tile the
+   * 200 mm grid, leaving an irrational ~24 mm √2 residue when a branch rejoins the
+   * main; one short straight of that exact length closes the passing loop to <1 mm
+   * rather than leaving a visible kink. Mirrors the `flipped?` / `radiusMm?` idiom:
+   * never written as `lengthMm: undefined` (exactOptionalPropertyTypes). Ignored
+   * by non-straight pieces.
+   */
+  readonly lengthMm?: number;
+  /**
    * Intrinsic livery for a `carriage` piece. Absent ⇒ the default carriage
    * colour. Lets the operator place distinctly-coloured wagons so an individual
    * carriage stays trackable as it is shunted between trains. Mirrors the
@@ -682,6 +695,29 @@ const STRAIGHT_ENDPOINTS: readonly LocalEndpoint[] = [
   { lx: -100, ly: 0, localAngle: 180 },
   { lx: 100, ly: 0, localAngle: 0 },
 ];
+
+/** Default straight length (mm) — the standard 200 mm plank. */
+const STRAIGHT_LENGTH_MM = 200;
+
+/** The IKEA LILLABO straight-length family (mm), for `lengthMm`-overridden
+ *  straights. 200 mm is the default plank; the shorter members let a layout be
+ *  built from the real-world variants and close passing loops on the grid. */
+export const LILLABO_STRAIGHT_LENGTHS_MM = [30, 60, 110, 150, 200] as const;
+
+/** Resolve a straight's length from its optional override (mm), clamped to a
+ *  sane positive value; absent/non-positive ⇒ the default 200 mm. */
+function straightLengthFor(lengthMm: number | undefined): number {
+  return lengthMm !== undefined && lengthMm > 0 ? lengthMm : STRAIGHT_LENGTH_MM;
+}
+
+/** A straight's two endpoints for a given length: ±half along the local x-axis. */
+function straightEndpoints(lengthMm: number | undefined): readonly LocalEndpoint[] {
+  const half = straightLengthFor(lengthMm) / 2;
+  return [
+    { lx: -half, ly: 0, localAngle: 180 },
+    { lx: half, ly: 0, localAngle: 0 },
+  ];
+}
 
 // Reuses the straight's 200 mm footprint so snap spacing stays uniform, but its
 // exit endpoint (index 1) is one layer higher: this single `layerDelta` IS the
@@ -1546,13 +1582,14 @@ interface PieceDescriptor {
   readonly tint: string | null;
   /** Marker kind contributed to the layout, or null for non-marker (device) pieces. */
   readonly markerKind: TrackMarkerKind | null;
-  /** Local endpoints, canonical index order (transformed to world by getEndpoints). */
-  endpoints(radiusMm?: number): readonly LocalEndpoint[];
+  /** Local endpoints, canonical index order (transformed to world by getEndpoints).
+   *  `radiusMm` overrides a curve's arc; `lengthMm` overrides a straight's length. */
+  endpoints(radiusMm?: number, lengthMm?: number): readonly LocalEndpoint[];
   /** Centre→endpoint half-path for `index` (the rail a train RIDES). undefined out of range. */
-  centreLine(index: number, radiusMm?: number): CentreLinePath | undefined;
+  centreLine(index: number, radiusMm?: number, lengthMm?: number): CentreLinePath | undefined;
   /** The rails a piece DRAWS — offset ±RAIL_GAUGE into grooves. Usually the
    * endpoint centre-lines; a dead-end overrides it (see getRailLines). */
-  railLines(radiusMm?: number): readonly CentreLinePath[];
+  railLines(radiusMm?: number, lengthMm?: number): readonly CentreLinePath[];
   /** Silhouette + feature overlays, sans grooves. */
   body(piece: TrackPiece): PieceBody;
 }
@@ -1563,10 +1600,10 @@ interface TrackSpec {
   readonly tray?: ToyboxTray;
   readonly tint: string | null;
   readonly markerKind: TrackMarkerKind;
-  endpoints(radiusMm?: number): readonly LocalEndpoint[];
-  centreLine(index: number, radiusMm?: number): CentreLinePath | undefined;
+  endpoints(radiusMm?: number, lengthMm?: number): readonly LocalEndpoint[];
+  centreLine(index: number, radiusMm?: number, lengthMm?: number): CentreLinePath | undefined;
   /** Override only when the drawn rail differs from the ridden centre-lines. */
-  railLines?(radiusMm?: number): readonly CentreLinePath[];
+  railLines?(radiusMm?: number, lengthMm?: number): readonly CentreLinePath[];
   body(piece: TrackPiece): PieceBody;
 }
 
@@ -1575,11 +1612,11 @@ interface TrackSpec {
 function trackPiece(spec: TrackSpec): PieceDescriptor {
   const railLines =
     spec.railLines ??
-    ((radiusMm?: number): readonly CentreLinePath[] => {
+    ((radiusMm?: number, lengthMm?: number): readonly CentreLinePath[] => {
       const out: CentreLinePath[] = [];
-      const eps = spec.endpoints(radiusMm);
+      const eps = spec.endpoints(radiusMm, lengthMm);
       for (let i = 0; i < eps.length; i++) {
-        const cl = spec.centreLine(i, radiusMm);
+        const cl = spec.centreLine(i, radiusMm, lengthMm);
         if (cl !== undefined) out.push(cl);
       }
       return out;
@@ -1639,8 +1676,15 @@ const PIECES: Record<TrackPieceType, PieceDescriptor> = {
     label: 'Straight',
     tint: null,
     markerKind: 'block_boundary',
-    ...linearLegs(STRAIGHT_ENDPOINTS),
-    body: () => plankBody(200, []),
+    // Length-aware (LILLABO variants + chain-closing fillers): a `lengthMm`
+    // override resizes the endpoints, the ridden centre-line and the drawn plank
+    // together. Absent ⇒ the standard 200 mm.
+    endpoints: (_radiusMm, lengthMm) => straightEndpoints(lengthMm),
+    centreLine: (index, _radiusMm, lengthMm) => {
+      const ep = straightEndpoints(lengthMm)[index];
+      return ep === undefined ? undefined : linearHalfPath(ep.lx, ep.ly);
+    },
+    body: (piece) => plankBody(straightLengthFor(piece.lengthMm), []),
   }),
   curve: curveDescriptor('Curve', CURVE_RADIUS_MM),
   'curve-tight': curveDescriptor('Tight Curve', CURVE_TIGHT_RADIUS_MM),
@@ -1844,7 +1888,7 @@ export function pieceMarkerKind(type: TrackPieceType): TrackMarkerKind {
  * north, west, south]; all others: [entry, exit]).
  */
 export function getEndpoints(piece: TrackPiece): ReadonlyArray<TrackEndpoint> {
-  const locals = PIECES[piece.type].endpoints(piece.radiusMm);
+  const locals = PIECES[piece.type].endpoints(piece.radiusMm, piece.lengthMm);
   const flip = piece.flipped === true;
   const baseLayer = layerOf(piece);
   return locals.map(({ lx, ly, localAngle, layerDelta }) => {
@@ -1876,7 +1920,7 @@ export function getCentreLinePath(
   piece: TrackPiece,
   endpointIndex: number,
 ): CentreLinePath | undefined {
-  const local = PIECES[piece.type].centreLine(endpointIndex, piece.radiusMm);
+  const local = PIECES[piece.type].centreLine(endpointIndex, piece.radiusMm, piece.lengthMm);
   if (local === undefined) return undefined;
   return worldHalfPath(piece, local);
 }
@@ -1890,7 +1934,9 @@ export function getCentreLinePath(
  * the terminus rail to the marker and silently break its grooves.
  */
 export function getRailLines(piece: TrackPiece): ReadonlyArray<CentreLinePath> {
-  return PIECES[piece.type].railLines(piece.radiusMm).map((local) => worldHalfPath(piece, local));
+  return PIECES[piece.type]
+    .railLines(piece.radiusMm, piece.lengthMm)
+    .map((local) => worldHalfPath(piece, local));
 }
 
 /**

@@ -41,6 +41,8 @@ export interface PieceSpec {
   readonly type: TrackPieceType;
   readonly flipped?: boolean;
   readonly radiusMm?: number;
+  /** Length override (mm) for a `straight` — LILLABO variant or chain-closing filler. */
+  readonly lengthMm?: number;
 }
 
 /** A segment's world endpoints (start = rail d 0, end = rail d length). */
@@ -54,11 +56,19 @@ function toRotationDeg(deg: number): RotationDeg {
   return ((((Math.round(deg / 45) * 45) % 360) + 360) % 360) as RotationDeg;
 }
 
-/** Place one piece so its connect endpoint (index 0) lands on `cursor`, its rail
- *  continuing forward, and return the exit-endpoint (index 1) cursor. Mirrors
- *  `bridge-demo.ts`'s `place` for the 2-endpoint case. */
-function placePiece(cursor: Cursor, spec: PieceSpec, id: string): { piece: TrackPiece; exit: Cursor } {
+/** Place one piece so its `connectIndex` endpoint (default 0) lands on `cursor`,
+ *  oriented so that endpoint faces back along `cursor.dir`, and return the
+ *  exit-endpoint (index 1) cursor. Mirrors `bridge-demo.ts`'s `place`. Laying a
+ *  run uses the default (the trunk/entry leads); a trailing merge lands the
+ *  branch endpoint (index 2) on the inbound rail instead. */
+function placePiece(
+  cursor: Cursor,
+  spec: PieceSpec,
+  id: string,
+  connectIndex = 0,
+): { piece: TrackPiece; exit: Cursor } {
   const radiusExtra = spec.radiusMm !== undefined ? { radiusMm: spec.radiusMm } : {};
+  const lengthExtra = spec.lengthMm !== undefined ? { lengthMm: spec.lengthMm } : {};
   const probe: TrackPiece = {
     id: '__probe__',
     type: spec.type,
@@ -67,9 +77,12 @@ function placePiece(cursor: Cursor, spec: PieceSpec, id: string): { piece: Track
     tagged: false,
     ...(spec.flipped === true ? { flipped: true } : {}),
     ...radiusExtra,
+    ...lengthExtra,
   };
-  const connectLocal = getEndpoints(probe)[0];
-  if (connectLocal === undefined) throw new Error(`piece-network: ${spec.type} has no endpoint 0`);
+  const connectLocal = getEndpoints(probe)[connectIndex];
+  if (connectLocal === undefined) {
+    throw new Error(`piece-network: ${spec.type} has no endpoint ${connectIndex}`);
+  }
   const baseLayer = cursor.layer - connectLocal.layer;
   const rotationDeg = toRotationDeg(cursor.dir + 180 - connectLocal.outgoingAngleDeg);
   const rad = (rotationDeg * Math.PI) / 180;
@@ -86,6 +99,7 @@ function placePiece(cursor: Cursor, spec: PieceSpec, id: string): { piece: Track
     ...(spec.flipped === true ? { flipped: true } : {}),
     ...(baseLayer !== 0 ? { layer: baseLayer } : {}),
     ...radiusExtra,
+    ...lengthExtra,
   };
   const exitEp = getEndpoints(piece)[1];
   if (exitEp === undefined) throw new Error(`piece-network: ${spec.type} has no endpoint 1`);
@@ -133,18 +147,18 @@ export class PieceNetworkBuilder {
   }
 
   /**
-   * Lay a turnout from `start` (its trunk endpoint lands on the cursor) and add its
-   * TWO internal paths as segments — `thruSeg` (trunk→through) and `branchSeg`
-   * (trunk→branch) — both starting at the trunk. The caller links the inbound
-   * segment to BOTH (switch-gated on `switchId`: `thruPos` vs `branchPos`), so the
-   * switch chooses which path a train takes. Returns the through + branch exit
-   * cursors (where each onward run continues). `flipped` selects the divert side.
+   * Lay a FACING turnout from `start` (its trunk endpoint lands on the cursor) and
+   * add its TWO internal paths as segments — `thruSeg` (trunk→through) and
+   * `branchSeg` (trunk→branch) — both starting at the trunk. The caller owns the
+   * switch: it links its inbound segment to BOTH paths, gated on the switch
+   * position, so the switch chooses which a train takes (the turnout can't wire
+   * that itself — it sees a cursor, not the inbound segment id). Returns the
+   * through + branch exit cursors. `flipped` selects the divert side.
    */
   junction(
     thruSeg: string,
     branchSeg: string,
     start: Cursor,
-    sw: { switchId: string; thruPos: string; branchPos: string },
     flipped?: boolean,
   ): { thruExit: Cursor; branchExit: Cursor } {
     const spec: PieceSpec = flipped === true ? { type: 'junction', flipped } : { type: 'junction' };
@@ -165,6 +179,46 @@ export class PieceNetworkBuilder {
     return {
       thruExit: { x: thru.x, y: thru.y, dir: thru.outgoingAngleDeg, layer: thru.layer },
       branchExit: { x: branch.x, y: branch.y, dir: branch.outgoingAngleDeg, layer: branch.layer },
+    };
+  }
+
+  /**
+   * Lay a TRAILING turnout (a merge): two inbound rails — the straight main and a
+   * rejoining branch — converge onto one trunk. The mirror of `junction()`: there
+   * the trunk is the single entry and through/branch the two exits; here through &
+   * branch are the two ENTRIES and the trunk the single exit. The piece is placed
+   * so its BRANCH endpoint (index 2) lands on `branchIn` (the converging branch's
+   * exit cursor). Adds `thruSeg` (through→trunk) and `branchSeg` (branch→trunk) as
+   * segments; the caller links each inbound run to the matching one and links both
+   * onward to whatever follows the trunk. Returns the trunk exit cursor (the merged
+   * main continues) and the through-entry cursor (where the straight main must
+   * arrive to meet this turnout). `flipped` selects the side the branch converges
+   * from (true = from below, mirroring an unflipped diverging junction).
+   */
+  mergeJunction(
+    thruSeg: string,
+    branchSeg: string,
+    branchIn: Cursor,
+    flipped?: boolean,
+  ): { trunkExit: Cursor; thruEntry: Cursor } {
+    const spec: PieceSpec = flipped === true ? { type: 'junction', flipped } : { type: 'junction' };
+    const { piece } = placePiece(branchIn, spec, `${thruSeg}-mp${this.serial++}`, 2);
+    this.placed.push(piece);
+    const thruRail = railOfPiece(piece, 1, 0);
+    const branchRail = railOfPiece(piece, 2, 0);
+    this.segments.set(thruSeg, thruRail);
+    this.segments.set(branchSeg, branchRail);
+    this.geom.set(thruSeg, { start: thruRail.at(0), end: thruRail.at(thruRail.length) });
+    this.geom.set(branchSeg, { start: branchRail.at(0), end: branchRail.at(branchRail.length) });
+    const eps = getEndpoints(piece);
+    const trunk = eps[0];
+    const thru = eps[1];
+    if (trunk === undefined || thru === undefined) {
+      throw new Error('piece-network: merge junction lacks trunk/through endpoints');
+    }
+    return {
+      trunkExit: { x: trunk.x, y: trunk.y, dir: trunk.outgoingAngleDeg, layer: trunk.layer },
+      thruEntry: { x: thru.x, y: thru.y, dir: thru.outgoingAngleDeg, layer: thru.layer },
     };
   }
 
