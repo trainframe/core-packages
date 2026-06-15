@@ -29,12 +29,14 @@ function pointToSlot(world: PhysicsWorld, yard: ReturnType<typeof buildScene>['y
     if (sw !== undefined) world.setSwitch(sw, k === i ? slotPos : thruPos);
 }
 
-/** Drive a train through slot `i`, entering from `startSeg` heading `facing`,
- *  returning the segments it visited (until it runs off the open end or a cap). */
-function driveThrough(i: number, startSeg: string, facing: 1 | -1, railPos: number): Set<string> {
-  const { net, yard } = buildScene();
-  const world = new PhysicsWorld(net);
-  pointToSlot(world, yard, i);
+/** Seed a forward loco at (startSeg, railPos, facing) and run it, returning the set of
+ *  segments it visited until it runs off the open end or a step cap. */
+function collectRun(
+  world: PhysicsWorld,
+  startSeg: string,
+  facing: 1 | -1,
+  railPos: number,
+): Set<string> {
   world.addBody({
     id: 'T',
     kind: 'loco',
@@ -53,6 +55,14 @@ function driveThrough(i: number, startSeg: string, facing: 1 | -1, railPos: numb
     if (p.fate !== 'on-rail') break;
   }
   return visited;
+}
+
+/** Drive a train through slot `i`, entering from `startSeg` heading `facing`. */
+function driveThrough(i: number, startSeg: string, facing: 1 | -1, railPos: number): Set<string> {
+  const { net, yard } = buildScene();
+  const world = new PhysicsWorld(net);
+  pointToSlot(world, yard, i);
+  return collectRun(world, startSeg, facing, railPos);
 }
 
 /** Enter from the top lead (the approach, forward). */
@@ -128,28 +138,8 @@ describe('addParallelogramYard — a drive-through parallelogram stabling fan', 
     expect(botY).toBeGreaterThan(topY + 400);
 
     const world = new PhysicsWorld(net);
-    const sl = yard.segments;
-    for (const [k, sw] of sl.topSwitches.entries())
-      if (sw !== undefined) world.setSwitch(sw, k === 2 ? sl.slotPos : sl.thruPos);
-    for (const [k, sw] of sl.bottomSwitches.entries())
-      if (sw !== undefined) world.setSwitch(sw, k === 2 ? sl.slotPos : sl.thruPos);
-    world.addBody({
-      id: 'T',
-      kind: 'loco',
-      railPos: 10,
-      facing: 1,
-      segment: 'approach',
-      motion: 'forward',
-      maxSpeed: 180,
-    });
-    const visited = new Set<string>();
-    for (let s = 0; s < 60 * 90; s++) {
-      world.step(1 / 60);
-      const p = world.bodies()[0];
-      if (p === undefined) break;
-      visited.add(p.segment);
-      if (p.fate !== 'on-rail') break;
-    }
+    pointToSlot(world, yard, 2);
+    const visited = collectRun(world, 'approach', 1, 10);
     expect(visited.has('F-slot2')).toBe(true);
     expect(visited.has('tail')).toBe(true);
   });
