@@ -17,7 +17,7 @@
  *
  * Pure geometry/topology: no DOM, no clock, no randomness.
  */
-import { detectSameLayerOverlaps } from '../track/overlap.js';
+import { detectSameLayerCrossings, detectSameLayerOverlaps } from '../track/overlap.js';
 import {
   type RotationDeg,
   type TrackPiece,
@@ -294,6 +294,16 @@ export class PieceNetworkBuilder {
       const ids = [...overlaps].sort().join(', ');
       throw new Error(
         `piece-network: the layout crosses over itself — pieces overlap without a joint: ${ids}. Use a 'crossing' piece for a deliberate flat crossing, or a height layer for a bridge.`,
+      );
+    }
+    /* The overlap test only catches pieces dropped ON each other (centres close); two
+     * long pieces can CROSS with their centres far apart. This catches that — a real
+     * track-over-track foul on the same layer (cross-layer = a bridge, allowed). */
+    const crossings = detectSameLayerCrossings(this.placed);
+    if (crossings.size > 0) {
+      const ids = [...crossings].sort().join(', ');
+      throw new Error(
+        `piece-network: the layout crosses over itself — rails cross on the same layer without a joint: ${ids}. Use a 'crossing' piece for a deliberate flat crossing, or a height layer for a bridge.`,
       );
     }
     return {

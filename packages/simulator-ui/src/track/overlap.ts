@@ -123,6 +123,104 @@ function pointToSegment(
   return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
 }
 
+/** Proper segment-segment intersection, strictly INTERIOR to both (a shared
+ *  endpoint or a T-touch is not a crossing). */
+function segmentsCross(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+  c: { x: number; y: number },
+  d: { x: number; y: number },
+): boolean {
+  const rx = b.x - a.x;
+  const ry = b.y - a.y;
+  const sx = d.x - c.x;
+  const sy = d.y - c.y;
+  const denom = rx * sy - ry * sx;
+  if (Math.abs(denom) < 1e-9) return false; // parallel
+  const t = ((c.x - a.x) * sy - (c.y - a.y) * sx) / denom;
+  const u = ((c.x - a.x) * ry - (c.y - a.y) * rx) / denom;
+  const e = 1e-3;
+  return t > e && t < 1 - e && u > e && u < 1 - e;
+}
+
+/** A piece's rail leg(s) as endpoint chords — one for a straight/curve/ramp, two
+ *  (trunk→through, trunk→branch) for a turnout. */
+function chordsOf(p: TrackPiece): { layer: number; a: LocalPt; b: LocalPt }[] {
+  const eps = getEndpoints(p);
+  const layer = layerOf(p);
+  if (p.type === 'junction' && eps.length >= 3) {
+    const [trunk, thru, branch] = eps;
+    if (trunk && thru && branch)
+      return [
+        { layer, a: trunk, b: thru },
+        { layer, a: trunk, b: branch },
+      ];
+  }
+  const [a, b] = eps;
+  return a && b ? [{ layer, a, b }] : [];
+}
+
+interface LocalPt {
+  readonly x: number;
+  readonly y: number;
+}
+
+interface Chord {
+  readonly layer: number;
+  readonly a: LocalPt;
+  readonly b: LocalPt;
+}
+
+/** True when two chords share an endpoint (the pieces are joined, not crossing). */
+function chordsShareEnd(a: Chord, b: Chord): boolean {
+  for (const ea of [a.a, a.b])
+    for (const eb of [b.a, b.b])
+      if (Math.hypot(ea.x - eb.x, ea.y - eb.y) <= OVERLAP_SHARED_ENDPOINT_MM) return true;
+  return false;
+}
+
+/** True when any same-layer leg of piece A crosses any same-layer leg of piece B
+ *  (interior intersection, not a shared joint). */
+function legsCross(as: readonly Chord[], bs: readonly Chord[]): boolean {
+  for (const ca of as) {
+    for (const cb of bs) {
+      if (ca.layer !== cb.layer) continue;
+      if (chordsShareEnd(ca, cb)) continue;
+      if (segmentsCross(ca.a, ca.b, cb.a, cb.b)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * The ids of track pieces whose rail centre-lines CROSS on the SAME layer without
+ * sharing a joint — a true track-over-track foul (two trains would collide). This
+ * is the complement of `detectSameLayerOverlaps`, which only catches pieces dropped
+ * ON each other (centres close): two long pieces can cross with their centres far
+ * apart, which that test misses entirely. Crossings on DIFFERENT layers (a bridge)
+ * are valid and never flagged. Uses endpoint chords — exact for straights, a close
+ * approximation for curves — so adjacent curves of a hump (which share endpoints)
+ * are excluded and never false-positive.
+ */
+export function detectSameLayerCrossings(pieces: ReadonlyArray<TrackPiece>): Set<string> {
+  const legs = pieces
+    .filter((p) => !isDevicePiece(p.type))
+    .map((p) => ({ id: p.id, chords: chordsOf(p) }));
+  const flagged = new Set<string>();
+  for (let i = 0; i < legs.length; i++) {
+    const A = legs[i];
+    if (A === undefined) continue;
+    for (let j = i + 1; j < legs.length; j++) {
+      const B = legs[j];
+      if (B !== undefined && legsCross(A.chords, B.chords)) {
+        flagged.add(A.id);
+        flagged.add(B.id);
+      }
+    }
+  }
+  return flagged;
+}
+
 /**
  * True when a raised piece's support pier should be SUPPRESSED because track
  * runs directly beneath it. This is the bridge-crossing case: the deck spans

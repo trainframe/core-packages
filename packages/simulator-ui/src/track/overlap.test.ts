@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { detectSameLayerOverlaps, pierSuppressed } from './overlap.js';
-import type { TrackPiece } from './pieces.js';
+import { detectSameLayerCrossings, detectSameLayerOverlaps, pierSuppressed } from './overlap.js';
+import type { RotationDeg, TrackPiece } from './pieces.js';
 
 function straight(id: string, x: number, y: number, layer?: number): TrackPiece {
   return {
@@ -12,6 +12,50 @@ function straight(id: string, x: number, y: number, layer?: number): TrackPiece 
     ...(layer !== undefined && layer !== 0 ? { layer } : {}),
   };
 }
+
+function rotStraight(
+  id: string,
+  x: number,
+  y: number,
+  rot: RotationDeg,
+  layer?: number,
+): TrackPiece {
+  return {
+    id,
+    type: 'straight',
+    position: { x, y },
+    rotationDeg: rot,
+    tagged: false,
+    ...(layer !== undefined && layer !== 0 ? { layer } : {}),
+  };
+}
+
+describe('detectSameLayerCrossings', () => {
+  it('catches two rails that CROSS with their centres far apart (the gap the overlap test misses)', () => {
+    /* A horizontal straight at the origin and a vertical one crossing it near the
+     *  horizontal's END: their centres are 90mm apart — beyond the 60mm overlap
+     *  band, so `detectSameLayerOverlaps` sees nothing — yet the rails genuinely
+     *  cross (two trains would collide). */
+    const h = straight('h', 0, 0); // (-100,0)..(100,0)
+    const v = rotStraight('v', 90, 0, 90); // (90,-100)..(90,100), crosses h at (90,0)
+    expect(detectSameLayerOverlaps([h, v]).size).toBe(0); // the old test is blind to it
+    const crossed = detectSameLayerCrossings([h, v]);
+    expect(crossed.has('h')).toBe(true);
+    expect(crossed.has('v')).toBe(true);
+  });
+
+  it('does NOT flag a cross on a different layer (a bridge)', () => {
+    const h = straight('h', 0, 0);
+    const v = rotStraight('v', 90, 0, 90, 1); // layer 1 — a flyover
+    expect(detectSameLayerCrossings([h, v]).size).toBe(0);
+  });
+
+  it('does NOT flag adjacent pieces that merely share a joint', () => {
+    const a = straight('a', 0, 0); // ends at (100,0)
+    const b = straight('b', 200, 0); // starts at (100,0) — joined, not crossing
+    expect(detectSameLayerCrossings([a, b]).size).toBe(0);
+  });
+});
 
 describe('detectSameLayerOverlaps', () => {
   it('flags two same-layer parallel straights overlapping with no shared endpoint', () => {
