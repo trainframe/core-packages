@@ -565,8 +565,16 @@ export class PhysicsWorld {
   }
 
   /** A body backing TAIL-first into the other (it faces away from its travel) →
-   *  magnetic couple. Works loco- or carriage-led (couplers on both ends). */
+   *  magnetic couple. Works loco- or carriage-led (couplers on both ends).
+   *
+   *  A coupling only ever forms between bodies of the SAME facing — a real rake is
+   *  uniformly oriented (every vehicle's nose points the same way), so a tail-end
+   *  coupler meets a nose-end coupler. Two OPPOSED bodies meeting (nose-to-nose or
+   *  tail-to-tail, e.g. a carriage that slewed round a tight junction) can never
+   *  form a valid rake, so they must COLLIDE/separate, never couple — this is what
+   *  keeps carriages from bunching front-to-front. */
   private tryCouple(lo: Body, hi: Body, minGap: number): boolean {
+    if (lo.facing !== hi.facing) return false;
     const loBacksIntoHi = lo.vel > 0.1 && lo.facing === -1; // lo moves +rail, faces -rail
     const hiBacksIntoLo = hi.vel < -0.1 && hi.facing === 1; // hi moves -rail, faces +rail
     if (!loBacksIntoHi && !hiBacksIntoLo) return false;

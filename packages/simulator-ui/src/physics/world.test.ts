@@ -209,6 +209,22 @@ describe('PhysicsWorld — contact', () => {
     expect(pose(w, 'L').coupledTo).toContain('C');
     expect(pose(w, 'C').coupledTo).toContain('L');
   });
+
+  it('an OPPOSED-facing carriage is collidable, never couples (no front-to-front bunching)', () => {
+    const w = new PhysicsWorld(straightRail(2000));
+    /* Same approach as the couple case, but C faces the OTHER way — a body that
+     *  slewed round a junction. Opposed facings can never form a valid rake, so
+     *  they must contact + separate, never couple. */
+    w.addBody({ id: 'L', kind: 'loco', railPos: 400, facing: 1, motion: 'reverse' });
+    w.addBody({ id: 'C', kind: 'carriage', railPos: 200, facing: -1 });
+    run(w, 22);
+    expect(pose(w, 'L').coupledTo).toHaveLength(0);
+    expect(pose(w, 'C').coupledTo).toHaveLength(0);
+    /* And they did not interpenetrate — contact kept them at least their combined
+     *  half-lengths apart (collidable, not passing through). */
+    const sep = Math.abs(pose(w, 'L').x - pose(w, 'C').x);
+    expect(sep).toBeGreaterThan(30);
+  });
 });
 
 describe('PhysicsWorld — rail ends', () => {
