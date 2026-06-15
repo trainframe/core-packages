@@ -68,7 +68,7 @@ function rake(world: PhysicsWorld, id: string): Set<string> {
  *  wired to the controller via the sim lift/place ops. Geometry points are read
  *  from the seeded poses — the controller is told only WHERE to reach, never which
  *  bodies are there (it acts purely through the crane + the lift/place callbacks). */
-function stage() {
+function stage(loop = false) {
   const { net, sidings } = buildYard();
   const world = new PhysicsWorld(net);
   const trainRoad = sidings[0];
@@ -147,17 +147,26 @@ function stage() {
     holding,
     spares,
     trainCouple,
+    loop,
   });
 
   return {
     world,
     crane,
     ctrl,
-    run: (cap = 60 * 120) => {
-      for (let i = 0; i < cap && ctrl.currentPhase !== 'done'; i++) {
+    /* Run to a clean boundary: `stopAfterCycles` completed swaps, observed at the
+     *  instant the crane reaches `done` with an empty hook (so all bodies are back
+     *  on the rails — never mid-lift, when a cut is in the air off the world). */
+    run: (stopAfterCycles = 1, cap = 60 * 600) => {
+      let prev = ctrl.currentPhase;
+      let cycles = 0;
+      for (let i = 0; i < cap; i++) {
         ctrl.tick(DT);
         crane.step(DT);
         world.step(DT);
+        if (ctrl.currentPhase === 'done' && prev !== 'done') cycles++;
+        prev = ctrl.currentPhase;
+        if (cycles >= stopAfterCycles && ctrl.currentPhase === 'done') break;
       }
     },
   };
@@ -192,6 +201,22 @@ describe('CraneSwapController — the railyard crane swaps a train’s rear cut 
     /* Every body stayed on the rails (nothing floated, derailed, or vanished). */
     const ids = sim.world.bodies().map((b) => b.id);
     for (const id of ['T', 'c0', 'c1', 'S0', 'S1']) expect(ids).toContain(id);
+    expect(sim.world.bodies().every((b) => b.mode === 'railed')).toBe(true);
+  });
+
+  it('loops: a second cycle sheds the spares again and re-rakes the train with its first cars (train→train migration)', () => {
+    const sim = stage(true);
+    /* Two full swap cycles — an even count returns the train to its original cars. */
+    sim.run(2);
+
+    /* After an even number of cycles the train is back to pulling c0/c1, and S0/S1
+     *  are the parked spares again — the rakes migrated train→spares→train. */
+    const tRake = rake(sim.world, 'T');
+    expect(tRake.has('c0')).toBe(true);
+    expect(tRake.has('c1')).toBe(true);
+    expect(tRake.has('S0')).toBe(false);
+    expect(tRake.has('S1')).toBe(false);
+    expect(rake(sim.world, 'S0')).toEqual(new Set(['S0', 'S1']));
     expect(sim.world.bodies().every((b) => b.mode === 'railed')).toBe(true);
   });
 });

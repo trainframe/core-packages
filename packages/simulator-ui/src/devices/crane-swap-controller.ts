@@ -31,9 +31,16 @@ export interface CraneSwapDeps {
   readonly spares: { x: number; y: number };
   /** Where to set the spares onto the train (couples to the loco). */
   readonly trainCouple: { x: number; y: number };
+  /** Keep cycling: after a swap, dwell, then SWAP the holding/spares roles and run
+   *  again — so the rake the crane just shed becomes the next train's spares and the
+   *  device services train after train. Default false (one swap, then `done`). */
+  readonly loop?: boolean;
 }
 
 type Phase = 'to-rear' | 'to-holding' | 'to-spares' | 'to-train' | 'done';
+
+/** How long (s) the crane rests on a finished swap before looping to the next. */
+const LOOP_REST_S = 1.2;
 
 export class CraneSwapController {
   private readonly d: CraneSwapDeps;
@@ -42,10 +49,16 @@ export class CraneSwapController {
   private held: readonly string[] = [];
   /** Small settle so the crane is seen to arrive + dwell before it lifts/places. */
   private dwell = 0;
+  /** Mutable drop points — the holding/spares roles SWAP each loop (the shed cut
+   *  becomes the next spares), so a looping crane services train after train. */
+  private holding: { x: number; y: number };
+  private spares: { x: number; y: number };
 
   constructor(deps: CraneSwapDeps) {
     this.d = deps;
     this.crane = deps.crane;
+    this.holding = deps.holding;
+    this.spares = deps.spares;
   }
 
   get currentPhase(): Phase {
@@ -84,16 +97,16 @@ export class CraneSwapController {
         });
         break;
       case 'to-holding':
-        this.travel(this.d.holding, dtS, () => {
-          this.d.placeCut(this.held, this.d.holding.x, this.d.holding.y);
+        this.travel(this.holding, dtS, () => {
+          this.d.placeCut(this.held, this.holding.x, this.holding.y);
           this.crane.release();
           this.held = [];
           this.to('to-spares');
         });
         break;
       case 'to-spares':
-        this.travel(this.d.spares, dtS, () => {
-          this.held = this.d.liftCut(this.d.spares.x, this.d.spares.y);
+        this.travel(this.spares, dtS, () => {
+          this.held = this.d.liftCut(this.spares.x, this.spares.y);
           this.crane.grab();
           this.to('to-train');
         });
@@ -107,6 +120,17 @@ export class CraneSwapController {
         });
         break;
       case 'done':
+        if (this.d.loop === true) {
+          /* Rest on the finished swap, then SWAP holding/spares (the cut just shed
+           *  is the next train's spares) and run the cycle again. */
+          this.dwell += dtS;
+          if (this.dwell >= LOOP_REST_S) {
+            const oldHolding = this.holding;
+            this.holding = this.spares;
+            this.spares = oldHolding;
+            this.to('to-rear');
+          }
+        }
         break;
     }
   }
