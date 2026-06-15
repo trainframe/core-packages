@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { buildMainLoopScene, buildRailyardCircuitScene } from './railyard-pieces.js';
+import {
+  buildFullRailyardScene,
+  buildMainLoopScene,
+  buildRailyardCircuitScene,
+} from './railyard-pieces.js';
 import { PhysicsWorld } from './world.js';
 
 interface LapResult {
@@ -109,5 +113,73 @@ describe('railyard-pieces — full circuit with a passing loop', () => {
     expect(r.lapped).toBe(true);
     expect(r.visited.has('PL-loop')).toBe(true); // diverted onto the siding
     expect(r.visited.has('PL-mid')).toBe(false); // skipped the straight main
+  });
+});
+
+describe('railyard-pieces — full layout: circuit + passing loop + in-line yard', () => {
+  it('builds overlap-clean (oval body, branch siding and yard never cross) and closes', () => {
+    const scene = buildFullRailyardScene();
+    expect(scene.closureGapMm).toBeLessThan(2);
+  });
+
+  it('a train laps the running line when the yard throat and branch are set thru/main', () => {
+    const scene = buildFullRailyardScene();
+    const world = new PhysicsWorld(scene.net);
+    world.setSwitch(scene.passingLoop.switchId, scene.passingLoop.mainPos);
+    world.setSwitch(scene.yard.throatSwitch, scene.yard.thruPos);
+    world.addBody({
+      id: 'T',
+      kind: 'loco',
+      railPos: 10,
+      facing: 1,
+      segment: scene.startSegment,
+      color: 'red',
+      motion: 'forward',
+      maxSpeed: 240,
+    });
+    const startPt = { ...(world.bodies()[0] ?? { x: 0, y: 0 }) };
+    let maxDist = 0;
+    let lapped = false;
+    let leftRails = false;
+    const DT = 1 / 60;
+    for (let i = 0; i < 60 * 160; i++) {
+      world.step(DT);
+      const body = world.bodies()[0];
+      if (body === undefined) continue;
+      if (body.fate !== 'on-rail' || body.mode !== 'railed') leftRails = true;
+      const d = Math.hypot(body.x - startPt.x, body.y - startPt.y);
+      maxDist = Math.max(maxDist, d);
+      if (maxDist > 700 && d < 70) lapped = true;
+    }
+    expect(leftRails).toBe(false);
+    expect(lapped).toBe(true);
+  });
+
+  it('the yard admits a train off the running line into a dead-end slot', () => {
+    const scene = buildFullRailyardScene();
+    const world = new PhysicsWorld(scene.net);
+    world.setSwitch(scene.passingLoop.switchId, scene.passingLoop.mainPos);
+    world.setSwitch(scene.yard.throatSwitch, scene.yard.enterPos);
+    scene.yard.ladderSwitches.forEach((sw, i) => {
+      world.setSwitch(sw, i === 0 ? scene.yard.ladderSlotPos : scene.yard.ladderThruPos);
+    });
+    world.addBody({
+      id: 'T',
+      kind: 'loco',
+      railPos: 10,
+      facing: 1,
+      segment: scene.startSegment,
+      color: 'red',
+      motion: 'forward',
+      maxSpeed: 160,
+    });
+    const DT = 1 / 60;
+    let last = scene.startSegment;
+    for (let i = 0; i < 60 * 60; i++) {
+      world.step(DT);
+      const body = world.bodies()[0];
+      if (body !== undefined) last = body.segment;
+    }
+    expect(last).toBe(scene.yard.slots[0]); // pulled into the first slot, stopped at its buffer
   });
 });

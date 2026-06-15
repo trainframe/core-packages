@@ -16,6 +16,7 @@
 import type { RailNetwork } from './network.js';
 import { type PassingLoopSegments, addPassingLoop } from './passing-loop.js';
 import { type Cursor, PieceNetworkBuilder, type PieceSpec } from './piece-network.js';
+import { type YardLadderSegments, addYardLadder } from './yard-ladder.js';
 
 const STRAIGHT: PieceSpec = { type: 'straight' };
 const CURVE: PieceSpec = { type: 'curve' };
@@ -25,6 +26,15 @@ const CORNER: readonly PieceSpec[] = [CURVE, CURVE];
 
 /** A 180° U-turn (a semicircular end) = four same-chirality 45° curves. */
 const SEMICIRCLE: readonly PieceSpec[] = [CURVE, CURVE, CURVE, CURVE];
+
+/** A 180° U-turn that curves the OTHER way (flipped), so the oval body sits on the
+ *  opposite side of the running line from the branch + yard sidings. */
+const SEMICIRCLE_FLIPPED: readonly PieceSpec[] = [
+  { type: 'curve', flipped: true },
+  { type: 'curve', flipped: true },
+  { type: 'curve', flipped: true },
+  { type: 'curve', flipped: true },
+];
 
 /** A side of the main loop = `n` straights. */
 function side(n: number): PieceSpec[] {
@@ -137,6 +147,71 @@ export function buildRailyardCircuitScene(): RailyardCircuitScene {
     pieces: built.pieces,
     geom: built.geom,
     passingLoop,
+    startSegment,
+    closureGapMm,
+  };
+}
+
+export interface FullRailyardScene {
+  readonly net: RailNetwork;
+  readonly pieces: ReturnType<PieceNetworkBuilder['build']>['pieces'];
+  readonly geom: ReturnType<PieceNetworkBuilder['build']>['geom'];
+  readonly passingLoop: PassingLoopSegments;
+  readonly yard: YardLadderSegments;
+  readonly startSegment: string;
+  readonly closureGapMm: number;
+}
+
+/**
+ * The COMPLETE railyard layout from real pieces: the oval running circuit with the
+ * passing-loop branch AND the in-line yard ladder both spliced into the bottom
+ * running line. The semicircle ends curve the OPPOSITE way to the sidings, so the
+ * oval body sits clear above the running line while the branch siding and the
+ * yard's lead + dead-end slots hang below — the overlap check (in `build()`)
+ * guarantees nothing crosses. A train laps the circuit; the scheduler can divert
+ * it round the passing loop or admit it into the yard.
+ */
+export function buildFullRailyardScene(): FullRailyardScene {
+  const b = new PieceNetworkBuilder();
+  const start: Cursor = { x: 0, y: 0, dir: 0, layer: 0 };
+
+  /* BOTTOM running line (heading east): lead-in, the passing-loop branch, a gap,
+   * the yard ladder, lead-out. Both sidings hang below. */
+  const startSegment = 'bot-a';
+  const botA = b.run(startSegment, start, side(2));
+  const pl = addPassingLoop(b, botA, { prefix: 'PL', parallelStraights: 3 });
+  b.link(startSegment, pl.inbound);
+  const afterPLrun = b.run('bot-mid', pl.exit, side(3));
+  b.link(pl.segments.mergeThrough, 'bot-mid');
+  b.link(pl.segments.mergeBranch, 'bot-mid');
+  const yard = addYardLadder(b, afterPLrun, { prefix: 'Y', slots: 3 });
+  b.link('bot-mid', yard.inbound);
+  const botEnd = b.run('bot-b', yard.spineExit, side(2));
+  b.link(yard.segments.spineThrough, 'bot-b');
+
+  /* RIGHT + LEFT ends: flipped semicircles (oval body curves up, away from the
+   * sidings below). TOP spans the bottom's extent, absorbing the √2 residue. */
+  const afterSemiR = b.run('semi-r', botEnd, SEMICIRCLE_FLIPPED);
+  b.link('bot-b', 'semi-r');
+  const east = botEnd.x - start.x;
+  const full = Math.floor(east / 200 + 1e-6);
+  const filler = east - full * 200;
+  const topSpecs = side(full);
+  if (filler > 0.5) topSpecs.push({ type: 'straight', lengthMm: filler });
+  const afterTop = b.run('top', afterSemiR, topSpecs);
+  b.link('semi-r', 'top');
+  const afterSemiL = b.run('semi-l', afterTop, SEMICIRCLE_FLIPPED);
+  b.link('top', 'semi-l');
+  b.link('semi-l', startSegment);
+
+  const closureGapMm = Math.hypot(afterSemiL.x - start.x, afterSemiL.y - start.y);
+  const built = b.build();
+  return {
+    net: built.net,
+    pieces: built.pieces,
+    geom: built.geom,
+    passingLoop: pl.segments,
+    yard: yard.segments,
     startSegment,
     closureGapMm,
   };
