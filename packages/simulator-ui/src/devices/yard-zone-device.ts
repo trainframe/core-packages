@@ -1,0 +1,398 @@
+/**
+ * The RAILYARD as a `core.gates_zone` device driven by the REAL scheduler
+ * (FROZEN SPEC §4; ADR-026/027/031/032). To core the yard is ONE opaque zone: a
+ * boundary throat marker (`M-yard-throat`), a capacity, and ONE asserted
+ * occupancy. Core never sees the interior ladder, the slots, or the carriages
+ * (ADR-016) — it only consults the device-asserted occupancy to decide whether a
+ * train may be cleared INTO the throat.
+ *
+ * Three core capabilities (the manifest + the `device_registered` event):
+ *   - `core.gates_zone` — admission at `M-yard-throat`. While `occupancy >=
+ *     capacity` the scheduler's gate denies clearance to the throat and holds the
+ *     approaching train one marker short (deny-and-hold, proven in
+ *     `zone-admission.test.ts`).
+ *   - `core.reports_length` — reconcile a train shortened by carriages shed into
+ *     the yard (ADR-023), on its way out.
+ *   - `core.controls_switch` paired to `M-main-w` (the yard tap `Jloop`) — the
+ *     zone owns its own entry tap. The scheduler throws it toward this device with
+ *     `set_switch_position`; the device drives `yardTap` and confirms.
+ * It MUST NOT declare `core.controls_motion`: it never drives a train across the
+ * throat (the scheduler reclaims a released train under ordinary clearance —
+ * scheduler `handleZoneTrainReleased`).
+ *
+ * NESTING (ADR-032): the visiting loco's own device stays on REAL core throughout.
+ * Only the INTERIOR shunting is nested — the device owns a `ParentPlatform` and a
+ * single `TrainDevice` (the unchanged manual-mode stub) wired from
+ * `platformFor(interiorLocoId)`; the reused `YardController` drives that loco and
+ * the crane through its phases (decouple a cut, migrate it to the spares slot).
+ * The child reports upward only, never to the broker.
+ *
+ * Admission → service → release, per resident train (single-mover interior,
+ * ADR-026 §4 — at most one `YardController` runs at a time):
+ *   - the device senses (by its crane-camera, never world ground truth) a train
+ *     arriving at the throat, bumps occupancy → `zone_state_changed`;
+ *   - it runs a `YardController` service on that train;
+ *   - on `done` it emits `zone_train_released` (and `train_length_changed` if a
+ *     cut was shed), frees the slot → `zone_state_changed`, admitting the next.
+ *
+ * Tick-driven over a virtual clock; pure (no DOM, no Date.now, no Math.random).
+ */
+import { type CoreCommand, type CoreEvent, PROTOCOL_VERSION } from '@trainframe/protocol';
+import type { DeviceManifest, SetSwitchPosition } from '@trainframe/protocol';
+import type { BranchingScene } from '../physics/branching-scene.js';
+import type { PhysicsWorld } from '../physics/world.js';
+import { Crane } from './crane.js';
+import { physicsMotorActuator } from './motor-actuator.js';
+import { ParentPlatform } from './parent-platform.js';
+import type { CommandHandler, PlatformProvider } from './platform-provider.js';
+import { physicsSwitchActuator } from './switch-actuator.js';
+import type { SwitchActuator } from './switch-actuator.js';
+import { TrainDevice } from './train-device.js';
+import { YardController, craneBounds } from './yard-controller.js';
+
+/** A fixed envelope timestamp for events the device publishes. The device is pure
+ *  (no Date.now); the integrator's broker stamps `timestamp_server`. A well-formed
+ *  ISO-8601 keeps the wire shape valid. */
+const EVENT_TIMESTAMP = '1970-01-01T00:00:00.000Z';
+
+/** The crane camera footprint radius (mm) — the device knows its own sensor. */
+const CAMERA_RADIUS = 20;
+
+/** Length (mm) a shed cut removes from a serviced train, reported via
+ *  `core.reports_length`. Two carriages at the yard's car spacing. */
+const SHED_LENGTH_MM = 136;
+
+/** The interior shunting loco's device id on the parent↔child seam. INTERIOR to
+ *  the zone — never seen by core (ADR-032). A v4-UUID so the seam carries valid
+ *  wire shapes if ever bridged out. */
+const INTERIOR_LOCO_ID = '0a0d0001-0000-4000-8000-000000000001';
+
+export interface YardZoneDeps {
+  /** The device's link to REAL core (the broker in the gate/script, an in-process
+   *  bus in unit tests). */
+  readonly platform: PlatformProvider;
+  /** The authoritative physical world — for the crane camera, the interior
+   *  actuators, and arrival sensing. */
+  readonly world: PhysicsWorld;
+  /** The scene: throat marker, yard layout (slot geom), entry/spares slots. */
+  readonly scene: BranchingScene;
+  /** Total slots the zone admits into (= slotCount − reserved spares). */
+  readonly capacity: number;
+  /** The throat tap (`Jloop`) the scheduler throws toward this device. */
+  readonly yardTap: SwitchActuator;
+}
+
+/** A train resident in the yard: its core id (the id core knows it by, == the
+ *  interior loco body id the world steps) and the controller servicing it. */
+interface Resident {
+  readonly trainId: string;
+  readonly controller: YardController;
+  /** Whether release + length reconciliation have already been emitted. */
+  released: boolean;
+}
+
+export class YardZoneDevice {
+  private readonly deviceId: string;
+  private readonly d: YardZoneDeps;
+  private unsubscribe: (() => void) | null = null;
+
+  /** The parent side of the ADR-032 nesting seam: this device is core to the
+   *  interior shunting loco, wired from `platformFor(INTERIOR_LOCO_ID)`. */
+  private readonly child = new ParentPlatform();
+
+  /** The single persistent gantry crane, shared across services so its head only
+   *  ever travels (never jumps between services). The device steps it. */
+  private readonly crane: Crane;
+  /** Interior ladder switch actuators (opaque to core). */
+  private readonly westPoints: SwitchActuator;
+  private readonly eastPoints: SwitchActuator;
+
+  /** Trains resident inside the zone, one per occupied slot. At most one is
+   *  serviced at a time (single-mover interior, ADR-026 §4). */
+  private readonly residents: Resident[] = [];
+  /** Trains the device has sensed arriving at the throat this run, so it bumps
+   *  occupancy exactly once per visit. */
+  private readonly admitted = new Set<string>();
+
+  /** Monotonic counter for deterministic envelope ids (the device stays pure). */
+  private seq = 0;
+
+  constructor(deviceId: string, deps: YardZoneDeps) {
+    this.deviceId = deviceId;
+    this.d = deps;
+    const bounds = craneBounds(deps.scene.yard);
+    this.crane = new Crane(bounds, {
+      x: (bounds.minX + bounds.maxX) / 2,
+      y: (bounds.minY + bounds.maxY) / 2,
+    });
+    this.westPoints = physicsSwitchActuator(deps.world, deps.scene.yard.westSwitch);
+    this.eastPoints = physicsSwitchActuator(deps.world, deps.scene.yard.eastSwitch);
+  }
+
+  /** The platform provider the interior loco is wired from (ADR-032). To it this
+   *  device IS core; it cannot tell the difference from the broker. */
+  platformFor(childId: string = INTERIOR_LOCO_ID): PlatformProvider {
+    return this.child.platformFor(childId);
+  }
+
+  /** Announce to core (manifest + a `device_registered` event carrying the
+   *  switch pairing) and publish the initial occupancy; subscribe to commands. */
+  start(): void {
+    this.d.platform.register(this.manifest());
+    /* The scheduler reads `controls_marker_id` (switch pairing) and the
+     *  gates_zone capability off the `device_registered` EVENT payload — the
+     *  manifest register ships only capabilities + kind. This mirrors the
+     *  existing convention (ScheduledTrainDevice ships train_length_mm the same
+     *  way); the device's surface stays additive (ADR-031). */
+    this.d.platform.publish(this.registeredEvent());
+    this.announce();
+    this.unsubscribe = this.d.platform.onCommand((command) => this.onCommand(command));
+  }
+
+  stop(): void {
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+  }
+
+  get capacity(): number {
+    return this.d.capacity;
+  }
+
+  /** The device's asserted occupancy — resident trains (the one number core sees
+   *  for the whole opaque zone, ADR-032 §2). Sensed by the device, never world
+   *  ground truth. */
+  get occupancy(): number {
+    return this.residents.length;
+  }
+
+  private manifest(): DeviceManifest {
+    return {
+      manifest_version: '1.0',
+      vendor: 'trainframe.sim',
+      device_kind: 'railyard',
+      version: '0.1.0',
+      protocol_version: PROTOCOL_VERSION,
+      display_name: 'Railyard',
+      description: 'A capacity-limited opaque shunting yard gating its throat.',
+      capabilities: ['core.gates_zone', 'core.reports_length', 'core.controls_switch'],
+    };
+  }
+
+  /** The `device_registered` event carrying the switch pairing (`controls_marker_id`
+   *  = the yard tap junction `M-main-w`) so the scheduler throws `Jloop` here. The
+   *  pairing field is added by `withControlsMarker` (the one sound coercion point —
+   *  see its comment). */
+  private registeredEvent(): CoreEvent {
+    const tap = this.d.scene.junctions.find((j) => j.switchId === 'Jloop');
+    const base: CoreEvent = {
+      event_id: this.nextId(),
+      device_id: this.deviceId,
+      timestamp_device: EVENT_TIMESTAMP,
+      event_type: 'device_registered',
+      protocol_version: PROTOCOL_VERSION,
+      payload: {
+        capabilities: ['core.gates_zone', 'core.reports_length', 'core.controls_switch'],
+        device_kind_hint: 'railyard',
+      },
+    };
+    return tap === undefined ? base : withControlsMarker(base, tap.markerId);
+  }
+
+  /** Handle a command from core: throw the yard tap on `set_switch_position`
+   *  (confirming), and ignore anything else (the device never drives a train). */
+  private onCommand(command: CoreCommand): void {
+    if (command.command_type !== 'set_switch_position') return;
+    const { junction_marker_id, position } = switchPositionPayload(command.payload);
+    this.d.yardTap.set(position);
+    this.d.platform.publish(this.switchConfirmed(junction_marker_id, position));
+  }
+
+  /** A confirmed `switch_state_changed` for the yard tap. */
+  private switchConfirmed(junctionMarkerId: string, position: string): CoreEvent {
+    return {
+      event_id: this.nextId(),
+      device_id: this.deviceId,
+      timestamp_device: EVENT_TIMESTAMP,
+      event_type: 'switch_state_changed',
+      protocol_version: PROTOCOL_VERSION,
+      payload: { junction_marker_id: junctionMarkerId, position, confirmed: true },
+    };
+  }
+
+  /** Step the interior: sense fresh arrivals at the throat, advance each
+   *  resident's service, and step the shared crane. */
+  step(dtS: number): void {
+    this.senseArrivals();
+    this.serviceResidents(dtS);
+    this.crane.step(dtS);
+  }
+
+  /** Detect a train newly arrived at (and stopped near) the throat by its
+   *  crane-camera, and begin servicing it — bumping occupancy. The device knows a
+   *  train by the body id core routed to the throat (tag id == train id == body
+   *  id, the seeded identity convention). It senses presence, never reads the
+   *  world's coupling/length ground truth. */
+  private senseArrivals(): void {
+    if (this.residents.length >= this.d.capacity) return; // full — no room to admit
+    const throat = this.throatWorldPoint();
+    const sighted = this.d.world.sampleAt(throat.x, throat.y, CAMERA_RADIUS * 2);
+    if (sighted === null) return;
+    const arrival = this.bodyNear(throat.x, throat.y);
+    if (arrival === null || this.admitted.has(arrival)) return;
+    this.admit(arrival);
+  }
+
+  /** The body id whose pose is nearest the throat (the just-arrived visitor). */
+  private bodyNear(x: number, y: number): string | null {
+    let best: { id: string; d2: number } | null = null;
+    for (const b of this.d.world.bodies()) {
+      if (b.kind !== 'loco') continue;
+      const d2 = (b.x - x) ** 2 + (b.y - y) ** 2;
+      if (best === null || d2 < best.d2) best = { id: b.id, d2 };
+    }
+    return best === null || best.d2 > (CAMERA_RADIUS * 4) ** 2 ? null : best.id;
+  }
+
+  /** Begin a `YardController` service on a newly-arrived train and take a slot. */
+  private admit(trainId: string): void {
+    this.admitted.add(trainId);
+    const controller = this.makeController(trainId);
+    this.residents.push({ trainId, controller, released: false });
+    this.announce();
+  }
+
+  /** Build a `YardController` for the visiting train. The controller drives the
+   *  train's own body (it self-drives the real interior rails) through the crane
+   *  camera + wedge + ladder points. */
+  private makeController(trainId: string): YardController {
+    const world = this.d.world;
+    const train = new TrainDevice(trainId, physicsMotorActuator(world, trainId));
+    return new YardController({
+      layout: this.d.scene.yard,
+      train,
+      westPoints: this.westPoints,
+      eastPoints: this.eastPoints,
+      look: (x, y) => {
+        const s = world.sampleAt(x, y, CAMERA_RADIUS);
+        return s === null ? { occupied: false } : { occupied: true, colour: s.colour };
+      },
+      cameraRadius: CAMERA_RADIUS,
+      wedgeAt: (x, y) => {
+        world.uncoupleAt(x, y);
+      },
+      crane: this.crane,
+      entrySlot: this.d.scene.entrySlot,
+      sparesSlot: this.d.scene.sparesSlot,
+    });
+  }
+
+  /** Advance the single active service (single-mover interior); release a train
+   *  whose service is `done`. */
+  private serviceResidents(dtS: number): void {
+    const active = this.residents.find((r) => !r.released);
+    if (active === undefined) return;
+    active.controller.tick(dtS);
+    if (active.controller.currentPhase === 'done') this.release(active);
+  }
+
+  /** Release a serviced train to core: emit `zone_train_released` (+ a length
+   *  reconcile if a cut was shed), drop the slot, and re-announce occupancy so the
+   *  next queued train is admitted. The device never drives it across the throat. */
+  private release(resident: Resident): void {
+    resident.released = true;
+    this.d.platform.publish(this.releasedEvent(resident.trainId));
+    this.d.platform.publish(this.lengthChanged(resident.trainId));
+    const idx = this.residents.indexOf(resident);
+    if (idx !== -1) this.residents.splice(idx, 1);
+    this.admitted.delete(resident.trainId);
+    this.announce();
+  }
+
+  private releasedEvent(trainId: string): CoreEvent {
+    return {
+      event_id: this.nextId(),
+      device_id: this.deviceId,
+      timestamp_device: EVENT_TIMESTAMP,
+      event_type: 'zone_train_released',
+      protocol_version: PROTOCOL_VERSION,
+      payload: { zone_marker_id: this.d.scene.throatMarker, train_id: trainId },
+    };
+  }
+
+  /** Reconcile a shed-cut train's length (ADR-023). Reports the train shorter by
+   *  the shed cut — honoured because the device declared `core.reports_length`. */
+  private lengthChanged(trainId: string): CoreEvent {
+    return {
+      event_id: this.nextId(),
+      device_id: this.deviceId,
+      timestamp_device: EVENT_TIMESTAMP,
+      event_type: 'train_length_changed',
+      protocol_version: PROTOCOL_VERSION,
+      payload: { train_id: trainId, train_length_mm: SHED_LENGTH_MM },
+    };
+  }
+
+  /** Re-publish the zone's capacity + current occupancy (`zone_state_changed`). */
+  private announce(): void {
+    this.d.platform.publish({
+      event_id: this.nextId(),
+      device_id: this.deviceId,
+      timestamp_device: EVENT_TIMESTAMP,
+      event_type: 'zone_state_changed',
+      protocol_version: PROTOCOL_VERSION,
+      payload: {
+        zone_marker_id: this.d.scene.throatMarker,
+        capacity: this.d.capacity,
+        occupancy: this.residents.length,
+      },
+    });
+  }
+
+  /** The throat's world point (the west lead's start, where a visitor parks). */
+  private throatWorldPoint(): { x: number; y: number } {
+    const g = this.d.scene.yard.geom.get(this.d.scene.yard.leadWest);
+    if (g === undefined) return { x: 0, y: 0 };
+    return { x: g.ax, y: g.ay };
+  }
+
+  /** A deterministic, structurally-valid v4-UUID for an event envelope — the
+   *  monotonic counter encoded in the final field, so the device stays pure (no
+   *  Math.random / Date.now) while every event carries a valid wire id. */
+  private nextId(): string {
+    this.seq += 1;
+    const tail = this.seq.toString(16).padStart(12, '0');
+    return `00000000-0000-4000-8000-${tail}`;
+  }
+}
+
+/**
+ * Attach the `controls_marker_id` switch-pairing field to a `device_registered`
+ * event. This is the ONE sound coercion in this module: the scheduler reads
+ * `controls_marker_id` straight off the `device_registered` payload to pair a
+ * `core.controls_switch` device with its junction marker (`scheduler.ts`
+ * switch-pairing; `VirtualSwitch` ships it the same way), but the protocol's
+ * `DeviceRegisteredPayload` schema has not yet formalised the field, so the
+ * strict `CoreEvent` payload type omits it. We add it through a single,
+ * well-named adapter rather than sprinkling casts; the broker re-validates the
+ * envelope on the wire. Returns a fresh event (no mutation of the input).
+ */
+/**
+ * Read a `set_switch_position` command's payload. `Static<CoreCommand>` is a union
+ * of envelopes; TypeScript narrows `command_type` on the envelope but over-widens
+ * `payload` to the union of every command's payload, so the concrete fields are
+ * not directly reachable. After the caller has confirmed
+ * `command_type === 'set_switch_position'`, this single typed adapter recovers the
+ * `SetSwitchPosition['payload']` shape the protocol schema guarantees — one sound
+ * coercion rather than reading fields off a widened union.
+ */
+function switchPositionPayload(payload: CoreCommand['payload']): SetSwitchPosition['payload'] {
+  return payload as SetSwitchPosition['payload'];
+}
+
+function withControlsMarker(event: CoreEvent, controlsMarkerId: string): CoreEvent {
+  const payload: Record<string, unknown> = {
+    ...(event.payload as Record<string, unknown>),
+    controls_marker_id: controlsMarkerId,
+  };
+  return { ...event, payload } as CoreEvent;
+}

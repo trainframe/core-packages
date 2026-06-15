@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { BrokerProvider } from './broker/broker-context.js';
 import type { BrokerClient } from './broker/client.js';
 import { MqttBrokerClient } from './broker/mqtt-client.js';
+import { BranchingSceneView } from './components/BranchingSceneView.js';
 import { BridgeRunoffScenarioView } from './components/BridgeRunoffScenarioView.js';
 import { CraneDropScenarioView } from './components/CraneDropScenarioView.js';
 import { DepotScenarioView } from './components/DepotScenarioView.js';
@@ -45,6 +46,7 @@ export function App({ client }: AppProps = {}) {
     return () => resolvedClient.disconnect();
   }, [resolvedClient, initialUrl, physics]);
 
+  if (physics === 'branching') return <BranchingSceneView />;
   if (physics === 'railyard-demo') return <RailyardDemoScenarioView />;
   if (physics === 'railyard') return <YardScenarioView />;
   if (physics === 'turntable') return <TurntableScenarioView />;

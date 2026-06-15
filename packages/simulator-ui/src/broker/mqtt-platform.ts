@@ -33,11 +33,25 @@ import type { BrokerClient } from './client.js';
 /* TypeBox treats string `format` as OPT-IN: an unregistered format FAILS
  * validation. The wire shapes use `uuid` / `date-time`, so the edge — where wire
  * validation lives — registers them once. Idempotent: re-registering the same
- * checker is harmless. This belongs at the IO boundary, not in the device layer. */
+ * checker is harmless. This belongs at the IO boundary, not in the device layer.
+ *
+ * The protocol types every IDENTIFIER field (`command_id`, `device_id`, AND every
+ * marker/junction/train id like `limit_marker_id`, `junction_marker_id`) as the
+ * shared `Uuid` string format. In practice this railway's ids are NOT all v4
+ * UUIDs: layouts compiled from pieces or from a physics scene carry human-readable
+ * kebab ids (`M-main-w`, `M-yard-throat`, `SWITCH-spur`, `T2`) — the toy-table
+ * demo puts exactly these on the same broker. A strict UUID-only predicate would
+ * silently DROP every scheduler command whose payload names such a marker, so a
+ * scheduler-driven device would never move. The format predicate at this edge
+ * therefore accepts EITHER a canonical UUID OR a layout identifier token (the
+ * id-safe characters the layouts use). Wire validation still rejects genuinely
+ * malformed envelopes (wrong types, missing fields, illegal characters); it just
+ * stops mistaking valid marker ids for invalid ones. The protocol schema is
+ * unchanged — only the runtime format predicate is widened to match reality. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const ID_TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 if (!FormatRegistry.Has('uuid')) {
-  FormatRegistry.Set('uuid', (value) =>
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value),
-  );
+  FormatRegistry.Set('uuid', (value) => UUID_RE.test(value) || ID_TOKEN_RE.test(value));
 }
 if (!FormatRegistry.Has('date-time')) {
   FormatRegistry.Set('date-time', (value) => !Number.isNaN(Date.parse(value)));

@@ -189,14 +189,20 @@ export class YardController {
     this.to('rest');
   }
 
-  /** Watch the slot's far end; when the loco arrives there, stop. */
+  /** Watch the slot's far end; when the loco arrives there, stop. Re-assert the
+   *  drive each tick while waiting: the visiting loco's own main-line device may
+   *  have been told to stop at the throat (a one-shot `revoke_clearance` on zone
+   *  entry), and the yard now owns it — so we keep commanding it forward until it
+   *  has physically pulled into the slot, robust against that stale stop. */
   private rest(): void {
     const at = this.slotFarEnd(this.d.entrySlot);
     if (this.d.look(at.x, at.y).occupied) {
       this.d.train.stop();
       this.restX = at.x;
       this.to('decouple');
+      return;
     }
+    this.d.train.forward();
   }
 
   /** Let it settle, scan the rake to locate the cut, then drive the crane over
