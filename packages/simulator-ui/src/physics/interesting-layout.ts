@@ -20,6 +20,7 @@
 import type { RailNetwork } from './network.js';
 import { type Cursor, PieceNetworkBuilder, type PieceSpec } from './piece-network.js';
 import { type SatelliteLoopSegments, addSatelliteLoop } from './satellite-loop.js';
+import { type TrapezoidYardSegments, addTrapezoidYard } from './trapezoid-yard.js';
 
 const STRAIGHT: PieceSpec = { type: 'straight' };
 const CURVE: PieceSpec = { type: 'curve' };
@@ -87,6 +88,8 @@ export interface MainLoopScene {
   readonly pieces: ReturnType<PieceNetworkBuilder['build']>['pieces'];
   readonly geom: ReturnType<PieceNetworkBuilder['build']>['geom'];
   readonly branches: MainLoopBranches;
+  /** The trapezoid yard hanging off the bottom-left tap. */
+  readonly yard: TrapezoidYardSegments;
   /** A segment a train can spawn on to lap the main loop. */
   readonly startSegment: string;
   /** End-to-start closure gap (mm). */
@@ -153,21 +156,15 @@ export function buildMainLoopScene(): MainLoopScene {
   const afterSemiR = b.run('semi-r', afterTopC, SEMI);
   b.link('top-c', 'semi-r');
 
-  /* BOTTOM run (heading west): the YARD tap, then WINDS via humps + a filler back to
-   *  the start x — humps (not straights) absorb the satellites' length so the bottom
-   *  stays curvy, not a dead-straight pad. */
+  /* BOTTOM run (heading west): WINDS via a varied mix of humps, then near the LEFT a
+   *  YARD tap drops the trapezoid yard below the loop (bottom-left), then a filler
+   *  closes back to the start x. Humps (not straights) absorb the satellites' length
+   *  so the bottom stays curvy. */
   const afterBotA = b.run('bot-a', afterSemiR, [STRAIGHT, ...HUMP]);
   b.link('semi-r', 'bot-a');
-  const yard = tap(b, 'bot-a', afterBotA, 'yard', false);
-  /* Lay as many humps as fit in the remaining westward span, then a straight+filler. */
-  const afterYard = b.run('bot-b', yard.onward, [STRAIGHT]);
-  b.link(yard.taps.throughSeg, 'bot-b');
-  /* Fill the bottom with a VARIED sequence of humps (different sizes, irregular) so it
-   *  winds organically rather than as a repeated scallop. Lay a cycling mix, measuring
-   *  each so the total never overshoots the start x; a short filler closes the rest. */
   const cycle = [HUMP, HUMP_BIG, HUMP_SM, HUMP, HUMP_SM];
   const botSpecs: PieceSpec[] = [];
-  let spanLeft = afterYard.x - start.x - 250; // leave room for the closing filler
+  let spanLeft = afterBotA.x - start.x - 900; // room for the yard tap + the closing filler
   for (let i = 0; spanLeft > 0 && i < 40; i++) {
     const h = cycle[i % cycle.length] ?? HUMP;
     const adv = travel(h);
@@ -175,19 +172,26 @@ export function buildMainLoopScene(): MainLoopScene {
     botSpecs.push(...h);
     spanLeft -= adv;
   }
-  const afterBotHumps = b.run('bot-c', afterYard, botSpecs.length > 0 ? botSpecs : [STRAIGHT]);
-  b.link('bot-b', 'bot-c');
-  const closeRemaining = afterBotHumps.x - start.x;
+  const afterBotHumps = b.run('bot-b', afterBotA, botSpecs.length > 0 ? botSpecs : [STRAIGHT]);
+  b.link('bot-a', 'bot-b');
+
+  /* YARD tap near the left + the trapezoid yard hanging below (bottom-left). */
+  const yard = tap(b, 'bot-b', afterBotHumps, 'yard', true);
+  const trap = addTrapezoidYard(b, yard.taps.branchExit, { prefix: 'YD', sidings: 3 });
+  b.link(yard.taps.branchSeg, trap.inbound);
+
+  /* Close the running line from the yard tap's through back to the start x. */
+  const closeRemaining = yard.onward.x - start.x;
   const full = Math.max(0, Math.floor(closeRemaining / 200 + 1e-6));
   const filler = closeRemaining - full * 200;
   const botCloseSpecs = side(full);
   if (filler > 0.5) botCloseSpecs.push({ type: 'straight', lengthMm: filler });
   const afterBotClose = b.run(
     'bot-d',
-    afterBotHumps,
+    yard.onward,
     botCloseSpecs.length > 0 ? botCloseSpecs : [STRAIGHT],
   );
-  b.link('bot-c', 'bot-d');
+  b.link(yard.taps.throughSeg, 'bot-d');
 
   /* LEFT end: a semicircle back up to the start. */
   const afterSemiL = b.run('semi-l', afterBotClose, SEMI);
@@ -201,6 +205,7 @@ export function buildMainLoopScene(): MainLoopScene {
     pieces: built.pieces,
     geom: built.geom,
     branches: { yard: yard.taps, satA: satA.segments, satB: satB.segments },
+    yard: trap.segments,
     startSegment,
     closureGapMm,
   };
