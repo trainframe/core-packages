@@ -185,7 +185,12 @@ export function buildMainLoopScene(): MainLoopScene {
    *  BELOW the westbound run) grows off the end of the lead-in. */
   const yard = tap(b, 'bot-b', afterBotHumps, 'yard', true);
   const LEVEL: PieceSpec = { type: 'curve', radiusMm: 241 };
-  const leadInEnd = b.run('yard-leadin', yard.taps.branchExit, [LEVEL, STRAIGHT, STRAIGHT, STRAIGHT]);
+  const leadInEnd = b.run('yard-leadin', yard.taps.branchExit, [
+    LEVEL,
+    STRAIGHT,
+    STRAIGHT,
+    STRAIGHT,
+  ]);
   b.link(yard.taps.branchSeg, 'yard-leadin');
   const pgYard = addParallelogramYard(b, leadInEnd, { prefix: 'YD', slots: 5, flipped: true });
   b.link('yard-leadin', pgYard.topLeadIn);
