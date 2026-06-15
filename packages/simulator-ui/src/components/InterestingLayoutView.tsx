@@ -50,9 +50,13 @@ export function InterestingLayoutView() {
 
   useEffect(() => {
     const w = new PhysicsWorld(scene.net);
-    for (const tapId of [scene.branches.yard, scene.branches.satA, scene.branches.satB]) {
-      w.setSwitch(tapId.switchId, tapId.mainPos);
-    }
+    /* Keep the running line over the yard, but DIVERT the lapping train through both
+     *  satellite loops, so the demo shows them being used. */
+    w.setSwitch(scene.branches.yard.switchId, scene.branches.yard.mainPos);
+    w.setSwitch(scene.branches.satA.switchId, scene.branches.satA.loopPos);
+    w.setSwitch(scene.branches.satB.switchId, scene.branches.satB.loopPos);
+
+    /* The lapping train: a loco + two carriages. */
     w.addBody({
       id: 'T',
       kind: 'loco',
@@ -60,7 +64,7 @@ export function InterestingLayoutView() {
       facing: 1,
       segment: scene.startSegment,
       color: '#c0392b',
-      maxSpeed: 220,
+      maxSpeed: 200,
     });
     for (let i = 0; i < 2; i++) {
       const id = `T-c${i}`;
@@ -73,6 +77,28 @@ export function InterestingLayoutView() {
         color: '#e08a1e',
       });
       w.couple(i === 0 ? 'T' : `T-c${i - 1}`, id);
+    }
+
+    /* A rake stabled in a yard siding (the bottom-left fan). */
+    const siding = scene.yard.sidings[1];
+    if (siding !== undefined) {
+      w.addBody({
+        id: 'S0',
+        kind: 'carriage',
+        railPos: 200,
+        facing: 1,
+        segment: siding,
+        color: '#8e44ad',
+      });
+      w.addBody({
+        id: 'S1',
+        kind: 'carriage',
+        railPos: 132,
+        facing: 1,
+        segment: siding,
+        color: '#8e44ad',
+      });
+      w.couple('S0', 'S1');
     }
     let elapsed = 0;
     let acc = 0;
