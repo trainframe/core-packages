@@ -19,9 +19,10 @@
  */
 import { type CrossoverLoopSegments, addCrossoverLoop } from './crossover-loop.js';
 import type { RailNetwork } from './network.js';
-import { type ParallelogramYardSegments, addParallelogramYard } from './parallelogram-yard.js';
+import type { ParallelogramYardSegments } from './parallelogram-yard.js';
 import { type Cursor, PieceNetworkBuilder, type PieceSpec } from './piece-network.js';
 import { type SatelliteLoopSegments, addSatelliteLoop } from './satellite-loop.js';
+import { type YardDetourSegments, addYardDetour } from './yard-detour.js';
 
 const STRAIGHT: PieceSpec = { type: 'straight' };
 const CURVE: PieceSpec = { type: 'curve' };
@@ -36,16 +37,6 @@ const SEMI: readonly PieceSpec[] = [CURVE, CURVE, CURVE, CURVE];
  *  pattern). The straights deepen the dip; the curves are the same R200. */
 const HUMP_SM: readonly PieceSpec[] = [CURVE, FLIP, FLIP, CURVE];
 const HUMP: readonly PieceSpec[] = [CURVE, STRAIGHT, FLIP, FLIP, STRAIGHT, CURVE];
-const HUMP_BIG: readonly PieceSpec[] = [
-  CURVE,
-  STRAIGHT,
-  STRAIGHT,
-  FLIP,
-  FLIP,
-  STRAIGHT,
-  STRAIGHT,
-  CURVE,
-];
 
 /** `n` straights in a row. */
 function side(n: number): PieceSpec[] {
@@ -64,26 +55,14 @@ function travel(specs: readonly PieceSpec[]): number {
  *  continues the main line and whose BRANCH is the stub a later slice grows into the
  *  yard / a satellite loop. */
 export interface MainLoopBranches {
-  /** The yard's facing-turnout tap (a dead-end branch stub the trapezoid yard grows
-   *  out of). */
-  readonly yard: BranchTap;
+  /** The yard detour's divert turnout (a drive-through yard hangs off it via buffered
+   *  lead-ins): `mainPos` keeps a train on the loop, `divertPos` sends it to the yard. */
+  readonly yard: YardDetourSegments;
   /** The satellite LOOP spliced into the top run (divert → big loop → rejoin). */
   readonly satA: SatelliteLoopSegments;
   /** The CROSSOVER loop — a teardrop that bridges over itself once (divert → loop
    *  that crosses over its own track on a height layer → rejoin). */
   readonly satB: CrossoverLoopSegments;
-}
-
-export interface BranchTap {
-  readonly switchId: string;
-  /** The facing turnout's through path (main continues) + branch path (the stub). */
-  readonly throughSeg: string;
-  readonly branchSeg: string;
-  /** The cursor at the end of the branch stub — where the next slice continues. */
-  readonly branchExit: Cursor;
-  /** Switch positions: `main` stays on the loop, `divert` takes the branch. */
-  readonly mainPos: string;
-  readonly divertPos: string;
 }
 
 export interface MainLoopScene {
@@ -97,34 +76,6 @@ export interface MainLoopScene {
   readonly startSegment: string;
   /** End-to-start closure gap (mm). */
   readonly closureGapMm: number;
-}
-
-/** Lay a facing turnout into the running line: a one-piece inbound stub from
- *  `cursor` (fed by `prevSeg`), then the turnout — THROUGH continues the main
- *  (returned as the onward cursor), BRANCH taps off a stub. `flipped` selects the
- *  side the branch peels off (which way the yard/satellite hangs). */
-function tap(
-  b: PieceNetworkBuilder,
-  prevSeg: string,
-  cursor: Cursor,
-  id: string,
-  flipped: boolean,
-): { onward: Cursor; taps: BranchTap } {
-  const switchId = `${id}-SW`;
-  const mainPos = 'main';
-  const divertPos = 'divert';
-  const inbound = `${id}-in`;
-  const throughSeg = `${id}-thru`;
-  const branchSeg = `${id}-br`;
-  const afterIn = b.run(inbound, cursor, [STRAIGHT]);
-  b.link(prevSeg, inbound);
-  const { thruExit, branchExit } = b.junction(throughSeg, branchSeg, afterIn, flipped);
-  b.link(inbound, throughSeg, { switchId, position: mainPos });
-  b.link(inbound, branchSeg, { switchId, position: divertPos });
-  return {
-    onward: thruExit,
-    taps: { switchId, throughSeg, branchSeg, branchExit, mainPos, divertPos },
-  };
 }
 
 /**
@@ -163,11 +114,21 @@ export function buildMainLoopScene(): MainLoopScene {
    *  YARD tap drops the trapezoid yard below the loop (bottom-left), then a filler
    *  closes back to the start x. Humps (not straights) absorb the satellites' length
    *  so the bottom stays curvy. */
-  const afterBotA = b.run('bot-a', afterSemiR, [STRAIGHT, ...HUMP]);
+  const afterBotA = b.run('bot-a', afterSemiR, [STRAIGHT, ...HUMP, STRAIGHT]);
   b.link('semi-r', 'bot-a');
-  const cycle = [HUMP, HUMP_BIG, HUMP_SM, HUMP, HUMP_SM];
+
+  /* YARD DETOUR — a DRIVE-THROUGH yard hung off the bottom run by a buffered lead-in
+   *  on EACH side: a serviced train diverts off the loop, runs through the yard, and
+   *  rejoins by the OTHER side (never reversing onto, nor blocking, the running line).
+   *  The detour's own bypass is the through line non-serviced trains take, so the loop
+   *  runs straight past while the yard sits below it. */
+  const detour = addYardDetour(b, 'bot-a', afterBotA, { prefix: 'yard', slots: 4 });
+
+  /* Close the running line from the detour's merge back to the start x — winding humps
+   *  fill the run, then a filler lands exactly on the start. */
+  const cycle = [HUMP, HUMP_SM, HUMP, HUMP_SM];
   const botSpecs: PieceSpec[] = [];
-  let spanLeft = afterBotA.x - start.x - 900; // room for the yard tap + the closing filler
+  let spanLeft = detour.onward.x - start.x - 300; // leave room for the closing filler
   for (let i = 0; spanLeft > 0 && i < 40; i++) {
     const h = cycle[i % cycle.length] ?? HUMP;
     const adv = travel(h);
@@ -175,38 +136,21 @@ export function buildMainLoopScene(): MainLoopScene {
     botSpecs.push(...h);
     spanLeft -= adv;
   }
-  const afterBotHumps = b.run('bot-b', afterBotA, botSpecs.length > 0 ? botSpecs : [STRAIGHT]);
-  b.link('bot-a', 'bot-b');
+  const afterBotHumps = b.run('bot-c', detour.onward, botSpecs.length > 0 ? botSpecs : [STRAIGHT]);
+  b.link('yard-mthru', 'bot-c');
+  b.link('yard-mbr', 'bot-c');
 
-  /* YARD tap near the left. The divert drops onto a BUFFERED LEAD-IN — a holding
-   *  siding, leveled off the 45° divert and run clear of the running line — so a train
-   *  bound for the yard pulls FULLY off the main loop before any slow shunting; the
-   *  yard never blocks the running line. The parallelogram yard (flipped, so it hangs
-   *  BELOW the westbound run) grows off the end of the lead-in. */
-  const yard = tap(b, 'bot-b', afterBotHumps, 'yard', true);
-  const LEVEL: PieceSpec = { type: 'curve', radiusMm: 241 };
-  const leadInEnd = b.run('yard-leadin', yard.taps.branchExit, [
-    LEVEL,
-    STRAIGHT,
-    STRAIGHT,
-    STRAIGHT,
-  ]);
-  b.link(yard.taps.branchSeg, 'yard-leadin');
-  const pgYard = addParallelogramYard(b, leadInEnd, { prefix: 'YD', slots: 5, flipped: true });
-  b.link('yard-leadin', pgYard.topLeadIn);
-
-  /* Close the running line from the yard tap's through back to the start x. */
-  const closeRemaining = yard.onward.x - start.x;
+  const closeRemaining = afterBotHumps.x - start.x;
   const full = Math.max(0, Math.floor(closeRemaining / 200 + 1e-6));
   const filler = closeRemaining - full * 200;
   const botCloseSpecs = side(full);
   if (filler > 0.5) botCloseSpecs.push({ type: 'straight', lengthMm: filler });
   const afterBotClose = b.run(
     'bot-d',
-    yard.onward,
+    afterBotHumps,
     botCloseSpecs.length > 0 ? botCloseSpecs : [STRAIGHT],
   );
-  b.link(yard.taps.throughSeg, 'bot-d');
+  b.link('bot-c', 'bot-d');
 
   /* LEFT end: a semicircle back up to the start. */
   const afterSemiL = b.run('semi-l', afterBotClose, SEMI);
@@ -219,8 +163,8 @@ export function buildMainLoopScene(): MainLoopScene {
     net: built.net,
     pieces: built.pieces,
     geom: built.geom,
-    branches: { yard: yard.taps, satA: satA.segments, satB: satB.segments },
-    yard: pgYard.segments,
+    branches: { yard: detour.segments, satA: satA.segments, satB: satB.segments },
+    yard: detour.segments.yard,
     startSegment,
     closureGapMm,
   };

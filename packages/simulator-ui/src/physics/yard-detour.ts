@@ -29,7 +29,9 @@ const FLIP: PieceSpec = { type: 'curve', flipped: true, radiusMm: 241 };
 export interface YardDetourSegments {
   readonly yard: ParallelogramYardSegments;
   /** The divert turnout switch: `main` stays on the loop, `divert` enters the yard. */
-  readonly divertSwitch: string;
+  readonly switchId: string;
+  /** The divert branch segment (a `yard_entry` marker rides its end). */
+  readonly branchSeg: string;
   readonly mainPos: string;
   readonly divertPos: string;
 }
@@ -48,15 +50,23 @@ function probeEnd(from: Cursor, specs: readonly PieceSpec[]): Cursor {
   return new PieceNetworkBuilder().run('probe', from, specs);
 }
 
-/** A climb-back lead-in `[CURVE, CURVE, straight(L), FLIP, FLIP]` whose straight L is
- *  sized so the run ENDS at `targetY` (the running-line level) — the curves give a
- *  fixed base climb and the straight (vertical mid-climb) trims the rest. */
+/** The trailing turnout's branch endpoint sits one branch-offset (≈71 mm) off the
+ *  trunk; the climb must arrive there, not on the line, so the merge's trunk lands
+ *  exactly on the running line. */
+const MERGE_BRANCH_OFFSET_MM = 71;
+
+/** A climb-back lead-in `[CURVE, CURVE, straight(L), FLIP]` that arrives at the merge's
+ *  BRANCH endpoint — heading up-and-along (225° off a westbound line) one branch-offset
+ *  below `targetY` — so `mergeJunction` then exits its trunk due along the line at
+ *  `targetY`. L (a vertical straight mid-climb) trims the curves' base climb to land
+ *  there. */
 function climbSpecs(from: Cursor, targetY: number): PieceSpec[] {
-  const base = probeEnd(from, [CURVE, CURVE, FLIP, FLIP]).y; // L = 0
-  const lengthMm = Math.max(0, base - targetY);
+  const branchY = targetY + MERGE_BRANCH_OFFSET_MM;
+  const base = probeEnd(from, [CURVE, CURVE, FLIP]).y; // L = 0
+  const lengthMm = Math.max(0, base - branchY);
   return lengthMm > 0.5
-    ? [CURVE, CURVE, { type: 'straight', lengthMm }, FLIP, FLIP]
-    : [CURVE, CURVE, FLIP, FLIP];
+    ? [CURVE, CURVE, { type: 'straight', lengthMm }, FLIP]
+    : [CURVE, CURVE, FLIP];
 }
 
 /**
@@ -76,7 +86,7 @@ export function addYardDetour(
   const leadInN = opts.leadInStraights ?? 2;
   const mainPos = 'main';
   const divertPos = 'divert';
-  const divertSwitch = `${p}-DIV`;
+  const switchId = `${p}-DIV`;
 
   /* DIVERT: a facing turnout — through stays on the loop, branch peels off (flipped so
    *  the yard hangs to the +y side). A one-piece inbound stub leads the turnout. */
@@ -84,8 +94,8 @@ export function addYardDetour(
   const afterIn = b.run(inbound, cursor, [STRAIGHT]);
   b.link(prevSeg, inbound);
   const { thruExit, branchExit } = b.junction(`${p}-dthru`, `${p}-dbr`, afterIn, true);
-  b.link(inbound, `${p}-dthru`, { switchId: divertSwitch, position: mainPos });
-  b.link(inbound, `${p}-dbr`, { switchId: divertSwitch, position: divertPos });
+  b.link(inbound, `${p}-dthru`, { switchId: switchId, position: mainPos });
+  b.link(inbound, `${p}-dbr`, { switchId: switchId, position: divertPos });
 
   /* ENTRY LEAD-IN: level the 45° divert back to the running heading + holding
    *  straights, so a train pulls fully off the line before the yard. */
@@ -129,7 +139,8 @@ export function addYardDetour(
     onward: trunkExit,
     segments: {
       yard: yard.segments,
-      divertSwitch,
+      switchId,
+      branchSeg: `${p}-dbr`,
       mainPos,
       divertPos,
     },

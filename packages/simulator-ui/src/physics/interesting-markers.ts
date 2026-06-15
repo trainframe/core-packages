@@ -69,9 +69,9 @@ export function buildInterestingMarkers(scene: MainLoopScene): InterestingMarker
     },
     {
       id: M.south,
-      segment: 'bot-b',
+      segment: 'bot-c',
       end: 'start',
-      distAlongMm: mid('bot-b'),
+      distAlongMm: mid('bot-c'),
       kind: 'station_stop',
     },
     { id: M.yard, segment: yardTap.branchSeg, end: 'end', kind: 'yard_entry' },

@@ -16,7 +16,7 @@ describe('interesting-layout — main loop with branch taps', () => {
 
   it('exposes three branch taps (yard + two satellites)', () => {
     const { branches } = buildMainLoopScene();
-    expect(branches.yard.switchId).toBe('yard-SW');
+    expect(branches.yard.switchId).toBe('yard-DIV');
     expect(branches.satA.switchId).toBe('satA-SW');
     expect(branches.satB.switchId).toBe('satB-SW');
   });

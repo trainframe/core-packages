@@ -62,7 +62,7 @@ describe('addYardDetour — drive-through yard off a running line', () => {
     const { net, detour } = buildScene(4);
     const sl = detour.segments.yard;
     const visited = drive(net, (w) => {
-      w.setSwitch(detour.segments.divertSwitch, detour.segments.divertPos);
+      w.setSwitch(detour.segments.switchId, detour.segments.divertPos);
       pointToSlot(w, sl, 1);
     });
     expect(visited.has('YD-leadin')).toBe(true); // pulled onto the entry lead-in
@@ -74,7 +74,7 @@ describe('addYardDetour — drive-through yard off a running line', () => {
   it('STAYS on the loop (the bypass) when the divert is not set', () => {
     const { net, detour } = buildScene(4);
     const visited = drive(net, (w) => {
-      w.setSwitch(detour.segments.divertSwitch, detour.segments.mainPos);
+      w.setSwitch(detour.segments.switchId, detour.segments.mainPos);
     });
     expect(visited.has('YD-bypass')).toBe(true); // took the through line
     expect(visited.has('onward')).toBe(true);
