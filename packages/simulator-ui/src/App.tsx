@@ -9,6 +9,7 @@ import { DepotScenarioView } from './components/DepotScenarioView.js';
 import { LiftBridgeScenarioView } from './components/LiftBridgeScenarioView.js';
 import { PhysicsScenarioView } from './components/PhysicsScenarioView.js';
 import { RailyardDemoScenarioView } from './components/RailyardDemoScenarioView.js';
+import { RailyardPiecesView } from './components/RailyardPiecesView.js';
 import { ToyTable } from './components/ToyTable.js';
 import { TurntableScenarioView } from './components/TurntableScenarioView.js';
 import { YardScenarioView } from './components/YardScenarioView.js';
@@ -48,6 +49,7 @@ export function App({ client }: AppProps = {}) {
 
   if (physics === 'branching') return <BranchingSceneView />;
   if (physics === 'railyard-demo') return <RailyardDemoScenarioView />;
+  if (physics === 'railyard-pieces') return <RailyardPiecesView />;
   if (physics === 'railyard') return <YardScenarioView />;
   if (physics === 'turntable') return <TurntableScenarioView />;
   if (physics === 'depot') return <DepotScenarioView />;

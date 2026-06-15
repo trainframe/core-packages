@@ -123,6 +123,100 @@ describe('LadderYardController — reverse-in servicing of the real-piece yard',
     for (const b of s.world.bodies()) expect(b.fate).toBe('on-rail');
   });
 
+  it('full journey: diverts round the passing loop, then reverse-ins past an occupied slot', () => {
+    const scene = buildFullRailyardScene();
+    const world = new PhysicsWorld(scene.net);
+    /* Divert the visitor round the passing-loop siding on its way to the yard. */
+    world.setSwitch(scene.passingLoop.switchId, scene.passingLoop.loopPos);
+    /* Pre-park a cut in slot 0 so the service must choose a later slot. */
+    const slot0 = scene.yard.slots[0];
+    if (slot0 === undefined) throw new Error('no slot0');
+    world.addBody({
+      id: 'p0',
+      kind: 'carriage',
+      segment: slot0,
+      railPos: 200,
+      facing: 1,
+      color: 'green',
+    });
+    /* Seed the visitor BEFORE the passing loop. */
+    world.addBody({
+      id: 'T',
+      kind: 'loco',
+      railPos: 300,
+      facing: 1,
+      segment: scene.startSegment,
+      color: 'red',
+      maxSpeed: 150,
+    });
+    for (let i = 0; i < 2; i++) {
+      const id = `T-c${i}`;
+      world.addBody({
+        id,
+        kind: 'carriage',
+        railPos: 300 - (i + 1) * 68,
+        facing: 1,
+        segment: scene.startSegment,
+        color: 'red',
+      });
+      world.couple(i === 0 ? 'T' : `T-c${i - 1}`, id);
+    }
+    const slots: SlotGeom[] = scene.yard.slots.map((id) => {
+      const g = scene.geom.get(id);
+      if (g === undefined) throw new Error(`no geom ${id}`);
+      return { mouth: g.end, buffer: g.start };
+    });
+    const headG = scene.geom.get(scene.yard.headshunt);
+    if (headG === undefined) throw new Error('no headshunt geom');
+    const xs = slots.flatMap((s) => [s.mouth.x, s.buffer.x]);
+    const ys = slots.flatMap((s) => [s.mouth.y, s.buffer.y]);
+    const bounds = {
+      minX: Math.min(...xs),
+      maxX: Math.max(...xs),
+      minY: Math.min(...ys),
+      maxY: Math.max(...ys),
+    };
+    const crane = new Crane(bounds, { x: bounds.minX, y: bounds.minY });
+    const controller = new LadderYardController({
+      train: new TrainDevice('T', physicsMotorActuator(world, 'T')),
+      throat: physicsSwitchActuator(world, scene.yard.throatSwitch),
+      enterPos: scene.yard.enterPos,
+      thruPos: scene.yard.thruPos,
+      ladder: scene.yard.ladderSwitches.map((sw) => physicsSwitchActuator(world, sw)),
+      ladderThruPos: scene.yard.ladderThruPos,
+      ladderSlotPos: scene.yard.ladderSlotPos,
+      slots,
+      headshuntRest: headG.end,
+      look: (x, y) => {
+        const s = world.sampleAt(x, y, CAMERA_R);
+        return s === null
+          ? { occupied: false }
+          : { occupied: true, colour: s.colour, at: { x: s.x, y: s.y } };
+      },
+      cameraRadius: CAMERA_R,
+      wedgeAt: (x, y) => {
+        world.uncoupleAt(x, y);
+      },
+      crane,
+    });
+    const DT = 1 / 60;
+    let divertedRoundLoop = false;
+    for (let i = 0; i < 60 * 90; i++) {
+      world.step(DT);
+      controller.tick(DT);
+      crane.step(DT);
+      if (world.bodies().some((b) => b.id === 'T' && b.segment === scene.passingLoop.loop)) {
+        divertedRoundLoop = true;
+      }
+    }
+    expect(divertedRoundLoop).toBe(true); // it really went round the siding
+    expect(controller.currentPhase).toBe('done');
+    expect(controller.chosenSlot).toBeGreaterThan(0); // skipped the occupied slot 0
+    const chosen = scene.yard.slots[controller.chosenSlot];
+    const c1 = world.bodies().find((b) => b.id === 'T-c1');
+    expect(c1?.segment).toBe(chosen);
+  });
+
   it('picks a FREE slot — skips one already occupied by a parked cut', () => {
     const s = setup();
     /* Pre-park a cut in slot 0 so the service must choose a later slot. */

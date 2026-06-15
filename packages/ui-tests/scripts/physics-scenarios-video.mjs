@@ -174,6 +174,24 @@ const CHECKS = {
       why: `LA={${[...laRake].sort().join(',')}} LB={${[...lbRake].sort().join(',')}} railed=${allRailed} onRail=${noWreck}`,
     };
   },
+  'railyard-pieces': (b) => {
+    // Real-piece circuit + reverse-in yard. The visitor V (loco + V-c0/V-c1)
+    // diverted round the passing loop, backed into a FREE slot (slot 0 pre-parked),
+    // the crane uncoupled the loco, and it pulled clear. Assert: both cars parked in
+    // a slot (Y-slotN, not the internal Y-slotrN rail), the loco uncoupled from them,
+    // and nothing wrecked.
+    const seg = (id) => b.find((x) => x.id === id)?.segment;
+    const inSlot = (s) =>
+      typeof s === 'string' && s.startsWith('Y-slot') && !s.startsWith('Y-slotr');
+    const loco = b.find((x) => x.id === 'V');
+    const carsParked = inSlot(seg('V-c0')) && inSlot(seg('V-c1'));
+    const uncoupled = !(loco?.coupledTo ?? []).includes('V-c0');
+    const allRailed = b.every((x) => x.fate === 'on-rail');
+    return {
+      ok: carsParked && uncoupled && allRailed,
+      why: `V-c0@${seg('V-c0')} V-c1@${seg('V-c1')} locoCoupled=${loco?.coupledTo?.length ?? '?'} railed=${allRailed}`,
+    };
+  },
   railyard: (b) => {
     const coupled = (id) => b.find((x) => x.id === id)?.coupledTo ?? [];
     const seg = (id) => b.find((x) => x.id === id)?.segment;
@@ -210,6 +228,9 @@ const DURATION = {
   load: 7,
   ramps: 7,
   railyard: 42,
+  /* Lap-in + passing-loop divert + pull onto the headshunt + reverse-in + the slow
+   *  crane decouple + pull-out — budget generously for the gantry's creep. */
+  'railyard-pieces': 55,
   /* Five trains across two loops + three full yard services (svc at ~47/96/144 s),
    *  the main-loop trains held on block clearance between — budget past the third. */
   'railyard-demo': 165,

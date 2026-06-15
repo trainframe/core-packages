@@ -156,10 +156,7 @@ export class LadderYardController {
     for (let i = 0; i < this.d.slots.length; i++) {
       const slot = this.d.slots[i];
       if (slot === undefined) continue;
-      const occupied =
-        this.d.look(slot.mouth.x, slot.mouth.y).occupied ||
-        this.d.look(slot.buffer.x, slot.buffer.y).occupied;
-      if (!occupied) {
+      if (!this.slotOccupied(slot)) {
         this.chosen = i;
         break;
       }
@@ -173,6 +170,20 @@ export class LadderYardController {
       this.d.ladder[i]?.set(i === this.chosen ? this.d.ladderSlotPos : this.d.ladderThruPos);
     }
     this.to('set-back');
+  }
+
+  /** A slot is occupied if the camera finds ANY body anywhere along it (mouth to
+   *  buffer) — a mid-slot cut must not read as free. */
+  private slotOccupied(slot: SlotGeom): boolean {
+    const dx = slot.buffer.x - slot.mouth.x;
+    const dy = slot.buffer.y - slot.mouth.y;
+    const len = Math.hypot(dx, dy) || 1;
+    const step = this.d.cameraRadius;
+    for (let s = 0; s <= len; s += step) {
+      const t = s / len;
+      if (this.d.look(slot.mouth.x + dx * t, slot.mouth.y + dy * t).occupied) return true;
+    }
+    return false;
   }
 
   /** Reverse: the trailing turnout backs the rake into the chosen slot; stop once

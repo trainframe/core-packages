@@ -25,6 +25,10 @@ declare global {
           name: string;
           elapsedS: number;
           bodies: () => readonly BodyPose[];
+          /** Yard service phase (the real-piece railyard scenario), if any. */
+          phase?: string;
+          /** The slot the yard service chose (−1 before one is picked), if any. */
+          chosenSlot?: number;
         }
       | undefined;
     __tfVision?: { reportedMm: number | null; expectedMm: number } | undefined;
