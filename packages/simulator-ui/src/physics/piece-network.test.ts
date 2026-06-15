@@ -121,4 +121,21 @@ describe('PieceNetworkBuilder — a layout from real track pieces', () => {
     expect(driveThroughJunction('thru')).toBe('thruRun');
     expect(driveThroughJunction('branch')).toBe('branchRun');
   });
+
+  it('rejects a layout that crosses over itself (overlap without a joint)', () => {
+    const b = new PieceNetworkBuilder();
+    /* Two straights whose centres coincide at (100,0) but share no endpoint —
+     * a track crossing over itself with no `crossing` piece. */
+    b.run('h', { x: 0, y: 0, dir: 0, layer: 0 }, [{ type: 'straight' }]);
+    b.run('v', { x: 100, y: -100, dir: 90, layer: 0 }, [{ type: 'straight' }]);
+    expect(() => b.build()).toThrow(/crosses over itself/);
+  });
+
+  it('accepts the same crossing point when the runs are on different height layers', () => {
+    const b = new PieceNetworkBuilder();
+    /* A grade separation (a bridge): same footprint, different layers — valid. */
+    b.run('low', { x: 0, y: 0, dir: 0, layer: 0 }, [{ type: 'straight' }]);
+    b.run('high', { x: 100, y: -100, dir: 90, layer: 1 }, [{ type: 'straight' }]);
+    expect(() => b.build()).not.toThrow();
+  });
 });

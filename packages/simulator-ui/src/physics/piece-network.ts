@@ -17,6 +17,7 @@
  *
  * Pure geometry/topology: no DOM, no clock, no randomness.
  */
+import { detectSameLayerOverlaps } from '../track/overlap.js';
 import {
   type RotationDeg,
   type TrackPiece,
@@ -223,6 +224,18 @@ export class PieceNetworkBuilder {
   }
 
   build(): PieceNetwork {
+    /* A layout that folds back over itself is a build-time error: two pieces on
+     * the same height layer whose footprints overlap without sharing a joint. A
+     * deliberate flat crossing uses the single `crossing` piece (which overlaps
+     * nothing — it joins its four arms end-to-end); a deliberate grade separation
+     * uses a height `layer`. Anything else is an accidental self-crossing. */
+    const overlaps = detectSameLayerOverlaps(this.placed);
+    if (overlaps.size > 0) {
+      const ids = [...overlaps].sort().join(', ');
+      throw new Error(
+        `piece-network: the layout crosses over itself — pieces overlap without a joint: ${ids}. Use a 'crossing' piece for a deliberate flat crossing, or a height layer for a bridge.`,
+      );
+    }
     return {
       net: buildNetwork(this.segments, this.links),
       pieces: this.placed,
