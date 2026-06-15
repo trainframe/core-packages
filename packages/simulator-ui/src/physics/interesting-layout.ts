@@ -37,6 +37,10 @@ const SEMI: readonly PieceSpec[] = [CURVE, CURVE, CURVE, CURVE];
  *  pattern). The straights deepen the dip; the curves are the same R200. */
 const HUMP_SM: readonly PieceSpec[] = [CURVE, FLIP, FLIP, CURVE];
 const HUMP: readonly PieceSpec[] = [CURVE, STRAIGHT, FLIP, FLIP, STRAIGHT, CURVE];
+/** A hump bulging the OTHER way (same advance, mirrored) — used on the runs flanking a
+ *  semicircle so they wind AWAY from each other instead of bulging together and
+ *  nearly touching across the loop's narrow end. */
+const HUMP_AWAY: readonly PieceSpec[] = [FLIP, STRAIGHT, CURVE, CURVE, STRAIGHT, FLIP];
 
 /** `n` straights in a row. */
 function side(n: number): PieceSpec[] {
@@ -102,7 +106,7 @@ export function buildMainLoopScene(): MainLoopScene {
   b.link(satA.segments.mergeBranch, 'top-b');
   const satB = addCrossoverLoop(b, afterTopB, { prefix: 'satB', flipped: true });
   b.link('top-b', satB.inbound);
-  const afterTopC = b.run('top-c', satB.exit, [STRAIGHT, ...HUMP, STRAIGHT]);
+  const afterTopC = b.run('top-c', satB.exit, [STRAIGHT, ...HUMP_AWAY, STRAIGHT]);
   b.link(satB.segments.mergeThrough, 'top-c');
   b.link(satB.segments.mergeBranch, 'top-c');
 
@@ -114,7 +118,7 @@ export function buildMainLoopScene(): MainLoopScene {
    *  YARD tap drops the trapezoid yard below the loop (bottom-left), then a filler
    *  closes back to the start x. Humps (not straights) absorb the satellites' length
    *  so the bottom stays curvy. */
-  const afterBotA = b.run('bot-a', afterSemiR, [STRAIGHT, ...HUMP, STRAIGHT]);
+  const afterBotA = b.run('bot-a', afterSemiR, [STRAIGHT, ...HUMP_AWAY, STRAIGHT]);
   b.link('semi-r', 'bot-a');
 
   /* YARD DETOUR — a DRIVE-THROUGH yard hung off the bottom run by a buffered lead-in
