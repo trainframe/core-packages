@@ -165,18 +165,6 @@ export class PhysicsWorld {
     this.byId.set(b.id, b);
   }
 
-  /** Remove a body from the world — the simulator side of a crane LIFTING a payload
-   *  off the rails (it is then in the air, off the network, until placed again with
-   *  `placeBodyAt`). Uncouples it from anything first. No-op for an unknown id. */
-  removeBody(id: string): void {
-    const b = this.byId.get(id);
-    if (b === undefined) return;
-    for (const other of [...b.coupledTo]) this.uncouple(id, other);
-    const idx = this.bodyList.indexOf(b);
-    if (idx !== -1) this.bodyList.splice(idx, 1);
-    this.byId.delete(id);
-  }
-
   /** The segment + distance-along-it of the rail point nearest world (x,y). The
    *  geometric query a crane uses to set a payload down (or seed a spaced rake):
    *  it knows a world footprint, not a segment id. */
