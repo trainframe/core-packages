@@ -23,6 +23,26 @@ describe('buildRail — from real placed pieces', () => {
     expect(rail.pieceTypeAt(800)).toBe('straight');
   });
 
+  it('a SINGLE straight (no neighbours) makes a full-length rail, not a degenerate stub', () => {
+    /* Regression: a lone piece has neither prev nor next, so endpoint resolution
+     *  must still pick the two distinct default endpoints (0 → 1) and span the
+     *  whole piece. A single-piece run (a passing-loop / yard inbound stub) used to
+     *  collapse to a zero-length rail at the origin. */
+    const straight = {
+      id: 's',
+      type: 'straight' as const,
+      position: { x: 100, y: 50 },
+      rotationDeg: 0 as const,
+      tagged: false,
+    };
+    const rail = buildRail([straight]);
+    expect(rail.length).toBeCloseTo(200, 0);
+    /* The straight spans its full 200 mm (centred on `position`), level. */
+    expect(rail.at(rail.length).x - rail.at(0).x).toBeCloseTo(200, 0);
+    expect(rail.at(0).y).toBeCloseTo(50, 0);
+    expect(rail.at(rail.length).y).toBeCloseTo(50, 0);
+  });
+
   it('a terminus at the end marks the rail end as buffered', () => {
     const rail = buildRail(piecesOf('terminus'));
     expect(rail.endBuffered).toBe(true);

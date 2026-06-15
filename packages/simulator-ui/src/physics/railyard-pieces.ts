@@ -13,9 +13,11 @@
  *
  * Pure geometry/topology: no DOM, no clock, no randomness.
  */
+import type { SceneJunction, SceneMarker } from './markers.js';
 import type { RailNetwork } from './network.js';
 import { type PassingLoopSegments, addPassingLoop } from './passing-loop.js';
 import { type Cursor, PieceNetworkBuilder, type PieceSpec } from './piece-network.js';
+import { type RailyardMarkerLayer, buildRailyardMarkers } from './railyard-markers.js';
 import { type YardLadderSegments, addYardLadder } from './yard-ladder.js';
 
 const STRAIGHT: PieceSpec = { type: 'straight' };
@@ -160,6 +162,16 @@ export interface FullRailyardScene {
   readonly yard: YardLadderSegments;
   readonly startSegment: string;
   readonly closureGapMm: number;
+  /** The sparse core markers (the layer the scheduler sees). */
+  readonly markers: readonly SceneMarker[];
+  /** The one core junction (the passing-loop switch). The yard throat switch is
+   *  the yard DEVICE's, not core's, so it is intentionally absent. */
+  readonly junctions: readonly SceneJunction[];
+  /** The full marker layer (markers + junctions + directed edges + throat) for
+   *  the `Layout` compiler and the demo's route/seed helpers. */
+  readonly markerLayer: RailyardMarkerLayer;
+  /** The yard-entry boundary marker id (`M-yard-throat`). */
+  readonly throatMarker: string;
 }
 
 /**
@@ -206,6 +218,23 @@ export function buildFullRailyardScene(): FullRailyardScene {
 
   const closureGapMm = Math.hypot(afterSemiL.x - start.x, afterSemiL.y - start.y);
   const built = b.build();
+
+  /* The SPARSE marker layer, anchored to the real-piece segments now they exist:
+   *  west lead-in, the passing turnout + its siding, the central station, the yard
+   *  throat, the east lead-out, the north station on the far side. */
+  const markerLayer = buildRailyardMarkers(built.net, {
+    westSeg: startSegment,
+    midSeg: 'bot-mid',
+    eastSeg: 'bot-b',
+    topSeg: 'top',
+    passingInbound: pl.inbound,
+    passingLoopSeg: pl.segments.loop,
+    passingSwitchId: pl.segments.switchId,
+    passingMainPos: pl.segments.mainPos,
+    passingLoopPos: pl.segments.loopPos,
+    yardInbound: yard.inbound,
+  });
+
   return {
     net: built.net,
     pieces: built.pieces,
@@ -214,5 +243,9 @@ export function buildFullRailyardScene(): FullRailyardScene {
     yard: yard.segments,
     startSegment,
     closureGapMm,
+    markers: markerLayer.markers,
+    junctions: markerLayer.junctions,
+    markerLayer,
+    throatMarker: markerLayer.throatMarker,
   };
 }

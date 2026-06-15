@@ -37,41 +37,16 @@
  * its segment ids, `Jw`/`Je` switches and slots preserved. Pure geometry/topology,
  * DOM-free.
  */
-import type { LayoutMarker } from '@trainframe/protocol';
 import { type NetLink, type RailNetwork, buildNetwork } from './network.js';
 import type { Rail } from './rail.js';
 import { cornerSeg } from './railyard-scene.js';
 import { type YardLayout, type YardSegGeom, buildYardLayout, straightSeg } from './yard.js';
 
-/** Which segment end a marker is anchored at. */
-export type MarkerEnd = 'start' | 'end';
-
-/** The protocol marker-kind union (no `MarkerKind` type is exported from the
- *  protocol package, so derive it from `LayoutMarker.kind` — the canonical
- *  source, which includes `yard_entry`/`unspecified`). */
-export type MarkerKind = LayoutMarker['kind'];
-
-/** A logical marker pinned to a physics segment. Core's view of the layout is
- *  the set of these; physics knows only segments. */
-export interface SceneMarker {
-  readonly id: string;
-  /** Physics segment id this marker is anchored to. */
-  readonly segment: string;
-  /** Anchored at this segment end (omit when `distAlongMm` is set). */
-  readonly end: MarkerEnd;
-  /** Set instead of `end` for a mid-segment station marker (distance along the
-   *  rail from its start, mm). */
-  readonly distAlongMm?: number;
-  /** Protocol marker kind. */
-  readonly kind: MarkerKind;
-}
-
-/** A junction-kind marker paired to a physics switch + its valid positions. */
-export interface SceneJunction {
-  readonly markerId: string;
-  readonly switchId: string;
-  readonly positions: readonly string[];
-}
+/* The marker model now lives in the shared `markers.ts` (one source of truth for
+ * the bezier + real-piece scenes); imported for local use and re-exported for
+ * back-compat (`scene-markers.ts` still imports these from here). */
+import type { MarkerEnd, MarkerKind, SceneJunction, SceneMarker } from './markers.js';
+export type { MarkerEnd, MarkerKind, SceneJunction, SceneMarker };
 
 /** A loop block: a running-line segment in travel order around a cycle. */
 export interface LoopBlock {

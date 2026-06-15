@@ -130,8 +130,12 @@ function segmentOf(
     for (let k = 0; k < epCount; k++) if (k !== j) return k;
     return 0;
   };
-  const entryIdx = entryFromPrev ?? other(exitToNext);
-  const exitIdx = exitToNext ?? other(entryFromPrev);
+  /* With a joined neighbour the free end is `other(joint)`; with NO neighbour on a
+   *  side (a lone or end piece), default to the natural traversal endpoints 0 → 1,
+   *  so a single-piece run still spans the whole piece rather than collapsing to a
+   *  zero-length stub at endpoint 0. */
+  const entryIdx = entryFromPrev ?? (exitToNext !== undefined ? other(exitToNext) : 0);
+  const exitIdx = exitToNext ?? (entryFromPrev !== undefined ? other(entryFromPrev) : 1);
   if (entryIdx === exitIdx) return null;
   // A ramp's higher endpoint is its `layerDelta` end (index 1, RAMP_ENDPOINTS).
   // Exiting via index 1 means the rail climbs in +d (+1); via 0 it descends (-1).
