@@ -56,7 +56,8 @@ export function InterestingLayoutView() {
     w.setSwitch(scene.branches.satA.switchId, scene.branches.satA.loopPos);
     w.setSwitch(scene.branches.satB.switchId, scene.branches.satB.loopPos);
 
-    /* The lapping train: a loco + two carriages. */
+    /* The lapping train: a loco + two carriages. DRIVING — without this it just sits
+     *  there (the bug that made the video show zero movement). */
     w.addBody({
       id: 'T',
       kind: 'loco',
@@ -64,6 +65,7 @@ export function InterestingLayoutView() {
       facing: 1,
       segment: scene.startSegment,
       color: '#c0392b',
+      motion: 'forward',
       maxSpeed: 200,
     });
     for (let i = 0; i < 2; i++) {
