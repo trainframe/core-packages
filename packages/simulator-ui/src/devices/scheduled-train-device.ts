@@ -30,7 +30,7 @@ import {
   PROTOCOL_VERSION,
   type SetTargetSpeed,
 } from '@trainframe/protocol';
-import type { Motion } from '../physics/world.js';
+import type { Motion } from '../physics/observation.js';
 import type { MarkerSensor } from './marker-sensor.js';
 import type { MotorActuator } from './motor-actuator.js';
 import type { PlatformProvider } from './platform-provider.js';

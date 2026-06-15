@@ -23,10 +23,12 @@
  */
 
 import { type RailNetwork, type SegEnd, singleRail } from './network.js';
+import type { BodyKind, BodyPose, Motion } from './observation.js';
 import type { Rail } from './rail.js';
 
-export type Motion = 'forward' | 'stopped' | 'reverse';
-export type BodyKind = 'loco' | 'carriage';
+/* Re-export the device↔sim data shapes (defined in observation.ts so a device can
+ * know the vocabulary without importing the simulation). */
+export type { Motion, BodyKind, BodyPose } from './observation.js';
 
 export interface BodyInit {
   readonly id: string;
@@ -76,21 +78,6 @@ interface Body {
   fate: 'on-rail' | 'derailed' | 'ran-off';
   /** Foreign matter on the rail — a train hitting it at speed derails. */
   obstacle: boolean;
-}
-
-export interface BodyPose {
-  readonly id: string;
-  readonly x: number;
-  readonly y: number;
-  readonly rotationDeg: number;
-  readonly kind: BodyKind;
-  readonly color: string | undefined;
-  readonly mode: 'railed' | 'free';
-  readonly fate: 'on-rail' | 'derailed' | 'ran-off';
-  readonly speed: number;
-  readonly coupledTo: readonly string[];
-  /** The network segment the body is on (`main` for a single rail). */
-  readonly segment: string;
 }
 
 /** Lateral acceleration (mm/s²) a body tolerates on a curve before it derails. */

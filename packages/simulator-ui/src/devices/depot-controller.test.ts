@@ -8,9 +8,9 @@ function isZoneStateChanged(e: CoreEvent): e is ZoneStateChanged {
   return e.event_type === 'zone_state_changed';
 }
 import { PhysicsWorld } from '../physics/world.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
+import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import { DepotController } from './depot-controller.js';
-import { physicsMotorActuator } from './motor-actuator.js';
-import { physicsSwitchActuator } from './switch-actuator.js';
 import { TrainDevice } from './train-device.js';
 import { TurntableActuator } from './turntable-actuator.js';
 

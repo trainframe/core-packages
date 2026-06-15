@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { type RailyardScene, buildRailyardScene } from '../physics/railyard-scene.js';
 import { type BodyPose, PhysicsWorld } from '../physics/world.js';
-import { physicsMotorActuator } from './motor-actuator.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
+import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import {
   RailyardDemoController,
   type RailyardDemoTrain,
   type YardJob,
 } from './railyard-demo-controller.js';
-import { physicsSwitchActuator } from './switch-actuator.js';
 import { TrainDevice } from './train-device.js';
 
 const CAM_R = 20;

@@ -1,3 +1,4 @@
+import type { BodyPose } from '../physics/observation.js';
 /**
  * The RAILYARD DEMO orchestrator (ADR-030, ADR-026/027 handoff, ADR-031 §2). It runs
  * N trains around the railyard demo loop and periodically peels ONE off into the
@@ -26,7 +27,6 @@
  * Tick-driven over a virtual clock; pure (no DOM, no Date.now, no Math.random).
  */
 import type { RailyardScene } from '../physics/railyard-scene.js';
-import type { BodyPose } from '../physics/world.js';
 import { Crane } from './crane.js';
 import type { SwitchActuator } from './switch-actuator.js';
 import type { TrainDevice } from './train-device.js';

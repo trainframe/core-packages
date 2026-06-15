@@ -8,10 +8,10 @@
  */
 import { describe, expect, it } from 'vitest';
 import { JibCrane } from '../devices/jib-crane.js';
-import { physicsMotorActuator } from '../devices/motor-actuator.js';
 import { TrainDevice } from '../devices/train-device.js';
 import { PhysicsWorld } from '../physics/world.js';
 import { straightSeg } from '../physics/yard.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
 
 const STEP_S = 1 / 120;
 const RAIL_Y = 600;

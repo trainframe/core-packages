@@ -10,12 +10,12 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { Crane } from '../devices/crane.js';
-import { physicsMotorActuator } from '../devices/motor-actuator.js';
-import { physicsSwitchActuator } from '../devices/switch-actuator.js';
 import { TrainDevice } from '../devices/train-device.js';
 import { YardController, craneBounds } from '../devices/yard-controller.js';
 import { type BodyPose, PhysicsWorld } from '../physics/world.js';
 import { buildYardLayout } from '../physics/yard.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
+import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 

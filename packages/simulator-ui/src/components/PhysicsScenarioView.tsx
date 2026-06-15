@@ -8,13 +8,13 @@
  * `window.__tfPhysics` so the video harness can read body fates/poses and assert.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { physicsMotorActuator } from '../devices/motor-actuator.js';
 import { TrainDevice } from '../devices/train-device.js';
 import { buildRail } from '../physics/rail.js';
 import { type PhysicsScenario, type TrackSpec, buildScenario } from '../physics/scenarios.js';
 import { type BodyPose, PhysicsWorld } from '../physics/world.js';
 import { physicsCameraProvider } from '../sensors/camera-provider.js';
 import { VisionStation } from '../sensors/vision-station.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
 import { PIECE_TINT, type TrackPiece, getEndpoints, getPieceShape } from '../track/pieces.js';
 import { PieceBody, WOOD_FILL, WoodDefs } from './piece-art.js';
 

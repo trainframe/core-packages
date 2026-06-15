@@ -15,9 +15,9 @@
 import { describe, expect, it } from 'vitest';
 import { buildBranchingScene } from '../physics/branching-scene.js';
 import { PhysicsWorld } from '../physics/world.js';
-import { physicsMotorActuator } from './motor-actuator.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
+import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import { InProcessBus, inProcessPlatform } from './platform-provider.js';
-import { physicsSwitchActuator } from './switch-actuator.js';
 import { YardZoneDevice } from './yard-zone-device.js';
 
 /** The sim-side throat camera used to wire the device's `sightedTrainAt` provider

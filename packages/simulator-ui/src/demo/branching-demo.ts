@@ -23,16 +23,16 @@
  */
 import type { Layout } from '@trainframe/protocol';
 import type { MarkerPoint } from '../devices/marker-sensor.js';
-import { physicsMarkerSensor } from '../devices/marker-sensor.js';
-import { physicsMotorActuator } from '../devices/motor-actuator.js';
 import type { PlatformProvider } from '../devices/platform-provider.js';
 import { ScheduledTrainDevice } from '../devices/scheduled-train-device.js';
-import { physicsSwitchActuator } from '../devices/switch-actuator.js';
 import { SwitchDevice } from '../devices/switch-device.js';
 import { YardZoneDevice } from '../devices/yard-zone-device.js';
 import { type BranchingScene, buildBranchingScene } from '../physics/branching-scene.js';
 import { sceneToLayout } from '../physics/scene-markers.js';
 import { PhysicsWorld } from '../physics/world.js';
+import { physicsMarkerSensor } from '../sim/marker-sensor.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
+import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 
 /** A factory the caller wires to its transport: `mqttPlatform(client, id)` in the
  *  gate/script/browser, or `inProcessPlatform(bus, id)` in a focused test. */

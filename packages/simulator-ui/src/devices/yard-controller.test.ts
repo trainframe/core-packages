@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { PhysicsWorld } from '../physics/world.js';
 import { buildYardLayout } from '../physics/yard.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
+import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import { Crane } from './crane.js';
-import { physicsMotorActuator } from './motor-actuator.js';
-import { physicsSwitchActuator } from './switch-actuator.js';
 import { TrainDevice } from './train-device.js';
 import { YardController, craneBounds } from './yard-controller.js';
 

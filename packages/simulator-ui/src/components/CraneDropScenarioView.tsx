@@ -16,10 +16,10 @@
  */
 import { useEffect, useState } from 'react';
 import { JibCrane } from '../devices/jib-crane.js';
-import { physicsMotorActuator } from '../devices/motor-actuator.js';
 import { TrainDevice } from '../devices/train-device.js';
 import { type BodyPose, PhysicsWorld } from '../physics/world.js';
 import { straightSeg } from '../physics/yard.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 

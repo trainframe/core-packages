@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { buildLiftBridgeLayout } from '../physics/lift-bridge.js';
 import { PhysicsWorld } from '../physics/world.js';
+import { physicsLinkActuator } from '../sim/link-actuator.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
 import { LiftBridgeController } from './lift-bridge-controller.js';
-import { type LinkActuator, physicsLinkActuator } from './link-actuator.js';
-import { physicsMotorActuator } from './motor-actuator.js';
+import type { LinkActuator } from './link-actuator.js';
 import { TrainDevice } from './train-device.js';
 
 /** Stage the lift bridge (span starts raised) with a train on the near approach

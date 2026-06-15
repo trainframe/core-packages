@@ -11,8 +11,8 @@ import { describe, expect, it } from 'vitest';
 import { buildNetwork } from '../physics/network.js';
 import type { Rail } from '../physics/rail.js';
 import { PhysicsWorld } from '../physics/world.js';
+import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import { InProcessBus, inProcessPlatform } from './platform-provider.js';
-import { physicsSwitchActuator } from './switch-actuator.js';
 import { SwitchDevice } from './switch-device.js';
 
 const VERSION = PROTOCOL_VERSION;

@@ -20,11 +20,12 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { LiftBridgeController } from '../devices/lift-bridge-controller.js';
-import { type LinkActuator, physicsLinkActuator } from '../devices/link-actuator.js';
-import { physicsMotorActuator } from '../devices/motor-actuator.js';
+import type { LinkActuator } from '../devices/link-actuator.js';
 import { TrainDevice } from '../devices/train-device.js';
 import { buildLiftBridgeLayout } from '../physics/lift-bridge.js';
 import { type BodyPose, PhysicsWorld } from '../physics/world.js';
+import { physicsLinkActuator } from '../sim/link-actuator.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
 import { LiftBridgeArt } from './LiftBridgeArt.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';

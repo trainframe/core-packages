@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Rail } from '../physics/rail.js';
 import { PhysicsWorld } from '../physics/world.js';
-import { physicsMotorActuator } from './motor-actuator.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
 import { TrainDevice } from './train-device.js';
 
 const straight = (length: number): Rail => ({

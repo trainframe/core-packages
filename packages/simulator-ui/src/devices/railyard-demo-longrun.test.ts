@@ -1,13 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { buildRailyardScene } from '../physics/railyard-scene.js';
 import { PhysicsWorld } from '../physics/world.js';
-import { physicsMotorActuator } from './motor-actuator.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
+import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import {
   RailyardDemoController,
   type RailyardDemoTrain,
   type YardJob,
 } from './railyard-demo-controller.js';
-import { physicsSwitchActuator } from './switch-actuator.js';
 import { TrainDevice } from './train-device.js';
 
 describe('railyard demo long-run (full view seeding)', () => {

@@ -8,7 +8,7 @@
  * The same class would run on real hardware by swapping the actuator for a motor
  * driver. Here it is what the scenarios command, instead of poking the world.
  */
-import type { Motion } from '../physics/world.js';
+import type { Motion } from '../physics/observation.js';
 import type { MotorActuator } from './motor-actuator.js';
 
 export class TrainDevice {

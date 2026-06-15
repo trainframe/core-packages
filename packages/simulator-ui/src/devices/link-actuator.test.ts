@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildNetwork } from '../physics/network.js';
 import type { Rail } from '../physics/rail.js';
 import { PhysicsWorld } from '../physics/world.js';
-import { physicsLinkActuator } from './link-actuator.js';
+import { physicsLinkActuator } from '../sim/link-actuator.js';
 
 function seg(length: number, endBuffered = false): Rail {
   return {

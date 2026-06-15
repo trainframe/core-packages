@@ -17,17 +17,17 @@
  * Exposes `window.__tfPhysics` so the video harness can assert progress + the swaps.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { physicsMotorActuator } from '../devices/motor-actuator.js';
 import {
   RailyardDemoController,
   type RailyardDemoTrain,
   type RailyardLoopRun,
   type YardJob,
 } from '../devices/railyard-demo-controller.js';
-import { physicsSwitchActuator } from '../devices/switch-actuator.js';
 import { TrainDevice } from '../devices/train-device.js';
 import { type RailyardScene, type Station, buildRailyardScene } from '../physics/railyard-scene.js';
 import { type BodyPose, PhysicsWorld } from '../physics/world.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
+import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 

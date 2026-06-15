@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { buildTurntableLayout, stubSensePoint } from '../physics/turntable.js';
 import { PhysicsWorld } from '../physics/world.js';
-import { physicsMotorActuator } from './motor-actuator.js';
-import { physicsSwitchActuator } from './switch-actuator.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
+import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import { TrainDevice } from './train-device.js';
 import { TurntableActuator } from './turntable-actuator.js';
 import { TurntableController } from './turntable-controller.js';

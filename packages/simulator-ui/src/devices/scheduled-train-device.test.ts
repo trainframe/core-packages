@@ -17,8 +17,8 @@ import { describe, expect, it } from 'vitest';
 import { buildNetwork } from '../physics/network.js';
 import type { Rail } from '../physics/rail.js';
 import { PhysicsWorld } from '../physics/world.js';
-import { physicsMarkerSensor } from './marker-sensor.js';
-import { physicsMotorActuator } from './motor-actuator.js';
+import { physicsMarkerSensor } from '../sim/marker-sensor.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
 import { InProcessBus, inProcessPlatform } from './platform-provider.js';
 import { ScheduledTrainDevice } from './scheduled-train-device.js';
 

@@ -20,12 +20,12 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { DepotController } from '../devices/depot-controller.js';
-import { physicsMotorActuator } from '../devices/motor-actuator.js';
-import { physicsSwitchActuator } from '../devices/switch-actuator.js';
 import { TrainDevice } from '../devices/train-device.js';
 import { TurntableActuator } from '../devices/turntable-actuator.js';
 import { type DepotLayout, buildDepotLayout } from '../physics/depot.js';
 import { type BodyPose, PhysicsWorld } from '../physics/world.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
+import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 

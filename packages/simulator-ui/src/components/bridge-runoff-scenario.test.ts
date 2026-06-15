@@ -8,11 +8,11 @@
  * the physics level, so the re-skin is proven without standing up a browser.
  */
 import { describe, expect, it } from 'vitest';
-import { physicsLinkActuator } from '../devices/link-actuator.js';
-import { physicsMotorActuator } from '../devices/motor-actuator.js';
 import { TrainDevice } from '../devices/train-device.js';
 import { buildLiftBridgeLayout } from '../physics/lift-bridge.js';
 import { PhysicsWorld } from '../physics/world.js';
+import { physicsLinkActuator } from '../sim/link-actuator.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
 
 const STEP_S = 1 / 120;
 

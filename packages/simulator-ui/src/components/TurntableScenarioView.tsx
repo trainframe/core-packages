@@ -11,13 +11,13 @@
  * video harness can assert the loco left via the intended stub with flipped facing.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { physicsMotorActuator } from '../devices/motor-actuator.js';
-import { physicsSwitchActuator } from '../devices/switch-actuator.js';
 import { TrainDevice } from '../devices/train-device.js';
 import { TurntableActuator } from '../devices/turntable-actuator.js';
 import { TurntableController } from '../devices/turntable-controller.js';
 import { buildTurntableLayout, stubSensePoint } from '../physics/turntable.js';
 import { type BodyPose, PhysicsWorld } from '../physics/world.js';
+import { physicsMotorActuator } from '../sim/motor-actuator.js';
+import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 
