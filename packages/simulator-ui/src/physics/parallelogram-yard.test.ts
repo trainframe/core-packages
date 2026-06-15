@@ -113,4 +113,44 @@ describe('addParallelogramYard — a drive-through parallelogram stabling fan', 
       if (k !== 2) expect(visited.has(`PG-slot${k}`)).toBe(false);
     }
   });
+
+  it('flipped: hangs BELOW a westbound run (flat leads, slots down) and still drives through', () => {
+    const b = new PieceNetworkBuilder();
+    const a = b.run('approach', { x: 0, y: 0, dir: 180, layer: 0 }, [STRAIGHT, STRAIGHT]); // west
+    const yard = addParallelogramYard(b, a, { prefix: 'F', slots: SLOTS, flipped: true });
+    b.link('approach', yard.topLeadIn);
+    b.run('tail', yard.segments.bottomLeadOut, [STRAIGHT, STRAIGHT]);
+    b.link(yard.segments.bottomLeadOutSeg, 'tail');
+    const net = b.build().net;
+    /* Both leads flat; the bottom lead sits BELOW the top lead (larger screen-y). */
+    const topY = net.railOf('F-topin').at(0).y;
+    const botY = net.railOf(yard.segments.bottomLeadOutSeg).at(0).y;
+    expect(botY).toBeGreaterThan(topY + 400);
+
+    const world = new PhysicsWorld(net);
+    const sl = yard.segments;
+    for (const [k, sw] of sl.topSwitches.entries())
+      if (sw !== undefined) world.setSwitch(sw, k === 2 ? sl.slotPos : sl.thruPos);
+    for (const [k, sw] of sl.bottomSwitches.entries())
+      if (sw !== undefined) world.setSwitch(sw, k === 2 ? sl.slotPos : sl.thruPos);
+    world.addBody({
+      id: 'T',
+      kind: 'loco',
+      railPos: 10,
+      facing: 1,
+      segment: 'approach',
+      motion: 'forward',
+      maxSpeed: 180,
+    });
+    const visited = new Set<string>();
+    for (let s = 0; s < 60 * 90; s++) {
+      world.step(1 / 60);
+      const p = world.bodies()[0];
+      if (p === undefined) break;
+      visited.add(p.segment);
+      if (p.fate !== 'on-rail') break;
+    }
+    expect(visited.has('F-slot2')).toBe(true);
+    expect(visited.has('tail')).toBe(true);
+  });
 });

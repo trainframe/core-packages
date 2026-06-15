@@ -60,6 +60,10 @@ export interface ParallelogramYardOptions {
   readonly prefix: string;
   /** Number of parallel diagonal slots. */
   readonly slots: number;
+  /** Which side the slots fan toward. `false` (default) drops them to screen-+y for an
+   *  EAST-heading entry; `true` mirrors it, so a WEST-heading entry still fans the slots
+   *  to +y (the yard hangs BELOW a westbound run rather than above it). */
+  readonly flipped?: boolean;
   /** Straights along each diagonal slot (its stabling length). */
   readonly slotStraights?: number;
   /** Straights of top-lead between adjacent slot turnouts (the slot stagger). */
@@ -109,6 +113,11 @@ export function addParallelogramYard(
   const thruPos = 'thru';
   const slotPos = 'slot';
   const last = opts.slots - 1;
+  const flip = opts.flipped ?? false;
+  /* The two corner curves mirror with the turnouts when flipped, so the whole yard
+   *  fans to the same side as the slot branches. */
+  const topCorner = flip ? FLIP : CURVE;
+  const botCorner = flip ? CURVE : FLIP;
 
   const topLeadIn = `${p}-topin`;
   let topCursor = b.run(topLeadIn, entry, [STRAIGHT]);
@@ -130,7 +139,7 @@ export function addParallelogramYard(
     let slotFeed: string;
     if (i === last) {
       const tc = `${p}-topcurve`;
-      slotMouth = b.run(tc, topCursor, [CURVE]);
+      slotMouth = b.run(tc, topCursor, [topCorner]);
       b.link(prevTopSeg, tc);
       slotFeed = tc;
       topSwitches.push(undefined);
@@ -138,7 +147,7 @@ export function addParallelogramYard(
       const sw = `${p}-sw${i}`;
       const topThru = `${p}-tt${i}`;
       const topBranch = `${p}-tb${i}`;
-      const { thruExit, branchExit } = b.junction(topThru, topBranch, topCursor, false);
+      const { thruExit, branchExit } = b.junction(topThru, topBranch, topCursor, flip);
       b.link(prevTopSeg, topThru, { switchId: sw, position: thruPos });
       b.link(prevTopSeg, topBranch, { switchId: sw, position: slotPos });
       slotMouth = branchExit;
@@ -159,7 +168,7 @@ export function addParallelogramYard(
      *  switch); every inner slot converges via a trailing turnout. */
     if (i === 0) {
       const bc = `${p}-botcurve`;
-      const bcEnd = b.run(bc, slotEnd, [FLIP]);
+      const bcEnd = b.run(bc, slotEnd, [botCorner]);
       b.link(slot, bc);
       prev = { trunk: bcEnd, feed: (leadId) => b.link(bc, leadId) };
       bottomSwitches.push(undefined);
@@ -167,7 +176,7 @@ export function addParallelogramYard(
       const botSw = `${p}-bsw${i}`;
       const botThru = `${p}-bt${i}`;
       const botBranch = `${p}-bb${i}`;
-      const { trunkExit, thruEntry } = b.mergeJunction(botThru, botBranch, slotEnd, false);
+      const { trunkExit, thruEntry } = b.mergeJunction(botThru, botBranch, slotEnd, flip);
       b.link(slot, botBranch);
       if (prev !== null) {
         const lead = `${p}-lead${i}`;
