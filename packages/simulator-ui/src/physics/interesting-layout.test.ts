@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { countBridges } from '../track/overlap.js';
 import { buildMainLoopScene } from './interesting-layout.js';
 import { PhysicsWorld } from './world.js';
 
@@ -6,6 +7,11 @@ describe('interesting-layout — main loop with branch taps', () => {
   it('builds overlap-clean and closes', () => {
     const scene = buildMainLoopScene();
     expect(scene.closureGapMm).toBeLessThan(2);
+  });
+
+  it('crosses over itself exactly once, on a bridge (the crossover loop)', () => {
+    const scene = buildMainLoopScene();
+    expect(countBridges(scene.pieces)).toBe(1);
   });
 
   it('exposes three branch taps (yard + two satellites)', () => {

@@ -17,6 +17,7 @@
  *
  * Pure geometry/topology: no DOM, no clock, no randomness.
  */
+import { type CrossoverLoopSegments, addCrossoverLoop } from './crossover-loop.js';
 import type { RailNetwork } from './network.js';
 import { type Cursor, PieceNetworkBuilder, type PieceSpec } from './piece-network.js';
 import { type SatelliteLoopSegments, addSatelliteLoop } from './satellite-loop.js';
@@ -66,9 +67,11 @@ export interface MainLoopBranches {
   /** The yard's facing-turnout tap (a dead-end branch stub the trapezoid yard grows
    *  out of). */
   readonly yard: BranchTap;
-  /** The two satellite LOOPS spliced into the top run (divert → big loop → rejoin). */
+  /** The satellite LOOP spliced into the top run (divert → big loop → rejoin). */
   readonly satA: SatelliteLoopSegments;
-  readonly satB: SatelliteLoopSegments;
+  /** The CROSSOVER loop — a teardrop that bridges over itself once (divert → loop
+   *  that crosses over its own track on a height layer → rejoin). */
+  readonly satB: CrossoverLoopSegments;
 }
 
 export interface BranchTap {
@@ -146,7 +149,7 @@ export function buildMainLoopScene(): MainLoopScene {
   const afterTopB = b.run('top-b', satA.exit, [STRAIGHT, ...HUMP_SM]);
   b.link(satA.segments.mergeThrough, 'top-b');
   b.link(satA.segments.mergeBranch, 'top-b');
-  const satB = addSatelliteLoop(b, afterTopB, { prefix: 'satB', flipped: true, riser: 4, span: 2 });
+  const satB = addCrossoverLoop(b, afterTopB, { prefix: 'satB', flipped: true });
   b.link('top-b', satB.inbound);
   const afterTopC = b.run('top-c', satB.exit, [STRAIGHT, ...HUMP, STRAIGHT]);
   b.link(satB.segments.mergeThrough, 'top-c');

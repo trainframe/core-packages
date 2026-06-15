@@ -63,6 +63,40 @@ function isInvalidOverlap(a: TrackPiece, b: TrackPiece): boolean {
 }
 
 /**
+ * True when two pieces form a BRIDGE: coincident footprints (centres within
+ * `OVERLAP_CENTRE_DISTANCE_MM`) on DIFFERENT height layers with no shared joint —
+ * the track passing over itself, grade-separated. The exact complement of
+ * `isInvalidOverlap`'s same-layer case: same coincidence test, opposite layer test.
+ */
+function isBridge(a: TrackPiece, b: TrackPiece): boolean {
+  if (layerOf(a) === layerOf(b)) return false; // same layer — not a bridge
+  if (centreDistance(a, b) > OVERLAP_CENTRE_DISTANCE_MM) return false; // apart
+  if (shareEndpoint(a, b)) return false; // an end-to-end ramp joint, not a crossing
+  return true;
+}
+
+/**
+ * How many grade-separated crossings (bridges) a layout contains — coincident
+ * footprints on different layers. A layout with no deliberate flyover returns 0; a
+ * single self-crossing teardrop returns 1. Pairs with the same-layer overlap check:
+ * `detectSameLayerOverlaps` must be empty (no foul) AND this counts the intended
+ * bridges (a build-time guard that a flyover is really grade-separated, not flat).
+ */
+export function countBridges(pieces: ReadonlyArray<TrackPiece>): number {
+  const track = pieces.filter((p) => !isDevicePiece(p.type));
+  let n = 0;
+  for (let i = 0; i < track.length; i++) {
+    const a = track[i];
+    if (a === undefined) continue;
+    for (let j = i + 1; j < track.length; j++) {
+      const b = track[j];
+      if (b !== undefined && isBridge(a, b)) n++;
+    }
+  }
+  return n;
+}
+
+/**
  * The pier point (the raised piece's centre) counts as "over" a lower piece when
  * it lands within this distance (mm) of that piece's rail centre-line. A plank is
  * `2 × PLANK_HALF_WIDTH` (26 mm) wide and the pier ~9 mm, so half the plank plus
