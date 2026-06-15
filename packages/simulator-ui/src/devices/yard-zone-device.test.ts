@@ -4,19 +4,18 @@
  * `inProcessPlatform` bus (an `InProcessBus`) as the device's link to core. We
  * observe occupancy/admission through the events the device PUBLISHES (the
  * `zone_state_changed` / `zone_train_released` / `train_length_changed` facts the
- * scheduler would consult) and the `switch_state_changed` it confirms — never by
- * mocking the scheduler, the registry, or the device's own hooks.
+ * scheduler would consult) — never by mocking the scheduler, the registry, or the
+ * device's own hooks. The yard is IN-LINE on the running line (a pure zone), so it
+ * owns no scheduler-thrown tap; the interior `Jw`/`Je` ladder points are opaque.
  *
  * The interior `YardController` runs unchanged behind the device's
  * `ParentPlatform`; we drive it by stepping the world + the device exactly as the
  * gate/script would, with a fixed dt (no Date.now / Math.random).
  */
-import { PROTOCOL_VERSION } from '@trainframe/protocol';
 import { describe, expect, it } from 'vitest';
 import { buildBranchingScene } from '../physics/branching-scene.js';
 import { PhysicsWorld } from '../physics/world.js';
 import { InProcessBus, inProcessPlatform } from './platform-provider.js';
-import { physicsSwitchActuator } from './switch-actuator.js';
 import { YardZoneDevice } from './yard-zone-device.js';
 
 const DEVICE_ID = 'YARD-1';
@@ -49,7 +48,6 @@ function setup(
     world,
     scene,
     capacity,
-    yardTap: physicsSwitchActuator(world, 'Jloop'),
   });
   return { device, world, bus, events, scene };
 }
@@ -83,7 +81,7 @@ const lastZone = (events: readonly SeenEvent[]): { capacity: number; occupancy: 
 };
 
 describe('YardZoneDevice — registration + initial occupancy', () => {
-  it('publishes device_registered (with the Jloop switch pairing) and an initial 0/N zone_state_changed', () => {
+  it('publishes device_registered (in-line zone: gates_zone + reports_length, no tap) and an initial 0/N zone_state_changed', () => {
     const { device, events } = setup(2);
     device.start();
 
@@ -91,39 +89,16 @@ describe('YardZoneDevice — registration + initial occupancy', () => {
     expect(reg).toBeDefined();
     const regPayload = reg?.payload as { capabilities: string[]; controls_marker_id?: string };
     expect(regPayload.capabilities).toEqual(
-      expect.arrayContaining(['core.gates_zone', 'core.reports_length', 'core.controls_switch']),
+      expect.arrayContaining(['core.gates_zone', 'core.reports_length']),
     );
     /* It must NOT claim controls_motion: it never drives a train across the throat. */
     expect(regPayload.capabilities).not.toContain('core.controls_motion');
-    /* The yard tap (Jloop at M-main-w) is paired to this device. */
-    expect(regPayload.controls_marker_id).toBe('M-main-w');
+    /* In-line yard: no scheduler-thrown tap, so no controls_switch and no pairing. */
+    expect(regPayload.capabilities).not.toContain('core.controls_switch');
+    expect(regPayload.controls_marker_id).toBeUndefined();
 
     const zone = lastZone(events);
     expect(zone).toMatchObject({ capacity: 2, occupancy: 0 });
-  });
-});
-
-describe('YardZoneDevice — the yard tap (core.controls_switch)', () => {
-  it('throws the physics switch and confirms on set_switch_position', () => {
-    const { device, bus, events } = setup(1);
-    device.start();
-
-    bus.sendCommand(DEVICE_ID, {
-      command_id: '00000000-0000-4000-8000-0000000000aa',
-      device_id: DEVICE_ID,
-      timestamp_server: '1970-01-01T00:00:00.000Z',
-      command_type: 'set_switch_position',
-      protocol_version: PROTOCOL_VERSION,
-      payload: { junction_marker_id: 'M-main-w', position: 'yard' },
-    });
-
-    const confirmed = events.find((e) => e.event_type === 'switch_state_changed');
-    expect(confirmed).toBeDefined();
-    expect(confirmed?.payload).toMatchObject({
-      junction_marker_id: 'M-main-w',
-      position: 'yard',
-      confirmed: true,
-    });
   });
 });
 

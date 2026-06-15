@@ -30,6 +30,7 @@
 import type { Layout } from '@trainframe/protocol';
 import {
   type BranchingDemo,
+  DEMO_ROUTES,
   MqttBrokerClient,
   buildBranchingDemo,
   buildBranchingScene,
@@ -50,14 +51,26 @@ interface Rig {
 }
 
 /**
+ * The scheduler's virtual clock (ms), advanced by `pump` in lockstep with the sim
+ * (`SIM_MS_PER_TICK` per `demo.step`). The in-line yard's crane service takes
+ * tens of SIM-seconds; pacing the dwell/clearance clock to SIM time (not wall
+ * time) lets the full service + the yard queue complete inside the test budget,
+ * deterministically. Reset per `startRig`.
+ */
+let clockMs = 0;
+const SIM_MS_PER_TICK = (1 / 60) * 1000;
+
+/**
  * Boot the broker + scheduler against the compiled layout, then build the demo
  * over MQTT — one `MqttBrokerClient` per device, each wrapped in `mqttPlatform`.
  * Seeds identity tags (tag id == marker id) so `tag_observed` resolves to
  * `marker_traversed`. Waits for every device to register before returning, so the
- * caller can assign schedules immediately.
+ * caller can assign schedules immediately. The scheduler runs on the virtual
+ * clock above (advanced by `pump`).
  */
 async function startRig(layout: Layout): Promise<Rig> {
-  const harness = await startHarness({ layout });
+  clockMs = 0;
+  const harness = await startHarness({ layout, now: () => clockMs });
   await harness.testClient.seedIdentityTags(layout.markers.map((m) => m.id));
 
   const deviceClients: MqttBrokerClient[] = [];
@@ -97,10 +110,14 @@ function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** Drive the world + devices a few ticks, then yield to the broker so its
- *  flush + the scheduler's reaction land before the next batch. */
+/** Drive the world + devices a few ticks (advancing the scheduler's virtual clock
+ *  in lockstep), then yield to the broker so its flush + the scheduler's reaction
+ *  land before the next batch. */
 async function pump(demo: BranchingDemo, ticks = 10): Promise<void> {
-  for (let i = 0; i < ticks; i++) demo.step(DT);
+  for (let i = 0; i < ticks; i++) {
+    demo.step(DT);
+    clockMs += SIM_MS_PER_TICK;
+  }
   await delay(6);
 }
 
@@ -186,23 +203,30 @@ const scene = buildBranchingScene(3);
 const LAYOUT: Layout = sceneToLayout(scene, 'branching');
 
 describe('Branching scene → protocol layout (pure)', () => {
-  it('emits the throat as a yard_entry, switched diverge edges, junctions, and no interior markers', () => {
+  it('emits the throat as a yard_entry on the running line, the switched spur diverge, the spur junction, and no interior markers', () => {
     const layout = sceneToLayout(buildBranchingScene(3), 'branching');
 
     const throat = layout.markers.find((m) => m.id === 'M-yard-throat');
     expect(throat?.kind).toBe('yard_entry');
 
-    const yardEdge = layout.edges.find(
-      (e) => e.from_marker_id === 'M-main-w' && e.to_marker_id === 'M-yard-throat',
+    /* The yard is IN-LINE (a zone on the running line), so the spine edge through
+     *  it is plain — no scheduler-thrown tap. */
+    const throughYard = layout.edges.find(
+      (e) => e.from_marker_id === 'M-yard-throat' && e.to_marker_id === 'M-yard-far',
     );
-    expect(yardEdge?.requires_switch_state).toBe('yard');
+    expect(throughYard?.requires_switch_state).toBeUndefined();
+    const intoYard = layout.edges.find(
+      (e) => e.from_marker_id === 'M-central' && e.to_marker_id === 'M-yard-throat',
+    );
+    expect(intoYard?.requires_switch_state).toBeUndefined();
 
+    /* The one real junction is the spur, diverging the scenic branch. */
     const branchEdge = layout.edges.find(
       (e) => e.from_marker_id === 'M-spur' && e.to_marker_id === 'M-branch-top',
     );
     expect(branchEdge?.requires_switch_state).toBe('branch');
 
-    expect(layout.junctions.map((j) => j.marker_id).sort()).toEqual(['M-main-w', 'M-spur']);
+    expect(layout.junctions.map((j) => j.marker_id)).toEqual(['M-spur']);
     for (const j of layout.junctions) expect((j.valid_positions ?? []).length).toBeGreaterThan(1);
 
     /* Interior yard segments (Jw/Je/slots) emit no core markers — the only yard
@@ -283,52 +307,45 @@ describe('Branching railyard on the REAL scheduler (headless gate)', () => {
     expect(grantsFor('T1').length).toBeGreaterThanOrEqual(1);
   }, 60_000);
 
-  it('(b) distinct branches via real junctions: T2 yard tap, T3 spur branch, distinct traversals', async () => {
-    /* Routes start at each train's HOME stop (where its body is seeded), so the
-     *  device's route belief and the body agree. T2 takes the yard branch; T3 the
-     *  spur branch — non-overlapping at the junctions. */
-    rig.harness.server.assignSchedule('T2', 'rB-yardturn', ['M-top', 'M-yard-throat', 'M-top']);
-    rig.harness.server.assignSchedule('T3', 'rC-branch', [
-      'M-spur',
-      'M-branch-top',
-      'M-branch-bot',
-    ]);
+  it('(b) distinct branches: the in-line yard throat and the scenic spur branch are both exercised via the real junction', async () => {
+    /* The full concurrent scenario (all three demo trains on their cyclic routes).
+     *  The yard is IN-LINE (every train runs the line to the throat — no tap); the
+     *  scenic BRANCH is a real `requires_switch_state` diverge off the spur, which
+     *  the reliever T4 takes. Driving all three keeps the line live so both
+     *  branches are reached (a parked, unscheduled train would foul the others). */
+    for (const id of rig.demo.trainIds) {
+      const route = DEMO_ROUTES.get(id);
+      if (route === undefined) throw new Error(`no DEMO route for ${id}`);
+      rig.harness.server.assignSchedule(id, route.routeId, [...route.stops]);
+    }
 
-    /* The scheduler throws the yard tap (Jloop@M-main-w → yard) for T2 and the
-     *  spur (Jspur@M-spur → branch) for T3 — both before clearing the train past
-     *  the junction. */
-    await pumpUntil(
-      rig.demo,
-      () => switchCommands('M-main-w', 'yard').length >= 1,
-      'the scheduler throws the yard tap toward the yard for T2',
-    );
+    /* The scheduler throws the spur (Jspur@M-spur → branch) so the reliever takes
+     *  the scenic branch — the real junction resolution off `requires_switch_state`. */
     await pumpUntil(
       rig.demo,
       () => switchCommands('M-spur', 'branch').length >= 1,
-      'the scheduler throws the spur toward the branch for T3',
+      'the scheduler throws the spur toward the branch',
     );
 
-    /* Distinct traversals: T2 reaches the yard throat (and not the branch top);
-     *  T3 reaches the branch top (and not the yard throat). */
+    /* Distinct traversals: a yard-turn train reaches the in-line yard throat; the
+     *  reliever reaches the scenic branch top. Both paths are exercised. */
     await pumpUntil(
       rig.demo,
       () => traversedBy('T2').has('M-yard-throat'),
-      'T2 traverses the yard throat',
+      'T2 traverses the in-line yard throat',
     );
     await pumpUntil(
       rig.demo,
-      () => traversedBy('T3').has('M-branch-top'),
-      'T3 traverses the branch top',
+      () => traversedBy('T4').has('M-branch-top'),
+      'T4 traverses the scenic branch top',
     );
-    expect(traversedBy('T2').has('M-branch-top')).toBe(false);
-    expect(traversedBy('T3').has('M-yard-throat')).toBe(false);
-  }, 60_000);
+  }, 90_000);
 
   it('(c) queues multiple trains at the yard: deny-and-hold while full, FIFO admit on a freed slot', async () => {
     /* Capacity is 1 (demo default) and the yard starts empty. Route both T2 and
      *  T4 to the throat; one will be serviced, the other held short while the
      *  zone is occupied. */
-    rig.harness.server.assignSchedule('T2', 'rB-yardturn', ['M-top', 'M-yard-throat', 'M-top']);
+    rig.harness.server.assignSchedule('T2', 'rB-yardturn', ['M-top', 'M-yard-throat', 'M-spur']);
     rig.harness.server.assignSchedule('T4', 'rD-reliever', [
       'M-branch-bot',
       'M-top',
@@ -372,7 +389,7 @@ describe('Branching railyard on the REAL scheduler (headless gate)', () => {
   }, 90_000);
 
   it('(d) a carriage migrates train→train through the opaque yard, shortening the visitor', async () => {
-    rig.harness.server.assignSchedule('T2', 'rB-yardturn', ['M-top', 'M-yard-throat', 'M-top']);
+    rig.harness.server.assignSchedule('T2', 'rB-yardturn', ['M-top', 'M-yard-throat', 'M-spur']);
 
     /* The visiting T2 carries two carriages; the yard's spares cut is the migrate
      *  target. Drive the service to release. */
@@ -414,43 +431,46 @@ describe('Branching railyard on the REAL scheduler (headless gate)', () => {
   }, 90_000);
 
   it('(e) no phantom 180° flip during ordinary running (directional running)', async () => {
-    /* T1 runs the main line from CENTRAL toward M-main-e — a leg that descends the
-     *  bottom run and sweeps the south-east CORNER (cSE) up the right straight,
-     *  exactly the geometry that would expose a phantom 180° flip if the planner
-     *  ever U-turned the loco. (On this compact single-throat layout the loops all
-     *  share the M-main-e / M-top rejoin, so a deadlock-free FOUR-train concurrent
-     *  spectacle is the render script's job; the gate proves the directional
-     *  invariant on a clean cornered run with no other train scheduled to foul
-     *  T1's blocks.) */
+    /* T1 runs its express loop through the in-line yard. The yard SERVICE reverses
+     *  the loco into a slot (an INTERIOR move the device owns — never a scheduler
+     *  grant_reverse), so the directional invariant is asserted on the MAIN-LINE
+     *  cornered leg only: the south-east + north-east corners (`cSE`, `cNE`) up the
+     *  long right ascending straight, exactly the geometry that would expose a
+     *  phantom 180° flip if the PLANNER ever U-turned the loco on the open line. We
+     *  sample headings only while T1 is on those running-line segments, never
+     *  inside the opaque yard. */
     rig.harness.server.assignSchedule('T1', 'rA-express', [
-      'M-central',
       'M-main-e',
       'M-top',
       'M-central',
+      'M-yard-throat',
     ]);
 
-    /* Sample T1's heading every pump while it runs the cornered leg, until it has
-     *  crossed at least two markers (a full edge) and we have a dense heading
-     *  trace through the bend. */
+    /* The main-line cornered leg T1 sweeps from its home (`M-main-e`, on the right
+     *  ascending straight) up to `M-top`: the right straight + the north-east
+     *  corner `cNE`. Heading samples are confined to these running-line segments so
+     *  the yard's interior reverse never enters the trace. */
+    const RUNNING_LEG = new Set(['rightA', 'rightB', 'cNE', 'top']);
     const headings: number[] = [];
     const deadline = Date.now() + SETTLE_TIMEOUT_MS;
-    while (Date.now() < deadline && (traversedBy('T1').size < 2 || headings.length < 30)) {
+    while (Date.now() < deadline && (traversedBy('T1').size < 3 || headings.length < 30)) {
       await pump(rig.demo);
       const t1 = rig.demo.world.bodies().find((b) => b.id === 'T1');
-      if (t1 !== undefined && t1.speed > 0) headings.push(t1.rotationDeg);
+      if (t1 !== undefined && t1.speed > 0 && RUNNING_LEG.has(t1.segment)) {
+        headings.push(t1.rotationDeg);
+      }
     }
     const edges = reportedEdges(events(), 'T1');
 
     /* No grant_reverse during ordinary running; edges rail-continuous + no
-     *  immediate reverse; no ~180° heading flip between samples. */
+     *  immediate reverse; no ~180° heading flip between samples on the running leg. */
     expect(commandsFor('T1').some((c) => c.command_type === 'grant_reverse')).toBe(false);
     expectRailContinuous(edges);
     expectNoHeadingFlip(headings);
 
-    /* At least one full edge crossing a real corner — enough to expose a phantom
-     *  flip if the planner ever U-turned the loco, and enough heading samples
-     *  through the bend to assert continuity. */
-    expect(traversedBy('T1').size).toBeGreaterThanOrEqual(2);
+    /* Several markers crossed (a real lap segment through corners) + a dense
+     *  heading trace through the bend — enough to expose a phantom flip. */
+    expect(traversedBy('T1').size).toBeGreaterThanOrEqual(3);
     expect(edges.length).toBeGreaterThanOrEqual(1);
     expect(headings.length).toBeGreaterThanOrEqual(10);
   }, 60_000);

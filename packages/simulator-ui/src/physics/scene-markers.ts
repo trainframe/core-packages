@@ -58,35 +58,34 @@ export function edgeRequiresSwitch(
 }
 
 /* The diverging (non-`thru`) position each junction edge selects. The remaining
- * edge out of a junction takes the junction's `thru` position. */
+ * edge out of a junction takes the junction's `thru` position. The yard is
+ * IN-LINE (a zone on the running line), so the only junction is the spur. */
 const DIVERGE_EDGES: Readonly<Record<string, string>> = {
-  'M-main-w->M-yard-throat': 'yard',
   'M-spur->M-branch-top': 'branch',
 };
 const THRU_POSITION: Readonly<Record<string, string>> = {
-  Jloop: 'thru',
   Jspur: 'thru',
 };
 
 /** The directed core edges of the branching layout — the marker adjacency along
- *  the rail network, forming cycles (main loop, branch loop, yard branch). The
- *  yard interior is opaque: the only yard edges are throat→far and far→throat. */
+ *  the rail network, forming cycles (the main loop running THROUGH the in-line
+ *  yard, and the branch loop). The yard interior is opaque: the only yard edges
+ *  are the throat↔far spine the running line crosses. */
 const CORE_EDGES: ReadonlyArray<readonly [string, string]> = [
-  /* Main loop cycle. */
+  /* Main loop cycle — runs straight THROUGH the in-line yard (throat → far). */
   ['M-top', 'M-main-w'],
-  ['M-main-w', 'M-main-wlow'],
-  ['M-main-wlow', 'M-central'],
-  ['M-central', 'M-main-e'],
-  ['M-main-e', 'M-spur'],
-  ['M-spur', 'M-top'],
-  /* Yard branch (off `Jloop=yard`), opaque interior. */
-  ['M-main-w', 'M-yard-throat'],
+  ['M-main-w', 'M-central'],
+  ['M-central', 'M-yard-throat'],
   ['M-yard-throat', 'M-yard-far'],
   ['M-yard-far', 'M-main-e'],
-  /* Branch loop (off `Jspur=branch`), rejoining the main top straight. */
+  ['M-main-e', 'M-spur'],
+  ['M-spur', 'M-north'],
+  ['M-north', 'M-top'],
+  /* Branch loop (off `Jspur=branch`), rejoining the main top straight at its
+   *  start — so it too passes the spare mid-top boundary before M-top. */
   ['M-spur', 'M-branch-top'],
   ['M-branch-top', 'M-branch-bot'],
-  ['M-branch-bot', 'M-top'],
+  ['M-branch-bot', 'M-north'],
 ];
 
 /** The rail length (mm) backing a core edge, for `estimated_length_mm`. Opaque
@@ -103,8 +102,7 @@ function edgeLengthMm(scene: BranchingScene, from: string, to: string): number {
  * yard span + the branch return), not the `from` marker's anchor segment. */
 const SEGMENT_FOR_EDGE: Readonly<Record<string, string>> = {
   'M-yard-throat->M-yard-far': 'thru',
-  'M-branch-bot->M-top': 'bBottom',
-  'M-yard-far->M-main-e': 'connOut',
+  'M-branch-bot->M-north': 'bBottom',
 };
 
 function compileMarkers(scene: BranchingScene): LayoutMarker[] {

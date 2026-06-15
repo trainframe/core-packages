@@ -29,7 +29,7 @@ describe('buildBranchingDemo — composition root', () => {
     const { demo } = setup();
     expect(demo.scene.throatMarker).toBe('M-yard-throat');
     expect(demo.layout.markers.length).toBeGreaterThan(0);
-    expect(demo.trainIds).toEqual(['T1', 'T2', 'T3', 'T4']);
+    expect(demo.trainIds).toEqual(['T1', 'T2', 'T4']);
     expect(demo.yardDeviceId).toBe('YARD-1');
     expect(demo.switchDeviceIds).toEqual(['SWITCH-spur']);
     for (const id of demo.trainIds) {
@@ -37,7 +37,7 @@ describe('buildBranchingDemo — composition root', () => {
     }
   });
 
-  it('seeds the four loco bodies on the network plus the spares cut', () => {
+  it('seeds the loco bodies on the network plus the spares cut', () => {
     const { demo } = setup();
     const ids = demo.world.bodies().map((b) => b.id);
     for (const id of demo.trainIds) expect(ids).toContain(id);
@@ -66,7 +66,8 @@ describe('buildBranchingDemo — composition root', () => {
     demo.start();
 
     /* Assign T1 a route then grant it clearance the way the real scheduler would.
-     *  The body must physically advance under the device's motor command. */
+     *  T1 is seeded at its home M-main-e, so its first edge starts there; the body
+     *  must physically advance under the device's motor command. */
     const t1Before = demo.world.bodies().find((b) => b.id === 'T1');
     const route = {
       command_id: '00000000-0000-4000-8000-0000000000a1',
@@ -76,7 +77,7 @@ describe('buildBranchingDemo — composition root', () => {
       protocol_version: PROTOCOL_VERSION,
       payload: {
         route_id: 'rA-express',
-        edges: [{ from_marker_id: 'M-central', to_marker_id: 'M-main-e' }],
+        edges: [{ from_marker_id: 'M-main-e', to_marker_id: 'M-spur' }],
       },
     } as const;
     bus.sendCommand('T1', route);
@@ -86,7 +87,7 @@ describe('buildBranchingDemo — composition root', () => {
       timestamp_server: '1970-01-01T00:00:00.000Z',
       command_type: 'grant_clearance',
       protocol_version: PROTOCOL_VERSION,
-      payload: { limit_marker_id: 'M-main-e' },
+      payload: { limit_marker_id: 'M-spur' },
     });
 
     for (let i = 0; i < 120; i++) demo.step(DT);

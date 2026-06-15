@@ -1,27 +1,41 @@
 /**
- * The BRANCHING layout (FROZEN SPEC §2): a single switched `RailNetwork` driven
- * by the REAL `@trainframe/server` scheduler (route + clearance based), not the
- * bespoke `RailyardDemoController`. It is a proper running MAIN loop with real
- * curved corners enclosing the embedded railyard, plus a second independent
- * BRANCH loop that diverges off a real junction and rejoins the main line — so
- * the scheduler can route distinct trains down distinct branches via real
- * `requires_switch_state` edges.
+ * The BRANCHING layout (FROZEN SPEC §2, reworked for the deadlock-free four-train
+ * run): a single switched `RailNetwork` driven by the REAL `@trainframe/server`
+ * scheduler (route + clearance based), not the bespoke `RailyardDemoController`.
+ * It is a proper running MAIN loop with real curved corners, with the embedded
+ * railyard spliced IN-LINE on the bottom run, plus a second scenic BRANCH loop
+ * that diverges off a real junction and rejoins the main line.
  *
- * Two main-line junctions:
- *   - `Jloop` at `M-main-w` (`leftA.end`): `thru` continues down the left
- *     straight; `yard` peels off the connector into the yard west throat. Owned
- *     by the `YardZoneDevice` (the zone owns its own entry tap).
+ * ── Why the yard is IN-LINE (and not a diverge/rejoin branch) ────────────────
+ * The scheduler does NO deadlock avoidance (conflict resolution is an open design
+ * question). A yard hung OFF the loop as a branch — peeling off one straight and
+ * REJOINing the loop at a different, contended point — gridlocks four concurrent
+ * trains: a train re-merging from the yard and a train already occupying the
+ * rejoin block wait on each other in a cycle. So the yard is spliced IN-LINE on
+ * the main running line, EXACTLY like the proven legacy `railyard-demo`: the
+ * running line passes straight THROUGH the yard spine (`leadW → thru → leadE`),
+ * its throat (`M-yard-throat`) is a marker ON the ring, and the yard is a pure
+ * ZONE (ADR-027). A train routed to the throat is SUSPENDED there holding no
+ * block, so a queue of trains waiting their turn never deadlocks the line — and a
+ * non-serviced through train simply runs the spine on the default `thru` points.
+ * A service DIVERTS the visitor into a slot (interior `Jw`/`Je`, opaque to core)
+ * and returns it to the SAME through line, so there is no second merge to foul.
+ *
+ * One main-line junction remains:
  *   - `Jspur` at `M-spur` (`rightB.end`): `thru` carries on round the top corner
  *     back to `M-top`; `branch` diverges up into the scenic BRANCH loop, which
  *     rejoins the main line at `M-top` with heading preserved (no 180° flip).
  *
  * The yard interior (its `Jw`/`Je` switches + slots) is OPAQUE: it emits NO core
- * markers. Core sees only `M-yard-throat` (the zone boundary) and `M-yard-far`.
+ * markers, and is NOT a scheduler-thrown tap. Core sees only `M-yard-throat` (the
+ * zone boundary) and `M-yard-far`. The interior points default to `thru` (an
+ * unconditional spine link), so a train passes straight through unless the yard
+ * device throws a slot for a service.
  *
  * Built from the SAME primitives the yard uses (`straightSeg`, `cornerSeg`,
  * smooth curves) plus the real `buildYardLayout` network merged in wholesale —
- * its segment ids, `Jw`/`Je` switches and slots preserved — exactly as
- * `railyard-scene.ts` does. Pure geometry/topology, DOM-free.
+ * its segment ids, `Jw`/`Je` switches and slots preserved. Pure geometry/topology,
+ * DOM-free.
  */
 import type { LayoutMarker } from '@trainframe/protocol';
 import { type NetLink, type RailNetwork, buildNetwork } from './network.js';
@@ -66,8 +80,8 @@ export interface LoopBlock {
   readonly curved: boolean;
 }
 
-/** A running loop the scheduler circulates as a cycle. `main` encloses the yard
- *  and feeds it; `branch` is an independent scenic ring. */
+/** A running loop the scheduler circulates as a cycle. `main` runs through the
+ *  in-line yard; `branch` is an independent scenic ring. */
 export interface LoopGroup {
   readonly id: string;
   readonly blocks: readonly LoopBlock[];
@@ -87,7 +101,7 @@ export interface Station {
 
 export interface BranchingScene {
   readonly net: RailNetwork;
-  /** Segment id → world endpoints (loop blocks + connectors + yard segments). */
+  /** Segment id → world endpoints (loop blocks + yard spine segments). */
   readonly geom: ReadonlyMap<string, YardSegGeom>;
   /** Every running loop in the scene (`main`, `branch`), each its own cycle. */
   readonly loops: readonly LoopGroup[];
@@ -106,8 +120,9 @@ export interface BranchingScene {
   readonly sparesSlot: string;
 }
 
-/* The yard's throat world points (from `buildYardLayout` — fixed). The loop is
- * sized so its quarter-turn connectors land exactly on these, heading east. */
+/* The yard spine world points (from `buildYardLayout` — fixed). The yard spine
+ * IS the bottom run of the main loop, so the loop's corners land exactly on these
+ * throats, the line running west→east through the spine. */
 const YARD_WEST = { x: 150, y: 600 };
 const YARD_EAST = { x: 2050, y: 600 };
 /* Corner radius — generous, so the loop reads as rounded and a train holds the
@@ -115,12 +130,16 @@ const YARD_EAST = { x: 2050, y: 600 };
 const R = 320;
 const LEFT_X = YARD_WEST.x - R;
 const RIGHT_X = YARD_EAST.x + R;
-const BOTTOM_Y = 1000;
-const TOP_Y = -360;
-/* Where on the left/right straights the yard branch leaves / returns (world y),
- * one radius above each throat so the connector is a clean quarter circle. */
-const DIVERGE_Y = YARD_WEST.y - R;
-const REJOIN_Y = YARD_EAST.y - R;
+const SPINE_Y = YARD_WEST.y;
+/* A tall loop so the left and right straights are LONG — long blocks with room
+ * for two markers and a train with separation between them (the original cramped
+ * straights starved the dead-reckoning and stalled trains). */
+const TOP_Y = -900;
+/* Where on the right straight the branch return / spur diverge sit (world y), set
+ * so the right run splits into two blocks (`rightA` below the yard corner up to
+ * here, `rightB` up to the top corner) — giving a spare block on the long
+ * ascending straight so trains pack with separation. */
+const REJOIN_Y = SPINE_Y - R - 600;
 
 /* BRANCH loop footprint (world mm): a rounded rectangle nested clear of the yard
  * ladder, diverging UP off the spur node and rejoining the main top straight. */
@@ -155,22 +174,24 @@ function makeCorner(
   blocks.push({ id, geom: g, curved: true });
 }
 
-/** Build the MAIN loop blocks (counter-clockwise) and register them. */
+/** Build the MAIN loop's own running blocks (counter-clockwise) and register them
+ *  — everything EXCEPT the yard spine, which is merged in by `embedYard` and
+ *  spliced between `cSW` and `cSE` so the bottom run passes through the yard. */
 function buildMainLoop(segments: Map<string, Rail>, geom: Map<string, YardSegGeom>): LoopBlock[] {
   const blocks: LoopBlock[] = [];
   const s = (id: string, g: YardSegGeom): void => makeStraight(segments, geom, blocks, id, g);
   const c = (id: string, g: YardSegGeom, i: number, o: number): void =>
     makeCorner(segments, geom, blocks, id, g, i, o);
-  /* LEFT straight descends (south, 90°); the yard branch diverges off it at
-   *  `leftA.end` (`Jloop`). bottom heads EAST; RIGHT straight ascends (north,
-   *  -90°) — the yard return rejoins at `rightB.start`, and the spur diverges at
-   *  `rightB.end`. Real curved corners join the four runs. */
-  s('leftA', { ax: LEFT_X, ay: TOP_Y + R, bx: LEFT_X, by: DIVERGE_Y });
-  s('leftB', { ax: LEFT_X, ay: DIVERGE_Y, bx: LEFT_X, by: BOTTOM_Y - R });
-  c('cSW', { ax: LEFT_X, ay: BOTTOM_Y - R, bx: LEFT_X + R, by: BOTTOM_Y }, 90, 0);
-  s('bottom', { ax: LEFT_X + R, ay: BOTTOM_Y, bx: RIGHT_X - R, by: BOTTOM_Y });
-  c('cSE', { ax: RIGHT_X - R, ay: BOTTOM_Y, bx: RIGHT_X, by: BOTTOM_Y - R }, 0, -90);
-  s('rightA', { ax: RIGHT_X, ay: BOTTOM_Y - R, bx: RIGHT_X, by: REJOIN_Y });
+  /* LEFT straight descends (south, 90°) from the top corner to one radius above
+   *  the spine; `cSW` curves it EAST onto the yard west throat (`M-yard-throat`).
+   *  The spine (`leadW → thru → leadE`) is the bottom run — embedded separately.
+   *  `cSE` curves the yard east throat (heading east) round to NORTH; the RIGHT
+   *  straight ascends; `Jspur` diverges the branch off `rightB.end`. */
+  s('leftA', { ax: LEFT_X, ay: TOP_Y + R, bx: LEFT_X, by: SPINE_Y - R });
+  c('cSW', { ax: LEFT_X, ay: SPINE_Y - R, bx: YARD_WEST.x, by: SPINE_Y }, 90, 0);
+  /* (yard spine leadW→thru→leadE goes here in travel order) */
+  c('cSE', { ax: YARD_EAST.x, ay: SPINE_Y, bx: RIGHT_X, by: SPINE_Y - R }, 0, -90);
+  s('rightA', { ax: RIGHT_X, ay: SPINE_Y - R, bx: RIGHT_X, by: REJOIN_Y });
   s('rightB', { ax: RIGHT_X, ay: REJOIN_Y, bx: RIGHT_X, by: TOP_Y + R });
   c('cNE', { ax: RIGHT_X, ay: TOP_Y + R, bx: RIGHT_X - R, by: TOP_Y }, -90, 180);
   s('top', { ax: RIGHT_X - R, ay: TOP_Y, bx: LEFT_X + R, by: TOP_Y });
@@ -178,20 +199,39 @@ function buildMainLoop(segments: Map<string, Rail>, geom: Map<string, YardSegGeo
   return blocks;
 }
 
-/** Chain the main loop as a CYCLE. `leftA` gets a SWITCHED through-link to
- *  `leftB` (`Jloop=thru`); `rightB` gets a SWITCHED through-link to its corner
- *  (`Jspur=thru`). Every other joint is plain. */
-function linkMainLoop(blocks: readonly LoopBlock[], links: NetLink[]): void {
-  for (let i = 0; i < blocks.length; i++) {
-    const cur = blocks[i];
-    const nxt = blocks[(i + 1) % blocks.length];
+/** Chain the main loop as a CYCLE. The yard spine is in-line on the bottom run, so
+ *  the chain is: …cSW → leadW → thru → leadE → cSE… (the three spine links added
+ *  by `embedYard`). `rightB` gets a SWITCHED through-link to its corner
+ *  (`Jspur=thru`); every other joint is plain. */
+function linkMainLoop(yard: YardLayout, links: NetLink[]): void {
+  /* The running order around the cycle, splicing the yard spine between cSW and
+   *  cSE so the bottom run IS the yard spine. */
+  const order = [
+    'leftA',
+    'cSW',
+    yard.leadWest,
+    'thru',
+    yard.leadEast,
+    'cSE',
+    'rightA',
+    'rightB',
+    'cNE',
+    'top',
+    'cNW',
+  ];
+  for (let i = 0; i < order.length; i++) {
+    const cur = order[i];
+    const nxt = order[(i + 1) % order.length];
     if (cur === undefined || nxt === undefined) continue;
-    if (cur.id === 'leftA') {
-      links.push({ from: cur.id, to: nxt.id, when: { switchId: 'Jloop', position: 'thru' } });
-    } else if (cur.id === 'rightB') {
-      links.push({ from: cur.id, to: nxt.id, when: { switchId: 'Jspur', position: 'thru' } });
+    /* leadW→thru and thru→leadE are the yard SPINE: unconditional (default-thru)
+     *  joints, so a non-serviced train runs straight through and a slot diversion
+     *  (interior `Jw`/`Je` thrown to a slot) overrides them only while servicing.
+     *  Those two links are added by `embedYard`; skip them here. */
+    if (cur === yard.leadWest || cur === 'thru') continue;
+    if (cur === 'rightB') {
+      links.push({ from: cur, to: nxt, when: { switchId: 'Jspur', position: 'thru' } });
     } else {
-      links.push({ from: cur.id, to: nxt.id });
+      links.push({ from: cur, to: nxt });
     }
   }
 }
@@ -227,12 +267,16 @@ function buildBranchLoop(
   return blocks;
 }
 
-/** Rebuild the yard's internal link topology (mirrors `buildYardLayout`) so the
- *  combined network owns the same diverge/converge ladder. */
+/** Rebuild the yard's internal link topology for the IN-LINE spine: the `thru`
+ *  spine joints are UNCONDITIONAL (so the default running line goes straight
+ *  through the yard, no scheduler tap), and only the slot legs are switched. A
+ *  slot diversion (interior `Jw`/`Je` thrown to `slotN`) wins over the
+ *  unconditional spine joint while a service is in progress; resetting the points
+ *  to anything other than a slot restores the straight-through run. */
 function yardLinks(yard: YardLayout, slotCount: number): NetLink[] {
   const links: NetLink[] = [
-    { from: yard.leadWest, to: 'thru', when: { switchId: yard.westSwitch, position: 'thru' } },
-    { from: 'thru', to: yard.leadEast, when: { switchId: yard.eastSwitch, position: 'thru' } },
+    { from: yard.leadWest, to: 'thru' },
+    { from: 'thru', to: yard.leadEast },
   ];
   for (let i = 0; i < slotCount; i++) {
     const slot = `slot${i}`;
@@ -252,10 +296,10 @@ function yardLinks(yard: YardLayout, slotCount: number): NetLink[] {
   return links;
 }
 
-/** Merge the embedded yard network + register the two connector legs (loop↔yard).
- *  The diverge leg curves the left straight (south) round to EAST into the yard
- *  west throat; the return leg curves the yard east throat (east) round to NORTH
- *  onto the right straight — so the train enters and leaves heading east. */
+/** Merge the embedded yard network IN-LINE: register its segments + geom, its
+ *  interior ladder links, and the two SPINE links (`leadW→thru→leadE`) that make
+ *  the yard spine the main loop's bottom run. No connector legs and no scheduler
+ *  tap — the line runs straight through the yard by default. */
 function embedYard(
   segments: Map<string, Rail>,
   geom: Map<string, YardSegGeom>,
@@ -266,40 +310,31 @@ function embedYard(
   for (const seg of yard.net.segments()) segments.set(seg, yard.net.railOf(seg));
   for (const [id, g] of yard.geom) geom.set(id, g);
   for (const l of yardLinks(yard, slotCount)) links.push(l);
-
-  const gIn: YardSegGeom = { ax: LEFT_X, ay: DIVERGE_Y, bx: YARD_WEST.x, by: YARD_WEST.y };
-  segments.set('connIn', cornerSeg(gIn.ax, gIn.ay, gIn.bx, gIn.by, 90, 0));
-  geom.set('connIn', gIn);
-  links.push({ from: 'leftA', to: 'connIn', when: { switchId: 'Jloop', position: 'yard' } });
-  links.push({ from: 'connIn', to: yard.leadWest });
-
-  const gOut: YardSegGeom = { ax: YARD_EAST.x, ay: YARD_EAST.y, bx: RIGHT_X, by: REJOIN_Y };
-  segments.set('connOut', cornerSeg(gOut.ax, gOut.ay, gOut.bx, gOut.by, 0, -90));
-  geom.set('connOut', gOut);
-  links.push({ from: yard.leadEast, to: 'connOut' });
-  links.push({ from: 'connOut', to: 'rightB' });
   return yard;
 }
 
-/** The full core-marker list (FROZEN SPEC §2). Yard interior emits none. */
-function sceneMarkers(): SceneMarker[] {
+/** The full core-marker list (in-line yard). Yard interior emits none. */
+function sceneMarkers(yard: YardLayout): SceneMarker[] {
   return [
     { id: 'M-top', segment: 'top', end: 'end', kind: 'block_boundary' },
-    { id: 'M-main-w', segment: 'leftA', end: 'end', kind: 'junction' },
-    /* Placed well DOWN leftB (not at its start) so it sits clear of BOTH the
-     *  diverge node (`M-main-w` at leftB's start, the same world point) AND the
-     *  yard-tap connector that curves away from that node — a position-based
-     *  marker reader would otherwise fire it spuriously as a yard-bound train
-     *  swings through the connector. Far enough south that the connector curve has
-     *  long since left its capture radius. */
-    { id: 'M-main-wlow', segment: 'leftB', end: 'start', distAlongMm: 300, kind: 'block_boundary' },
-    { id: 'M-central', segment: 'bottom', end: 'start', distAlongMm: 600, kind: 'station_stop' },
-    { id: 'M-main-e', segment: 'rightB', end: 'start', kind: 'junction' },
+    /* The approach to the yard from the west/top, on the long descending left
+     *  straight — a plain block boundary (no junction; the yard is in-line).
+     *  M-main-w and M-central are spaced well apart, both clear of the segment
+     *  ends (nodes), so a train holds clearance smoothly down the straight. */
+    { id: 'M-main-w', segment: 'leftA', end: 'start', distAlongMm: 250, kind: 'block_boundary' },
+    { id: 'M-central', segment: 'leftA', end: 'start', distAlongMm: 580, kind: 'station_stop' },
+    /* The yard throat: a yard_entry marker ON the running line (zone boundary). */
+    { id: 'M-yard-throat', segment: yard.leadWest, end: 'start', kind: 'yard_entry' },
+    { id: 'M-yard-far', segment: yard.leadEast, end: 'end', kind: 'block_boundary' },
+    /* The ascending right straight, between the yard and the spur. */
+    { id: 'M-main-e', segment: 'rightA', end: 'end', kind: 'block_boundary' },
     { id: 'M-spur', segment: 'rightB', end: 'end', kind: 'junction' },
+    /* A spare block boundary mid-`top` so the long top run is two blocks, not one
+     *  — extra passing capacity so the four trains pack with a clear block between
+     *  them and a queue at the yard never backs up into a circular wait. */
+    { id: 'M-north', segment: 'top', end: 'start', distAlongMm: 900, kind: 'block_boundary' },
     { id: 'M-branch-top', segment: 'bTop', end: 'end', kind: 'station_stop' },
     { id: 'M-branch-bot', segment: 'bBottom', end: 'start', kind: 'block_boundary' },
-    { id: 'M-yard-throat', segment: 'leadW', end: 'start', kind: 'yard_entry' },
-    { id: 'M-yard-far', segment: 'leadE', end: 'end', kind: 'block_boundary' },
   ];
 }
 
@@ -310,12 +345,27 @@ export function buildBranchingScene(slotCount = 3): BranchingScene {
   const links: NetLink[] = [];
 
   const mainBlocks = buildMainLoop(segments, geom);
-  linkMainLoop(mainBlocks, links);
-  const branchBlocks = buildBranchLoop(segments, geom, links);
   const yard = embedYard(segments, geom, links, slotCount);
+  linkMainLoop(yard, links);
+  const branchBlocks = buildBranchLoop(segments, geom, links);
+
+  /* The main loop's blocks in travel order, with the yard spine spliced in-line
+   *  on the bottom run (between cSW and cSE) so callers that circulate the loop as
+   *  a cycle traverse the yard. */
+  const spine: LoopBlock[] = [yard.leadWest, 'thru', yard.leadEast].map((id) => {
+    const g = geom.get(id);
+    if (g === undefined) throw new Error(`branching-scene: no geom for spine ${id}`);
+    return { id, geom: g, curved: false };
+  });
+  const cSWIdx = mainBlocks.findIndex((b) => b.id === 'cSW');
+  const mainInline: LoopBlock[] = [
+    ...mainBlocks.slice(0, cSWIdx + 1),
+    ...spine,
+    ...mainBlocks.slice(cSWIdx + 1),
+  ];
 
   const loops: LoopGroup[] = [
-    { id: 'main', blocks: mainBlocks, feedsYard: true },
+    { id: 'main', blocks: mainInline, feedsYard: true },
     { id: 'branch', blocks: branchBlocks, feedsYard: false },
   ];
 
@@ -323,9 +373,9 @@ export function buildBranchingScene(slotCount = 3): BranchingScene {
     {
       id: 'central',
       name: 'CENTRAL',
-      x: LEFT_X + R + 600,
-      y: BOTTOM_Y,
-      angleDeg: 0,
+      x: LEFT_X,
+      y: (TOP_Y + R + SPINE_Y - R) / 2,
+      angleDeg: 90,
       side: 1,
       length: 460,
     },
@@ -341,7 +391,6 @@ export function buildBranchingScene(slotCount = 3): BranchingScene {
   ];
 
   const junctions: SceneJunction[] = [
-    { markerId: 'M-main-w', switchId: 'Jloop', positions: ['thru', 'yard'] },
     { markerId: 'M-spur', switchId: 'Jspur', positions: ['thru', 'branch'] },
   ];
 
@@ -351,7 +400,7 @@ export function buildBranchingScene(slotCount = 3): BranchingScene {
     loops,
     stations,
     yard,
-    markers: sceneMarkers(),
+    markers: sceneMarkers(yard),
     junctions,
     throatMarker: 'M-yard-throat',
     entrySlot: yard.slots[0] ?? 'slot0',

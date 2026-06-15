@@ -7,7 +7,7 @@
  *   - ONE `PhysicsWorld` over the scene's switched `RailNetwork`,
  *   - Engineer B's `ScheduledTrainDevice` per loco + a `SwitchDevice` for the
  *     `Jspur` main-line junction,
- *   - Engineer C's `YardZoneDevice` for the opaque yard (it owns the `Jloop` tap),
+ *   - Engineer C's `YardZoneDevice` for the opaque IN-LINE yard zone,
  *
  * all talking to core through a `PlatformProvider`. The caller supplies a
  * `platformFactory(deviceId)` so the SAME assembly runs:
@@ -94,58 +94,67 @@ export const SPUR_SWITCH_ID = 'SWITCH-spur';
 const VISITOR_CARS = 2;
 
 /**
- * The four trains (FROZEN SPEC §8). Each starts parked just inside the segment
- * that carries its first stop's marker so its first `train_status` seeds a real
- * heading before the operator assigns its cyclic route. All declare `can_reverse`
- * (any may be admitted to the yard).
- */
-/*
- * Each train homes at a DISTINCT marker (so the four bodies seed clear of one
- * another) chosen so the train's first move exercises what it is meant to: T2
- * homes at M-top so its first edge is the yard tap (M-main-w→M-yard-throat); T3
- * homes at the spur so its first edge is the branch diverge; T1 (express) and T4
- * (reliever) home on the bottom run, well clear. Routes are cycles, so each
- * stop-list is simply rotated to begin at the home stop.
+ * The three trains of the deadlock-free spectacle (FROZEN SPEC §8, reworked).
+ * Each starts parked just inside the segment that carries its first stop's marker
+ * so its first `train_status` seeds a real heading before the operator assigns its
+ * cyclic route. All declare `can_reverse` (any may be admitted to the yard).
+ *
+ * Why THREE, not four: the running ring is a single cycle threading the in-line
+ * yard, and the scheduler does no deadlock avoidance (an open design question).
+ * Four trains all circulating a ring whose only yard is a slow capacity-1 zone
+ * form a circular wait — a fourth train (a pure branch loop that must return to
+ * the spur THROUGH the yard) ties up the branch, the main ring AND the yard at
+ * once and gridlocks. Three trains — the express, the yard turn, and the branch
+ * reliever — keep at least one block clear in the cycle at all times, so the run
+ * is deadlock-free BY CONSTRUCTION (proven headless in `branching-liveness.test`).
+ * It still shows multiple trains on distinct routes, the scenic BRANCH (T4), and
+ * MULTIPLE trains queueing at the yard (all three visit it, capacity 1).
+ *
+ * Each homes at a DISTINCT marker so the three bodies seed clear of one another:
+ * T1 (express) on the right ascending straight (`M-main-e`), clear of the left
+ * descent; T2 (yard turn) at `M-top`, descending the left straight toward the yard
+ * (held a block back by section exclusivity, never rammed); T4 (branch reliever)
+ * on the branch return (`M-branch-bot`), off the main ring. Routes are cycles,
+ * rotated to begin at the home stop.
  */
 const TRAINS: readonly TrainPlacement[] = [
   {
     id: 'T1',
+    /* The express circulates the main loop. Homed on the right ascending straight
+     *  (`M-main-e`) so a parked T1 sits clear of the left-straight descent the
+     *  yard-turn trains use — no seed-collision. Its loop crosses the IN-LINE yard,
+     *  so the yard throat is a scheduled stop (ADR-028 cyclic resume): a train
+     *  whose path enters the zone MUST schedule it as a stop, or the zone releases
+     *  it with nowhere to go. Serviced each lap (a wagon migrates). Cycle (rotated
+     *  to its home): M-main-e → M-top → M-central → the in-line yard → back. */
     route: {
       routeId: 'rA-express',
-      stops: ['M-central', 'M-main-e', 'M-top', 'M-central'],
+      stops: ['M-main-e', 'M-top', 'M-central', 'M-yard-throat'],
       canReverse: true,
     },
     color: '#c0392b',
-    homeStop: 'M-central',
-    cars: 0,
+    homeStop: 'M-main-e',
+    cars: VISITOR_CARS,
   },
   {
     id: 'T2',
-    route: { routeId: 'rB-yardturn', stops: ['M-top', 'M-yard-throat', 'M-top'], canReverse: true },
+    route: {
+      routeId: 'rB-yardturn',
+      stops: ['M-top', 'M-yard-throat', 'M-spur'],
+      canReverse: true,
+    },
     color: '#2e6fb7',
     homeStop: 'M-top',
     cars: VISITOR_CARS,
   },
   {
-    id: 'T3',
-    /* Homed AT the spur diverge so its FIRST move takes the branch — the spur
-     *  switch is thrown to `branch` straight away, and it vacates the right
-     *  straight for the express behind it. */
-    route: {
-      routeId: 'rC-branch',
-      stops: ['M-spur', 'M-branch-top', 'M-branch-bot', 'M-top', 'M-spur'],
-      canReverse: true,
-    },
-    color: '#27a35a',
-    homeStop: 'M-spur',
-    cars: 0,
-  },
-  {
     id: 'T4',
-    /* Homed on the BRANCH return (OFF the main loop), so it never fouls the
-     *  express or the express's right straight; its yard route rejoins at M-top
-     *  then takes the tap — converging on the throat with T2 (the queueing proof)
-     *  without crossing a parked train. */
+    /* The branch reliever, homed on the BRANCH return (`M-branch-bot`, OFF the
+     *  main ring) so it seeds clear of the express + the yard-turn. Its cycle runs
+     *  the branch up to `M-top`, then descends the main loop into the IN-LINE yard
+     *  (a scheduled stop), converging on the throat behind T2 (the queueing proof)
+     *  before looping back up the branch. Exercises the distinct BRANCH AND the
+     *  yard queue in one train. */
     route: {
       routeId: 'rD-reliever',
       stops: ['M-branch-bot', 'M-top', 'M-yard-throat', 'M-branch-bot'],
@@ -273,7 +282,6 @@ export function buildBranchingDemo(platformFactory: PlatformFactory): BranchingD
     world,
     scene,
     capacity: YARD_CAPACITY,
-    yardTap: physicsSwitchActuator(world, 'Jloop'),
   });
 
   const routes = DEMO_ROUTES;

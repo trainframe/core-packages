@@ -24,6 +24,12 @@ type AedesBroker = Awaited<ReturnType<typeof Aedes.createBroker>>;
  */
 export interface HarnessOptions {
   readonly layout: Layout;
+  /** Optional monotonic clock (ms) for the scheduler's dwell/clearance timing.
+   *  Defaults to the real wall clock. A test that pumps simulated time far faster
+   *  than wall time can inject a clock it advances in lockstep with the sim, so
+   *  station dwells fire in SIM time (not wall time) and the run stays
+   *  deterministic. */
+  readonly now?: () => number;
 }
 
 export interface Harness {
@@ -43,7 +49,11 @@ export async function startHarness(opts: HarnessOptions): Promise<Harness> {
 
   const serverClient = new MqttBrokerClient();
   await serverClient.connect(brokerUrl);
-  const server = new TrainframeServer({ layout: opts.layout, client: serverClient });
+  const server = new TrainframeServer(
+    opts.now === undefined
+      ? { layout: opts.layout, client: serverClient }
+      : { layout: opts.layout, client: serverClient, now: opts.now },
+  );
   server.start();
 
   const testClient = await TestClient.connect(brokerUrl);

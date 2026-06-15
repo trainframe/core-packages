@@ -4,6 +4,8 @@ Snapshot of what's built vs. what's specified. Spec is the source of truth for *
 
 Status values: `shipped`, `partial`, `not started`.
 
+Recently: the scheduler-driven branching railyard demo is now DEADLOCK-FREE. The yard was reworked from a branch-hung diverge/rejoin (which gridlocked the concurrent run at the contended rejoin block) to an IN-LINE zone — the main running line passes straight through the yard spine (`leadW → thru → leadE`, default-`thru` points), the throat is a `yard_entry` marker on the ring, and a service diverts the visitor into a slot and returns it to the same line (no second merge to foul). The demo runs three trains (express / yard turn / branch reliever), all visiting the capacity-1 yard (the queue proof) with the scenic spur branch exercised; the ring keeps a clear block at all times. A committed liveness gate (`packages/integration/src/branching-liveness.test.ts`) drives the full concurrent run on the real broker + scheduler over MQTT for 200 sim-seconds and asserts no train freezes (it would catch the old gridlock, which froze trains for the whole run). `branching-scheduler.test.ts` updated to the in-line topology (no yard tap; the throat is a plain in-line zone boundary).
+
 ---
 
 ## Wire protocol: `packages/protocol/`

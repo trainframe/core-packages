@@ -6,16 +6,17 @@
  * (ADR-016) — it only consults the device-asserted occupancy to decide whether a
  * train may be cleared INTO the throat.
  *
- * Three core capabilities (the manifest + the `device_registered` event):
+ * The yard is IN-LINE on the running line (its spine IS the main loop's bottom
+ * run), so it owns NO scheduler-thrown tap: a train passes straight through on the
+ * default `thru` points, and only a service diverts it into a slot (the opaque
+ * interior `Jw`/`Je`, which the device throws itself). Two core capabilities (the
+ * manifest + the `device_registered` event):
  *   - `core.gates_zone` — admission at `M-yard-throat`. While `occupancy >=
  *     capacity` the scheduler's gate denies clearance to the throat and holds the
  *     approaching train one marker short (deny-and-hold, proven in
  *     `zone-admission.test.ts`).
  *   - `core.reports_length` — reconcile a train shortened by carriages shed into
  *     the yard (ADR-023), on its way out.
- *   - `core.controls_switch` paired to `M-main-w` (the yard tap `Jloop`) — the
- *     zone owns its own entry tap. The scheduler throws it toward this device with
- *     `set_switch_position`; the device drives `yardTap` and confirms.
  * It MUST NOT declare `core.controls_motion`: it never drives a train across the
  * throat (the scheduler reclaims a released train under ordinary clearance —
  * scheduler `handleZoneTrainReleased`).
@@ -37,8 +38,8 @@
  *
  * Tick-driven over a virtual clock; pure (no DOM, no Date.now, no Math.random).
  */
-import { type CoreCommand, type CoreEvent, PROTOCOL_VERSION } from '@trainframe/protocol';
-import type { DeviceManifest, SetSwitchPosition } from '@trainframe/protocol';
+import { type CoreEvent, PROTOCOL_VERSION } from '@trainframe/protocol';
+import type { DeviceManifest } from '@trainframe/protocol';
 import type { BranchingScene } from '../physics/branching-scene.js';
 import type { PhysicsWorld } from '../physics/world.js';
 import { Crane } from './crane.js';
@@ -78,8 +79,6 @@ export interface YardZoneDeps {
   readonly scene: BranchingScene;
   /** Total slots the zone admits into (= slotCount − reserved spares). */
   readonly capacity: number;
-  /** The throat tap (`Jloop`) the scheduler throws toward this device. */
-  readonly yardTap: SwitchActuator;
 }
 
 /** A train resident in the yard: its core id (the id core knows it by, == the
@@ -135,18 +134,20 @@ export class YardZoneDevice {
     return this.child.platformFor(childId);
   }
 
-  /** Announce to core (manifest + a `device_registered` event carrying the
-   *  switch pairing) and publish the initial occupancy; subscribe to commands. */
+  /** Announce to core (manifest + a `device_registered` event with the gates_zone
+   *  + reports_length capabilities) and publish the initial occupancy. Sets the
+   *  interior ladder points to the through (spine) position so a non-serviced
+   *  train runs straight through the in-line yard from the first tick. */
   start(): void {
+    this.westPoints.set('thru');
+    this.eastPoints.set('thru');
     this.d.platform.register(this.manifest());
-    /* The scheduler reads `controls_marker_id` (switch pairing) and the
-     *  gates_zone capability off the `device_registered` EVENT payload — the
-     *  manifest register ships only capabilities + kind. This mirrors the
-     *  existing convention (ScheduledTrainDevice ships train_length_mm the same
-     *  way); the device's surface stays additive (ADR-031). */
+    /* The scheduler reads the gates_zone capability off the `device_registered`
+     *  EVENT payload — the manifest register ships only capabilities + kind. This
+     *  mirrors the existing convention (ScheduledTrainDevice ships train_length_mm
+     *  the same way); the device's surface stays additive (ADR-031). */
     this.d.platform.publish(this.registeredEvent());
     this.announce();
-    this.unsubscribe = this.d.platform.onCommand((command) => this.onCommand(command));
   }
 
   stop(): void {
@@ -174,48 +175,24 @@ export class YardZoneDevice {
       protocol_version: PROTOCOL_VERSION,
       display_name: 'Railyard',
       description: 'A capacity-limited opaque shunting yard gating its throat.',
-      capabilities: ['core.gates_zone', 'core.reports_length', 'core.controls_switch'],
+      capabilities: ['core.gates_zone', 'core.reports_length'],
     };
   }
 
-  /** The `device_registered` event carrying the switch pairing (`controls_marker_id`
-   *  = the yard tap junction `M-main-w`) so the scheduler throws `Jloop` here. The
-   *  pairing field is added by `withControlsMarker` (the one sound coercion point —
-   *  see its comment). */
+  /** The `device_registered` event announcing the in-line zone's capabilities. The
+   *  yard owns no scheduler-thrown tap (it is in-line on the running line), so the
+   *  event carries no switch pairing. */
   private registeredEvent(): CoreEvent {
-    const tap = this.d.scene.junctions.find((j) => j.switchId === 'Jloop');
-    const base: CoreEvent = {
+    return {
       event_id: this.nextId(),
       device_id: this.deviceId,
       timestamp_device: EVENT_TIMESTAMP,
       event_type: 'device_registered',
       protocol_version: PROTOCOL_VERSION,
       payload: {
-        capabilities: ['core.gates_zone', 'core.reports_length', 'core.controls_switch'],
+        capabilities: ['core.gates_zone', 'core.reports_length'],
         device_kind_hint: 'railyard',
       },
-    };
-    return tap === undefined ? base : withControlsMarker(base, tap.markerId);
-  }
-
-  /** Handle a command from core: throw the yard tap on `set_switch_position`
-   *  (confirming), and ignore anything else (the device never drives a train). */
-  private onCommand(command: CoreCommand): void {
-    if (command.command_type !== 'set_switch_position') return;
-    const { junction_marker_id, position } = switchPositionPayload(command.payload);
-    this.d.yardTap.set(position);
-    this.d.platform.publish(this.switchConfirmed(junction_marker_id, position));
-  }
-
-  /** A confirmed `switch_state_changed` for the yard tap. */
-  private switchConfirmed(junctionMarkerId: string, position: string): CoreEvent {
-    return {
-      event_id: this.nextId(),
-      device_id: this.deviceId,
-      timestamp_device: EVENT_TIMESTAMP,
-      event_type: 'switch_state_changed',
-      protocol_version: PROTOCOL_VERSION,
-      payload: { junction_marker_id: junctionMarkerId, position, confirmed: true },
     };
   }
 
@@ -305,6 +282,12 @@ export class YardZoneDevice {
     const idx = this.residents.indexOf(resident);
     if (idx !== -1) this.residents.splice(idx, 1);
     this.admitted.delete(resident.trainId);
+    /* The serviced train has cleared out onto the east lead (`exit` phase). Restore
+     *  the interior ladder to the through spine so the next NON-serviced train runs
+     *  straight through the in-line yard — and so the just-released train, now
+     *  beyond the east leg on `M-yard-far`, continues onto the main loop. */
+    this.westPoints.set('thru');
+    this.eastPoints.set('thru');
     this.announce();
   }
 
@@ -363,36 +346,4 @@ export class YardZoneDevice {
     const tail = this.seq.toString(16).padStart(12, '0');
     return `00000000-0000-4000-8000-${tail}`;
   }
-}
-
-/**
- * Attach the `controls_marker_id` switch-pairing field to a `device_registered`
- * event. This is the ONE sound coercion in this module: the scheduler reads
- * `controls_marker_id` straight off the `device_registered` payload to pair a
- * `core.controls_switch` device with its junction marker (`scheduler.ts`
- * switch-pairing; `VirtualSwitch` ships it the same way), but the protocol's
- * `DeviceRegisteredPayload` schema has not yet formalised the field, so the
- * strict `CoreEvent` payload type omits it. We add it through a single,
- * well-named adapter rather than sprinkling casts; the broker re-validates the
- * envelope on the wire. Returns a fresh event (no mutation of the input).
- */
-/**
- * Read a `set_switch_position` command's payload. `Static<CoreCommand>` is a union
- * of envelopes; TypeScript narrows `command_type` on the envelope but over-widens
- * `payload` to the union of every command's payload, so the concrete fields are
- * not directly reachable. After the caller has confirmed
- * `command_type === 'set_switch_position'`, this single typed adapter recovers the
- * `SetSwitchPosition['payload']` shape the protocol schema guarantees — one sound
- * coercion rather than reading fields off a widened union.
- */
-function switchPositionPayload(payload: CoreCommand['payload']): SetSwitchPosition['payload'] {
-  return payload as SetSwitchPosition['payload'];
-}
-
-function withControlsMarker(event: CoreEvent, controlsMarkerId: string): CoreEvent {
-  const payload: Record<string, unknown> = {
-    ...(event.payload as Record<string, unknown>),
-    controls_marker_id: controlsMarkerId,
-  };
-  return { ...event, payload } as CoreEvent;
 }

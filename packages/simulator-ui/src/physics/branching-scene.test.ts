@@ -41,44 +41,59 @@ function isCycle(adj: ReadonlyMap<string, string[]>, seq: readonly string[]): bo
 }
 
 describe('buildBranchingScene', () => {
-  it('embeds the real yard network (segments, switches, slots) wholesale', () => {
+  it('embeds the real yard network (segments, switches, slots) IN-LINE on the spine', () => {
     const scene = buildBranchingScene(3);
     const segs = scene.net.segments();
     expect(segs).toContain(scene.yard.leadWest);
     expect(segs).toContain(scene.yard.leadEast);
+    expect(segs).toContain('thru');
     expect(segs).toContain(scene.entrySlot);
     expect(segs).toContain(scene.sparesSlot);
-    expect(segs).toContain('connIn');
-    expect(segs).toContain('connOut');
-    /* Two running loops: main (feeds yard) + branch (independent ring). */
+    /* Two running loops: main (runs through the in-line yard) + branch (an
+     *  independent scenic ring). */
     expect(scene.loops.map((l) => l.id).sort()).toEqual(['branch', 'main']);
     expect(scene.loops.find((l) => l.id === 'main')?.feedsYard).toBe(true);
     expect(scene.loops.find((l) => l.id === 'branch')?.feedsYard).toBe(false);
+    /* The main loop's travel order includes the yard spine in-line. */
+    const mainBlocks = scene.loops.find((l) => l.id === 'main')?.blocks.map((b) => b.id) ?? [];
+    expect(mainBlocks).toContain(scene.yard.leadWest);
+    expect(mainBlocks).toContain('thru');
+    expect(mainBlocks).toContain(scene.yard.leadEast);
   });
 
   it('is a connected branching graph with multiple distinct cycles', () => {
     const scene = buildBranchingScene(3);
     const adj = adjacency(scene);
-    /* The main loop cycle. */
+    /* The main loop cycle — runs straight through the in-line yard, with a spare
+     *  mid-top block boundary (M-north). */
     expect(
-      isCycle(adj, ['M-top', 'M-main-w', 'M-main-wlow', 'M-central', 'M-main-e', 'M-spur']),
+      isCycle(adj, [
+        'M-top',
+        'M-main-w',
+        'M-central',
+        'M-yard-throat',
+        'M-yard-far',
+        'M-main-e',
+        'M-spur',
+        'M-north',
+      ]),
     ).toBe(true);
-    /* The branch loop cycle — a DISTINCT cycle sharing only M-spur/M-top. */
+    /* The branch loop cycle — a DISTINCT cycle sharing only M-spur/M-north/M-top
+     *  with the main loop (the branch rejoins the top run at its start, before the
+     *  spare M-north boundary). */
     expect(
       isCycle(adj, [
         'M-spur',
         'M-branch-top',
         'M-branch-bot',
+        'M-north',
         'M-top',
         'M-main-w',
-        'M-main-wlow',
         'M-central',
+        'M-yard-throat',
+        'M-yard-far',
         'M-main-e',
       ]),
-    ).toBe(true);
-    /* The yard branch cycle — diverges at M-main-w, rejoins at M-main-e. */
-    expect(
-      isCycle(adj, ['M-main-w', 'M-yard-throat', 'M-yard-far', 'M-main-e', 'M-spur', 'M-top']),
     ).toBe(true);
     /* Every marker is reachable from M-top (connected). */
     const reached = new Set<string>(['M-top']);
@@ -98,7 +113,7 @@ describe('buildBranchingScene', () => {
 });
 
 describe('sceneToLayout', () => {
-  it('compiles markers, switched diverge edges, and junctions', () => {
+  it('compiles markers, the switched spur diverge edge, and the spur junction', () => {
     const scene = buildBranchingScene(3);
     const layout = sceneToLayout(scene, 'branching');
     expect(layout.name).toBe('branching');
@@ -106,23 +121,30 @@ describe('sceneToLayout', () => {
     const throat = layout.markers.find((m) => m.id === 'M-yard-throat');
     expect(throat?.kind).toBe('yard_entry');
 
-    const toYard = layout.edges.find(
-      (e) => e.from_marker_id === 'M-main-w' && e.to_marker_id === 'M-yard-throat',
+    /* The yard is IN-LINE: the throat→far spine edge is a plain edge (no switch). */
+    const throughYard = layout.edges.find(
+      (e) => e.from_marker_id === 'M-yard-throat' && e.to_marker_id === 'M-yard-far',
     );
-    expect(toYard?.requires_switch_state).toBe('yard');
+    expect(throughYard?.requires_switch_state).toBeUndefined();
+    /* The approach to the yard is plain too (no tap junction). */
+    const intoYard = layout.edges.find(
+      (e) => e.from_marker_id === 'M-central' && e.to_marker_id === 'M-yard-throat',
+    );
+    expect(intoYard?.requires_switch_state).toBeUndefined();
+
     const toBranch = layout.edges.find(
       (e) => e.from_marker_id === 'M-spur' && e.to_marker_id === 'M-branch-top',
     );
     expect(toBranch?.requires_switch_state).toBe('branch');
-    /* The thru continuation off each junction carries the thru position. */
-    const thruDown = layout.edges.find(
-      (e) => e.from_marker_id === 'M-main-w' && e.to_marker_id === 'M-main-wlow',
+    /* The thru continuation off the spur (toward the top run, via the spare
+     *  mid-top boundary) carries the thru position. */
+    const thruTop = layout.edges.find(
+      (e) => e.from_marker_id === 'M-spur' && e.to_marker_id === 'M-north',
     );
-    expect(thruDown?.requires_switch_state).toBe('thru');
+    expect(thruTop?.requires_switch_state).toBe('thru');
 
-    /* Junctions present with valid positions. */
-    const jLoop = layout.junctions.find((j) => j.marker_id === 'M-main-w');
-    expect(jLoop?.valid_positions).toEqual(['thru', 'yard']);
+    /* The only junction is the spur (the yard is an in-line zone, not a tap). */
+    expect(layout.junctions.map((j) => j.marker_id)).toEqual(['M-spur']);
     const jSpur = layout.junctions.find((j) => j.marker_id === 'M-spur');
     expect(jSpur?.valid_positions).toEqual(['thru', 'branch']);
   });
@@ -139,11 +161,11 @@ describe('sceneToLayout', () => {
       'wleg0',
       'eleg0',
     ]);
-    /* No marker is anchored such that it surfaces an interior slot/leg as a node:
-     *  only M-yard-throat (leadW.start) and M-yard-far (leadE.end) touch the yard. */
+    /* Only M-yard-throat (leadW.start) and M-yard-far (leadE.end) touch the yard;
+     *  the slots/legs/thru surface no markers. */
     const yardMarkers = layout.markers.filter((m) => m.id.startsWith('M-yard'));
     expect(yardMarkers.map((m) => m.id).sort()).toEqual(['M-yard-far', 'M-yard-throat']);
-    /* No edge mentions any opaque interior marker (there are none). */
+    /* No edge mentions any opaque interior SEGMENT id as a marker. */
     for (const e of layout.edges) {
       expect(interior.has(e.from_marker_id)).toBe(false);
       expect(interior.has(e.to_marker_id)).toBe(false);
@@ -176,43 +198,42 @@ describe('markerAt / edgeRequiresSwitch', () => {
     expect(markerAt(scene, 'cSW', 'start')).toBeUndefined();
   });
 
-  it('resolves diverge edges to switch + position, plain edges to undefined', () => {
+  it('resolves the spur diverge edge to switch + position, plain edges to undefined', () => {
     const scene = buildBranchingScene(3);
-    expect(edgeRequiresSwitch(scene, 'M-main-w', 'M-yard-throat')).toEqual({
-      switchId: 'Jloop',
-      position: 'yard',
-    });
     expect(edgeRequiresSwitch(scene, 'M-spur', 'M-branch-top')).toEqual({
       switchId: 'Jspur',
       position: 'branch',
     });
-    /* Non-junction from-marker: no switch constraint. */
-    expect(edgeRequiresSwitch(scene, 'M-central', 'M-main-e')).toBeUndefined();
+    /* The in-line yard spine carries no switch constraint. */
+    expect(edgeRequiresSwitch(scene, 'M-yard-throat', 'M-yard-far')).toBeUndefined();
+    expect(edgeRequiresSwitch(scene, 'M-central', 'M-yard-throat')).toBeUndefined();
   });
 });
 
 describe('physics traversal', () => {
-  it('drives a full MAIN cycle on-rail (Jloop=thru, Jspur=thru), never straying to yard/branch', () => {
+  it('drives a full MAIN cycle on-rail through the in-line yard (Jspur=thru), never straying to a slot/branch', () => {
     const scene = buildBranchingScene(3);
     const w = new PhysicsWorld(scene.net);
-    w.setSwitch('Jloop', 'thru');
     w.setSwitch('Jspur', 'thru');
+    /* Interior ladder defaults to thru by being unset (the spine joints are
+     *  unconditional), so a non-serviced train runs straight through. */
     w.addBody({
       id: 'T',
       kind: 'loco',
       railPos: 100,
       facing: 1,
-      segment: 'bottom',
+      segment: 'leftA',
       motion: 'forward',
       power: 1100,
     });
-    const visited = visitedSegments(w, 60);
+    const visited = visitedSegments(w, 70);
     const b = w.bodies()[0];
     expect(b?.fate).toBe('on-rail');
-    const main = scene.loops.find((l) => l.id === 'main');
-    for (const block of main?.blocks ?? []) expect(visited.has(block.id)).toBe(true);
-    /* It never took the yard or the branch. */
-    expect(visited.has('connIn')).toBe(false);
+    /* It ran the yard spine in-line (leadW → thru → leadE). */
+    expect(visited.has(scene.yard.leadWest)).toBe(true);
+    expect(visited.has('thru')).toBe(true);
+    expect(visited.has(scene.yard.leadEast)).toBe(true);
+    /* It never diverted into a slot or took the branch. */
     expect(visited.has(scene.entrySlot)).toBe(false);
     expect(visited.has('bTop')).toBe(false);
   });
@@ -220,7 +241,6 @@ describe('physics traversal', () => {
   it('drives the BRANCH cycle on-rail (Jspur=branch), rejoining the main top straight', () => {
     const scene = buildBranchingScene(3);
     const w = new PhysicsWorld(scene.net);
-    w.setSwitch('Jloop', 'thru');
     w.setSwitch('Jspur', 'branch');
     /* Start on the right ascending straight approaching the spur. */
     w.addBody({
@@ -241,13 +261,15 @@ describe('physics traversal', () => {
     expect(visited.has('top')).toBe(true);
   });
 
-  it('diverts into the yard branch when Jloop=yard, staying on-rail', () => {
+  it('diverts into a yard slot when the interior west point is thrown, staying on-rail', () => {
     const scene = buildBranchingScene(3);
     const w = new PhysicsWorld(scene.net);
-    w.setSwitch('Jloop', 'yard');
     w.setSwitch('Jspur', 'thru');
-    w.setSwitch(scene.yard.westSwitch, 'thru');
-    w.setSwitch(scene.yard.eastSwitch, 'thru');
+    /* Throw BOTH interior points to the entry slot: the train diverts off the
+     *  spine into the slot and rejoins it on the far side (the divert-and-return a
+     *  service uses, here with both legs open so it stays on-rail end to end). */
+    w.setSwitch(scene.yard.westSwitch, scene.entrySlot);
+    w.setSwitch(scene.yard.eastSwitch, scene.entrySlot);
     w.addBody({
       id: 'T',
       kind: 'loco',
@@ -259,8 +281,8 @@ describe('physics traversal', () => {
       maxSpeed: 220,
     });
     const visited = visitedSegments(w, 40);
-    expect(visited.has('connIn')).toBe(true);
     expect(visited.has(scene.yard.leadWest)).toBe(true);
+    expect(visited.has(scene.entrySlot)).toBe(true);
     expect(w.bodies()[0]?.fate).toBe('on-rail');
   });
 });

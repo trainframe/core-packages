@@ -13,17 +13,18 @@ describe('BranchingSceneView', () => {
     render(<BranchingSceneView />);
     expect(screen.getByTestId('physics-canvas')).toBeTruthy();
     expect(screen.getByTestId('physics-title').textContent).toContain('Branching layout');
-    /* Both real main-line junctions (Jloop at M-main-w, Jspur at M-spur) are drawn. */
-    expect(screen.getAllByTestId('branching-junction').length).toBe(2);
+    /* The one main-line junction (Jspur at M-spur) is drawn; the yard is in-line
+     *  (a zone on the running line), not a tap junction. */
+    expect(screen.getAllByTestId('branching-junction').length).toBe(1);
     /* The two station platforms (CENTRAL, HILLSIDE) and the CV gantry are drawn. */
     expect(screen.getByTestId('station-central')).toBeTruthy();
     expect(screen.getByTestId('station-hillside')).toBeTruthy();
     expect(screen.getByTestId('yard-gantry')).toBeTruthy();
 
     await waitFor(() => {
-      /* The real demo world: four locos + their rakes (T2/T4 carry two cars each)
-       *  + the two-carriage spares cut render as bodies — ten in all — and the
-       *  world handle is exposed under the `branching` name. */
+      /* The real demo world: three locos + their rakes (two cars each) + the
+       *  two-carriage spares cut render as bodies — eleven in all — and the world
+       *  handle is exposed under the `branching` name. */
       expect(document.querySelectorAll('[data-body-id]').length).toBeGreaterThanOrEqual(10);
       expect(window.__tfPhysics?.name).toBe('branching');
     });
@@ -31,7 +32,6 @@ describe('BranchingSceneView', () => {
     const ids = window.__tfPhysics?.bodies().map((b) => b.id) ?? [];
     expect(ids).toContain('T1');
     expect(ids).toContain('T2');
-    expect(ids).toContain('T3');
     expect(ids).toContain('T4');
     expect(ids).toContain('spare0');
   });
