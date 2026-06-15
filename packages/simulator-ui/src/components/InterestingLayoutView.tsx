@@ -24,8 +24,22 @@ function railPath(rail: { length: number; at: (d: number) => { x: number; y: num
 function SegArt({ d }: { d: string }) {
   return (
     <>
-      <path d={d} fill="none" stroke="#cba460" strokeWidth={14} strokeLinecap="round" strokeLinejoin="round" />
-      <path d={d} fill="none" stroke="#6f4c28" strokeWidth={2.6} strokeLinecap="round" strokeLinejoin="round" />
+      <path
+        d={d}
+        fill="none"
+        stroke="#cba460"
+        strokeWidth={14}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d={d}
+        fill="none"
+        stroke="#6f4c28"
+        strokeWidth={2.6}
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </>
   );
 }
@@ -39,10 +53,25 @@ export function InterestingLayoutView() {
     for (const tapId of [scene.branches.yard, scene.branches.satA, scene.branches.satB]) {
       w.setSwitch(tapId.switchId, tapId.mainPos);
     }
-    w.addBody({ id: 'T', kind: 'loco', railPos: 10, facing: 1, segment: scene.startSegment, color: '#c0392b', maxSpeed: 220 });
+    w.addBody({
+      id: 'T',
+      kind: 'loco',
+      railPos: 10,
+      facing: 1,
+      segment: scene.startSegment,
+      color: '#c0392b',
+      maxSpeed: 220,
+    });
     for (let i = 0; i < 2; i++) {
       const id = `T-c${i}`;
-      w.addBody({ id, kind: 'carriage', railPos: 10 - (i + 1) * 68, facing: 1, segment: scene.startSegment, color: '#e08a1e' });
+      w.addBody({
+        id,
+        kind: 'carriage',
+        railPos: 10 - (i + 1) * 68,
+        facing: 1,
+        segment: scene.startSegment,
+        color: '#e08a1e',
+      });
       w.couple(i === 0 ? 'T' : `T-c${i - 1}`, id);
     }
     let elapsed = 0;
@@ -70,12 +99,14 @@ export function InterestingLayoutView() {
   }, [scene]);
 
   const segs = scene.net.segments();
-  const pts = segs.map((id) => scene.net.railOf(id)).flatMap((r) => {
-    const out: { x: number; y: number }[] = [];
-    const n = Math.max(2, Math.ceil(r.length / 40));
-    for (let i = 0; i <= n; i++) out.push(r.at((r.length * i) / n));
-    return out;
-  });
+  const pts = segs
+    .map((id) => scene.net.railOf(id))
+    .flatMap((r) => {
+      const out: { x: number; y: number }[] = [];
+      const n = Math.max(2, Math.ceil(r.length / 40));
+      for (let i = 0; i <= n; i++) out.push(r.at((r.length * i) / n));
+      return out;
+    });
   const minX = Math.min(...pts.map((p) => p.x)) - 120;
   const maxX = Math.max(...pts.map((p) => p.x)) + 120;
   const minY = Math.min(...pts.map((p) => p.y)) - 120;
@@ -84,7 +115,14 @@ export function InterestingLayoutView() {
   return (
     <div style={{ width: '100vw', height: '100vh', background: '#efe6d3' }}>
       <div
-        style={{ position: 'absolute', top: 12, left: 16, fontFamily: 'sans-serif', fontSize: 15, color: '#5a4a2a' }}
+        style={{
+          position: 'absolute',
+          top: 12,
+          left: 16,
+          fontFamily: 'sans-serif',
+          fontSize: 15,
+          color: '#5a4a2a',
+        }}
         data-testid="physics-title"
       >
         Interesting layout — winding main loop (real pieces), branch taps for yard + two satellites
