@@ -22,9 +22,15 @@ import { type Cursor, PieceNetworkBuilder, type PieceSpec } from './piece-networ
 
 const STRAIGHT: PieceSpec = { type: 'straight' };
 const CURVE: PieceSpec = { type: 'curve' };
+const FLIP: PieceSpec = { type: 'curve', flipped: true };
 
-/** A 90° corner = two same-chirality 45° curves. */
-const CORNER: readonly PieceSpec[] = [CURVE, CURVE];
+/** A 180° end (a semicircle) = four same-chirality 45° curves. */
+const SEMI: readonly PieceSpec[] = [CURVE, CURVE, CURVE, CURVE];
+
+/** A HUMP — curve out and back to the same line + heading (net 0° turn), so a run
+ *  winds instead of running dead straight. The reason real layouts read as fun: the
+ *  track flows in and out rather than turning only at the corners. */
+const HUMP: readonly PieceSpec[] = [CURVE, FLIP, FLIP, CURVE];
 
 /** `n` straights in a row. */
 function side(n: number): PieceSpec[] {
@@ -93,46 +99,38 @@ function tap(
 }
 
 /**
- * Build the MAIN LOOP — a large rounded rectangle of real pieces — with three facing
- * turnouts tapped into it: one on the bottom run (the YARD branch, hanging below) and
- * two on the top run (the SATELLITE loops, hanging above). The loop closes (8 curves =
- * 360°); each tap's branch is a short stub a later slice grows out.
+ * Build the MAIN LOOP — a WINDING loop of real pieces (humps make the runs flow in and
+ * out, not run dead straight) with three facing turnouts tapped into it: one on the
+ * bottom run (the YARD branch, below) and two on the top run (the SATELLITE loops,
+ * above). Semicircle ends + a filler-sized final run close it; each tap's branch is a
+ * short stub a later slice grows out.
  */
 export function buildMainLoopScene(): MainLoopScene {
   const b = new PieceNetworkBuilder();
   const start: Cursor = { x: 0, y: 0, dir: 0, layer: 0 };
-  const LONG = 4; // straights per run between taps
-  const SHORT = 3; // straights up each end
 
-  /* BOTTOM run (east), with the YARD tap in its middle (branch hangs DOWN). */
+  /* BOTTOM run (heading east): winds via a hump, with the YARD tap (branch below).
+   *  Humps net 0° so the run returns to the y=0 line, heading east. */
   const startSegment = 'bot-a';
-  const afterBotA = b.run(startSegment, start, side(LONG));
+  const afterBotA = b.run(startSegment, start, [STRAIGHT, ...HUMP, STRAIGHT]);
   const yard = tap(b, startSegment, afterBotA, 'yard', false);
-  const afterBotB = b.run('bot-b', yard.onward, side(LONG));
+  const afterBotB = b.run('bot-b', yard.onward, [STRAIGHT, ...HUMP, STRAIGHT]);
   b.link(yard.taps.throughSeg, 'bot-b');
 
-  /* SE + NE corners up to the top run. */
-  const afterCornerSE = b.run('corner-se', afterBotB, CORNER);
-  b.link('bot-b', 'corner-se');
-  const afterRight = b.run('right', afterCornerSE, side(SHORT));
-  b.link('corner-se', 'right');
-  const afterCornerNE = b.run('corner-ne', afterRight, CORNER);
-  b.link('right', 'corner-ne');
+  /* RIGHT end: a semicircle up to the top run (turns east → west). */
+  const afterSemiR = b.run('semi-r', afterBotB, SEMI);
+  b.link('bot-b', 'semi-r');
 
-  /* TOP run (heading west), with the TWO satellite taps (branches hang UP, away from
-   *  the yard). The taps add asymmetric length vs the single-tap bottom, so the final
-   *  top segment is sized with a filler straight to land the NW corner back above the
-   *  start x — the same close-to-target trick the circuit uses. */
-  /* Shorter intermediate runs than the bottom (the two taps add length) so the top
-   *  stays SHORT of the start x and the filler closes the remainder, never overshoots. */
-  const TOP_RUN = 2;
-  const afterTopA = b.run('top-a', afterCornerNE, side(TOP_RUN));
-  b.link('corner-ne', 'top-a');
+  /* TOP run (heading west): winds via humps, with the TWO satellite taps (branches
+   *  above). The taps + humps make it asymmetric to the bottom, so the final segment
+   *  is filler-sized to land the left end back above the start x. */
+  const afterTopA = b.run('top-a', afterSemiR, [STRAIGHT, ...HUMP]);
+  b.link('semi-r', 'top-a');
   const satA = tap(b, 'top-a', afterTopA, 'satA', true);
-  const afterTopB = b.run('top-b', satA.onward, side(TOP_RUN));
+  const afterTopB = b.run('top-b', satA.onward, [STRAIGHT, ...HUMP]);
   b.link(satA.taps.throughSeg, 'top-b');
   const satB = tap(b, 'top-b', afterTopB, 'satB', true);
-  /* Close the top run to x = start.x (heading west, so x decreases). */
+  /* Close the top run to x = start.x (heading west, x decreasing). */
   const remaining = satB.onward.x - start.x;
   const full = Math.max(0, Math.floor(remaining / 200 + 1e-6));
   const filler = remaining - full * 200;
@@ -141,16 +139,12 @@ export function buildMainLoopScene(): MainLoopScene {
   const afterTopC = b.run('top-c', satB.onward, topCSpecs);
   b.link(satB.taps.throughSeg, 'top-c');
 
-  /* NW + SW corners back to the start. */
-  const afterCornerNW = b.run('corner-nw', afterTopC, CORNER);
-  b.link('top-c', 'corner-nw');
-  const afterLeft = b.run('left', afterCornerNW, side(SHORT));
-  b.link('corner-nw', 'left');
-  const afterCornerSW = b.run('corner-sw', afterLeft, CORNER);
-  b.link('left', 'corner-sw');
-  b.link('corner-sw', startSegment); // close the loop
+  /* LEFT end: a semicircle back down to the start. */
+  const afterSemiL = b.run('semi-l', afterTopC, SEMI);
+  b.link('top-c', 'semi-l');
+  b.link('semi-l', startSegment); // close the loop
 
-  const closureGapMm = Math.hypot(afterCornerSW.x - start.x, afterCornerSW.y - start.y);
+  const closureGapMm = Math.hypot(afterSemiL.x - start.x, afterSemiL.y - start.y);
   const built = b.build();
   return {
     net: built.net,
