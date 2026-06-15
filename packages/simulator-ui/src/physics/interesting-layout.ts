@@ -19,6 +19,7 @@
  */
 import type { RailNetwork } from './network.js';
 import { type Cursor, PieceNetworkBuilder, type PieceSpec } from './piece-network.js';
+import { type SatelliteLoopSegments, addSatelliteLoop } from './satellite-loop.js';
 
 const STRAIGHT: PieceSpec = { type: 'straight' };
 const CURVE: PieceSpec = { type: 'curve' };
@@ -41,10 +42,12 @@ function side(n: number): PieceSpec[] {
  *  continues the main line and whose BRANCH is the stub a later slice grows into the
  *  yard / a satellite loop. */
 export interface MainLoopBranches {
-  /** Switch id + branch-stub segment + its exit cursor, for each tap. */
+  /** The yard's facing-turnout tap (a dead-end branch stub the trapezoid yard grows
+   *  out of). */
   readonly yard: BranchTap;
-  readonly satA: BranchTap;
-  readonly satB: BranchTap;
+  /** The two satellite LOOPS spliced into the top run (divert → big loop → rejoin). */
+  readonly satA: SatelliteLoopSegments;
+  readonly satB: SatelliteLoopSegments;
 }
 
 export interface BranchTap {
@@ -109,39 +112,56 @@ export function buildMainLoopScene(): MainLoopScene {
   const b = new PieceNetworkBuilder();
   const start: Cursor = { x: 0, y: 0, dir: 0, layer: 0 };
 
-  /* BOTTOM run (heading east): winds via a hump, with the YARD tap (branch below).
-   *  Humps net 0° so the run returns to the y=0 line, heading east. */
-  const startSegment = 'bot-a';
-  const afterBotA = b.run(startSegment, start, [STRAIGHT, ...HUMP, STRAIGHT]);
-  const yard = tap(b, startSegment, afterBotA, 'yard', false);
-  const afterBotB = b.run('bot-b', yard.onward, [STRAIGHT, ...HUMP, STRAIGHT]);
+  /* TOP run (heading east): a hump, then the TWO big satellite LOOPS (each diverts up
+   *  and away into a loop and rejoins). Built FIRST; the bottom is sized to match. */
+  const startSegment = 'top-a';
+  const afterTopA = b.run(startSegment, start, [STRAIGHT, ...HUMP]);
+  const satA = addSatelliteLoop(b, afterTopA, { prefix: 'satA', flipped: true });
+  b.link(startSegment, satA.inbound);
+  const afterTopB = b.run('top-b', satA.exit, [STRAIGHT]);
+  b.link(satA.segments.mergeThrough, 'top-b');
+  b.link(satA.segments.mergeBranch, 'top-b');
+  const satB = addSatelliteLoop(b, afterTopB, { prefix: 'satB', flipped: true });
+  b.link('top-b', satB.inbound);
+  const afterTopC = b.run('top-c', satB.exit, [STRAIGHT, ...HUMP, STRAIGHT]);
+  b.link(satB.segments.mergeThrough, 'top-c');
+  b.link(satB.segments.mergeBranch, 'top-c');
+
+  /* RIGHT end: a semicircle down to the bottom run (turns east → west). */
+  const afterSemiR = b.run('semi-r', afterTopC, SEMI);
+  b.link('top-c', 'semi-r');
+
+  /* BOTTOM run (heading west): the YARD tap, then WINDS via humps + a filler back to
+   *  the start x — humps (not straights) absorb the satellites' length so the bottom
+   *  stays curvy, not a dead-straight pad. */
+  const afterBotA = b.run('bot-a', afterSemiR, [STRAIGHT, ...HUMP]);
+  b.link('semi-r', 'bot-a');
+  const yard = tap(b, 'bot-a', afterBotA, 'yard', false);
+  /* Lay as many humps as fit in the remaining westward span, then a straight+filler. */
+  const afterYard = b.run('bot-b', yard.onward, [STRAIGHT]);
   b.link(yard.taps.throughSeg, 'bot-b');
+  const HUMP_X = 566; // a hump's x-advance (measured)
+  const remaining = afterYard.x - start.x;
+  const humps = Math.max(0, Math.floor((remaining - 200) / HUMP_X));
+  const botSpecs: PieceSpec[] = [];
+  for (let i = 0; i < humps; i++) botSpecs.push(...HUMP);
+  const afterBotHumps = b.run('bot-c', afterYard, botSpecs.length > 0 ? botSpecs : [STRAIGHT]);
+  b.link('bot-b', 'bot-c');
+  const closeRemaining = afterBotHumps.x - start.x;
+  const full = Math.max(0, Math.floor(closeRemaining / 200 + 1e-6));
+  const filler = closeRemaining - full * 200;
+  const botCloseSpecs = side(full);
+  if (filler > 0.5) botCloseSpecs.push({ type: 'straight', lengthMm: filler });
+  const afterBotClose = b.run(
+    'bot-d',
+    afterBotHumps,
+    botCloseSpecs.length > 0 ? botCloseSpecs : [STRAIGHT],
+  );
+  b.link('bot-c', 'bot-d');
 
-  /* RIGHT end: a semicircle up to the top run (turns east → west). */
-  const afterSemiR = b.run('semi-r', afterBotB, SEMI);
-  b.link('bot-b', 'semi-r');
-
-  /* TOP run (heading west): winds via humps, with the TWO satellite taps (branches
-   *  above). The taps + humps make it asymmetric to the bottom, so the final segment
-   *  is filler-sized to land the left end back above the start x. */
-  const afterTopA = b.run('top-a', afterSemiR, [STRAIGHT, ...HUMP]);
-  b.link('semi-r', 'top-a');
-  const satA = tap(b, 'top-a', afterTopA, 'satA', true);
-  const afterTopB = b.run('top-b', satA.onward, [STRAIGHT, ...HUMP]);
-  b.link(satA.taps.throughSeg, 'top-b');
-  const satB = tap(b, 'top-b', afterTopB, 'satB', true);
-  /* Close the top run to x = start.x (heading west, x decreasing). */
-  const remaining = satB.onward.x - start.x;
-  const full = Math.max(0, Math.floor(remaining / 200 + 1e-6));
-  const filler = remaining - full * 200;
-  const topCSpecs = side(full);
-  if (filler > 0.5) topCSpecs.push({ type: 'straight', lengthMm: filler });
-  const afterTopC = b.run('top-c', satB.onward, topCSpecs);
-  b.link(satB.taps.throughSeg, 'top-c');
-
-  /* LEFT end: a semicircle back down to the start. */
-  const afterSemiL = b.run('semi-l', afterTopC, SEMI);
-  b.link('top-c', 'semi-l');
+  /* LEFT end: a semicircle back up to the start. */
+  const afterSemiL = b.run('semi-l', afterBotClose, SEMI);
+  b.link('bot-d', 'semi-l');
   b.link('semi-l', startSegment); // close the loop
 
   const closureGapMm = Math.hypot(afterSemiL.x - start.x, afterSemiL.y - start.y);
@@ -150,7 +170,7 @@ export function buildMainLoopScene(): MainLoopScene {
     net: built.net,
     pieces: built.pieces,
     geom: built.geom,
-    branches: { yard: yard.taps, satA: satA.taps, satB: satB.taps },
+    branches: { yard: yard.taps, satA: satA.segments, satB: satB.segments },
     startSegment,
     closureGapMm,
   };
