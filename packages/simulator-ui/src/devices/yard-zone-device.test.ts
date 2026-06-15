@@ -15,8 +15,22 @@
 import { describe, expect, it } from 'vitest';
 import { buildBranchingScene } from '../physics/branching-scene.js';
 import { PhysicsWorld } from '../physics/world.js';
+import { physicsMotorActuator } from './motor-actuator.js';
 import { InProcessBus, inProcessPlatform } from './platform-provider.js';
+import { physicsSwitchActuator } from './switch-actuator.js';
 import { YardZoneDevice } from './yard-zone-device.js';
+
+/** The sim-side throat camera used to wire the device's `sightedTrainAt` provider
+ *  from the world (the test plays the composition-root role). */
+function nearestLocoId(world: PhysicsWorld, x: number, y: number, r: number): string | null {
+  let best: { id: string; d2: number } | null = null;
+  for (const b of world.bodies()) {
+    if (b.kind !== 'loco') continue;
+    const d2 = (b.x - x) ** 2 + (b.y - y) ** 2;
+    if (best === null || d2 < best.d2) best = { id: b.id, d2 };
+  }
+  return best === null || best.d2 > r * r ? null : best.id;
+}
 
 const DEVICE_ID = 'YARD-1';
 const DT = 1 / 60;
@@ -43,11 +57,22 @@ function setup(
   const bus = new InProcessBus();
   const events: SeenEvent[] = [];
   bus.onEvent(DEVICE_ID, (e) => events.push({ event_type: e.event_type, payload: e.payload }));
+  const CAM_R = 20;
   const device = new YardZoneDevice(DEVICE_ID, {
     platform: inProcessPlatform(bus, DEVICE_ID),
-    world,
     scene,
     capacity,
+    westPoints: physicsSwitchActuator(world, scene.yard.westSwitch),
+    eastPoints: physicsSwitchActuator(world, scene.yard.eastSwitch),
+    look: (x, y) => {
+      const s = world.sampleAt(x, y, CAM_R);
+      return s === null ? { occupied: false } : { occupied: true, colour: s.colour };
+    },
+    wedgeAt: (x, y) => {
+      world.uncoupleAt(x, y);
+    },
+    sightedTrainAt: (x, y, r) => nearestLocoId(world, x, y, r),
+    motorFor: (id) => physicsMotorActuator(world, id),
   });
   return { device, world, bus, events, scene };
 }

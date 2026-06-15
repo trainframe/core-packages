@@ -41,15 +41,13 @@
 import { type CoreEvent, PROTOCOL_VERSION } from '@trainframe/protocol';
 import type { DeviceManifest } from '@trainframe/protocol';
 import type { BranchingScene } from '../physics/branching-scene.js';
-import type { PhysicsWorld } from '../physics/world.js';
 import { Crane } from './crane.js';
-import { physicsMotorActuator } from './motor-actuator.js';
+import type { MotorActuator } from './motor-actuator.js';
 import { ParentPlatform } from './parent-platform.js';
 import type { CommandHandler, PlatformProvider } from './platform-provider.js';
-import { physicsSwitchActuator } from './switch-actuator.js';
 import type { SwitchActuator } from './switch-actuator.js';
 import { TrainDevice } from './train-device.js';
-import { YardController, craneBounds } from './yard-controller.js';
+import { type Sighting, YardController, craneBounds } from './yard-controller.js';
 
 /** A fixed envelope timestamp for events the device publishes. The device is pure
  *  (no Date.now); the integrator's broker stamps `timestamp_server`. A well-formed
@@ -72,13 +70,26 @@ export interface YardZoneDeps {
   /** The device's link to REAL core (the broker in the gate/script, an in-process
    *  bus in unit tests). */
   readonly platform: PlatformProvider;
-  /** The authoritative physical world — for the crane camera, the interior
-   *  actuators, and arrival sensing. */
-  readonly world: PhysicsWorld;
-  /** The scene: throat marker, yard layout (slot geom), entry/spares slots. */
+  /** The scene: throat marker, yard layout (slot geom), entry/spares slots. PURE
+   *  layout data — NOT the physical world. */
   readonly scene: BranchingScene;
   /** Total slots the zone admits into (= slotCount − reserved spares). */
   readonly capacity: number;
+  /* The device perceives + acts ONLY through these injected providers — it never
+   * touches the physics world (the composition root binds them to the sim; on
+   * hardware they bind to GPIO/CV). ADR-030/031. */
+  /** The interior ladder points (opaque to core). */
+  readonly westPoints: SwitchActuator;
+  readonly eastPoints: SwitchActuator;
+  /** The crane camera: what is beneath the footprint at world (x,y). */
+  readonly look: (x: number, y: number) => Sighting;
+  /** Lower the wedge at world (x,y) to split the coupling there. */
+  readonly wedgeAt: (x: number, y: number) => void;
+  /** The throat camera: the id of the train sighted within `r` of (x,y), or null —
+   *  the device reads the arriving loco's tag, never the world's body list. */
+  readonly sightedTrainAt: (x: number, y: number, r: number) => string | null;
+  /** The visiting loco's motor (the interior controller self-drives it). */
+  readonly motorFor: (trainId: string) => MotorActuator;
 }
 
 /** A train resident in the yard: its core id (the id core knows it by, == the
@@ -124,8 +135,8 @@ export class YardZoneDevice {
       x: (bounds.minX + bounds.maxX) / 2,
       y: (bounds.minY + bounds.maxY) / 2,
     });
-    this.westPoints = physicsSwitchActuator(deps.world, deps.scene.yard.westSwitch);
-    this.eastPoints = physicsSwitchActuator(deps.world, deps.scene.yard.eastSwitch);
+    this.westPoints = deps.westPoints;
+    this.eastPoints = deps.eastPoints;
   }
 
   /** The platform provider the interior loco is wired from (ADR-032). To it this
@@ -164,6 +175,11 @@ export class YardZoneDevice {
    *  ground truth. */
   get occupancy(): number {
     return this.residents.length;
+  }
+
+  /** Where the gantry crane head physically is, for rendering. */
+  get cranePos(): { x: number; y: number } {
+    return this.crane.pos;
   }
 
   private manifest(): DeviceManifest {
@@ -212,22 +228,11 @@ export class YardZoneDevice {
   private senseArrivals(): void {
     if (this.residents.length >= this.d.capacity) return; // full — no room to admit
     const throat = this.throatWorldPoint();
-    const sighted = this.d.world.sampleAt(throat.x, throat.y, CAMERA_RADIUS * 2);
-    if (sighted === null) return;
-    const arrival = this.bodyNear(throat.x, throat.y);
+    /* The throat camera reads the arriving loco's tag (id) — the device never sees
+     *  the world's body list. */
+    const arrival = this.d.sightedTrainAt(throat.x, throat.y, CAMERA_RADIUS * 4);
     if (arrival === null || this.admitted.has(arrival)) return;
     this.admit(arrival);
-  }
-
-  /** The body id whose pose is nearest the throat (the just-arrived visitor). */
-  private bodyNear(x: number, y: number): string | null {
-    let best: { id: string; d2: number } | null = null;
-    for (const b of this.d.world.bodies()) {
-      if (b.kind !== 'loco') continue;
-      const d2 = (b.x - x) ** 2 + (b.y - y) ** 2;
-      if (best === null || d2 < best.d2) best = { id: b.id, d2 };
-    }
-    return best === null || best.d2 > (CAMERA_RADIUS * 4) ** 2 ? null : best.id;
   }
 
   /** Begin a `YardController` service on a newly-arrived train and take a slot. */
@@ -242,21 +247,15 @@ export class YardZoneDevice {
    *  train's own body (it self-drives the real interior rails) through the crane
    *  camera + wedge + ladder points. */
   private makeController(trainId: string): YardController {
-    const world = this.d.world;
-    const train = new TrainDevice(trainId, physicsMotorActuator(world, trainId));
+    const train = new TrainDevice(trainId, this.d.motorFor(trainId));
     return new YardController({
       layout: this.d.scene.yard,
       train,
       westPoints: this.westPoints,
       eastPoints: this.eastPoints,
-      look: (x, y) => {
-        const s = world.sampleAt(x, y, CAMERA_RADIUS);
-        return s === null ? { occupied: false } : { occupied: true, colour: s.colour };
-      },
+      look: this.d.look,
       cameraRadius: CAMERA_RADIUS,
-      wedgeAt: (x, y) => {
-        world.uncoupleAt(x, y);
-      },
+      wedgeAt: this.d.wedgeAt,
       crane: this.crane,
       entrySlot: this.d.scene.entrySlot,
       sparesSlot: this.d.scene.sparesSlot,

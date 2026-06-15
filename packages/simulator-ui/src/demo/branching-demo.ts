@@ -174,6 +174,19 @@ export const DEMO_ROUTES: ReadonlyMap<string, DemoRoute> = new Map(
   TRAINS.map((t) => [t.id, t.route]),
 );
 
+/** The sim-side throat camera: the id of the loco whose pose lies within `r` of
+ *  (x,y), or null. This binds the yard device's `sightedTrainAt` provider to the
+ *  world HERE (the composition root), so the device reads only a sighted tag id. */
+function nearestLocoId(world: PhysicsWorld, x: number, y: number, r: number): string | null {
+  let best: { id: string; d2: number } | null = null;
+  for (const b of world.bodies()) {
+    if (b.kind !== 'loco') continue;
+    const d2 = (b.x - x) ** 2 + (b.y - y) ** 2;
+    if (best === null || d2 < best.d2) best = { id: b.id, d2 };
+  }
+  return best === null || best.d2 > r * r ? null : best.id;
+}
+
 /** Project every scene marker to its world point (where the loco's tag reader
  *  physically meets it) — the sensor input the device needs but does not own. */
 function markerPoints(scene: BranchingScene): MarkerPoint[] {
@@ -277,11 +290,26 @@ export function buildBranchingDemo(platformFactory: PlatformFactory): BranchingD
     positions: ['thru', 'branch'],
   });
 
+  /* Bind the yard device's providers to the sim HERE (the composition root is the
+   *  sim-wiring layer — world access is legitimate). The device itself never sees
+   *  the world: it perceives through `look`/`sightedTrainAt` and acts through the
+   *  points/wedge/motor providers. */
+  const YARD_CAM_R = 20;
   const yard = new YardZoneDevice(YARD_DEVICE_ID, {
     platform: platformFactory(YARD_DEVICE_ID),
-    world,
     scene,
     capacity: YARD_CAPACITY,
+    westPoints: physicsSwitchActuator(world, scene.yard.westSwitch),
+    eastPoints: physicsSwitchActuator(world, scene.yard.eastSwitch),
+    look: (x, y) => {
+      const s = world.sampleAt(x, y, YARD_CAM_R);
+      return s === null ? { occupied: false } : { occupied: true, colour: s.colour };
+    },
+    wedgeAt: (x, y) => {
+      world.uncoupleAt(x, y);
+    },
+    sightedTrainAt: (x, y, r) => nearestLocoId(world, x, y, r),
+    motorFor: (id) => physicsMotorActuator(world, id),
   });
 
   const routes = DEMO_ROUTES;
