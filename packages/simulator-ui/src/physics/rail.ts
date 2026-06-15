@@ -139,6 +139,32 @@ function segmentOf(
   return { traversal: pieceTraversal(piece, entryIdx, exitIdx), type: piece.type, slope };
 }
 
+/** Build a Rail for ONE piece traversed from endpoint `entryIdx` to `exitIdx`.
+ *  Needed for junctions, whose two internal paths (trunk→through, trunk→branch)
+ *  are separate rails sharing the trunk endpoint — `buildRail` only ever takes the
+ *  default 0→1 traversal. */
+export function railOfPiece(piece: TrackPiece, entryIdx: number, exitIdx: number): Rail {
+  const path = pieceTraversal(piece, entryIdx, exitIdx);
+  const type = piece.type;
+  const slope = type === 'ramp' ? (exitIdx === 1 ? 1 : -1) : 0;
+  const EPS = 0.5;
+  return {
+    length: path.length,
+    at: (d) => path.at(d),
+    pieceTypeAt: () => type,
+    slopeAt: () => slope,
+    startBuffered: type === 'terminus',
+    endBuffered: type === 'terminus',
+    curvatureAt(d: number): number {
+      const a = path.at(Math.max(0, d - EPS)).headingDeg;
+      const b = path.at(Math.min(path.length, d + EPS)).headingDeg;
+      const dh = ((b - a + 540) % 360) - 180;
+      const ds = Math.min(path.length, d + EPS) - Math.max(0, d - EPS);
+      return ds <= 0 ? 0 : (dh * Math.PI) / 180 / ds;
+    },
+  };
+}
+
 export function buildRail(pieces: ReadonlyArray<TrackPiece>): Rail {
   const traversals: CentreLinePath[] = [];
   const segs: { type: string; start: number; end: number; slope: number }[] = [];

@@ -24,7 +24,7 @@ import {
   getEndpoints,
 } from '../track/pieces.js';
 import { type NetLink, type RailNetwork, buildNetwork } from './network.js';
-import { type Rail, buildRail } from './rail.js';
+import { type Rail, buildRail, railOfPiece } from './rail.js';
 
 /** The turtle's pose between placements: the world point a new piece's connect
  *  endpoint lands on, the rail direction there (deg, clockwise from east), and
@@ -130,6 +130,42 @@ export class PieceNetworkBuilder {
    *  gated by a switch position (a junction selects which `to` is live). */
   link(from: string, to: string, when?: { switchId: string; position: string }): void {
     this.links.push(when === undefined ? { from, to } : { from, to, when });
+  }
+
+  /**
+   * Lay a turnout from `start` (its trunk endpoint lands on the cursor) and add its
+   * TWO internal paths as segments — `thruSeg` (trunk→through) and `branchSeg`
+   * (trunk→branch) — both starting at the trunk. The caller links the inbound
+   * segment to BOTH (switch-gated on `switchId`: `thruPos` vs `branchPos`), so the
+   * switch chooses which path a train takes. Returns the through + branch exit
+   * cursors (where each onward run continues). `flipped` selects the divert side.
+   */
+  junction(
+    thruSeg: string,
+    branchSeg: string,
+    start: Cursor,
+    sw: { switchId: string; thruPos: string; branchPos: string },
+    flipped?: boolean,
+  ): { thruExit: Cursor; branchExit: Cursor } {
+    const spec: PieceSpec = flipped === true ? { type: 'junction', flipped } : { type: 'junction' };
+    const { piece } = placePiece(start, spec, `${thruSeg}-jp${this.serial++}`);
+    this.placed.push(piece);
+    const thruRail = railOfPiece(piece, 0, 1);
+    const branchRail = railOfPiece(piece, 0, 2);
+    this.segments.set(thruSeg, thruRail);
+    this.segments.set(branchSeg, branchRail);
+    this.geom.set(thruSeg, { start: thruRail.at(0), end: thruRail.at(thruRail.length) });
+    this.geom.set(branchSeg, { start: branchRail.at(0), end: branchRail.at(branchRail.length) });
+    const eps = getEndpoints(piece);
+    const thru = eps[1];
+    const branch = eps[2];
+    if (thru === undefined || branch === undefined) {
+      throw new Error('piece-network: junction piece lacks through/branch endpoints');
+    }
+    return {
+      thruExit: { x: thru.x, y: thru.y, dir: thru.outgoingAngleDeg, layer: thru.layer },
+      branchExit: { x: branch.x, y: branch.y, dir: branch.outgoingAngleDeg, layer: branch.layer },
+    };
   }
 
   build(): PieceNetwork {
