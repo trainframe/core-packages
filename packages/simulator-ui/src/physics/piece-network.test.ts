@@ -1,0 +1,66 @@
+import { describe, expect, it } from 'vitest';
+import { type Cursor, PieceNetworkBuilder } from './piece-network.js';
+import { PhysicsWorld } from './world.js';
+
+/** A rounded-square loop built from REAL pieces: four sides of two straights, four
+ *  corners of two 45° curves (8 curves = 360°, so it closes). */
+function ovalBuilder(): PieceNetworkBuilder {
+  const b = new PieceNetworkBuilder();
+  const start: Cursor = { x: 0, y: 0, dir: 0, layer: 0 };
+  const side = [{ type: 'straight' as const }, { type: 'straight' as const }];
+  const corner = [{ type: 'curve' as const }, { type: 'curve' as const }];
+  b.run('loop', start, [...side, ...corner, ...side, ...corner, ...side, ...corner, ...side, ...corner]);
+  /* Close the loop: the run's END links back to its own START. */
+  b.link('loop', 'loop');
+  return b;
+}
+
+describe('PieceNetworkBuilder — a layout from real track pieces', () => {
+  it('lays a closed loop of real pieces and closes geometrically', () => {
+    const { net, pieces, geom } = ovalBuilder().build();
+    /* Real pieces, not bezier: straights + curves only. */
+    expect(pieces.length).toBe(16);
+    expect(pieces.every((p) => p.type === 'straight' || p.type === 'curve')).toBe(true);
+    const rail = net.railOf('loop');
+    expect(rail.length).toBeGreaterThan(0);
+    /* The loop closes: the run's start and end world points coincide. */
+    const g = geom.get('loop');
+    if (g === undefined) throw new Error('no loop geom');
+    expect(Math.hypot(g.end.x - g.start.x, g.end.y - g.start.y)).toBeLessThan(5);
+  });
+
+  it('a train drives the whole loop on the real-piece rails without leaving them', () => {
+    const { net } = ovalBuilder().build();
+    const world = new PhysicsWorld(net);
+    world.addBody({
+      id: 'T',
+      kind: 'loco',
+      railPos: 10,
+      facing: 1,
+      segment: 'loop',
+      color: 'red',
+      motion: 'forward',
+      maxSpeed: 240,
+    });
+    const start = world.bodies()[0];
+    if (start === undefined) throw new Error('no body');
+    const startPt = { x: start.x, y: start.y };
+    let maxDist = 0;
+    let returnedAfterFar = false;
+    let everLeftRails = false;
+    const DT = 1 / 60;
+    for (let i = 0; i < 60 * 60; i++) {
+      world.step(DT);
+      const b = world.bodies()[0];
+      if (b === undefined) continue;
+      if (b.fate !== 'on-rail' || b.mode !== 'railed') everLeftRails = true;
+      const dist = Math.hypot(b.x - startPt.x, b.y - startPt.y);
+      maxDist = Math.max(maxDist, dist);
+      /* A completed lap: it got far from the start, then came back near it. */
+      if (maxDist > 300 && dist < 40) returnedAfterFar = true;
+    }
+    expect(everLeftRails).toBe(false); // stayed on the real-piece rails throughout
+    expect(maxDist).toBeGreaterThan(300); // genuinely circulated, not stuck
+    expect(returnedAfterFar).toBe(true); // completed at least one full lap
+  });
+});
