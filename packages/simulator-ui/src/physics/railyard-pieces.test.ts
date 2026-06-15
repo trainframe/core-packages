@@ -155,31 +155,37 @@ describe('railyard-pieces — full layout: circuit + passing loop + in-line yard
     expect(lapped).toBe(true);
   });
 
-  it('the yard admits a train off the running line into a dead-end slot', () => {
+  it('the yard reverse-ins a train off the running line into a dead-end slot', () => {
     const scene = buildFullRailyardScene();
     const world = new PhysicsWorld(scene.net);
     world.setSwitch(scene.passingLoop.switchId, scene.passingLoop.mainPos);
+    /* Approach the throat from the bottom run; divert onto the lead, every slot
+     *  turnout `thru` so the train pulls right down to the headshunt. */
     world.setSwitch(scene.yard.throatSwitch, scene.yard.enterPos);
-    scene.yard.ladderSwitches.forEach((sw, i) => {
-      world.setSwitch(sw, i === 0 ? scene.yard.ladderSlotPos : scene.yard.ladderThruPos);
-    });
+    for (const sw of scene.yard.ladderSwitches) world.setSwitch(sw, scene.yard.ladderThruPos);
     world.addBody({
       id: 'T',
       kind: 'loco',
       railPos: 10,
       facing: 1,
-      segment: scene.startSegment,
+      segment: 'bot-mid',
       color: 'red',
       motion: 'forward',
       maxSpeed: 160,
     });
     const DT = 1 / 60;
-    let last = scene.startSegment;
-    for (let i = 0; i < 60 * 60; i++) {
+    /* Pull forward onto the headshunt. */
+    for (let i = 0; i < 60 * 30; i++) world.step(DT);
+    expect(world.bodies()[0]?.segment).toBe(scene.yard.headshunt);
+    /* Set back into the first slot. */
+    world.setSwitch(scene.yard.ladderSwitches[0] ?? '', scene.yard.ladderSlotPos);
+    world.setMotion('T', 'reverse');
+    let last = scene.yard.headshunt;
+    for (let i = 0; i < 60 * 30; i++) {
       world.step(DT);
       const body = world.bodies()[0];
       if (body !== undefined) last = body.segment;
     }
-    expect(last).toBe(scene.yard.slots[0]); // pulled into the first slot, stopped at its buffer
+    expect(last).toBe(scene.yard.slots[0]); // backed into the first slot, stopped at its buffer
   });
 });

@@ -22,19 +22,14 @@ function buildScene(): {
   return { net: b.build().net, seg: segments };
 }
 
-/** Drive a body from the approach with the throat + ladder set to reach `target`
- *  (a slot index, or -1 to stay on the running line); return the segment it ends on. */
-function driveTo(target: number): string {
+/** Reverse-IN a train to slot `target`: enter the lead, pull all the way onto the
+ *  headshunt (every turnout `thru`), then set the target turnout to `slot` and
+ *  back in. Returns the segment the train comes to rest on. */
+function reverseInto(target: number): string {
   const { net, seg } = buildScene();
   const world = new PhysicsWorld(net);
-  if (target < 0) {
-    world.setSwitch(seg.throatSwitch, seg.thruPos);
-  } else {
-    world.setSwitch(seg.throatSwitch, seg.enterPos);
-    seg.ladderSwitches.forEach((sw, i) => {
-      world.setSwitch(sw, i === target ? seg.ladderSlotPos : seg.ladderThruPos);
-    });
-  }
+  world.setSwitch(seg.throatSwitch, seg.enterPos);
+  for (const sw of seg.ladderSwitches) world.setSwitch(sw, seg.ladderThruPos);
   world.addBody({
     id: 'T',
     kind: 'loco',
@@ -43,11 +38,16 @@ function driveTo(target: number): string {
     segment: 'approach',
     color: 'red',
     motion: 'forward',
-    maxSpeed: 160,
+    maxSpeed: 140,
   });
   const DT = 1 / 60;
+  /* Pull forward onto the headshunt. */
+  for (let i = 0; i < 60 * 25; i++) world.step(DT);
+  /* Set back into the target slot. */
+  world.setSwitch(seg.ladderSwitches[target] ?? '', seg.ladderSlotPos);
+  world.setMotion('T', 'reverse');
   let last = 'approach';
-  for (let i = 0; i < 60 * 40; i++) {
+  for (let i = 0; i < 60 * 30; i++) {
     world.step(DT);
     const body = world.bodies()[0];
     if (body !== undefined) last = body.segment;
@@ -55,18 +55,63 @@ function driveTo(target: number): string {
   return last;
 }
 
-describe('yard ladder — dead-end slots from real pieces', () => {
+describe('yard ladder — reverse-in dead-end slots from real pieces', () => {
   it('builds overlap-clean (no slot crosses another)', () => {
     expect(() => buildScene()).not.toThrow();
   });
 
   it('the throat keeps a non-visiting train on the running line', () => {
-    expect(driveTo(-1)).toBe('depart');
+    const { net, seg } = buildScene();
+    const world = new PhysicsWorld(net);
+    world.setSwitch(seg.throatSwitch, seg.thruPos);
+    world.addBody({
+      id: 'T',
+      kind: 'loco',
+      railPos: 5,
+      facing: 1,
+      segment: 'approach',
+      color: 'red',
+      motion: 'forward',
+      maxSpeed: 140,
+    });
+    const DT = 1 / 60;
+    let last = 'approach';
+    for (let i = 0; i < 60 * 30; i++) {
+      world.step(DT);
+      const body = world.bodies()[0];
+      if (body !== undefined) last = body.segment;
+    }
+    expect(last).toBe('depart');
   });
 
-  it('each slot is reachable: the ladder routes a train into slot i to its buffer', () => {
+  it('a train pulling down the lead runs onto the headshunt, clear of every slot', () => {
+    const { net, seg } = buildScene();
+    const world = new PhysicsWorld(net);
+    world.setSwitch(seg.throatSwitch, seg.enterPos);
+    for (const sw of seg.ladderSwitches) world.setSwitch(sw, seg.ladderThruPos);
+    world.addBody({
+      id: 'T',
+      kind: 'loco',
+      railPos: 5,
+      facing: 1,
+      segment: 'approach',
+      color: 'red',
+      motion: 'forward',
+      maxSpeed: 140,
+    });
+    const DT = 1 / 60;
+    let last = 'approach';
+    for (let i = 0; i < 60 * 30; i++) {
+      world.step(DT);
+      const body = world.bodies()[0];
+      if (body !== undefined) last = body.segment;
+    }
+    expect(last).toBe(seg.headshunt);
+  });
+
+  it('each slot is reverse-in reachable: backing in lands the train in slot i', () => {
     for (let i = 0; i < SLOTS; i++) {
-      expect(driveTo(i)).toBe(`Y-slot${i}`);
+      expect(reverseInto(i)).toBe(`Y-slot${i}`);
     }
   });
 });

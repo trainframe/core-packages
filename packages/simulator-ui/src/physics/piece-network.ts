@@ -228,6 +228,51 @@ export class PieceNetworkBuilder {
     };
   }
 
+  /**
+   * Lay a TRAILING turnout for REVERSE-IN servicing: the turnout is placed via its
+   * THROUGH endpoint (index 1) on `start`, so its TRUNK continues the running
+   * direction (a forward train passes straight through onto whatever follows the
+   * trunk) and its BRANCH peels off to a dead-end siding the train can only reach by
+   * BACKING in. The mirror of `junction()` (which faces the trunk at the entry): a
+   * forward train sails past on through→trunk; a reversing train, approaching the
+   * frog from the trunk side, is diverted onto the branch when the switch selects it.
+   *
+   * Adds `thruSeg` (through→trunk, the forward pass) and `branchSeg` (branch→trunk,
+   * whose END meets the trunk so the network can feed the onward segment from EITHER
+   * the pass or the siding). The caller wires the gated links — the keystone is that
+   * the onward (trunk-continuation) segment is fed by `thruSeg` on the through
+   * position and by `branchSeg` on the siding position, so a reverse off the onward
+   * segment's start diverts into the siding exactly when the switch says so. Returns
+   * the trunk exit (running direction continues) and the branch exit (the siding
+   * mouth — the caller lays the dead-end siding so its rail's END lands here).
+   */
+  trailingJunction(
+    thruSeg: string,
+    branchSeg: string,
+    start: Cursor,
+    flipped?: boolean,
+  ): { trunkExit: Cursor; branchExit: Cursor } {
+    const spec: PieceSpec = flipped === true ? { type: 'junction', flipped } : { type: 'junction' };
+    const { piece } = placePiece(start, spec, `${thruSeg}-tp${this.serial++}`, 1);
+    this.placed.push(piece);
+    const thruRail = railOfPiece(piece, 1, 0); // through→trunk (forward pass)
+    const branchRail = railOfPiece(piece, 2, 0); // branch→trunk (END meets the trunk)
+    this.segments.set(thruSeg, thruRail);
+    this.segments.set(branchSeg, branchRail);
+    this.geom.set(thruSeg, { start: thruRail.at(0), end: thruRail.at(thruRail.length) });
+    this.geom.set(branchSeg, { start: branchRail.at(0), end: branchRail.at(branchRail.length) });
+    const eps = getEndpoints(piece);
+    const trunk = eps[0];
+    const branch = eps[2];
+    if (trunk === undefined || branch === undefined) {
+      throw new Error('piece-network: trailing junction lacks trunk/branch endpoints');
+    }
+    return {
+      trunkExit: { x: trunk.x, y: trunk.y, dir: trunk.outgoingAngleDeg, layer: trunk.layer },
+      branchExit: { x: branch.x, y: branch.y, dir: branch.outgoingAngleDeg, layer: branch.layer },
+    };
+  }
+
   build(): PieceNetwork {
     /* A layout that folds back over itself is a build-time error: two pieces on
      * the same height layer whose footprints overlap without sharing a joint. A
