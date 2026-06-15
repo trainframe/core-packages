@@ -44,6 +44,9 @@ export interface PieceSpec {
   readonly radiusMm?: number;
   /** Length override (mm) for a `straight` — LILLABO variant or chain-closing filler. */
   readonly lengthMm?: number;
+  /** Which endpoint lands on the cursor (default 0). `1` attaches a ramp by its HIGH
+   *  end, so it DESCENDS — a down-ramp for the far side of a bridge. */
+  readonly connectVia?: 0 | 1;
 }
 
 /** A segment's world endpoints (start = rail d 0, end = rail d length). */
@@ -102,7 +105,9 @@ function placePiece(
     ...radiusExtra,
     ...lengthExtra,
   };
-  const exitEp = getEndpoints(piece)[1];
+  /* Exit by the OTHER endpoint: connect via 0 → exit 1, connect via 1 → exit 0 (a
+   *  down-ramp). connectIndex 2 (a trailing merge) ignores this exit entirely. */
+  const exitEp = getEndpoints(piece)[connectIndex === 1 ? 0 : 1];
   if (exitEp === undefined) {
     /* A dead-end piece (a terminus has only its connect endpoint): nothing runs
      * on past it, so the turtle stops here — the exit cursor is the entry, never
@@ -135,7 +140,12 @@ export class PieceNetworkBuilder {
     const runPieces: TrackPiece[] = [];
     let cursor = start;
     for (const spec of specs) {
-      const { piece, exit } = placePiece(cursor, spec, `${id}-p${this.serial++}`);
+      const { piece, exit } = placePiece(
+        cursor,
+        spec,
+        `${id}-p${this.serial++}`,
+        spec.connectVia ?? 0,
+      );
       runPieces.push(piece);
       this.placed.push(piece);
       cursor = exit;
