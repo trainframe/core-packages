@@ -3,18 +3,20 @@
  * SLOTS are parallel 45° diagonals strung between a TOP lead and a BOTTOM lead.
  *
  *     in ╲
- *         ●━━━━┳━━━━┳━━━━┳━━━━┳━━━━●     top lead (facing turnouts into each slot)
- *          ╲    ╲    ╲    ╲    ╲    ╲
- *           ╲    ╲    ╲    ╲    ╲    ╲    the slots: parallel diagonal roads
- *            ●━━━━┻━━━━┻━━━━┻━━━━┻━━━━●
- *            bottom lead (trailing turnouts)        ╲ out
+ *         ╰──┬────┬────┬────╮     top lead — facing turnouts into the inner slots,
+ *          ╲  ╲    ╲    ╲    ╲     and a plain CURVE into the trailing slot (no switch)
+ *           ╲  ╲    ╲    ╲    ╲    the slots: parallel diagonal roads
+ *         ╭──┴────┴────┴────╯
+ *      out╯  bottom lead — a plain CURVE off the leading slot (no switch), then
+ *            trailing turnouts up the inner slots
  *
- * Each lead is just the run between the OUTER slots — it curves out of the running
- * line onto the LEADING slot and ends at the TRAILING slot, with no overshoot. The
- * yard has NO inherent direction: either lead can be the way in or out (the wider
- * layout + operator decide), exactly as the existing yard service treats its throats.
- * A train drives in on one lead, a turnout drops it into a slot to stable, and it
- * leaves by the other lead.
+ * Each lead is just the run between the OUTER slots: the top lead curves into the
+ * TRAILING slot and the bottom lead curves off the LEADING slot — the two outer
+ * corners are plain curves, since a train that reaches the end of a lead has only one
+ * place to go (no switch needed). Inner slots carry a turnout on each lead. The yard
+ * has NO inherent direction: either lead can be the way in or out (the wider layout +
+ * operator decide). A train drives in on one lead, a turnout (or the end curve) drops
+ * it into a slot to stable, and it leaves by the other lead. `slots` is configurable.
  *
  * Built on the Brio/IKEA 45°/200 mm grid, so it closes by construction and an
  * accidental same-layer overlap is a build-time error. Pure geometry/topology: no
@@ -23,6 +25,8 @@
 import type { Cursor, PieceNetworkBuilder, PieceSpec } from './piece-network.js';
 
 const STRAIGHT: PieceSpec = { type: 'straight' };
+const CURVE: PieceSpec = { type: 'curve' };
+const FLIP: PieceSpec = { type: 'curve', flipped: true };
 
 function side(n: number): PieceSpec[] {
   return Array.from({ length: n }, () => STRAIGHT);
@@ -31,13 +35,13 @@ function side(n: number): PieceSpec[] {
 export interface ParallelogramYardSegments {
   /** The diagonal slot segment ids (leading → trailing), where stock stables. */
   readonly slots: readonly string[];
-  /** Top-lead turnout switch ids (one per slot): `thru` stays on the lead, `slot`
-   *  drops into the slot. */
-  readonly topSwitches: readonly string[];
-  /** Bottom-lead turnout switch ids (one per slot). The yard is directionless: a
-   *  train entering the BOTTOM lead diverts up a slot when its bottom switch is
-   *  `slot`; a train coming down a slot from the top merges out when it is `slot`. */
-  readonly bottomSwitches: readonly string[];
+  /** Top-lead switch id per slot, or `undefined` for the trailing slot (a plain
+   *  curve). `thru` stays on the lead, `slot` drops into the slot. */
+  readonly topSwitches: readonly (string | undefined)[];
+  /** Bottom-lead switch id per slot, or `undefined` for the leading slot (a plain
+   *  curve). The yard is directionless: a train entering the BOTTOM lead diverts up a
+   *  slot when its bottom switch is `slot`. */
+  readonly bottomSwitches: readonly (string | undefined)[];
   readonly thruPos: string;
   readonly slotPos: string;
   /** The top lead's entry stub (the caller links its inbound run here). */
@@ -58,48 +62,37 @@ export interface ParallelogramYardOptions {
   readonly leadStraights?: number;
 }
 
-/** A bottom-lead trailing turnout's outputs: its trunk cursor, its two converging
- *  legs (through + slot), and its switch. */
-interface BottomMerge {
+/** A bottom-lead node (a slot's foot) feeding the lead: its trunk cursor where the
+ *  lead carries on, and a `feed` that links the node's output leg(s) onto the next
+ *  lead segment (a plain link off the leading curve, or two switch-gated legs off a
+ *  merge). */
+interface BottomNode {
   readonly trunk: Cursor;
-  readonly thruSeg: string;
-  readonly branchSeg: string;
-  readonly sw: string;
+  readonly feed: (leadId: string) => void;
 }
 
-/** Lay a bottom-lead segment off `prev`'s trunk and converge `prev`'s two legs onto
- *  it (gated on `prev.sw`). When `target` is a cursor the segment is filler-sized to
- *  reach it (the next merge's through-entry); when null it's a single straight (the
- *  lead-out stub). Returns the segment's end cursor. */
-function convergeBottomLead(
-  b: PieceNetworkBuilder,
-  id: string,
-  prev: BottomMerge,
-  target: Cursor | null,
-  thruPos: string,
-  slotPos: string,
-): Cursor {
+/** A filler-sized straight run from `from` toward `target` (or a single straight when
+ *  `target` is null — the lead-out stub). Returns its end cursor. */
+function runLead(b: PieceNetworkBuilder, id: string, from: Cursor, target: Cursor | null): Cursor {
   let specs: PieceSpec[] = [STRAIGHT];
   if (target !== null) {
-    const dist = Math.hypot(target.x - prev.trunk.x, target.y - prev.trunk.y);
+    const dist = Math.hypot(target.x - from.x, target.y - from.y);
     const full = Math.floor(dist / 200 + 1e-6);
     const filler = dist - full * 200;
     specs = side(full);
     if (filler > 0.5) specs.push({ type: 'straight', lengthMm: filler });
     if (specs.length === 0) specs = [STRAIGHT];
   }
-  const end = b.run(id, prev.trunk, specs);
-  b.link(prev.thruSeg, id, { switchId: prev.sw, position: thruPos });
-  b.link(prev.branchSeg, id, { switchId: prev.sw, position: slotPos });
-  return end;
+  return b.run(id, from, specs);
 }
 
 /**
  * Add a parallelogram yard to `b` from `entry` (heading along `entry.dir` — the top
- * lead's direction). Lays the top-lead ladder of facing turnouts, the parallel
- * diagonal slots, and the bottom-lead chain of trailing turnouts that rejoins them.
- * Wires all internal links; the caller links its inbound run → `topLeadIn` and the
- * onward run ← `bottomLeadOutSeg`. Returns the segment/switch ids.
+ * lead's direction). Lays the top-lead ladder (facing turnouts into the inner slots,
+ * a curve into the trailing slot), the parallel diagonal slots, and the bottom-lead
+ * chain (a curve off the leading slot, trailing turnouts up the inner slots). Wires
+ * all internal links; the caller links its inbound run → `topLeadIn` and the onward
+ * run ← `bottomLeadOutSeg`. Returns the segment/switch ids.
  */
 export function addParallelogramYard(
   b: PieceNetworkBuilder,
@@ -111,77 +104,90 @@ export function addParallelogramYard(
   const leadStraights = opts.leadStraights ?? 1;
   const thruPos = 'thru';
   const slotPos = 'slot';
+  const last = opts.slots - 1;
 
   const topLeadIn = `${p}-topin`;
   let topCursor = b.run(topLeadIn, entry, [STRAIGHT]);
   let prevTopSeg = topLeadIn;
 
   const slots: string[] = [];
-  const topSwitches: string[] = [];
-  const bottomSwitches: string[] = [];
-
-  /* The bottom lead is chained left→right by short "lead" segments between consecutive
-   *  trailing turnouts. BOTH a merge's legs (the through and the slot) converge to its
-   *  trunk, so both link onto the next lead segment — GATED on the merge's bottom
-   *  switch (`thru` = stay on the lead, `slot` = up the slot), which is what makes the
-   *  yard work from either lead. The leading merge starts the lead (its through-entry
-   *  is the dead west end); the final lead segment is the lead-out. */
-  let prev: BottomMerge | null = null;
+  const topSwitches: (string | undefined)[] = [];
+  const bottomSwitches: (string | undefined)[] = [];
+  let prev: BottomNode | null = null;
   let bottomLeadOutSeg = '';
   let bottomLeadOut: Cursor = entry;
 
   for (let i = 0; i < opts.slots; i++) {
-    const sw = `${p}-sw${i}`;
-    const topThru = `${p}-tt${i}`;
-    const topBranch = `${p}-tb${i}`;
-    /* Facing turnout on the top lead: through continues the lead, branch drops into
-     *  the slot at 45°. */
-    const { thruExit, branchExit } = b.junction(topThru, topBranch, topCursor, false);
-    b.link(prevTopSeg, topThru, { switchId: sw, position: thruPos });
-    b.link(prevTopSeg, topBranch, { switchId: sw, position: slotPos });
-
-    /* The diagonal slot — a straight run at 45°, where stock stables. */
     const slot = `${p}-slot${i}`;
-    const slotEnd = b.run(slot, branchExit, side(slotStraights));
-    b.link(topBranch, slot);
 
-    /* Trailing turnout converging the slot onto the bottom lead. */
-    const botSw = `${p}-bsw${i}`;
-    const botThru = `${p}-bt${i}`;
-    const botBranch = `${p}-bb${i}`;
-    const { trunkExit, thruEntry } = b.mergeJunction(botThru, botBranch, slotEnd, false);
-    b.link(slot, botBranch);
-
-    /* The previous merge's legs converge onto a lead segment that feeds this merge. */
-    if (prev !== null) {
-      const lead = `${p}-lead${i - 1}`;
-      convergeBottomLead(b, lead, prev, thruEntry, thruPos, slotPos);
-      b.link(lead, botThru);
-    }
-    prev = { trunk: trunkExit, thruSeg: botThru, branchSeg: botBranch, sw: botSw };
-
-    slots.push(slot);
-    topSwitches.push(sw);
-    bottomSwitches.push(botSw);
-
-    /* Advance the top lead to the next slot turnout (the slot stagger). */
-    if (i < opts.slots - 1) {
+    /* TOP: a facing turnout into each inner slot; the trailing slot is reached by the
+     *  top lead simply CURVING into it (the lead ends — no choice, no switch). */
+    let slotMouth: Cursor;
+    let slotFeed: string;
+    if (i === last) {
+      const tc = `${p}-topcurve`;
+      slotMouth = b.run(tc, topCursor, [CURVE]);
+      b.link(prevTopSeg, tc);
+      slotFeed = tc;
+      topSwitches.push(undefined);
+    } else {
+      const sw = `${p}-sw${i}`;
+      const topThru = `${p}-tt${i}`;
+      const topBranch = `${p}-tb${i}`;
+      const { thruExit, branchExit } = b.junction(topThru, topBranch, topCursor, false);
+      b.link(prevTopSeg, topThru, { switchId: sw, position: thruPos });
+      b.link(prevTopSeg, topBranch, { switchId: sw, position: slotPos });
+      slotMouth = branchExit;
+      slotFeed = topBranch;
+      topSwitches.push(sw);
       const gap = `${p}-tg${i}`;
       topCursor = b.run(gap, thruExit, side(leadStraights));
       b.link(topThru, gap);
       prevTopSeg = gap;
+    }
+
+    /* The diagonal slot — a straight run at 45°, where stock stables. */
+    const slotEnd = b.run(slot, slotMouth, side(slotStraights));
+    b.link(slotFeed, slot);
+    slots.push(slot);
+
+    /* BOTTOM: the leading slot CURVES onto the bottom lead (the lead starts — no
+     *  switch); every inner slot converges via a trailing turnout. */
+    if (i === 0) {
+      const bc = `${p}-botcurve`;
+      const bcEnd = b.run(bc, slotEnd, [FLIP]);
+      b.link(slot, bc);
+      prev = { trunk: bcEnd, feed: (leadId) => b.link(bc, leadId) };
+      bottomSwitches.push(undefined);
     } else {
-      prevTopSeg = topThru;
-      topCursor = thruExit;
+      const botSw = `${p}-bsw${i}`;
+      const botThru = `${p}-bt${i}`;
+      const botBranch = `${p}-bb${i}`;
+      const { trunkExit, thruEntry } = b.mergeJunction(botThru, botBranch, slotEnd, false);
+      b.link(slot, botBranch);
+      if (prev !== null) {
+        const lead = `${p}-lead${i}`;
+        runLead(b, lead, prev.trunk, thruEntry);
+        prev.feed(lead);
+        b.link(lead, botThru);
+      }
+      prev = {
+        trunk: trunkExit,
+        feed: (leadId) => {
+          b.link(botThru, leadId, { switchId: botSw, position: thruPos });
+          b.link(botBranch, leadId, { switchId: botSw, position: slotPos });
+        },
+      };
+      bottomSwitches.push(botSw);
     }
   }
 
-  /* The lead-out: a final bottom-lead segment off the trailing merge's trunk that
-   *  BOTH its legs converge onto — the caller links its onward run from here. */
+  /* The lead-out: a final bottom-lead stub the trailing node feeds. */
   if (prev !== null) {
-    const outId = `${p}-leadout`;
-    bottomLeadOut = convergeBottomLead(b, outId, prev, null, thruPos, slotPos);
-    bottomLeadOutSeg = outId;
+    const out = `${p}-leadout`;
+    bottomLeadOut = runLead(b, out, prev.trunk, null);
+    prev.feed(out);
+    bottomLeadOutSeg = out;
   }
 
   return {

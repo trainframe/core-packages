@@ -19,11 +19,14 @@ function buildScene() {
   return { net: b.build().net, yard };
 }
 
-/** Set every turnout (both ladders) to `thru`, except slot `i`'s pair to `slot`. */
+/** Set every turnout (both ladders) to `thru`, except slot `i`'s pair to `slot`.
+ *  The outer-corner curves have no switch (`undefined`) and are skipped. */
 function pointToSlot(world: PhysicsWorld, yard: ReturnType<typeof buildScene>['yard'], i: number) {
   const { topSwitches, bottomSwitches, slotPos, thruPos } = yard.segments;
-  topSwitches.forEach((sw, k) => world.setSwitch(sw, k === i ? slotPos : thruPos));
-  bottomSwitches.forEach((sw, k) => world.setSwitch(sw, k === i ? slotPos : thruPos));
+  for (const [k, sw] of topSwitches.entries())
+    if (sw !== undefined) world.setSwitch(sw, k === i ? slotPos : thruPos);
+  for (const [k, sw] of bottomSwitches.entries())
+    if (sw !== undefined) world.setSwitch(sw, k === i ? slotPos : thruPos);
 }
 
 /** Drive a train through slot `i`, entering from `startSeg` heading `facing`,
@@ -63,6 +66,29 @@ describe('addParallelogramYard — a drive-through parallelogram stabling fan', 
     expect(yard.segments.slots).toHaveLength(SLOTS);
     expect(yard.segments.topSwitches).toHaveLength(SLOTS);
     expect(yard.segments.bottomSwitches).toHaveLength(SLOTS);
+  });
+
+  it('makes the outer corners plain curves (no switch where there is no choice)', () => {
+    const { yard } = buildScene();
+    /* Trailing slot's top + leading slot's bottom are curves → no switch there. */
+    expect(yard.segments.topSwitches[SLOTS - 1]).toBeUndefined();
+    expect(yard.segments.bottomSwitches[0]).toBeUndefined();
+    /* Every other corner is a real switch. */
+    expect(yard.segments.topSwitches.slice(0, SLOTS - 1).every((s) => s !== undefined)).toBe(true);
+    expect(yard.segments.bottomSwitches.slice(1).every((s) => s !== undefined)).toBe(true);
+  });
+
+  it('is configurable to N slots (and each builds clean + drives through)', () => {
+    for (const n of [2, 3, 7]) {
+      const b = new PieceNetworkBuilder();
+      const a = b.run('approach', { x: 0, y: 0, dir: 0, layer: 0 }, [STRAIGHT, STRAIGHT]);
+      const yard = addParallelogramYard(b, a, { prefix: 'N', slots: n });
+      b.link('approach', yard.topLeadIn);
+      b.run('tail', yard.segments.bottomLeadOut, [STRAIGHT, STRAIGHT]);
+      b.link(yard.segments.bottomLeadOutSeg, 'tail');
+      expect(() => b.build()).not.toThrow();
+      expect(yard.segments.slots).toHaveLength(n);
+    }
   });
 
   it('drives a train in the top lead, into EACH slot, and out the bottom lead', () => {
