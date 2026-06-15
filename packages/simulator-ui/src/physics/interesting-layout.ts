@@ -28,14 +28,34 @@ const FLIP: PieceSpec = { type: 'curve', flipped: true };
 /** A 180° end (a semicircle) = four same-chirality 45° curves. */
 const SEMI: readonly PieceSpec[] = [CURVE, CURVE, CURVE, CURVE];
 
-/** A HUMP — curve out and back to the same line + heading (net 0° turn), so a run
- *  winds instead of running dead straight. The reason real layouts read as fun: the
- *  track flows in and out rather than turning only at the corners. */
-const HUMP: readonly PieceSpec[] = [CURVE, FLIP, FLIP, CURVE];
+/** HUMPS of three sizes — curve out and back to the same line + heading (net 0°), so
+ *  a run winds instead of running dead straight. Mixing the sizes keeps the winding
+ *  IRREGULAR (a real layout flows in and out by different amounts, not a stamped
+ *  pattern). The straights deepen the dip; the curves are the same R200. */
+const HUMP_SM: readonly PieceSpec[] = [CURVE, FLIP, FLIP, CURVE];
+const HUMP: readonly PieceSpec[] = [CURVE, STRAIGHT, FLIP, FLIP, STRAIGHT, CURVE];
+const HUMP_BIG: readonly PieceSpec[] = [
+  CURVE,
+  STRAIGHT,
+  STRAIGHT,
+  FLIP,
+  FLIP,
+  STRAIGHT,
+  STRAIGHT,
+  CURVE,
+];
 
 /** `n` straights in a row. */
 function side(n: number): PieceSpec[] {
   return Array.from({ length: n }, () => STRAIGHT);
+}
+
+/** How far a spec sequence advances along the travel direction (mm), measured on a
+ *  throwaway builder — so the bottom can lay VARIED humps without overshooting. */
+function travel(specs: readonly PieceSpec[]): number {
+  const tb = new PieceNetworkBuilder();
+  const exit = tb.run('probe', { x: 0, y: 0, dir: 0, layer: 0 }, specs);
+  return Math.hypot(exit.x, exit.y);
 }
 
 /** The branch junctions the main loop exposes — each a facing turnout whose THROUGH
@@ -116,12 +136,14 @@ export function buildMainLoopScene(): MainLoopScene {
    *  and away into a loop and rejoins). Built FIRST; the bottom is sized to match. */
   const startSegment = 'top-a';
   const afterTopA = b.run(startSegment, start, [STRAIGHT, ...HUMP]);
-  const satA = addSatelliteLoop(b, afterTopA, { prefix: 'satA', flipped: true });
+  /* The two loops are DIFFERENT — a big wide one and a smaller taller one — so the
+   *  layout doesn't read as a stamped-out pattern. */
+  const satA = addSatelliteLoop(b, afterTopA, { prefix: 'satA', flipped: true, riser: 2, span: 5 });
   b.link(startSegment, satA.inbound);
-  const afterTopB = b.run('top-b', satA.exit, [STRAIGHT]);
+  const afterTopB = b.run('top-b', satA.exit, [STRAIGHT, ...HUMP_SM]);
   b.link(satA.segments.mergeThrough, 'top-b');
   b.link(satA.segments.mergeBranch, 'top-b');
-  const satB = addSatelliteLoop(b, afterTopB, { prefix: 'satB', flipped: true });
+  const satB = addSatelliteLoop(b, afterTopB, { prefix: 'satB', flipped: true, riser: 4, span: 2 });
   b.link('top-b', satB.inbound);
   const afterTopC = b.run('top-c', satB.exit, [STRAIGHT, ...HUMP, STRAIGHT]);
   b.link(satB.segments.mergeThrough, 'top-c');
@@ -140,11 +162,19 @@ export function buildMainLoopScene(): MainLoopScene {
   /* Lay as many humps as fit in the remaining westward span, then a straight+filler. */
   const afterYard = b.run('bot-b', yard.onward, [STRAIGHT]);
   b.link(yard.taps.throughSeg, 'bot-b');
-  const HUMP_X = 566; // a hump's x-advance (measured)
-  const remaining = afterYard.x - start.x;
-  const humps = Math.max(0, Math.floor((remaining - 200) / HUMP_X));
+  /* Fill the bottom with a VARIED sequence of humps (different sizes, irregular) so it
+   *  winds organically rather than as a repeated scallop. Lay a cycling mix, measuring
+   *  each so the total never overshoots the start x; a short filler closes the rest. */
+  const cycle = [HUMP, HUMP_BIG, HUMP_SM, HUMP, HUMP_SM];
   const botSpecs: PieceSpec[] = [];
-  for (let i = 0; i < humps; i++) botSpecs.push(...HUMP);
+  let spanLeft = afterYard.x - start.x - 250; // leave room for the closing filler
+  for (let i = 0; spanLeft > 0 && i < 40; i++) {
+    const h = cycle[i % cycle.length] ?? HUMP;
+    const adv = travel(h);
+    if (adv > spanLeft) break;
+    botSpecs.push(...h);
+    spanLeft -= adv;
+  }
   const afterBotHumps = b.run('bot-c', afterYard, botSpecs.length > 0 ? botSpecs : [STRAIGHT]);
   b.link('bot-b', 'bot-c');
   const closeRemaining = afterBotHumps.x - start.x;
