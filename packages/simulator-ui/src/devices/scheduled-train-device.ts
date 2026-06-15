@@ -13,7 +13,7 @@
  * it is on a known route edge, integrates a nominal distance from that edge's
  * start as it runs, and SNAPS that belief to a fix each time its marker sensor
  * reports a crossing (a real loco resets odometry at each tag it reads). The
- * physics world owns the truth; the device only senses marker crossings and
+ * simulator owns the truth; the device only senses marker crossings and
  * commands its motor.
  *
  * The device↔core link is a `PlatformProvider` (ADR-031); the world link is a

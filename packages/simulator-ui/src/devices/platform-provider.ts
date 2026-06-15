@@ -1,7 +1,7 @@
 /**
  * The PLATFORM provider family (ADR-031 §1) — the device↔core seam, the dual of
  * the ADR-030 WORLD providers (`CameraProvider` to sense, `MotorActuator` /
- * `SwitchActuator` to act on the physical world).
+ * `SwitchActuator` to act on the track).
  *
  * A device perceives and acts on the *world* through world providers; its link
  * to *core* — publishing events, receiving commands / clearance, registering its

@@ -71,12 +71,12 @@ export interface YardZoneDeps {
    *  bus in unit tests). */
   readonly platform: PlatformProvider;
   /** The scene: throat marker, yard layout (slot geom), entry/spares slots. PURE
-   *  layout data — NOT the physical world. */
+   *  layout data — NOT the track. */
   readonly scene: BranchingScene;
   /** Total slots the zone admits into (= slotCount − reserved spares). */
   readonly capacity: number;
   /* The device perceives + acts ONLY through these injected providers — it never
-   * touches the physics world (the composition root binds them to the sim; on
+   * touches the simulator (the composition root binds them to the sim; on
    * hardware they bind to GPIO/CV). ADR-030/031. */
   /** The interior ladder points (opaque to core). */
   readonly westPoints: SwitchActuator;

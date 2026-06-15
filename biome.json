@@ -70,6 +70,28 @@
       }
     },
     {
+      "include": ["packages/simulator-ui/src/devices/**"],
+      "ignore": [
+        "packages/simulator-ui/src/devices/**/*.test.ts",
+        "packages/simulator-ui/src/devices/**/*.test.tsx"
+      ],
+      "linter": {
+        "rules": {
+          "nursery": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@trainframe/visualiser": "simulator-ui must not import from visualiser — see ADR-013.",
+                  "../physics/world.js": "Devices are world-agnostic (ADR-030/031): a device must NOT import the physics world. Perceive + act ONLY through injected providers (sensors/actuators); the sim-backing lives in sim/, and shared data shapes (Motion/BodyPose) live in physics/observation.ts."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "include": ["packages/visualiser/**"],
       "linter": {
         "rules": {

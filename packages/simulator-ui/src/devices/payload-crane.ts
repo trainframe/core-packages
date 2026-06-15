@@ -10,7 +10,7 @@
  *
  * `grab`/`release` are the cargo latch: `grab` latches a payload onto the hook,
  * `release` lets it go and reports whether the hook WAS carrying (so the caller
- * knows to drop a real body into the physics world at `pos`).
+ * knows to drop a real body into the simulator at `pos`).
  *
  * Concrete cranes (`Crane` — the gantry; `JibCrane` — the dock jib) add their
  * own targeting commands on top of this; this interface is only the common seam
