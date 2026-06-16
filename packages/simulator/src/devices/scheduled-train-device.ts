@@ -21,6 +21,7 @@
  */
 import {
   type AssignRoute,
+  type BeginExploration,
   type CoreCommand,
   type CoreEvent,
   type DeviceManifest,
@@ -87,6 +88,12 @@ export class ScheduledTrainDevice {
   private speedScale = 1;
   /** Whether the current clearance is a reverse grant (bounded backing up). */
   private reversing = false;
+  /** Cold-start discovery (ADR-015): driving forward across markers with no route
+   *  or limit, emitting `tag_observed` per crossing so the server's LearnMode maps
+   *  the loop. Ends on `revoke_clearance` / `emergency_stop` / `assign_route`. The
+   *  device picks no edges — the physical switches route it; the sensor reports
+   *  whatever marker it actually crosses. */
+  private exploring = false;
 
   private offCommand: (() => void) | undefined;
   private offSensor: (() => void) | undefined;
@@ -150,7 +157,7 @@ export class ScheduledTrainDevice {
       if (this.distance < 0) this.distance = 0;
       this.clampToEdgeLength();
     }
-    if (this.route.length > 0) this.publishStatus();
+    if (this.route.length > 0 || this.exploring) this.publishStatus();
   }
 
   // ---- command handling -------------------------------------------------
@@ -177,8 +184,13 @@ export class ScheduledTrainDevice {
       return;
     }
     if (command.command_type === 'emergency_stop') {
+      this.exploring = false;
       this.drive('stopped');
       this.limitMarker = undefined;
+      return;
+    }
+    if (narrow<BeginExploration>(command, 'begin_exploration') !== undefined) {
+      this.onBeginExploration();
       return;
     }
     const speed = narrow<SetTargetSpeed>(command, 'set_target_speed');
@@ -189,6 +201,7 @@ export class ScheduledTrainDevice {
   /** Store the route (a cycle), reset progress, and set heading from edge 0. No
    *  motion — the train waits for clearance. */
   private onAssignRoute(command: AssignRoute): void {
+    this.exploring = false;
     this.route = command.payload.edges;
     this.progress = 0;
     this.distance = 0;
@@ -212,8 +225,22 @@ export class ScheduledTrainDevice {
   }
 
   private onRevoke(): void {
+    this.exploring = false;
     this.drive('stopped');
     this.limitMarker = undefined;
+  }
+
+  /** Begin cold-start discovery: shed any route/limit and drive forward. The loco
+   *  runs until the server revokes clearance (LearnMode stops it when the loop is
+   *  fully mapped) — it never stops at a limit because there is none. */
+  private onBeginExploration(): void {
+    this.exploring = true;
+    this.route = [];
+    this.progress = 0;
+    this.distance = 0;
+    this.reversing = false;
+    this.limitMarker = undefined;
+    this.drive('forward');
   }
 
   /** The ONLY path to reverse: bounded by the granted limit + edges. Ignored if

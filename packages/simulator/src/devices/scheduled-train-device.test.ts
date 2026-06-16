@@ -183,6 +183,17 @@ function emergencyStop(): CoreCommand {
   };
 }
 
+function beginExploration(): CoreCommand {
+  return {
+    command_id: UUID,
+    device_id: 'T1',
+    timestamp_server: TS,
+    command_type: 'begin_exploration',
+    protocol_version: VERSION,
+    payload: { reason: 'track-learn' },
+  };
+}
+
 const ROUTE = [
   { from_marker_id: 'M-A', to_marker_id: 'M-B' },
   { from_marker_id: 'M-B', to_marker_id: 'M-C' },
@@ -294,6 +305,48 @@ describe('ScheduledTrainDevice — marker reporting + self-stop at the limit', (
     expect(last.current_edge?.from_marker_id).toBe('M-A');
     expect(last.estimated_distance_from_edge_start_mm ?? 0).toBeGreaterThan(0);
     expect(last.speed_normalised).toBeGreaterThan(0);
+  });
+});
+
+describe('ScheduledTrainDevice — cold-start exploration (ADR-015)', () => {
+  it('drives forward with no route, reporting every marker it crosses', () => {
+    const r = rig();
+    r.send(beginExploration());
+    expect(r.device.motion).toBe('forward');
+    /* Run far enough to pass both B (500) and C (1000) — no clearance limit holds
+     *  it, so it reports both. */
+    r.run(260);
+    const tags = tagsObserved(r.events);
+    expect(tags).toContain('M-B');
+    expect(tags).toContain('M-C');
+    /* It picks no edges — there is no route belief while exploring. */
+    expect(r.device.currentEdge).toBeUndefined();
+  });
+
+  it('runs past markers without a limit, and revoke_clearance stops it', () => {
+    const r = rig();
+    r.send(beginExploration());
+    r.run(140); // past B — would have stopped there if a limit were in force
+    expect(r.device.motion).toBe('forward');
+    r.send(revokeClearance());
+    expect(r.device.motion).toBe('stopped');
+  });
+
+  it('emits train_status while exploring even without a route', () => {
+    const r = rig();
+    r.send(beginExploration());
+    r.run(3);
+    expect(r.events.filter((e) => e.event_type === 'train_status').length).toBeGreaterThan(0);
+  });
+
+  it('assign_route ends exploration (a scheduled run supersedes discovery)', () => {
+    const r = rig();
+    r.send(beginExploration());
+    r.run(5);
+    r.send(assignRoute(ROUTE));
+    /* A route with no grant holds the train: exploration no longer drives it. */
+    expect(r.device.motion).toBe('stopped');
+    expect(r.device.currentEdge).toEqual({ from_marker_id: 'M-A', to_marker_id: 'M-B' });
   });
 });
 
