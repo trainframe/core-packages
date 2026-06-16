@@ -9,7 +9,7 @@ import type { TrackPiece } from './pieces.js';
  */
 export const SNAP_DISTANCE_MM = 30;
 
-interface EndpointRef {
+export interface EndpointRef {
   readonly pieceIdx: number;
   readonly endpointIdx: number;
   readonly x: number;
@@ -24,7 +24,7 @@ interface EndpointRef {
 // Step 1 — collect endpoints
 // ---------------------------------------------------------------------------
 
-function collectEndpoints(pieces: ReadonlyArray<TrackPiece>): EndpointRef[] {
+export function collectEndpoints(pieces: ReadonlyArray<TrackPiece>): EndpointRef[] {
   const refs: EndpointRef[] = [];
   for (let pi = 0; pi < pieces.length; pi++) {
     const piece = pieces[pi];
@@ -73,7 +73,7 @@ function findNearbyCluster(
   return -1;
 }
 
-function clusterEndpoints(
+export function clusterEndpoints(
   allEndpoints: ReadonlyArray<EndpointRef>,
 ): ReadonlyArray<readonly number[]> {
   const clusters: number[][] = [];
@@ -125,7 +125,10 @@ function switchStateForTurntableEndpoint(endpointIdx: number): string | undefine
 
 /** The switch state an edge leaving `from` via `fromEndpointIdx` requires,
  * or undefined for non-switched pieces / the trunk approach. */
-function switchStateForEndpoint(from: TrackPiece, fromEndpointIdx: number): string | undefined {
+export function switchStateForEndpoint(
+  from: TrackPiece,
+  fromEndpointIdx: number,
+): string | undefined {
   if (from.type === 'junction') return switchStateForJunctionEndpoint(fromEndpointIdx);
   if (from.type === 'turntable') return switchStateForTurntableEndpoint(fromEndpointIdx);
   return undefined;
