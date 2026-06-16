@@ -126,7 +126,7 @@ export function buildMainLoopScene(): MainLoopScene {
    *  rejoins by the OTHER side (never reversing onto, nor blocking, the running line).
    *  The detour's own bypass is the through line non-serviced trains take, so the loop
    *  runs straight past while the yard sits below it. */
-  const detour = addYardDetour(b, 'bot-a', afterBotA, { prefix: 'yard', slots: 4 });
+  const detour = addYardDetour(b, 'bot-a', afterBotA, { prefix: 'yard', slots: 5 });
 
   /* Close the running line from the detour's merge back to the start x — winding humps
    *  fill the run, then a filler lands exactly on the start. */
