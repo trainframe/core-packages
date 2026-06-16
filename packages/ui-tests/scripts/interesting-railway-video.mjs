@@ -20,8 +20,8 @@ import process from 'node:process';
 import { chromium } from '@playwright/test';
 import { MqttBrokerClient } from '@trainframe/server';
 import {
-  INTERESTING_MARKERS as M,
   INTERESTING_YARD_DEVICE_ID,
+  INTERESTING_MARKERS as M,
   buildMainLoopScene,
   interestingToLayout,
 } from '../../simulator-ui/src/demo/index.ts';
