@@ -14,6 +14,7 @@ import { buildMainLoopScene } from '../physics/interesting-layout.js';
 import { railOfPiece } from '../physics/rail.js';
 import type { BodyPose } from '../physics/world.js';
 import { buildInterestingDemo } from '../sim/interesting-demo.js';
+import { pierSuppressed } from '../track/overlap.js';
 import { layerOf } from '../track/pieces.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
@@ -116,11 +117,20 @@ export function InterestingLayoutView() {
   const minY = Math.min(...pts.map((p) => p.y)) - 120;
   const maxY = Math.max(...pts.map((p) => p.y)) + 120;
 
-  /* The flyover deck: the pieces on a height layer, drawn raised (shadowed) on top
-   *  so the crossing reads as a bridge, not a flat junction. */
-  const raisedDecks = scene.pieces
-    .filter((p) => layerOf(p) >= 1)
-    .map((p) => ({ id: p.id, d: railPath(railOfPiece(p, 0, 1)) }));
+  /* The flyover structure: the elevated DECK pieces (on a height layer) PLUS the RAMP
+   *  pieces (the inclined approaches), all drawn raised so the whole bridge — ramp up,
+   *  span over, ramp down — reads as one elevated run, not a flat junction. */
+  const bridgePieces = scene.pieces.filter((p) => layerOf(p) >= 1 || p.type === 'ramp');
+  const raisedDecks = bridgePieces.map((p) => ({
+    id: p.id,
+    d: railPath(railOfPiece(p, 0, 1)),
+    ramp: p.type === 'ramp',
+  }));
+  /* Support piers under the elevated deck (omitted where track runs beneath the span —
+   *  a pier never plants on the rail below). */
+  const piers = scene.pieces
+    .filter((p) => layerOf(p) >= 1 && !pierSuppressed(p, scene.pieces))
+    .map((p) => ({ id: p.id, x: p.position.x, y: p.position.y }));
 
   return (
     <div style={{ width: '100vw', height: '100vh', background: '#efe6d3' }}>
@@ -148,7 +158,24 @@ export function InterestingLayoutView() {
         {segs.map((id) => (
           <SegArt key={id} d={railPath(scene.net.railOf(id))} />
         ))}
-        {/* The flyover deck on top of the ground track it crosses. */}
+        {/* Support piers beneath the deck — drawn before the deck so the deck sits on
+         *  top of them. */}
+        {piers.map((pier) => (
+          <g key={`pier-${pier.id}`}>
+            <ellipse cx={pier.x} cy={pier.y + 13} rx={9} ry={4} fill="rgba(63,43,19,0.28)" />
+            <rect
+              x={pier.x - 5}
+              y={pier.y - 2}
+              width={10}
+              height={15}
+              rx={2}
+              fill="#9a7b4f"
+              stroke="#6f4c28"
+              strokeWidth={1.5}
+            />
+          </g>
+        ))}
+        {/* The flyover: ramps + deck, raised over the ground track it crosses. */}
         {raisedDecks.map((deck) => (
           <SegArt key={deck.id} d={deck.d} raised />
         ))}
