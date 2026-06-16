@@ -215,3 +215,64 @@ describe('YardZoneDevice — the capacity gate', () => {
     expect(device.occupancy).toBe(1);
   });
 });
+
+describe('YardZoneDevice — discovers operator-placed stock (the toybox gantry)', () => {
+  /** The coupled group containing `id`, by flood-fill over the world's couplings. */
+  function group(world: PhysicsWorld, id: string): Set<string> {
+    const seen = new Set<string>([id]);
+    const stack = [id];
+    while (stack.length) {
+      const cur = stack.pop();
+      if (cur === undefined) continue;
+      for (const n of world.coupledTo(cur))
+        if (!seen.has(n)) {
+          seen.add(n);
+          stack.push(n);
+        }
+    }
+    return seen;
+  }
+
+  it('with NO seeded spares, searches its slots, finds the stock, and swaps with it', () => {
+    const scene = buildBranchingScene(3);
+    const world = new PhysicsWorld(scene.net);
+    const events: SeenEvent[] = [];
+    const bus = new InProcessBus();
+    bus.onEvent(DEVICE_ID, (e) => events.push({ event_type: e.event_type, payload: e.payload }));
+    const CAM_R = 20;
+    /* The "operator" parks a two-car cut in slot1 — the gantry is told NO sparesSlot. */
+    world.addBody({ id: 'p0', kind: 'carriage', railPos: 200, facing: 1, segment: 'slot1' });
+    world.addBody({ id: 'p1', kind: 'carriage', railPos: 132, facing: 1, segment: 'slot1' });
+    world.couple('p0', 'p1');
+
+    const device = new YardZoneDevice(DEVICE_ID, {
+      platform: inProcessPlatform(bus, DEVICE_ID),
+      scene: { yard: scene.yard, throatMarker: scene.throatMarker }, // sparesSlot OMITTED
+      capacity: 1,
+      westPoints: physicsSwitchActuator(world, scene.yard.westSwitch),
+      eastPoints: physicsSwitchActuator(world, scene.yard.eastSwitch),
+      look: (x, y) => {
+        const s = world.sampleAt(x, y, CAM_R);
+        return s === null ? { occupied: false } : { occupied: true, colour: s.colour };
+      },
+      wedgeAt: (x, y) => {
+        world.uncoupleAt(x, y);
+      },
+      sightedTrainAt: (x, y, r) => nearestLocoId(world, x, y, r),
+      motorFor: (id) => physicsMotorActuator(world, id),
+    });
+    device.start();
+    parkVisitorAtThroat(world, 'V', 3);
+
+    let released = false;
+    for (let i = 0; i < 6000 && !released; i++) {
+      device.step(DT);
+      world.step(DT);
+      released = events.some((e) => e.event_type === 'zone_train_released');
+    }
+    expect(released, 'the gantry serviced the visitor it discovered stock for').toBe(true);
+    /* The visitor leaves wearing the stock the operator placed — discovery worked. */
+    const v = group(world, 'V');
+    expect(v.has('p0') || v.has('p1'), 'visitor picked up the discovered stock').toBe(true);
+  });
+});

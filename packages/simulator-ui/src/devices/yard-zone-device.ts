@@ -74,9 +74,12 @@ const INTERIOR_LOCO_ID = '0a0d0001-0000-4000-8000-000000000001';
 export interface YardZoneScene {
   readonly yard: YardLayout;
   readonly throatMarker: string;
-  /** The slot the INITIAL spares cut is stabled in. From here it rotates: each serviced
-   *  visitor's shed cut becomes the next visitor's spares, in the visitor's own slot. */
-  readonly sparesSlot: string;
+  /** The slot the INITIAL spares cut is stabled in, from which it rotates (each serviced
+   *  visitor's shed cut becomes the next visitor's spares, in its own slot). OPTIONAL:
+   *  when omitted (the toybox — the operator places the carriages themselves), the gantry
+   *  SEARCHES its slots for stock on its first service and uses whatever it finds; if it
+   *  finds none it stalls rather than fabricating spares. */
+  readonly sparesSlot?: string;
   /** Where the visitor PARKS at the throat — the world point the throat camera reads.
    *  For an IN-LINE yard this is the west lead's start (the default). For a DETOUR
    *  yard the throat sits on the running line, across the divert + lead-in from the
@@ -153,8 +156,9 @@ export class YardZoneDevice {
 
   /** Which slot currently holds the pick-up-able SPARES cut. It ROTATES: each serviced
    *  visitor leaves its own shed cut in its entry slot, and that cut becomes the spares
-   *  for the next visitor (the old spares having left coupled to the train). */
-  private sparesSlot: string;
+   *  for the next visitor (the old spares having left coupled to the train). `null` until
+   *  known — either seeded or DISCOVERED by searching the slots on the first service. */
+  private sparesSlot: string | null;
   /** Round-robin cursor over the slots, so successive visitors spread across ALL of
    *  them rather than reusing the same one or two. */
   private entryHint = 0;
@@ -162,7 +166,7 @@ export class YardZoneDevice {
   constructor(deviceId: string, deps: YardZoneDeps) {
     this.deviceId = deviceId;
     this.d = deps;
-    this.sparesSlot = deps.scene.sparesSlot;
+    this.sparesSlot = deps.scene.sparesSlot ?? null;
     const bounds = craneBounds(deps.scene.yard);
     this.crane = new Crane(bounds, {
       x: (bounds.minX + bounds.maxX) / 2,
@@ -177,7 +181,8 @@ export class YardZoneDevice {
    *  used over time. */
   private pickFreeSlot(): string {
     const slots = this.d.scene.yard.slots;
-    const taken = new Set<string>([this.sparesSlot]);
+    const taken = new Set<string>();
+    if (this.sparesSlot !== null) taken.add(this.sparesSlot);
     for (const r of this.residents) if (r.entrySlot !== null) taken.add(r.entrySlot);
     for (let i = 0; i < slots.length; i++) {
       const idx = (this.entryHint + i) % slots.length;
@@ -188,8 +193,8 @@ export class YardZoneDevice {
       }
     }
     /* Every slot taken (should not happen below capacity): fall back to the spares slot
-     *  so the controller still has a defined target. */
-    return this.sparesSlot;
+     *  (or the first slot) so the controller still has a defined target. */
+    return this.sparesSlot ?? slots[0] ?? '';
   }
 
   /** The platform provider the interior loco is wired from (ADR-032). To it this
@@ -297,11 +302,29 @@ export class YardZoneDevice {
     this.announce();
   }
 
+  /** Search the slots for stock the operator has placed (a body sitting in a slot, not
+   *  the empty road). Returns the first slot found occupied, or null if the yard is bare
+   *  — in which case the gantry has nothing to swap with and stalls. The crane does this
+   *  on its first service, so the operator just parks carriages in a road and the gantry
+   *  finds them. */
+  private searchForStock(): string | null {
+    for (const slot of this.d.scene.yard.slots) {
+      const g = this.d.scene.yard.geom.get(slot);
+      if (g === undefined) continue;
+      const len = Math.hypot(g.ax - g.bx, g.ay - g.by) || 1;
+      const ux = (g.ax - g.bx) / len;
+      const uy = (g.ay - g.by) / len;
+      for (let d = 0; d <= len; d += 10) {
+        if (this.d.look(g.bx + ux * d, g.by + uy * d).occupied) return slot;
+      }
+    }
+    return null;
+  }
+
   /** Build a `YardController` for the visiting train, pulling into `entrySlot` and
-   *  collecting the spares from the CURRENT `sparesSlot`. The controller drives the
-   *  train's own body (it self-drives the real interior rails) through the crane camera
-   *  + wedge + ladder points. */
-  private makeController(trainId: string, entrySlot: string): YardController {
+   *  collecting the spares from `sparesSlot`. The controller drives the train's own body
+   *  (it self-drives the real interior rails) through the crane camera + wedge + points. */
+  private makeController(trainId: string, entrySlot: string, sparesSlot: string): YardController {
     const train = new TrainDevice(trainId, this.d.motorFor(trainId));
     return new YardController({
       layout: this.d.scene.yard,
@@ -313,19 +336,22 @@ export class YardZoneDevice {
       wedgeAt: this.d.wedgeAt,
       crane: this.crane,
       entrySlot,
-      sparesSlot: this.sparesSlot,
+      sparesSlot,
     });
   }
 
-  /** Advance the single active service (single-mover interior). The active resident
-   *  binds its slot + controller lazily on its first tick (so it gets the current
-   *  spares); release a train whose service is `done`. */
+  /** Advance the single active service (single-mover interior). The active resident binds
+   *  its slot + controller lazily on its first tick (so it gets the current spares). If
+   *  the spares slot isn't known yet, the crane SEARCHES for stock first; finding none, it
+   *  STALLS (no controller bound) rather than swap against an empty yard. */
   private serviceResidents(dtS: number): void {
     const active = this.residents.find((r) => !r.released);
     if (active === undefined) return;
     if (active.controller === null) {
+      if (this.sparesSlot === null) this.sparesSlot = this.searchForStock();
+      if (this.sparesSlot === null) return; // no stock to swap with — stall, don't service
       active.entrySlot = this.pickFreeSlot();
-      active.controller = this.makeController(active.trainId, active.entrySlot);
+      active.controller = this.makeController(active.trainId, active.entrySlot, this.sparesSlot);
     }
     active.controller.tick(dtS);
     if (active.controller.currentPhase === 'done') this.release(active);
