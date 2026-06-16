@@ -94,6 +94,12 @@ export class ScheduledTrainDevice {
    *  device picks no edges — the physical switches route it; the sensor reports
    *  whatever marker it actually crosses. */
   private exploring = false;
+  /** Power state. A powered-OFF loco is inert in place: it commands its motor
+   *  stopped, then falls SILENT (no `train_status`, no marker reports, ignores
+   *  commands) WITHOUT disconnecting — so the scheduler, hearing silence rather
+   *  than a `device_disconnected`, keeps its block reserved and a follower stalls
+   *  behind it. Powering back on resumes it toward its last clearance. */
+  private powered = true;
 
   private offCommand: (() => void) | undefined;
   private offSensor: (() => void) | undefined;
@@ -113,6 +119,29 @@ export class ScheduledTrainDevice {
   /** The motor state the device is currently commanding (for tests/inspection). */
   get motion(): Motion {
     return this.intent;
+  }
+
+  /** Whether the loco has power (for tests/inspection). */
+  get isPowered(): boolean {
+    return this.powered;
+  }
+
+  /**
+   * Switch the loco's power. Off: command the motor stopped (the body coasts to
+   * rest and sits as an inert obstacle) and fall silent — no heartbeat, no marker
+   * reports, commands ignored — but stay registered (no disconnect), so the
+   * scheduler keeps the block reserved. On: resume toward the last granted limit.
+   */
+  power(on: boolean): void {
+    if (on === this.powered) return;
+    this.powered = on;
+    if (!on) {
+      this.drive('stopped');
+      return;
+    }
+    if (this.limitMarker !== undefined && !this.headIsAtMarker(this.limitMarker)) {
+      this.drive(this.reversing ? 'reverse' : 'forward');
+    }
   }
 
   /** The device's belief of the edge its head is on, or undefined before a route. */
@@ -150,6 +179,7 @@ export class ScheduledTrainDevice {
    *  elapses. A device that fell silent while stopped would never be resumed past a
    *  scheduled stop, stalling the cyclic schedule. */
   step(dtS: number): void {
+    if (!this.powered) return;
     this.d.sensor.sample();
     if (this.intent !== 'stopped') {
       const speed = this.nominalSpeed * this.speedScale;
@@ -164,6 +194,7 @@ export class ScheduledTrainDevice {
 
   /** Dispatch a core command, narrowing by its `command_type` (see `narrow`). */
   private handle(command: CoreCommand): void {
+    if (!this.powered) return;
     const route = narrow<AssignRoute>(command, 'assign_route');
     if (route !== undefined) {
       this.onAssignRoute(route);

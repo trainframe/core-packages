@@ -350,6 +350,42 @@ describe('ScheduledTrainDevice — cold-start exploration (ADR-015)', () => {
   });
 });
 
+describe('ScheduledTrainDevice — power (inert-in-place when off)', () => {
+  it('power-off stops + silences the loco without disconnecting; power-on resumes', () => {
+    const r = rig();
+    r.send(assignRoute(ROUTE));
+    r.send(grantClearance('M-C'));
+    r.run(10);
+    expect(r.device.motion).toBe('forward');
+
+    const eventsBefore = r.events.length;
+    r.device.power(false);
+    expect(r.device.isPowered).toBe(false);
+    expect(r.device.motion).toBe('stopped');
+
+    /* While off it emits NOTHING (no heartbeat) and never a device_disconnected. */
+    r.run(40);
+    expect(r.events.length).toBe(eventsBefore);
+    expect(r.events.some((e) => e.event_type === 'device_disconnected')).toBe(false);
+
+    /* Powered back on, it drives again and resumes emitting. */
+    r.device.power(true);
+    expect(r.device.isPowered).toBe(true);
+    r.run(10);
+    expect(r.device.motion).toBe('forward');
+    expect(r.events.length).toBeGreaterThan(eventsBefore);
+  });
+
+  it('ignores commands while powered off (a dead loco does not act)', () => {
+    const r = rig();
+    r.send(assignRoute(ROUTE));
+    r.device.power(false);
+    r.send(grantClearance('M-C'));
+    r.run(20);
+    expect(r.device.motion).toBe('stopped');
+  });
+});
+
 describe('ScheduledTrainDevice — reverse only under grant_reverse', () => {
   it('never reverses on ordinary clearance', () => {
     const r = rig();
