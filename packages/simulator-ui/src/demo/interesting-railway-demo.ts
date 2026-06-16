@@ -92,6 +92,8 @@ export interface InterestingRailwayDemo {
   readonly yardDeviceId: string;
   /** train id → its cyclic route (for the operator to `assignSchedule`). */
   readonly routes: ReadonlyMap<string, { routeId: string; stops: readonly string[] }>;
+  /** The yard gantry crane's current head position (for rendering the crane working). */
+  yardCranePos(): { x: number; y: number };
   start(): void;
   stop(): void;
   step(dtS: number): void;
@@ -264,6 +266,7 @@ export function buildInterestingRailwayDemo(
     switchDeviceIds: switches.map((s) => s.deviceId),
     yardDeviceId: INTERESTING_YARD_DEVICE_ID,
     routes: new Map(TRAINS.map((t) => [t.id, { routeId: t.routeId, stops: t.stops }])),
+    yardCranePos: () => yard.cranePos,
     start(): void {
       if (started) return;
       started = true;

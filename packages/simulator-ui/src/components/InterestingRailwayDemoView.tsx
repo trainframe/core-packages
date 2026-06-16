@@ -19,6 +19,7 @@ import {
   buildInterestingRailwayDemo,
 } from '../demo/interesting-railway-demo.js';
 import { buildMainLoopScene } from '../physics/interesting-layout.js';
+import { buildInterestingMarkers } from '../physics/interesting-markers.js';
 import { railOfPiece } from '../physics/rail.js';
 import type { BodyPose } from '../physics/world.js';
 import { pierSuppressed } from '../track/overlap.js';
@@ -98,9 +99,43 @@ function buildDemo(): { demo: InterestingRailwayDemo; clients: MqttBrokerClient[
   return { demo, clients };
 }
 
+/** Station platforms (each station marker's world point) + the yard's bounding box (for
+ *  the gantry truss) — derived once from the pure scene. */
+function sceneFurniture(scene: ReturnType<typeof buildMainLoopScene>) {
+  const ml = buildInterestingMarkers(scene);
+  const stations = ml.markers
+    .filter((m) => m.kind === 'station_stop')
+    .map((m) => {
+      const rail = scene.net.railOf(m.segment);
+      const d = m.distAlongMm ?? (m.end === 'start' ? 0 : rail.length);
+      const p = rail.at(d);
+      return { id: m.id, x: p.x, y: p.y };
+    });
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const seg of [scene.yard.topLeadIn, scene.yard.bottomLeadOutSeg, ...scene.yard.slots]) {
+    const g = scene.geom.get(seg);
+    if (g === undefined) continue;
+    for (const pt of [g.start, g.end]) {
+      minX = Math.min(minX, pt.x);
+      maxX = Math.max(maxX, pt.x);
+      minY = Math.min(minY, pt.y);
+      maxY = Math.max(maxY, pt.y);
+    }
+  }
+  return { stations, yard: { minX, maxX, minY, maxY } };
+}
+
 export function InterestingRailwayDemoView() {
   const scene = useMemo(() => buildMainLoopScene(), []);
+  const furniture = useMemo(() => sceneFurniture(scene), [scene]);
   const [poses, setPoses] = useState<readonly BodyPose[]>([]);
+  const [crane, setCrane] = useState<{ x: number; y: number }>({
+    x: (furniture.yard.minX + furniture.yard.maxX) / 2,
+    y: furniture.yard.minY,
+  });
 
   useEffect(() => {
     const { demo, clients } = buildDemo();
@@ -119,6 +154,7 @@ export function InterestingRailwayDemoView() {
         acc -= STEP_S;
       }
       setPoses(world.bodies());
+      setCrane(demo.yardCranePos());
       window.__tfPhysics = {
         name: 'interesting-demo',
         elapsedS: elapsed,
@@ -199,9 +235,55 @@ export function InterestingRailwayDemoView() {
         {raisedDecks.map((deck) => (
           <SegArt key={deck.id} d={deck.d} raised />
         ))}
+        {/* Station platforms — a sleeper-coloured slab beside each station marker. */}
+        {furniture.stations.map((s) => (
+          <g key={`stn-${s.id}`} data-testid="station">
+            <rect
+              x={s.x - 30}
+              y={s.y - 26}
+              width={60}
+              height={13}
+              rx={3}
+              fill="#c9b48c"
+              stroke="#6f4c28"
+              strokeWidth={1.5}
+            />
+          </g>
+        ))}
         {poses.map((p) => (
           <BodyG key={p.id} pose={p} />
         ))}
+        {/* The yard gantry crane: a metal truss spanning the yard, riding rails along its
+         *  top + bottom, with the CV head where the device has driven it (live). */}
+        <g data-testid="yard-gantry">
+          <line
+            x1={furniture.yard.minX - 12}
+            y1={furniture.yard.minY - 18}
+            x2={furniture.yard.maxX + 12}
+            y2={furniture.yard.minY - 18}
+            stroke="#7a7f88"
+            strokeWidth={4}
+          />
+          <line
+            x1={furniture.yard.minX - 12}
+            y1={furniture.yard.maxY + 18}
+            x2={furniture.yard.maxX + 12}
+            y2={furniture.yard.maxY + 18}
+            stroke="#7a7f88"
+            strokeWidth={4}
+          />
+          {/* The travelling bridge of the gantry, at the crane head's x. */}
+          <line
+            x1={crane.x}
+            y1={furniture.yard.minY - 18}
+            x2={crane.x}
+            y2={furniture.yard.maxY + 18}
+            stroke="#9aa0aa"
+            strokeWidth={5}
+          />
+          {/* The hoist/wedge head, at the device-driven (x,y). */}
+          <circle cx={crane.x} cy={crane.y} r={9} fill="#d94f3a" stroke="#5a2017" strokeWidth={2} />
+        </g>
       </svg>
     </div>
   );
