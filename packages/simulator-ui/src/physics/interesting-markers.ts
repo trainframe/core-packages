@@ -41,6 +41,14 @@ export const INTERESTING_MARKERS = {
   blkEY1: 'M-blk-ey1', // east → yard (on the right semicircle)
   blkEY2: 'M-blk-ey2', // east → yard (on the bottom approach run)
   blkWN: 'M-blk-wn', // west → north (on the left semicircle)
+  /* MERGE-NODE markers, right AT each physical rejoin (where a branch comes back onto
+   *  the main). Marking the junction itself makes it its own short block: a train holds
+   *  it only as it crosses and RELEASES it the instant its tail is through — instead of
+   *  holding one long block clear across the junction, which needlessly stalls a train
+   *  on the other approach (the Brio/Factorio "signal each side of a junction" rule). */
+  satAMerge: 'M-satA-mg', // where the satA loop rejoins the main
+  satBMerge: 'M-satB-mg', // where the satB loop rejoins the main
+  yardMerge: 'M-yard-mg', // where the yard detour rejoins the running line
 } as const;
 
 /** A train's cyclic station→station route. */
@@ -130,6 +138,13 @@ export function buildInterestingMarkers(scene: MainLoopScene): InterestingMarker
       distAlongMm: mid('semi-l'),
       kind: 'unspecified',
     },
+    /* MERGE-NODE markers, right after each physical rejoin (a short way onto the trunk a
+     *  branch comes back onto), so the merge is its own short block: a train releases it
+     *  the instant it's through, freeing the other approach, instead of holding it clear
+     *  across to the next station. */
+    { id: M.satAMerge, segment: 'top-b', end: 'start', distAlongMm: 40, kind: 'unspecified' },
+    { id: M.satBMerge, segment: 'top-c', end: 'start', distAlongMm: 40, kind: 'unspecified' },
+    { id: M.yardMerge, segment: 'bot-c', end: 'start', distAlongMm: 40, kind: 'unspecified' },
     /* The DIVERT junction on the running line (the start of the divert branch, where the
      *  bypass and the into-yard branch split). A circulating train crosses it on the
      *  bypass; the scheduler throws it to `divert` to send a visitor into the yard. */
@@ -158,19 +173,27 @@ export function buildInterestingMarkers(scene: MainLoopScene): InterestingMarker
    *  the loop so four trains seed clear and never bunch into one block. */
   const edges: EdgeSpec[] = [
     { from: M.north, to: M.satA },
-    { from: M.satA, to: M.blkAB, requiresSwitch: a.mainPos }, // stay on the main
+    /* satA diamond: both the main-through and the loop rejoin at the satA MERGE node, a
+     *  short block the train clears before reaching blkAB. */
+    { from: M.satA, to: M.satAMerge, requiresSwitch: a.mainPos }, // stay on the main
     { from: M.satA, to: M.satAStation, requiresSwitch: a.loopPos }, // divert into the loop
-    { from: M.satAStation, to: M.blkAB }, // loop rejoins the through on top-b
+    { from: M.satAStation, to: M.satAMerge }, // loop rejoins at the merge
+    { from: M.satAMerge, to: M.blkAB },
     { from: M.blkAB, to: M.satB },
-    { from: M.satB, to: M.east, requiresSwitch: bsat.mainPos },
+    /* satB diamond → satB merge → east. */
+    { from: M.satB, to: M.satBMerge, requiresSwitch: bsat.mainPos },
     { from: M.satB, to: M.satBStation, requiresSwitch: bsat.loopPos },
-    { from: M.satBStation, to: M.east },
+    { from: M.satBStation, to: M.satBMerge },
+    { from: M.satBMerge, to: M.east },
     { from: M.east, to: M.blkEY1 },
     { from: M.blkEY1, to: M.blkEY2 },
     { from: M.blkEY2, to: M.yardJn },
-    { from: M.yardJn, to: M.south, requiresSwitch: yardTap.mainPos }, // bypass the yard
+    /* Yard: bypass + the released-visitor rejoin both pass the yard MERGE node, then on
+     *  to south — so the junction frees the instant a train is through it. */
+    { from: M.yardJn, to: M.yardMerge, requiresSwitch: yardTap.mainPos }, // bypass the yard
     { from: M.yardJn, to: M.yard, requiresSwitch: yardTap.divertPos }, // divert into the yard
-    { from: M.yard, to: M.south }, // released visitor rejoins past the merge (opaque interior)
+    { from: M.yard, to: M.yardMerge }, // released visitor rejoins past the merge (opaque interior)
+    { from: M.yardMerge, to: M.south },
     { from: M.south, to: M.west },
     { from: M.west, to: M.blkWN },
     { from: M.blkWN, to: M.north },

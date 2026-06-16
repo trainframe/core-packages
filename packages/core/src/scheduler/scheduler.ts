@@ -71,25 +71,6 @@ export const CLEARANCE_LEAD_TIME_MS = 6_000;
  */
 export const CLEARANCE_HORIZON_MAX_EDGES = 6;
 
-/**
- * How many edges AHEAD a train is allowed to reserve a MERGE junction — a marker
- * several edges converge on (in-degree ≥ 2), where two trains' paths physically
- * join. The full clearance horizon would let a train lock a merge five or six short
- * blocks early — so a train still out on a satellite loop (or any branch) reserves
- * the rejoin long before it gets there, needlessly stopping a train on the other
- * approach that could have cleared the merge first.
- *
- * Instead the horizon RESERVES UP TO a merge but grants the edge THROUGH it only
- * once the train is within this many edges of it (just-in-time). Whichever train is
- * actually closer takes the merge; the farther one holds at the block before it and
- * flows on the moment the merge frees. This optimises for smooth, natural running
- * (far fewer phantom waits) AND reduces deadlock pressure (no train locks a junction
- * it won't reach for a while). On open track with no nearby merge the full horizon
- * still applies. Two edges keeps a block of approach room while killing the early
- * over-reservation.
- */
-export const MERGE_RESERVE_HORIZON_EDGES = 2;
-
 export interface SchedulerOptions {
   /**
    * Monotonic clock callback in ms, used to time the station dwell. REQUIRED:
@@ -1018,20 +999,6 @@ export class Scheduler {
     ) {
       const edge = train.transit.edges[i];
       if (!edge) break;
-      /* JUST-IN-TIME MERGE RESERVATION: don't lock a merge junction (a marker several
-       * edges converge on) from far back. Reserve UP TO it, but grant the edge THROUGH
-       * it only once the train is within `MERGE_RESERVE_HORIZON_EDGES` — so whichever
-       * train is genuinely closer takes the merge and a train still out on a branch
-       * never blocks it. A merge edge the train already HOLDS is kept (don't drop a
-       * grant it's relying on); only an un-held, too-far merge stops the walk. */
-      const depth = i - train.transit.progress_index;
-      if (
-        depth > MERGE_RESERVE_HORIZON_EDGES &&
-        this.layout.edgesInto(edge.to_marker_id).length >= 2 &&
-        !train.cleared_edges.some((e) => edgesEqual(e, edge))
-      ) {
-        break;
-      }
       /* Unknown traversal time → treat the edge as covering the FULL lead time.
        * The horizon then only extends past the floor when learned-fast edges
        * keep the running total below the target; an un-measured edge is assumed
