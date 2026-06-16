@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { addParallelogramYard } from '../physics/parallelogram-yard.js';
 import { parallelogramYardLayout } from '../physics/parallelogram-yard-layout.js';
+import { addParallelogramYard } from '../physics/parallelogram-yard.js';
 import { type Cursor, PieceNetworkBuilder } from '../physics/piece-network.js';
 import { PhysicsWorld } from '../physics/world.js';
 import { ladderSwitchActuator } from '../sim/ladder-switch-actuator.js';
