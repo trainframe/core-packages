@@ -1,45 +1,36 @@
 /**
- * The toy-table vision length station, ported onto the ADR-030 honest model.
+ * The toy-table vision length station (ADR-030 §5), measuring PHYSICS BODIES.
  *
  * The legacy toy-table cheated: it read the simulator's ground-truth consist
- * (`train.getConsist().length`) and published that as the wire length. That
- * could never port to real hardware, where a fixed camera cannot read a train's
- * makeup off a manifest — it only sees a blob pass beneath it.
+ * (`train.getConsist().length`) and published that as the wire length. That could
+ * never port to real hardware, where a fixed camera cannot read a train's makeup
+ * off a manifest — it only sees a blob pass beneath it.
  *
- * This drives the SAME honest device as the physics-scenario view: the
+ * This drives the SAME honest device as the physics-scenario view: a real
  * `VisionStation` (`sensors/vision-station.ts`). The station owns two sensing
  * reference points a fixed baseline apart and a camera footprint between them
- * (geometry in `pieces.ts`). As a train's HEAD crosses the two reference points
- * it measures speed = baseline ÷ crossing-interval; the camera integrates the
- * dwell the train's body covers the footprint; length = speed × dwell. No train
+ * (geometry in `pieces.ts`). As a train's HEAD crosses the two reference points it
+ * measures speed = baseline ÷ crossing-interval; the camera integrates the dwell
+ * the train's body covers the footprint; length = speed × dwell. No train
  * self-report, no consist read for the wire length.
  *
- * The honest sensor inputs come from the toy-table's authoritative world (the
- * `@trainframe/simulator` `Simulation`, which ADR-030 §4 designates the physical
- * layer here): a train's body world positions — its loco head plus each coupled
- * carriage, placed exactly as the renderer places them (`trailingCarriagePose`)
- * — are the physical bodies a camera perceives, the toy-table analogue of the
- * physics world's `world.bodies()`. The camera reports `occupied` while any body
- * covers the footprint; the head's crossings of the two reference points give
- * the speed. The consist is read ONLY as a physical body (its count + livery a
- * camera sees), never as the length put on the wire.
+ * The honest sensor inputs are the toy-table's PHYSICS BODIES — exactly the poses
+ * the `PhysicsWorld` reports via `world.bodies()` and the renderer draws. The owner
+ * (`ToyHardware`) snapshots each live train's loco + coupled carriage bodies and
+ * feeds them in via `tick`. The camera reports `occupied` while any body covers the
+ * footprint; the head's crossings of the two reference points give the speed. The
+ * consist is read ONLY as a physical body (its count + livery a camera sees), never
+ * as the length put on the wire.
  *
  * DOM-free and unit-testable headless: time arrives via `tick`, positions via a
- * `TrainBody` snapshot. The toy-table feeds it from `ToyHardware`.
+ * `TrainBody` snapshot — no dependency on any `Simulation` or `PhysicsWorld`.
  */
 
-import type { Simulation } from '@trainframe/simulator';
 import type {
   CameraPerception,
   CameraProvider,
 } from '@trainframe/simulator/sensors/camera-provider.js';
 import { VisionStation } from '@trainframe/simulator/sensors/vision-station.js';
-import { CARRIAGE_SPACING_MM, type WorldPosition } from '@trainframe/simulator/track/coupling.js';
-import {
-  type EdgePath,
-  type TrailingPositionSource,
-  trailingCarriagePose,
-} from '@trainframe/simulator/track/edge-path.js';
 import {
   type TrackPiece,
   VISION_BASELINE_MM,
@@ -49,74 +40,23 @@ import {
   transformPoint,
 } from '@trainframe/simulator/track/pieces.js';
 
-/** Body half-extents along the rail (mm), mirroring the physics CameraProvider:
- * a loco is ~68 mm long, a carriage ~60 mm. The camera sees a body when the
- * footprint falls within `halfLen + radius` of the body's centre. */
-const HALF_LEN_MM = { loco: 34, carriage: 30 } as const;
-
-/** One physical body the camera can perceive: its world centre + livery. */
-interface VisionBody {
-  readonly pos: WorldPosition;
+/** One physical body the camera can perceive: its world centre, half-extent along
+ *  the rail (mm), and livery (if any). A loco is ~68 mm long, a carriage ~60 mm. */
+export interface VisionBody {
+  readonly pos: { readonly x: number; readonly y: number; readonly rotationDeg: number };
   readonly half: number;
   readonly colour: string | undefined;
 }
 
-/** A live train as the camera perceives it: its loco head plus coupled
- * carriages, head-first, each a physical body at a world position. */
+/** A live train as the camera perceives it: its loco head plus coupled carriages,
+ *  head-first, each a physical body at a world position. */
 export interface TrainBody {
   readonly trainId: string;
   readonly bodies: ReadonlyArray<VisionBody>;
 }
 
-/**
- * Compute a live train's body world positions from the authoritative sim — the
- * loco head and each coupled carriage, placed by the same `trailingCarriagePose`
- * the renderer uses. This is the physical-body snapshot a camera perceives; the
- * carriage COUNT and livery are physical facts a camera reads, never the wire
- * length. Returns undefined when the train is deferred (no resolvable position).
- */
-export function trainBodyPositions(
-  sim: Simulation,
-  trainDeviceId: string,
-  carriageIds: ReadonlyArray<string>,
-  piecesById: ReadonlyMap<string, TrackPiece>,
-): TrainBody | undefined {
-  const simTrain = sim.getTrain(trainDeviceId);
-  if (simTrain === undefined) return undefined;
-  const source: TrailingPositionSource = simTrain;
-  const edgeEstLen = (f: string, to: string): number =>
-    sim.layout.findEdge(f, to)?.estimated_length_mm ?? 200;
-  const pathCache = new Map<string, EdgePath>();
-
-  const headPose = trailingCarriagePose(source, 0, piecesById, edgeEstLen, pathCache);
-  if (headPose === undefined) return undefined;
-
-  const bodies: VisionBody[] = [
-    { pos: headPose, half: HALF_LEN_MM.loco, colour: liveryOf(sim, trainDeviceId, -1) },
-  ];
-  for (let i = 0; i < carriageIds.length; i++) {
-    const pose = trailingCarriagePose(
-      source,
-      (i + 1) * CARRIAGE_SPACING_MM,
-      piecesById,
-      edgeEstLen,
-      pathCache,
-    );
-    if (pose === undefined) continue;
-    bodies.push({ pos: pose, half: HALF_LEN_MM.carriage, colour: liveryOf(sim, trainDeviceId, i) });
-  }
-  return { trainId: trainDeviceId, bodies };
-}
-
-/** The livery of the loco (index -1) or the carriage at `index` in the sim
- * consist, if it carries one — what the camera would see as colour. */
-function liveryOf(sim: Simulation, trainDeviceId: string, index: number): string | undefined {
-  if (index < 0) return undefined; // the loco has no livery in the sim model
-  return sim.getTrain(trainDeviceId)?.getConsist()[index]?.colorId;
-}
-
-/** The station's two world reference points + footprint centre, derived from
- * its placement (local x along the rail, rotated into world space). */
+/** The station's two world reference points + footprint centre, derived from its
+ *  placement (local x along the rail, rotated into world space). */
 interface StationRig {
   readonly markerA: WorldPosition2D;
   readonly markerB: WorldPosition2D;
@@ -149,10 +89,10 @@ export function stationRig(piece: TrackPiece): StationRig {
 }
 
 /**
- * A camera that perceives a single train body snapshot at a fixed footprint —
- * the toy-table analogue of `physicsCameraProvider`. `occupied` is true while
- * any of the train's physical bodies covers the footprint; the nearest body's
- * livery wins, exactly as one fixed sensor resolves overlapping blobs.
+ * A camera that perceives a single train body snapshot at a fixed footprint — the
+ * toy-table analogue of `physicsCameraProvider`. `occupied` is true while any of the
+ * train's physical bodies covers the footprint; the nearest body's livery wins,
+ * exactly as one fixed sensor resolves overlapping blobs.
  */
 function snapshotCamera(
   footprint: WorldPosition2D,
@@ -179,9 +119,9 @@ function snapshotCamera(
   };
 }
 
-/** Scalar position of a point projected onto the station's A→B axis (mm), so a
- * head crossing each reference is a clean monotonic threshold regardless of the
- * piece's rotation. markerA projects to 0, markerB to the baseline length. */
+/** Scalar position of a point projected onto the station's A→B axis (mm), so a head
+ *  crossing each reference is a clean monotonic threshold regardless of the piece's
+ *  rotation. markerA projects to 0, markerB to the baseline length. */
 function projectOntoAxis(rig: StationRig, p: WorldPosition2D): number {
   const ax = rig.markerB.x - rig.markerA.x;
   const ay = rig.markerB.y - rig.markerA.y;
@@ -195,9 +135,9 @@ function projectOntoAxis(rig: StationRig, p: WorldPosition2D): number {
 /**
  * One honest measurement of a single train at a single station. Wraps a real
  * `VisionStation`, feeding it the two head crossings (detected by the head's
- * projection passing each reference along the axis) and the camera dwell. A
- * crossing fires in EITHER axis direction so a train passing from either end is
- * measured. Once both crossings and a dwell are in, the `VisionStation` reports.
+ * projection passing each reference along the axis) and the camera dwell. A crossing
+ * fires in EITHER axis direction so a train passing from either end is measured. Once
+ * both crossings and a dwell are in, the `VisionStation` reports.
  */
 class TrainMeasurement {
   private readonly rig: StationRig;
@@ -212,14 +152,11 @@ class TrainMeasurement {
     this.station = new VisionStation({
       markerA: 'A',
       markerB: 'B',
-      /* The B reference projects to the baseline length along the A→B axis and A
-       * to 0, so the speed divisor is exactly the device's fixed baseline. */
       baselineMm: VISION_BASELINE_MM,
       camera: snapshotCamera(rig.footprint, VISION_FOOTPRINT_RADIUS_MM, () => this.currentBody),
       onLength: (mm) => {
-        /* The VisionStation resets its own per-pass state after reporting; clear
-         * ours too so the SAME train measured again on a later pass re-fires its
-         * crossings rather than staying latched from the first. */
+        /* The VisionStation resets its own per-pass state after reporting; clear ours
+         *  too so the SAME train measured again on a later pass re-fires. */
         this.crossedA = false;
         this.crossedB = false;
         onLength(mm);
@@ -227,8 +164,8 @@ class TrainMeasurement {
     });
   }
 
-  /** Advance by `dtS`, given the train's latest body snapshot (or undefined if
-   * the train is gone) and the absolute sim timestamp (s). */
+  /** Advance by `dtS`, given the train's latest body snapshot (or undefined if the
+   *  train is gone) and the absolute sim timestamp (s). */
   step(dtS: number, body: TrainBody | undefined, timestampS: number): void {
     this.currentBody = body;
     const head = body?.bodies[0]?.pos;
@@ -250,18 +187,18 @@ class TrainMeasurement {
   }
 }
 
-/** True when the scalar moved across `threshold` between `prev` and `now`, in
- * either direction (a train may pass the station from either end). */
+/** True when the scalar moved across `threshold` between `prev` and `now`, in either
+ *  direction (a train may pass the station from either end). */
 function crossedThreshold(prev: number, now: number, threshold: number): boolean {
   return (prev < threshold && now >= threshold) || (prev > threshold && now <= threshold);
 }
 
 /**
- * Drives the honest `VisionStation` for every live vision-station piece against
- * the live trains, one measurement per (station, train) pair. The owner
- * (`ToyHardware`) calls `tick` each frame with the elapsed sim time and the live
- * train bodies; reported lengths arrive via `onLength(stationDeviceId, trainId,
- * lengthMm)`.
+ * Drives the honest `VisionStation` for every live vision-station piece against the
+ * live trains, one measurement per (station, train) pair. The owner (`ToyHardware`)
+ * calls `tick` each frame with the elapsed sim time and the live train bodies
+ * (sampled from the `PhysicsWorld`); reported lengths arrive via
+ * `onLength(stationDeviceId, trainId, lengthMm)`.
  */
 export class ToyVisionStations {
   private readonly onLength: (stationDeviceId: string, trainId: string, lengthMm: number) => void;
@@ -276,7 +213,7 @@ export class ToyVisionStations {
   }
 
   /** Re-index the live vision stations from the placed pieces + live set. Drops
-   * measurements for stations that are gone. */
+   *  measurements for stations that are gone. */
   index(pieces: ReadonlyArray<TrackPiece>, liveIds: ReadonlySet<string>): void {
     const rigs = new Map<string, StationRig>();
     const deviceIds = new Map<string, string>();
@@ -294,13 +231,13 @@ export class ToyVisionStations {
     }
   }
 
-  /** Whether any vision station is currently live (so the owner knows whether
-   * to pay the per-sub-step body-snapshot cost). */
+  /** Whether any vision station is currently live (so the owner knows whether to pay
+   *  the per-sub-step body-snapshot cost). */
   hasLiveStation(): boolean {
     return this.rigs.size > 0;
   }
 
-  /** The sim was rebuilt: its clock + event stream start over, so reset. */
+  /** The world was rebuilt: its clock + event stream start over, so reset. */
   reset(): void {
     this.measurements.clear();
     this.elapsedS = 0;

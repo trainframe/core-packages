@@ -49,7 +49,8 @@
  *
  * DEFERRED (documented, not half-implemented): `turntable` (an N-way rotating junction
  * whose deck angle, not a static branch, picks the exit, with facing-flip transitions).
- * It throws rather than emit a silently-wrong network — see `assertSupported`. NOTE on
+ * It is SKIPPED (left as a non-routing gap, recorded in `contradictions`) rather than
+ * throwing — one unsupported piece must not crash a whole layout — see `isDeferred`. NOTE on
  * bridges: a grade-separated self-crossing (a satellite loop ramping over the main on a
  * height layer, as in `interesting-layout.ts`) is NOT a special case here — the crossing
  * pieces are on different layers and share NO joint, so they never cluster; the ramps are
@@ -100,14 +101,13 @@ function branchSegId(piece: TrackPiece): string {
   return `S-${piece.id}-b`;
 }
 
-/** Throw on a piece type whose faithful free-placed compilation is deferred, so we
- *  never emit a silently-wrong network. See the file header's DEFERRED note. */
-function assertSupported(piece: TrackPiece): void {
-  if (piece.type === 'turntable') {
-    throw new Error(
-      `network-from-pieces: turntable (${piece.id}) is not yet supported by the free-placed compiler — it is an N-way rotating junction; use PieceNetworkBuilder for turntable scenes.`,
-    );
-  }
+/** Whether a piece type's faithful free-placed compilation is DEFERRED (turntable —
+ *  an N-way rotating junction; multi-deck bridges are handled by layer separation,
+ *  not here). A deferred piece is SKIPPED — left as a non-routing gap and recorded
+ *  in the result's `contradictions` — rather than throwing, so one unsupported piece
+ *  can never crash a whole layout (a real operator table may carry one). */
+function isDeferred(piece: TrackPiece): boolean {
+  return piece.type === 'turntable';
 }
 
 /** A non-device piece with its world endpoints and the index into the piece array
@@ -277,13 +277,17 @@ class NetworkCompiler {
   private readonly contradictions: string[] = [];
 
   constructor(pieces: readonly TrackPiece[]) {
-    for (const piece of pieces) if (!isDevicePiece(piece.type)) assertSupported(piece);
     this.adjacency = buildAdjacency(pieces).adjacency;
-    /* Only non-device pieces are topology (devices ride the track, they don't form
-     * it — exactly as `compileLayout` skips them). */
+    /* Only non-device, non-deferred pieces are routable topology (devices ride the
+     * track — `compileLayout` skips them too; deferred pieces like a turntable are
+     * left as a recorded gap, never thrown, so one can't crash a whole layout). */
     for (let i = 0; i < pieces.length; i++) {
       const piece = pieces[i];
       if (piece === undefined || isDevicePiece(piece.type)) continue;
+      if (isDeferred(piece)) {
+        this.contradictions.push(`deferred: ${piece.type} (${piece.id}) left as a non-routing gap`);
+        continue;
+      }
       const eps = getEndpoints(piece).map((e) => ({ x: e.x, y: e.y, layer: e.layer }));
       if (eps.length === 0) continue;
       const node: PieceNode = { idx: i, piece, endpoints: eps };
@@ -620,7 +624,7 @@ class NetworkCompiler {
 /**
  * Compile free-placed track pieces into a physics `RailNetwork`. See the file
  * header for the orientation algorithm. Device pieces are skipped; turntables and
- * multi-layer bridges are deferred (they throw). Pure geometry/topology.
+ * turntables are deferred (skipped as a recorded gap, not thrown). Pure geometry/topology.
  */
 export function compileNetwork(pieces: readonly TrackPiece[]): CompiledNetwork {
   return new NetworkCompiler(pieces).compile();

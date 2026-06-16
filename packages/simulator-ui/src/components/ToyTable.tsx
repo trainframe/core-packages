@@ -2,19 +2,10 @@ import type { BrokerClient } from '@trainframe/simulator/broker/client.js';
 import { encodeDeviceEvent } from '@trainframe/simulator/broker/encode-event.js';
 import { buildBridgeDemo } from '@trainframe/simulator/demo/bridge-demo.js';
 import { buildRailyardDemo } from '@trainframe/simulator/demo/railyard-demo.js';
+import type { BodyPose } from '@trainframe/simulator/physics/observation.js';
 import { nearestStartEdge } from '@trainframe/simulator/sim/nearest-edge.js';
-import {
-  CARRIAGE_SPACING_MM,
-  type WorldPosition,
-  computeTrainTrails,
-} from '@trainframe/simulator/track/coupling.js';
-import {
-  type EdgePath,
-  composeEdgePath,
-  pieceIdFromMarkerId,
-  poseAt,
-  trailingCarriagePose,
-} from '@trainframe/simulator/track/edge-path.js';
+import { type WorldPosition, computeTrainTrails } from '@trainframe/simulator/track/coupling.js';
+import { composeEdgePath, pieceIdFromMarkerId } from '@trainframe/simulator/track/edge-path.js';
 import { SNAP_DISTANCE, compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
 import { detectSameLayerOverlaps, pierSuppressed } from '@trainframe/simulator/track/overlap.js';
 import {
@@ -36,7 +27,6 @@ import {
   RAILYARD_HEAD_Y,
   RAILYARD_RAIL_Y,
   RAILYARD_SLOT_YS,
-  type RailyardJourney,
   type RotationDeg,
   type SupportColumn,
   TOYBOX_TRAYS,
@@ -60,10 +50,8 @@ import {
   liftBridgeGap,
   liftBridgeSpan,
   pieceMarkerKind,
-  railyardInteriorJourney,
   supportColumn,
   turntableDeck,
-  worldHalfPath,
 } from '@trainframe/simulator/track/pieces.js';
 import {
   computeMovePlacement,
@@ -469,185 +457,54 @@ function spawnOrientationDeg(
   return toRotationDeg(composeEdgePath(fromPiece, toPiece).at(0).headingDeg);
 }
 
-/**
- * Compute render-time world positions for all live trains and their coupled
- * carriages from the current simulation state.
- *
- * Each live train that has a `current_edge` in the simulation drives:
- *   - its own rendered position (the train sprite follows the sim, not the
- *     placement position),
- *   - each coupled carriage at `CARRIAGE_SPACING_MM * (trailIndex + 1)` behind.
- *
- * If a carriage's computed offset is negative (it would trail onto the
- * previous edge) it is clamped to distance 0 (edge start). Full multi-edge
- * trailing is a TODO for a future revision.
- *
- * Pieces with no resolvable sim edge (train deferred — scanned but no track
- * yet) are omitted; the renderer falls back to `piece.position`.
- *
- * @pure — reads from sim and pieces only; returns a new Map each call.
- */
-/**
- * Place one live train (and any coupled carriages) at its simulated edge
- * position, writing into `result`. No-op when the train has no resolvable sim
- * edge (deferred — scanned but no track under it yet).
- */
-type ToySimulation = ReturnType<ToyHardware['getSimulation']>;
+/** A live body's world pose, lifted straight from physics — the renderer reads
+ *  poses, never computes them. */
+function toPos(b: BodyPose): WorldPosition {
+  return { x: b.x, y: b.y, rotationDeg: b.rotationDeg };
+}
+
+/** The loco body id for a train piece — the train's own device id (`T-{id}`),
+ *  which physics uses as the loco body id. Must match `deviceIdForDevicePiece`. */
+function locoId(piece: TrackPiece): string {
+  return `T-${piece.id}`;
+}
 
 /**
- * Render a PARKED train (no current sim edge — it ran to a route end and
- * stopped) and its rake from the traversal history, so the whole train stays on
- * the rail behind where it stopped instead of every piece snapping back to its
- * static placement off the track. `offset 0` is the loco at its parked marker;
- * carriages trail back from there. No-op (→ static fallback) when the train has
- * no position at all (deferred — scanned with no track yet).
+ * Compute render-time world positions for every live train, its coupled
+ * carriages, and any operator-parked yard spares — read STRAIGHT from the
+ * physics bodies (each body is already positioned in world coords).
+ *
+ * For each live `train` piece P:
+ *   - P renders at its loco body `T-{P}`'s pose;
+ *   - each carriage piece id in `trainTrails.get(P)` at index `i` renders at the
+ *     carriage body `T-{P}-c{i}`'s pose.
+ * Then every `SPARE-{carriagePieceId}` body parks that carriage piece at its own
+ * physics pose. Because coupled spare bodies move WITH the train and shed bodies
+ * stay in the yard, a railyard swap becomes visible for free — the renderer just
+ * follows the bodies.
+ *
+ * Pieces whose body is absent (a train deferred — scanned with no rail under it
+ * yet) are omitted; the renderer falls back to `piece.position`.
+ *
+ * @pure — reads bodies + pieces only; returns a new Map each call.
  */
-function placeParkedTrain(
+/** Place ONE live train piece (and its coupled carriage pieces) at their
+ *  physics bodies' poses, writing into `result`. Loco at `T-{P}`; carriage piece
+ *  `i` at `T-{P}-c{i}`. Absent bodies are skipped (static fallback). */
+function placeTrainBodies(
   piece: TrackPiece,
-  simTrain: NonNullable<ReturnType<ToySimulation['getTrain']>>,
-  piecesById: ReadonlyMap<string, TrackPiece>,
-  edgeEstLen: (f: string, to: string) => number,
+  byId: ReadonlyMap<string, BodyPose>,
   carriageIds: ReadonlyArray<string>,
   result: Map<string, WorldPosition>,
 ): void {
-  const cache = new Map<string, EdgePath>();
-  const locoPose = trailingCarriagePose(simTrain, 0, piecesById, edgeEstLen, cache);
-  if (locoPose === undefined) return;
-  result.set(piece.id, locoPose);
+  const loco = byId.get(locoId(piece));
+  if (loco !== undefined) result.set(piece.id, toPos(loco));
   for (let i = 0; i < carriageIds.length; i++) {
-    const carriageId = carriageIds[i];
-    if (carriageId === undefined) continue;
-    const pose = trailingCarriagePose(
-      simTrain,
-      (i + 1) * CARRIAGE_SPACING_MM,
-      piecesById,
-      edgeEstLen,
-      cache,
-    );
-    if (pose !== undefined) result.set(carriageId, pose);
+    const carriagePieceId = carriageIds[i];
+    if (carriagePieceId === undefined) continue;
+    const car = byId.get(`${locoId(piece)}-c${i}`);
+    if (car !== undefined) result.set(carriagePieceId, toPos(car));
   }
-}
-
-function placeLiveTrain(
-  piece: TrackPiece,
-  sim: ToySimulation,
-  piecesById: ReadonlyMap<string, TrackPiece>,
-  trainTrails: ReadonlyMap<string, ReadonlyArray<string>>,
-  result: Map<string, WorldPosition>,
-): void {
-  const simTrain = sim.getTrain(`T-${piece.id}`);
-  if (simTrain === undefined) return;
-
-  const edgeEstLen = (f: string, to: string): number =>
-    sim.layout.findEdge(f, to)?.estimated_length_mm ?? 200;
-  const carriageIds = trainTrails.get(piece.id) ?? [];
-
-  const endpoints = resolveEdgeEndpoints(simTrain, piecesById);
-  if (endpoints === undefined) {
-    placeParkedTrain(piece, simTrain, piecesById, edgeEstLen, carriageIds, result);
-    return;
-  }
-
-  const { fromPiece, toPiece, fromMarkerId, toMarkerId } = endpoints;
-
-  // The TRUE rail the train rides: the composite centre-line path from the
-  // current edge's two markers, following the real arc/junction-leg geometry
-  // rather than the chord between the two piece centres.
-  const path = composeEdgePath(fromPiece, toPiece);
-
-  // Map the sim's logical progress onto the true rail length. The sim measures
-  // progress against `estimated_length_mm`; `t` (0..1) is that fraction, and we
-  // sample the composite path at `t * L` so the train lands exactly on
-  // `toPiece`'s centre at t=1 regardless of how the estimate differs from L.
-  const estimatedLengthMm =
-    sim.layout.findEdge(fromMarkerId, toMarkerId)?.estimated_length_mm ?? 200;
-  const t = estimatedLengthMm > 0 ? simTrain.getDistanceIntoEdge() / estimatedLengthMm : 0;
-  const trainDist = t * path.length;
-
-  result.set(piece.id, poseAt(path, trainDist));
-
-  /* Coupled carriages trail behind via the sim's multi-edge traversal history.
-     The path cache is seeded with the current edge's already-composed path so
-     current-edge carriages are a cache hit; previous-edge carriages compose
-     once per distinct edge and then also hit the cache. */
-  const pathCache = new Map<string, EdgePath>([[`${fromMarkerId}->${toMarkerId}`, path]]);
-
-  for (let i = 0; i < carriageIds.length; i++) {
-    const carriageId = carriageIds[i];
-    if (carriageId === undefined) continue;
-    const offset = (i + 1) * CARRIAGE_SPACING_MM;
-    const pose =
-      trailingCarriagePose(simTrain, offset, piecesById, edgeEstLen, pathCache) ??
-      poseAt(path, trainDist - offset);
-    result.set(carriageId, pose);
-  }
-}
-
-/** True when at least one live train is currently under power in the sim. */
-function anyLiveTrainMoving(
-  hardware: ToyHardware,
-  pieces: ReadonlyArray<TrackPiece>,
-  liveIds: ReadonlySet<string>,
-): boolean {
-  const sim = hardware.getSimulation();
-  for (const p of pieces) {
-    if (p.type !== 'train' || !liveIds.has(p.id)) continue;
-    const simTrain = sim.getTrain(`T-${p.id}`);
-    if (simTrain !== undefined && simTrain.getVelocity() > 0) return true;
-  }
-  return false;
-}
-
-/**
- * The ordered carriage-piece-ids each live train carries. Prefers the
- * SIMULATION consist (seeded from proximity at attach, then mutated by a
- * railyard swap) — that is what makes a shunt visible, the renderer following
- * the sim rather than the static placement. Falls back to live proximity
- * coupling for a train whose consist has not been seeded yet (e.g. the frame a
- * carriage is first dropped, before the hardware effect runs), so hand-built
- * coupling still reads instantly.
- */
-function consistTrails(
-  pieces: ReadonlyArray<TrackPiece>,
-  liveIds: ReadonlySet<string>,
-  hardware: ToyHardware,
-): Map<string, string[]> {
-  const sim = hardware.getSimulation();
-  const proximity = computeTrainTrails(pieces, liveIds);
-  const trails = new Map<string, string[]>();
-  for (const p of pieces) {
-    if (p.type !== 'train' || !liveIds.has(p.id)) continue;
-    const consist = sim.getTrain(`T-${p.id}`)?.getConsist();
-    if (consist !== undefined && consist.length > 0) {
-      trails.set(
-        p.id,
-        consist.map((c) => c.id),
-      );
-    } else {
-      const prox = proximity.get(p.id);
-      if (prox !== undefined && prox.length > 0) trails.set(p.id, prox);
-    }
-  }
-  return trails;
-}
-
-/** Park a live railyard's resting spare cut as a contiguous rake in whichever
- *  slot the spares currently sit in, so they read as a real cut on a siding (and
- *  a visiting train will reverse onto them). During a maneuver the shunt renders
- *  the cuts itself, so this stands down. */
-function placeYardSpares(
-  piece: TrackPiece,
-  sim: ToySimulation,
-  result: Map<string, WorldPosition>,
-): void {
-  const yard = sim.getRailyard(`YARD-${piece.id}`);
-  if (yard === undefined || yard.getInteriorState() != null) return;
-  const ids = yard.getSpares().map((c) => c.id);
-  if (ids.length === 0) return;
-  const sparesSlotY = yard.getSparesSlotY();
-  // entrySlotY is irrelevant to sparesPose; pass the spares slot itself.
-  const journey = railyardInteriorJourney(sparesSlotY, sparesSlotY);
-  placeRestingCut(piece, ids, journey.sparesPose, result);
 }
 
 function computeRenderPositions(
@@ -657,138 +514,39 @@ function computeRenderPositions(
   hardware: ToyHardware,
 ): Map<string, WorldPosition> {
   const result = new Map<string, WorldPosition>();
-  const piecesById = new Map<string, TrackPiece>();
-  for (const p of pieces) piecesById.set(p.id, p);
-
-  const sim = hardware.getSimulation();
-  // Every *live* train rides its simulated edge position — not just trains that
-  // happen to have carriages coupled. Without this a lone train renders at its
-  // static placement coordinate (e.g. a curve's marker, ~24 mm off the rail),
-  // so it looks parked beside the track instead of running on it.
+  const byId = new Map(hardware.bodies().map((b) => [b.id, b]));
   for (const piece of pieces) {
-    if (piece.type === 'train' && liveIds.has(piece.id)) {
-      placeLiveTrain(piece, sim, piecesById, trainTrails, result);
-    } else if (piece.type === 'railyard' && liveIds.has(piece.id)) {
-      placeYardSpares(piece, sim, result);
-    }
+    if (piece.type !== 'train' || !liveIds.has(piece.id)) continue;
+    placeTrainBodies(piece, byId, trainTrails.get(piece.id) ?? [], result);
   }
-  // Second pass: a train being shunted INSIDE a yard (ADR-029) overrides its
-  // throat position with its interior depth, so it visibly pulls in and out.
-  // Runs after the train pass so it wins over `placeLiveTrain`.
-  for (const piece of pieces) {
-    if (piece.type === 'railyard' && liveIds.has(piece.id)) {
-      placeShuntedTrain(piece, sim, result);
-    }
+  /* Operator-parked yard spares: each `SPARE-{carriagePieceId}` body parks that
+     carriage piece at its physics pose, so a shed/coupled cut renders where the
+     bodies actually are. */
+  const sparePrefix = 'SPARE-';
+  for (const b of hardware.bodies()) {
+    if (!b.id.startsWith(sparePrefix)) continue;
+    result.set(b.id.slice(sparePrefix.length), toPos(b));
   }
   return result;
 }
 
-type YardInterior = NonNullable<
-  ReturnType<NonNullable<ReturnType<ToySimulation['getRailyard']>>['getInteriorState']>
->;
-
-/** Which centre-line the train rides this phase, how far along (0..1), and
- *  whether it is travelling in reverse (rake trailing AHEAD of the loco). Loco-
- *  referenced: the loco walks each path start→end so its position is continuous
- *  across phases. The two crane phases hold the train at the previous drive's end. */
-function shuntSegment(
-  interior: YardInterior,
-  j: RailyardJourney,
-): { local: RailyardJourney['enter']; progress: number; reverse: boolean } {
-  switch (interior.phase) {
-    case 'enter':
-      return { local: j.enter, progress: interior.progress, reverse: true };
-    case 'decouple':
-      return { local: j.enter, progress: 1, reverse: true };
-    case 'pull-clear':
-      return { local: j.pullClear, progress: interior.progress, reverse: false };
-    case 'back-to-spares':
-      return { local: j.backToSpares, progress: interior.progress, reverse: true };
-    case 'settle':
-      return { local: j.settle, progress: interior.progress, reverse: false };
-    case 'inspect':
-      return { local: j.settle, progress: 1, reverse: false };
-    case 'exit':
-      return { local: j.exit, progress: interior.progress, reverse: false };
-  }
+/** True when at least one loco body is currently moving. */
+function anyLiveTrainMoving(hardware: ToyHardware): boolean {
+  return hardware.bodies().some((b) => b.kind === 'loco' && b.speed > 0);
 }
 
-/** Transform a yard-local point to world (mirror→rotate→translate, matching the
- *  renderer + worldHalfPath). */
-function yardLocalToWorld(piece: TrackPiece, lx: number, ly: number): { x: number; y: number } {
-  const rad = (piece.rotationDeg * Math.PI) / 180;
-  const fy = (piece.flipped === true ? -1 : 1) * ly;
-  return {
-    x: piece.position.x + lx * Math.cos(rad) - fy * Math.sin(rad),
-    y: piece.position.y + lx * Math.sin(rad) + fy * Math.cos(rad),
-  };
-}
-
-/** Render a contiguous cut of carriages resting along a slot, from `pose` (the
- *  east end) running back along the slot. */
-function placeRestingCut(
-  piece: TrackPiece,
-  ids: readonly string[],
-  pose: { x: number; y: number },
-  result: Map<string, WorldPosition>,
-): void {
-  for (let i = 0; i < ids.length; i++) {
-    const id = ids[i];
-    if (id === undefined) continue;
-    const w = yardLocalToWorld(piece, pose.x - i * CARRIAGE_SPACING_MM, pose.y);
-    result.set(id, { x: w.x, y: w.y, rotationDeg: piece.rotationDeg });
-  }
-}
-
-/** Render the train the yard is shunting ON THE REAL RAILS: the loco walks the
- *  current phase's centre-line (spine → ladder leg → slot), its coupled rake
- *  trailing along the SAME rail (behind it, or ahead when reversing) — so the
- *  whole train follows the track through the curves rather than floating. The
- *  journey is anchored to the throat the train actually parked at (mirrored if it
- *  entered the east throat) so there's no teleport. The shed rear cut sits parked
- *  in the entry slot; the spare cut waits in the spares slot. No-op when idle. */
-function placeShuntedTrain(
-  piece: TrackPiece,
-  sim: ToySimulation,
-  result: Map<string, WorldPosition>,
-): void {
-  const yard = sim.getRailyard(`YARD-${piece.id}`);
-  const interior = yard?.getInteriorState();
-  if (interior == null) return;
-  const trainPieceId = interior.trainId.startsWith('T-')
-    ? interior.trainId.slice(2)
-    : interior.trainId;
-  const consist = sim.getTrain(interior.trainId)?.getConsist() ?? [];
-
-  const journey = railyardInteriorJourney(interior.entrySlotY, interior.sparesSlotY);
-  const seg = shuntSegment(interior, journey);
-  const path = worldHalfPath(piece, seg.local);
-  const locoArc = seg.progress * path.length;
-  const loco = path.at(locoArc);
-  const flip = seg.reverse ? 180 : 0;
-  // The loco's heading (its sprite faces forward; on a reverse phase that's 180°
-  // from the travel tangent). The coupled rake is a RIGID line trailing straight
-  // behind the loco along this heading — NOT sampled along the path, which would
-  // pile the wagons up where a slot segment runs out and pop them at each phase
-  // boundary. A rigid trail stays strung out and continuous.
-  const headRad = ((loco.headingDeg + flip) * Math.PI) / 180;
-  const back = { x: -Math.cos(headRad), y: -Math.sin(headRad) };
-  result.set(trainPieceId, { x: loco.x, y: loco.y, rotationDeg: loco.headingDeg + flip });
-  for (let i = 0; i < consist.length; i++) {
-    const wagon = consist[i];
-    if (wagon === undefined) continue;
-    const d = (i + 1) * CARRIAGE_SPACING_MM;
-    result.set(wagon.id, {
-      x: loco.x + back.x * d,
-      y: loco.y + back.y * d,
-      rotationDeg: loco.headingDeg + flip,
-    });
-  }
-
-  // The cuts that aren't on the train: the shed rear cut parked in the entry slot,
-  // and the spare cut waiting in the spares slot (until the train couples it).
-  placeRestingCut(piece, interior.shedCutIds, journey.shedPose, result);
-  placeRestingCut(piece, interior.sparesCutIds, journey.sparesPose, result);
+/**
+ * The ordered carriage-piece-ids each live train carries, from proximity
+ * coupling (`computeTrainTrails`) — the seeded rake order. A railyard swap is
+ * made visible by the `SPARE-` body pass in `computeRenderPositions` (coupled
+ * spares move with the train, shed bodies stay in the yard), so the trail map
+ * itself stays the simple proximity consist.
+ */
+function consistTrails(
+  pieces: ReadonlyArray<TrackPiece>,
+  liveIds: ReadonlySet<string>,
+): Map<string, string[]> {
+  return computeTrainTrails(pieces, liveIds);
 }
 
 /** Angle for a turntable's confirmed switch position; unknown or not-yet-set
@@ -817,51 +575,8 @@ function trainUnderSensor(
   return false;
 }
 
-/** The gantry crane is a DECOUPLER. It PARKS at its home end while the self-
- *  propelled train drives itself, and only ever moves to (1) the coupling in the
- *  entry slot, lowering to split it (`decouple`), and (2) over the finished train
- *  to camera-read it (`inspect`). It never lifts, carries, or couples a carriage. */
-const CRANE_HOME_X = -RAILYARD_GANTRY_X;
-
-const lerp = (a: number, b: number, t: number): number => a + (b - a) * Math.max(0, Math.min(1, t));
-
-/** The crane's local-frame pose this phase: bridge depth (`x`), head lane (`y`),
- *  whether the hook is lowered (splitting a coupling), and whether it is working
- *  (camera/LED). */
-interface YardCraneState {
-  readonly x: number;
-  readonly y: number;
-  readonly hookDown: boolean;
-  readonly working: boolean;
-}
-
-function yardCraneState(interior: YardInterior, journey: RailyardJourney): YardCraneState {
-  switch (interior.phase) {
-    case 'decouple': {
-      // Run in from home to the COUPLING (between the kept rake and the shed cut)
-      // and lower to split it there.
-      const t = interior.progress / 0.55;
-      return {
-        x: lerp(CRANE_HOME_X, journey.couplingPose.x, t),
-        y: lerp(0, journey.couplingPose.y, t),
-        hookDown: interior.progress > 0.5,
-        working: true,
-      };
-    }
-    case 'inspect': {
-      // Camera-read the finished train where it rests (no hook).
-      const rest = interior.swapping ? journey.settle : journey.enter;
-      const at = rest.at(rest.length);
-      return { x: at.x, y: at.y, hookDown: false, working: true };
-    }
-    default:
-      // The train drives itself; the crane stays parked at home.
-      return { x: CRANE_HOME_X, y: 0, hookDown: false, working: false };
-  }
-}
-
 /** The crane's pose for the gantry to render (bridge depth + head lane + hook +
- *  LED). Null when the yard isn't shunting, so the crane parks at home. */
+ *  LED). Null when the crane isn't working, so it parks at its home end. */
 interface YardCranePose {
   readonly depthMm: number;
   readonly laneMm: number;
@@ -869,13 +584,14 @@ interface YardCranePose {
   readonly hookDown: boolean;
 }
 
-function yardCranePose(piece: TrackPiece, hardware: ToyHardware | null): YardCranePose | null {
-  if (hardware === null) return null;
-  const interior = hardware.getSimulation().getRailyard(`YARD-${piece.id}`)?.getInteriorState();
-  if (interior == null) return null;
-  const journey = railyardInteriorJourney(interior.entrySlotY, interior.sparesSlotY);
-  const s = yardCraneState(interior, journey);
-  return { depthMm: s.x, laneMm: s.y, working: s.working, hookDown: s.hookDown };
+/* TODO(B): crane viz from the real discovered-slot yard. The legacy yard-
+ *  interior maneuver (enter/decouple/pull-clear/…) drove the gantry crane's
+ *  bridge depth + hook in lock-step; the ADR-030 physics yard emits intents and
+ *  the train self-drives, so there is no keyframed interior to read here yet.
+ *  Until the physics yard exposes a crane working-state, the gantry parks at
+ *  home (no interior animation in A). */
+function yardCranePose(_piece: TrackPiece, _hardware: ToyHardware | null): YardCranePose | null {
+  return null;
 }
 
 /** Everything `experimentVisualFor` reads — bundled so the per-piece dispatch
@@ -885,11 +601,11 @@ interface ExperimentVisualContext {
   readonly liveIds: ReadonlySet<string>;
   readonly renderPositions: ReadonlyMap<string, WorldPosition>;
   readonly craneStacks: ReadonlyMap<string, number>;
-  readonly sim: ToySimulation | undefined;
+  readonly hardware: ToyHardware | null;
 }
 
 /** The live visual for ONE piece's moving parts, or undefined for pieces that
- * have none. Sim-owned state (switch position, gate withhold) is read only
+ * have none. Hardware-owned state (switch position, gate withhold) is read only
  * for LIVE pieces; everything else reads as its resting pose. @pure */
 function experimentVisualFor(
   p: TrackPiece,
@@ -897,15 +613,13 @@ function experimentVisualFor(
 ): ExperimentVisual | undefined {
   switch (p.type) {
     case 'turntable': {
-      const pos = ctx.liveIds.has(p.id)
-        ? ctx.sim?.getSwitch(`SWITCH-${p.id}`)?.getPosition()
-        : undefined;
+      const pos = ctx.liveIds.has(p.id) ? ctx.hardware?.switchPosition(p.id) : undefined;
       return { kind: 'turntable', angleDeg: turntableAngleFor(pos) };
     }
     case 'lift-bridge': {
       const raised =
         ctx.liveIds.has(p.id) &&
-        ctx.sim?.getGate(`BRIDGE-${p.id}`)?.isWithholding(`M-${p.id}`) === true;
+        ctx.hardware?.isWithholding(`BRIDGE-${p.id}`, `M-${p.id}`) === true;
       return { kind: 'lift-bridge', raised };
     }
     case 'vision-station':
@@ -951,7 +665,7 @@ function computeExperimentVisuals(
     liveIds,
     renderPositions,
     craneStacks,
-    sim: hardware?.getSimulation(),
+    hardware,
   };
   for (const p of pieces) {
     const visual = experimentVisualFor(p, ctx);
@@ -997,7 +711,7 @@ function wagonUnderHook(
   return best;
 }
 
-/** Signature of the sim-owned experimental state (deck positions, span
+/** Signature of the hardware-owned experimental state (deck positions, span
  * withholds), so the RAF tick can trigger a re-render when a command moves a
  * part while no train is moving — e.g. LearnMode throwing the turntable. */
 function experimentSimSignature(
@@ -1005,14 +719,13 @@ function experimentSimSignature(
   pieces: ReadonlyArray<TrackPiece>,
   liveIds: ReadonlySet<string>,
 ): string {
-  const sim = hardware.getSimulation();
   const parts: string[] = [];
   for (const p of pieces) {
     if (!liveIds.has(p.id)) continue;
     if (p.type === 'turntable') {
-      parts.push(`${p.id}:${sim.getSwitch(`SWITCH-${p.id}`)?.getPosition() ?? ''}`);
+      parts.push(`${p.id}:${hardware.switchPosition(p.id) ?? ''}`);
     } else if (p.type === 'lift-bridge') {
-      parts.push(`${p.id}:${sim.getGate(`BRIDGE-${p.id}`)?.isWithholding(`M-${p.id}`) === true}`);
+      parts.push(`${p.id}:${hardware.isWithholding(`BRIDGE-${p.id}`, `M-${p.id}`)}`);
     }
   }
   return parts.join('|');
@@ -1072,6 +785,18 @@ export function effectiveLayer(
   return layerOf(piece);
 }
 
+/** A `TrainLayerSource` backed by the physics world. TODO(B): the ADR-030
+ *  `BodyPose` exposes a network `segment`, not the two edge markers
+ *  `effectiveLayer` needs, so we cannot yet resolve a live train's current edge
+ *  from a body. Reporting a null current edge makes `effectiveLayer` fall back
+ *  to each train's STATIC layer — correct everywhere except a train mid-bridge,
+ *  which then draws on its placement deck rather than the deck it is crossing.
+ *  The seam stays wired so a future body→edge map lights up the bridge-crossing
+ *  draw order without touching the renderer. */
+function bodyTrainLayerSource(): TrainLayerSource {
+  return { getTrain: () => ({ getCurrentEdge: () => null }) };
+}
+
 /** Build an SVG `filter` string from a layer's height cue, or `undefined` for
  * the ground layer (no shadow). Pure. */
 function layerFilter(layer: number): string | undefined {
@@ -1097,10 +822,10 @@ interface TrainframeSimHandle {
   readonly pause: () => void;
   readonly resume: () => void;
   readonly step: (ms: number) => void;
-  /** The live in-browser simulation (or null before the table mounts one) — an
+  /** Every physics body's pose (or null before the table mounts hardware) — an
    * escape hatch for the live-driving playbook + screenshot harnesses to read
-   * device state (e.g. the yard's interior maneuver) from the page. */
-  readonly getSimulation: () => ToySimulation | null;
+   * the world's body population (loco/carriage/spare poses) from the page. */
+  readonly bodies: () => readonly BodyPose[] | null;
 }
 
 declare global {
@@ -1294,7 +1019,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
           return;
         }
       }
-      const moving = hw !== null && anyLiveTrainMoving(hw, piecesRef.current, liveIdsRef.current);
+      const moving = hw !== null && anyLiveTrainMoving(hw);
       if (moving || trainTrailsRef.current.size > 0) {
         setTickCount((n) => n + 1);
       }
@@ -1310,7 +1035,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       pause: () => {},
       resume: () => {},
       step: () => {},
-      getSimulation: () => hardwareRef.current?.getSimulation() ?? null,
+      bodies: () => hardwareRef.current?.bodies() ?? null,
     };
     window.trainframeSim = handle;
     return () => {
@@ -1355,11 +1080,12 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   // observations and can schedule them. The orchestrator
   // (scripts/railyard-demo-server) then assigns each train a cyclic schedule.
   //
-  // Consists are seeded EXPLICITLY via the sim API once the trains spawn, NOT by
-  // proximity: the four stations sit close enough that ToyHardware's proximity
-  // reseed would merge adjacent trains' rakes into one. We let that reseed run
-  // (it fires once at stage time on the static positions) and then overwrite it
-  // with each train's exact rake by id — so what migrates is never guessed.
+  // Consists + yard spares are now seeded by the PHYSICS hardware itself from
+  // piece proximity (each loco's rake from `computeTrainTrails`; the gantry's
+  // spares from carriage pieces parked over its discovered footprint), so this
+  // hook only stages the pieces + commissions them on the bus. We still poll for
+  // demo-readiness (the expected loco bodies present + the yard's occupancy
+  // defined) so the screenshot harness can wait on a settled world.
   useEffect(() => {
     if (!import.meta.env.DEV) return;
     window.__tfLoadRailyardDemo = () => {
@@ -1372,32 +1098,20 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       }
       garageRegisteredRef.current = garage;
 
-      // Poll until every train + the yard have spawned, then seed consists +
-      // spares by id (overriding the proximity reseed). Bounded so a failed
-      // stage doesn't poll forever.
-      const seedConsists = (attempt: number): void => {
-        const sim = hardwareRef.current?.getSimulation();
-        const ready =
-          sim !== undefined &&
-          demo.trains.every((t) => sim.getTrain(t.deviceId) !== undefined) &&
-          sim.getRailyard(demo.yardDeviceId) !== undefined;
-        if (!ready) {
-          if (attempt < 50) setTimeout(() => seedConsists(attempt + 1), 100);
-          return;
-        }
-        for (const t of demo.trains) {
-          sim.setTrainConsist(
-            t.deviceId,
-            t.consist.map((c) => ({ id: c.id, colorId: c.colorId as CarriageColorId })),
-          );
-        }
-        sim
-          .getRailyard(demo.yardDeviceId)
-          ?.loadSpares(
-            demo.yardSpares.map((c) => ({ id: c.id, colorId: c.colorId as CarriageColorId })),
-          );
+      /* Poll until every train's loco body has spawned. Bounded so a failed
+         stage doesn't poll forever. TODO(B): the exact by-id consist/spare
+         seeding the legacy sim did is gone — proximity seeding can merge
+         adjacent rakes if the stations sit too close, and the yard's stabled
+         spares now come from carriage pieces parked over the gantry's
+         discovered footprint; the physics discovered-slot yard is the
+         replacement once that path lands. */
+      const awaitReady = (attempt: number): void => {
+        const hw = hardwareRef.current;
+        const bodyIds = new Set(hw?.bodies().map((b) => b.id) ?? []);
+        const ready = hw !== null && demo.trains.every((t) => bodyIds.has(t.deviceId));
+        if (!ready && attempt < 50) setTimeout(() => awaitReady(attempt + 1), 100);
       };
-      seedConsists(0);
+      awaitReady(0);
     };
     return () => {
       window.__tfLoadRailyardDemo = undefined;
@@ -1650,12 +1364,13 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       const piece = piecesRef.current.find((p) => p.id === pieceId);
       if (piece === undefined || piece.type !== 'lift-bridge') return;
       if (!liveIdsRef.current.has(pieceId)) return;
-      const gate = hardwareRef.current?.getSimulation().getGate(`BRIDGE-${pieceId}`);
-      if (gate === undefined) return;
+      const hw = hardwareRef.current;
+      if (hw === null) return;
+      const deviceId = `BRIDGE-${pieceId}`;
       const markerId = `M-${pieceId}`;
-      if (gate.isWithholding(markerId)) gate.release(markerId);
-      else gate.withhold(markerId, 'span raised');
-      // Visuals follow the sim; nudge a re-render so the tilt starts now.
+      if (hw.isWithholding(deviceId, markerId)) hw.releaseGate(deviceId, markerId);
+      else hw.holdGate(deviceId, markerId, 'span raised');
+      // Visuals follow the hardware; nudge a re-render so the tilt starts now.
       setTickCount((n) => n + 1);
     },
     [hardwareRef],
@@ -1668,16 +1383,16 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   const spinTurntable = useCallback(
     (pieceId: string) => {
       if (!liveIdsRef.current.has(pieceId)) return;
-      const sw = hardwareRef.current?.getSimulation().getSwitch(`SWITCH-${pieceId}`);
-      if (sw === undefined) return;
+      const hw = hardwareRef.current;
+      if (hw === null) return;
       // An unset deck rests at stub-a's angle, so the first spin moves on to
       // stub-b — findIndex's -1 and stub-a both advance from index 0.
       const idx = Math.max(
-        TURNTABLE_POSITIONS.findIndex((p) => p === sw.getPosition()),
+        TURNTABLE_POSITIONS.findIndex((p) => p === hw.switchPosition(pieceId)),
         0,
       );
       const next = TURNTABLE_POSITIONS[(idx + 1) % TURNTABLE_POSITIONS.length];
-      if (next !== undefined) sw.setPosition(next);
+      if (next !== undefined) hw.setSwitch(pieceId, next);
       setTickCount((n) => n + 1);
     },
     [hardwareRef],
@@ -1699,16 +1414,17 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       const wagon = wagonUnderHook(crane, piecesRef.current, lifting);
       if (wagon === undefined) return;
 
-      const gate = hardwareRef.current?.getSimulation().getGate(`CRANE-${craneId}`);
+      const hw = hardwareRef.current;
+      const deviceId = `CRANE-${craneId}`;
       const markerId = `M-${craneId}`;
-      gate?.withhold(markerId, lifting ? 'crane lift' : 'crane place');
+      hw?.holdGate(deviceId, markerId, lifting ? 'crane lift' : 'crane place');
       setPieces((prev) => prev.map((p) => (p.id === wagon.id ? { ...p, cargo: !lifting } : p)));
       setCraneStacks((prev) => {
         const next = new Map(prev);
         next.set(craneId, stack + (lifting ? 1 : -1));
         return next;
       });
-      gate?.release(markerId);
+      hw?.releaseGate(deviceId, markerId);
     },
     [craneStacks, hardwareRef],
   );
@@ -1729,24 +1445,23 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
 
   const selectedPiece = pieces.find((p) => p.id === selectedId) ?? null;
 
-  // Coupling: read which carriages each live train carries, in order, from the
-  // SIMULATION consist (seeded from proximity at attach, then authoritative — a
-  // railyard rearranges it, so this reflects swaps). Falls back to an empty map
-  // when no hardware yet.
+  // Coupling: which carriages each live train carries, in seeded proximity
+  // order (`computeTrainTrails`). A railyard swap is made visible by the
+  // `SPARE-` body pass in `computeRenderPositions`, not by mutating this map.
   const hardware = hardwareRef.current;
-  const trainTrails: ReadonlyMap<string, string[]> =
-    hardware !== null ? consistTrails(pieces, liveIds, hardware) : new Map<string, string[]>();
+  const trainTrails: ReadonlyMap<string, string[]> = consistTrails(pieces, liveIds);
   trainTrailsRef.current = trainTrails;
 
-  // Compute render positions from the live simulation. Only non-empty when
-  // there are coupled carriages and the train has a resolved sim edge.
+  // Render positions read straight from the physics bodies (loco at its body,
+  // each carriage at its `-c{i}` body, spares at their `SPARE-` body). Only
+  // non-empty when a live train has a spawned body.
   const hasLiveTrain = pieces.some((p) => p.type === 'train' && liveIds.has(p.id));
   const renderPositions =
     hardware !== null && hasLiveTrain
       ? computeRenderPositions(pieces, liveIds, trainTrails, hardware)
       : new Map<string, WorldPosition>();
 
-  // Live state for the experimental pieces' moving parts, read off the sim.
+  // Live state for the experimental pieces' moving parts, read off the hardware.
   const experimentVisuals = computeExperimentVisuals(
     pieces,
     liveIds,
@@ -2608,11 +2323,21 @@ function Table({
   // of the ground loop under a bridge with opaque fills. A live train reads the
   // higher of its current edge's two layers so it draws ON TOP of the ground
   // loop it crosses mid-bridge, not under it.
-  const sim = hardware?.getSimulation();
   const piecesById = new Map<string, TrackPiece>();
   for (const p of pieces) piecesById.set(p.id, p);
+  /* TODO(B): a live train should draw on the higher of its current edge's two
+     layers while crossing a bridge, so it sits ON TOP of the ground loop it
+     spans. That needs a body→current-edge mapping the ADR-030 physics world
+     doesn't expose yet (`BodyPose` carries a network `segment`, not the two
+     edge markers). Until it does, every train reads its STATIC layer — a
+     crossing train draws on its placement deck, not the deck it is on. The
+     `effectiveLayer` seam stays wired (returning a null-edge source ⇒ static
+     `layerOf`) so it lights up the moment the mapping lands. */
+  const layerSource = hardware !== null ? bodyTrainLayerSource() : null;
   const layerOfPiece = (p: TrackPiece): number =>
-    sim !== undefined ? effectiveLayer(p, sim, carriageCoupledTo, piecesById) : layerOf(p);
+    layerSource !== null
+      ? effectiveLayer(p, layerSource, carriageCoupledTo, piecesById)
+      : layerOf(p);
   const byLayer = new Map<number, TrackPiece[]>();
   for (const p of pieces) {
     const layer = layerOfPiece(p);
