@@ -23,6 +23,8 @@ export type { BranchingDemo, DemoRoute, PlatformFactory } from './branching-demo
  * as the branching demo. */
 export { buildInterestingRailwayDemo } from './interesting-railway-demo.js';
 export type { InterestingRailwayDemo } from './interesting-railway-demo.js';
+export { buildMainLoopScene } from '../physics/interesting-layout.js';
+export { interestingToLayout, buildInterestingMarkers } from '../physics/interesting-markers.js';
 export { buildBranchingScene } from '../physics/branching-scene.js';
 export type { BranchingScene, SceneMarker } from '../physics/branching-scene.js';
 export { sceneToLayout, markerAt, edgeRequiresSwitch } from '../physics/scene-markers.js';

@@ -51,14 +51,19 @@ interface TrainPlacement {
   readonly cars: number;
 }
 
-/** FOUR trains, each homed at a DISTINCT station so the bodies seed clear, each with a
- *  different station rota (so they don't all chase the same calls). All declare
- *  `can_reverse` (eligible for a yard service). Routes are cycles, beginning at home. */
+/** FOUR trains, each homed at a DISTINCT marker, SPACED so no body seeds boxed into a
+ *  single-edge block (the bottom-left markers south/west/north are only one edge apart,
+ *  so crowding trains there gives the scheduler a tight seed-time waits-for cycle it
+ *  cannot unwind). Three circulate the main loop two-to-three edges apart; the fourth
+ *  seeds OFF the main on the satA loop, so the running line carries three trains evenly
+ *  and the satellite exercises a divert. Each has a distinct station rota (so they don't
+ *  all chase the same calls). All declare `can_reverse` (eligible for a yard service).
+ *  Routes are cycles, beginning at home, every leg forward along the directed loop. */
 const TRAINS: readonly TrainPlacement[] = [
-  { id: 'T1', routeId: 'r1', stops: [M.north, M.satAStation, M.south], color: '#c0392b', cars: 2 },
-  { id: 'T2', routeId: 'r2', stops: [M.satBStation, M.north], color: '#2e6fb7', cars: 2 },
-  { id: 'T3', routeId: 'r3', stops: [M.south, M.satBStation], color: '#27ae60', cars: 2 },
-  { id: 'T4', routeId: 'r4', stops: [M.satAStation, M.south], color: '#e08a1e', cars: 2 },
+  { id: 'T1', routeId: 'r1', stops: [M.north, M.east, M.south], color: '#c0392b', cars: 2 },
+  { id: 'T2', routeId: 'r2', stops: [M.satAStation, M.south, M.north], color: '#2e6fb7', cars: 2 },
+  { id: 'T3', routeId: 'r3', stops: [M.east, M.north, M.south], color: '#27ae60', cars: 2 },
+  { id: 'T4', routeId: 'r4', stops: [M.south, M.west, M.north], color: '#e08a1e', cars: 2 },
 ];
 
 export interface InterestingRailwayDemo {
