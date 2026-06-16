@@ -1,168 +1,173 @@
 /**
  * BEHAVIOUR GATE for the LEARNED-TIME-AWARE clearance horizon.
  *
- * The proactive horizon used to grant a FIXED `CLEARANCE_HORIZON_EDGES` (3)
- * blocks ahead regardless of how long each block takes to traverse. That gives
- * inconsistent lead *time* across a layout of mixed block sizes: three long
- * blocks are many seconds of warning; three short blocks are barely any.
+ * The proactive horizon used to grant a FIXED `CLEARANCE_HORIZON_EDGES` (3) blocks
+ * ahead regardless of how long each block takes to traverse. That gives inconsistent
+ * lead *time* across a layout of mixed block sizes: three long blocks are many seconds
+ * of warning; three short blocks are barely any.
  *
- * `LayoutState.getLearnedTraversalMs` accumulates a per-edge EWMA of traversal
- * time as trains run, but until now nothing read it. The scheduler now grows the
- * horizon ABOVE the 3-edge floor (up to a 6-edge ceiling) once it has learned
- * that the upcoming edges are short/fast, so the train keeps a consistent
- * lead TIME (`CLEARANCE_LEAD_TIME_MS`, 6 s) of clearance and starts clearing
- * earlier on the quick parts of the layout. Edges whose time it has NOT yet
- * learned are treated conservatively (assumed to carry a full lead time on their
- * own), so a cold layout behaves exactly like the old fixed floor.
+ * `LayoutState.getLearnedTraversalMs` accumulates a per-edge EWMA of traversal time as
+ * trains run. The scheduler grows the horizon ABOVE the 3-edge floor (up to a 6-edge
+ * ceiling) once it has learned that the upcoming edges are short/fast, so the train
+ * keeps a consistent lead TIME (`CLEARANCE_LEAD_TIME_MS`, 6 s) of clearance. Edges
+ * whose time it has NOT yet learned are treated conservatively, so a cold layout
+ * behaves exactly like the old fixed floor.
  *
- * This test proves, through the real Server + Scheduler + Simulation +
- * in-process broker (no mocks, injected virtual clock, pristine fault profile,
- * fixed seed):
+ * This test proves the same end-to-end, through the REAL `@trainframe/server`
+ * scheduler + REAL physics `ScheduledTrainDevice` on a REAL `PhysicsWorld`, driven
+ * synchronously over the in-memory broker (no mocks). The horizon depth is read the
+ * way the gate tests read clearance — off the `grant_clearance` commands the scheduler
+ * issues to the train (`limit_marker_id`), never from scheduler internals:
  *
- *   (a) on a COLD layout (no per-edge time learned yet) the train holds exactly
- *       the 3-edge floor of clearance ahead — the old behaviour, unchanged; and
+ *   (a) on a COLD layout (no per-edge time learned yet) the proactive grant clears
+ *       exactly the 3-edge floor ahead — the old behaviour, unchanged; and
  *   (b) after the train has lapped the (short, fast) ring enough times that the
- *       per-edge EWMA is populated, it holds STRICTLY MORE than the floor — the
- *       horizon learned to extend further because each block is quick — but
- *       never past the 6-edge over-lock ceiling.
+ *       per-edge EWMA is populated, a fresh assignment clears STRICTLY MORE than the
+ *       floor — the horizon learned to extend further because each block is quick —
+ *       but never past the 6-edge over-lock ceiling.
  *
  * The single-train ring has no peer to conflict with, so nothing other than the
- * horizon logic limits how far ahead clearance reaches. The transit chosen
- * (S1 → S8, seven edges) is long enough that the HORIZON, not the transit
- * length, is the binding constraint.
+ * horizon logic limits how far ahead clearance reaches. The leg chosen (seven edges
+ * the long way round) is longer than the ceiling, so the HORIZON, not the leg length,
+ * is the binding constraint.
  */
 
-import type { Layout } from '@trainframe/protocol';
-import { describe, expect, it } from 'vitest';
-import { startTestEnvironment } from './testing.js';
+import {
+  type PhysicsEnv,
+  startPhysicsEnv,
+  straightLoop,
+} from '@trainframe/simulator/physics-env.js';
+import { afterEach, describe, expect, it } from 'vitest';
 
 /**
- * An eight-marker ring of SHORT edges (120 mm). At the simulator's default
- * 100 mm/s a block takes ~1.2 s to cross, so the 3-edge floor is only ~3.6 s of
- * lead time — below `CLEARANCE_LEAD_TIME_MS` (6 s). Once the per-edge time is
- * learned, the horizon must pull more blocks forward (to ~5) to reach the
- * lead-time target.
+ * An eight-marker ring of SHORT edges (120 mm). The physics loco tops out at
+ * 400 mm/s, so a block takes well under a second to cross — the 3-edge floor is only a
+ * couple of seconds of lead time, below `CLEARANCE_LEAD_TIME_MS` (6 s). Once the
+ * per-edge time is learned, the horizon must pull more blocks forward to reach the
+ * lead-time target. Eight markers means a single leg can run seven edges — past the
+ * six-edge ceiling — so the ceiling, not the leg, caps the grown horizon.
  */
-const SHORT_RING: Layout = {
-  name: 'learned-horizon-ring',
-  markers: [
-    { id: 'S1', kind: 'block_boundary' },
-    { id: 'S2', kind: 'block_boundary' },
-    { id: 'S3', kind: 'block_boundary' },
-    { id: 'S4', kind: 'block_boundary' },
-    { id: 'S5', kind: 'block_boundary' },
-    { id: 'S6', kind: 'block_boundary' },
-    { id: 'S7', kind: 'block_boundary' },
-    { id: 'S8', kind: 'block_boundary' },
-  ],
-  edges: [
-    { from_marker_id: 'S1', to_marker_id: 'S2', estimated_length_mm: 120 },
-    { from_marker_id: 'S2', to_marker_id: 'S3', estimated_length_mm: 120 },
-    { from_marker_id: 'S3', to_marker_id: 'S4', estimated_length_mm: 120 },
-    { from_marker_id: 'S4', to_marker_id: 'S5', estimated_length_mm: 120 },
-    { from_marker_id: 'S5', to_marker_id: 'S6', estimated_length_mm: 120 },
-    { from_marker_id: 'S6', to_marker_id: 'S7', estimated_length_mm: 120 },
-    { from_marker_id: 'S7', to_marker_id: 'S8', estimated_length_mm: 120 },
-    { from_marker_id: 'S8', to_marker_id: 'S1', estimated_length_mm: 120 },
-  ],
-  junctions: [],
-};
+const RING_MARKER_IDS = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8'] as const;
+
+const buildScene = () =>
+  straightLoop(
+    RING_MARKER_IDS.map((id) => ({ id, kind: 'block_boundary' as const })),
+    { spacingMm: 120, name: 'learned-horizon-ring' },
+  );
+
+let env: PhysicsEnv;
+
+afterEach(() => {
+  env.shutdown();
+});
+
+/** The marker IDs cleared, in order, by the train's `grant_clearance` commands. */
+const grantLimits = (): string[] =>
+  env
+    .commandsFor('T1')
+    .filter((c) => c.command_type === 'grant_clearance')
+    .map((c) => String(c.payload.limit_marker_id));
+
+/** How many times `trainId` has crossed `markerId`, as a moving-train sanity check. */
+const crossings = (trainId: string, markerId: string): number =>
+  env
+    .eventsOfType('marker_traversed')
+    .filter(
+      (e) =>
+        (e.payload as { train_id?: unknown }).train_id === trainId &&
+        (e.payload as { marker_id?: unknown }).marker_id === markerId,
+    ).length;
 
 describe('learned-time-aware clearance horizon — behaviour gate', () => {
-  it('holds the 3-edge floor on a cold layout, then extends past it once edge times are learned', () => {
-    const env = startTestEnvironment({ layout: SHORT_RING, seed: 7, faults: 'pristine' });
+  it('clears the 3-edge floor on a cold layout, then extends past it once edge times are learned', () => {
+    env = startPhysicsEnv(buildScene());
 
-    env.spawnTrain('T1', {
-      startEdge: { from_marker_id: 'S1', to_marker_id: 'S2' },
-      config: { train_status_interval_ms: 100 },
-    });
-    /* A cyclic schedule whose leg spans almost the whole ring (S1 → S8, seven
-     * edges), so the clearance horizon — not the transit length — is what caps
-     * how far ahead the train clears. S1 == the spawn marker. */
+    env.spawnTrain('T1', { atMarker: 'S1' });
+    /* A leg that spans almost the whole ring (S1 → S8, seven edges), so the clearance
+     * horizon — not the leg length — caps how far ahead the train is cleared. */
     env.assignSchedule('T1', ['S1', 'S8']);
 
-    const scheduler = env.server.getScheduler();
-    const clearedAhead = (): number => scheduler.getTrainState('T1')?.cleared_edges.length ?? 0;
+    /* (a) COLD: the proactive grant fires inside `assignSchedule`, before the train
+     * has traversed a single edge, so no per-edge time is learned. The scheduler
+     * clears exactly the 3-edge floor ahead — limits S2, S3, S4 — the same depth the
+     * old fixed-count horizon produced. */
+    const coldLimits = grantLimits();
+    expect(coldLimits).toEqual(['S2', 'S3', 'S4']);
+    const coldHorizon = coldLimits.length;
 
-    /* (a) COLD: the initial proactive grant fires inside `assignSchedule`,
-     * before the train has traversed a single edge, so no per-edge time is
-     * learned. The horizon must sit at exactly the 3-edge floor — the same value
-     * the old fixed-count horizon produced. */
-    const coldAhead = clearedAhead();
-    expect(coldAhead).toBe(3);
-
-    /* (b) WARM: let the train lap the ring so every edge's EWMA is populated,
-     * sampling the deepest clearance it holds at any moment. (Sampling the peak,
-     * not a single instant, because the train releases blocks behind its head as
-     * it moves; the peak is the true horizon depth.) */
-    let warmMaxAhead = 0;
-    for (let t = 0; t < 40_000; t += 50) {
-      env.advance(50);
-      warmMaxAhead = Math.max(warmMaxAhead, clearedAhead());
+    /* (b) WARM: let the train lap the ring so every edge's EWMA is populated with its
+     * short, fast traversal time. */
+    for (let t = 0; t < 40_000; t += 500) {
+      env.advance(500);
     }
 
-    // The horizon learned the blocks are quick and pulled more clearance forward
-    // to keep the lead-TIME target — strictly above the cold floor...
-    expect(warmMaxAhead).toBeGreaterThan(coldAhead);
-    // ...but never past the over-lock ceiling.
-    expect(warmMaxAhead).toBeLessThanOrEqual(6);
+    /* The train genuinely lapped the ring multiple times, so the learned times are
+     * real moving-train observations. */
+    expect(crossings('T1', 'S1')).toBeGreaterThanOrEqual(3);
 
-    /* Sanity: the train genuinely lapped the ring multiple times, so the warm
-     * reading is a real moving-train observation under learned conditions. */
-    const s1Crossings = env
-      .getEventsOfType('marker_traversed')
-      .filter((e) => (e.payload as { marker_id?: unknown }).marker_id === 'S1').length;
-    expect(s1Crossings).toBeGreaterThanOrEqual(3);
+    /* Re-assign a fresh seven-edge leg from wherever the train now sits. The new
+     * proactive grant reads the learned (fast) edge times and must pull MORE than the
+     * cold floor forward to hold the 6 s lead time — capped by the six-edge ceiling.
+     * The cold assignment above cleared exactly three under the identical leg shape;
+     * the only difference now is the learned timings. */
+    const lastMarker = String(
+      (env.eventsOfType('marker_traversed').at(-1)?.payload as { marker_id?: unknown }).marker_id,
+    );
+    const fromIdx = RING_MARKER_IDS.indexOf(lastMarker as (typeof RING_MARKER_IDS)[number]);
+    /* Seven edges the long way round: turn-marker is the one immediately *behind* the
+     * current marker on the ring, so the leg traverses every other marker first. */
+    const toMarker =
+      RING_MARKER_IDS[(fromIdx + RING_MARKER_IDS.length - 1) % RING_MARKER_IDS.length];
+    expect(toMarker).toBeDefined();
 
-    env.shutdown();
+    const grantsBeforeReassign = grantLimits().length;
+    env.assignSchedule('T1', [lastMarker, toMarker ?? lastMarker]);
+    const warmHorizon = grantLimits().length - grantsBeforeReassign;
+
+    /* The horizon learned the blocks are quick and pulled more clearance forward to
+     * keep the lead-TIME target — strictly above the cold floor... */
+    expect(warmHorizon).toBeGreaterThan(coldHorizon);
+    /* ...but never past the over-lock ceiling. */
+    expect(warmHorizon).toBeLessThanOrEqual(6);
   });
 
   it('does not over-lock a chaser once the leader has learned (and grown) its horizon', () => {
-    /* The grown horizon could in principle let a learned-fast leader grab so
-     * many blocks that a chaser starves — the exact "over-lock" risk the 3-edge
-     * floor was originally chosen to avoid. The 6-edge ceiling exists to bound
-     * it. Prove, through the real system under genuine contention, that two
-     * trains circulating the learned-fast ring both keep making forward progress
-     * and never settle into a deadlock.
+    /* The grown horizon could in principle let a learned-fast leader grab so many
+     * blocks that a chaser starves — the exact "over-lock" risk the 3-edge floor was
+     * originally chosen to avoid. The 6-edge ceiling bounds it. Prove, through the
+     * real system under genuine contention, that two trains circulating the
+     * learned-fast ring both keep making forward progress and never deadlock.
      *
-     * Eight markers, two trains: even at the 6-edge ceiling the leader cannot
-     * lock the whole ring, so the chaser always has at least one block to take. */
-    const env = startTestEnvironment({ layout: SHORT_RING, seed: 11, faults: 'pristine' });
+     * Eight markers, two trains offset by half a loop: even at the 6-edge ceiling the
+     * leader cannot lock the whole ring, so the chaser always has a block to take. */
+    env = startPhysicsEnv(buildScene());
 
-    env.spawnTrain('T1', {
-      startEdge: { from_marker_id: 'S1', to_marker_id: 'S2' },
-      config: { train_status_interval_ms: 100 },
-    });
-    env.spawnTrain('T2', {
-      startEdge: { from_marker_id: 'S5', to_marker_id: 'S6' },
-      config: { train_status_interval_ms: 100 },
-    });
-    /* Both circulate the full ring continuously, offset by half a loop: T1
-     * cycles S1 → S5 → S1 …, T2 cycles S5 → S1 → S5 …. Two stops each (a
+    env.spawnTrain('T1', { atMarker: 'S1' });
+    env.spawnTrain('T2', { atMarker: 'S5' });
+    /* Both circulate the full ring, offset by half a loop. Two stops each (a
      * single-stop schedule parks the train at its terminus). */
     env.assignSchedule('T1', ['S1', 'S5']);
     env.assignSchedule('T2', ['S5', 'S1']);
 
-    // Warm-up so the per-edge EWMA populates and the horizon grows.
+    /* Warm-up so the per-edge EWMA populates and the horizon grows. */
     env.advance(10_000);
 
-    const crossingsAfter = (trainId: string, since: number): number =>
-      env
-        .getEventsOfType('marker_traversed')
-        .filter(
-          (e) => e.at_ms >= since && (e.payload as { train_id?: unknown }).train_id === trainId,
-        ).length;
-
-    const windowStart = env.simulation.clock.now();
+    const windowStart = env.events.at(-1)?.at_ms ?? 0;
     env.advance(40_000);
 
-    /* Both trains kept moving through the learned, grown-horizon steady state —
-     * neither starved behind the other. Continued forward progress over a long
-     * window is exactly the absence of deadlock: a deadlocked pair makes zero
-     * crossings from the moment the cycle forms. */
-    expect(crossingsAfter('T1', windowStart)).toBeGreaterThanOrEqual(3);
-    expect(crossingsAfter('T2', windowStart)).toBeGreaterThanOrEqual(3);
+    const crossingsAfter = (trainId: string): number =>
+      env
+        .eventsOfType('marker_traversed')
+        .filter(
+          (e) =>
+            e.at_ms > windowStart && (e.payload as { train_id?: unknown }).train_id === trainId,
+        ).length;
 
-    env.shutdown();
+    /* Both trains kept moving through the learned, grown-horizon steady state — neither
+     * starved behind the other. Continued forward progress over a long window is
+     * exactly the absence of deadlock: a deadlocked pair makes zero crossings from the
+     * moment the cycle forms. */
+    expect(crossingsAfter('T1')).toBeGreaterThanOrEqual(3);
+    expect(crossingsAfter('T2')).toBeGreaterThanOrEqual(3);
   });
 });

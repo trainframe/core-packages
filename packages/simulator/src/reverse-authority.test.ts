@@ -1,240 +1,151 @@
 /**
  * BEHAVIOUR GATE for ADR-022 reverse authority — the SIMULATOR-side enactment,
- * driven through the real Simulation + BrokerBridge + in-process broker (no
- * mocks, injected virtual clock, pristine fault profile, fixed seed).
+ * driven through the REAL `@trainframe/server` scheduler + a REAL
+ * `ScheduledTrainDevice` on a REAL `PhysicsWorld`, over the synchronous
+ * in-memory broker. Nothing is mocked.
  *
  * ADR-022 adds a bounded, signed (backward) clearance, `grant_reverse`, that the
  * scheduler issues to break a closed nose-to-nose standoff: it backs one train
  * OUT of a block it occupies, over track it provably holds, so a peer can
  * proceed. The scheduler's DECISION (when to grant, which train, how far back,
  * the safety walk) is proven at the scheduler level in
- * `packages/core/src/scheduler/scheduler.test.ts` — including the resolvable
- * standoff that now reverses and the report-don't-force fallback.
+ * `packages/core/src/scheduler/scheduler.test.ts`.
  *
- * This file proves the OTHER half of the vertical slice: that a real
- * `VirtualTrain`, on receiving a `grant_reverse` off the wire, physically BACKS
- * UP — moving its head backward along the held edges to the granted marker via
- * the virtual clock (deterministic, no Math.random / Date.now), emitting a
- * `tag_observed` for each marker it backs onto, then stopping. Application code
- * cannot tell this virtual reverse from a physical one — the simulator-as-peer
- * commitment (ADR-013). The command is published exactly as the server would
- * publish it (`railway/commands/{device}` with `{command_type, payload}`), so
- * the bridge → `simulation.handleCommand` path is the real one.
+ * This file proves the OTHER half of the vertical slice: that a real loco, on
+ * receiving a `grant_reverse` off the wire, physically BACKS UP — its body
+ * moving backward along the rail to the granted marker, emitting a `tag_observed`
+ * for each marker it backs onto, then stopping at the cleared limit. Application
+ * code cannot tell this virtual reverse from a physical one (ADR-013). The
+ * command is published exactly as the scheduler would publish it
+ * (`railway/commands/{device}` with `{command_type, payload}`) via
+ * `server.publishCommand`, so the device's real command path is exercised. Then
+ * `revoke_clearance` is shown to end the reverse.
  */
 
-import type { Layout } from '@trainframe/protocol';
-import { InMemoryBrokerClient } from '@trainframe/server';
-import { describe, expect, it } from 'vitest';
-import { BrokerBridge } from './broker-bridge.js';
-import { Simulation } from './simulation.js';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { type PhysicsEnv, startPhysicsEnv, straightLoop } from './physics-env.js';
 
-/* A short single-track spur: a train sits with its head at SM having driven
-   L1->L2->S1->SM, occupying that run. A reverse grant backs it to S1. */
-const SPUR: Layout = {
-  name: 'reverse-spur',
-  markers: [
-    { id: 'L1', kind: 'block_boundary' },
-    { id: 'L2', kind: 'block_boundary' },
-    { id: 'S1', kind: 'block_boundary' },
-    { id: 'SM', kind: 'block_boundary' },
-    { id: 'S2', kind: 'block_boundary' },
-  ],
-  edges: [
-    { from_marker_id: 'L1', to_marker_id: 'L2', estimated_length_mm: 200 },
-    { from_marker_id: 'L2', to_marker_id: 'S1', estimated_length_mm: 200 },
-    { from_marker_id: 'S1', to_marker_id: 'SM', estimated_length_mm: 200 },
-    { from_marker_id: 'SM', to_marker_id: 'S2', estimated_length_mm: 200 },
-  ],
-  junctions: [],
+/* A rail carrying evenly spaced markers M0..M5. A loco placed at M3 facing
+   forward (+rail) backs DOWN the rail under a reverse grant — toward M2, then M1
+   — reporting each marker as it crosses it. Wide spacing so the loco's brief
+   braking overshoot past the limit marker never reaches the previous one. The
+   retreat targets (M2, M1) sit well clear of the loop's railPos-0 seam, so the
+   reverse never runs up against the wrap point. */
+const SPACING_MM = 300;
+
+function buildScene() {
+  return straightLoop(
+    [
+      { id: 'M0', kind: 'block_boundary' },
+      { id: 'M1', kind: 'block_boundary' },
+      { id: 'M2', kind: 'block_boundary' },
+      { id: 'M3', kind: 'block_boundary' },
+      { id: 'M4', kind: 'block_boundary' },
+      { id: 'M5', kind: 'block_boundary' },
+    ],
+    { spacingMm: SPACING_MM, name: 'reverse-authority' },
+  );
+}
+
+let env: PhysicsEnv;
+
+beforeEach(() => {
+  env = startPhysicsEnv(buildScene());
+});
+
+afterEach(() => {
+  env.shutdown();
+});
+
+/* World x of a marker on the straight loop: marker i sits at i * SPACING_MM. */
+const markerX = (index: number): number => index * SPACING_MM;
+
+/* The reverse-direction marks reported by the train, in the order they fired —
+   the proof that the loco backed over real track and re-fixed at each tag. */
+const reverseMarks = (): string[] =>
+  env
+    .eventsOfType('tag_observed')
+    .filter((e) => e.device_id === 'T1' && e.payload.direction === 'reverse')
+    .map((e) => (typeof e.payload.tag_id === 'string' ? e.payload.tag_id : ''));
+
+const bodyX = (): number => env.world.bodies().find((b) => b.id === 'T1')?.x ?? Number.NaN;
+const bodySpeed = (): number => env.world.bodies().find((b) => b.id === 'T1')?.speed ?? Number.NaN;
+
+/* Publish a reverse grant exactly as the scheduler would: head-first over the
+   held edges to `limit`, on the device command topic. */
+const grantReverse = (limit: string, edges: ReadonlyArray<{ from: string; to: string }>): void => {
+  env.server.publishCommand('T1', 'grant_reverse', {
+    limit_marker_id: limit,
+    edges: edges.map((e) => ({ from_marker_id: e.from, to_marker_id: e.to })),
+    reason: 'deadlock_reverse',
+  });
 };
 
-interface Observed {
-  device_id: string;
-  tag_id: string;
-}
-
-/* Pristine physics + zero detection latency so marker observations land
-   synchronously and deterministically, with no missed reads — the test asserts
-   on the exact retreat reports. `train_status_interval_ms: 0` silences status
-   broadcasts the test does not consume. */
-const PRISTINE = {
-  miss_rate: 0,
-  double_read_rate: 0,
-  spurious_read_rate: 0,
-  stopping_noise: 0,
-  overshoot_rate: 0,
-  detection_latency_ms: { mean: 0, stddev: 0 },
-  train_status_interval_ms: 0,
-  length_mm: 100,
-} as const;
-
-/**
- * Wire a real Simulation to a real in-process broker via the BrokerBridge, with
- * identity tags seeded so `tag_observed` payloads carry marker IDs. Returns the
- * sim, the broker client, the captured marker observations, and a teardown.
- */
-function setup(seed: number): {
-  sim: Simulation;
-  client: InMemoryBrokerClient;
-  observed: Observed[];
-  stop: () => void;
-} {
-  const sim = new Simulation({ layout: SPUR, seed, tick_ms: 50 });
-  const client = new InMemoryBrokerClient();
-  const observed: Observed[] = [];
-  client.subscribe('railway/events/+/+', (message) => {
-    const parts = message.topic.split('/');
-    if (parts[2] !== 'tag_observed') return;
-    try {
-      const env = JSON.parse(new TextDecoder().decode(message.payload)) as {
-        device_id?: unknown;
-        payload?: { tag_id?: unknown };
-      };
-      const device_id = typeof env.device_id === 'string' ? env.device_id : (parts[3] ?? '');
-      const tag_id = typeof env.payload?.tag_id === 'string' ? env.payload.tag_id : '';
-      if (tag_id) observed.push({ device_id, tag_id });
-    } catch {
-      /* ignore */
-    }
-  });
-  let seq = 0;
-  const newId = (): string => {
-    seq += 1;
-    return `id-${seq}`;
-  };
-  const bridge = new BrokerBridge(sim, client, { newId });
-  bridge.start();
-  sim.seedIdentityTags(SPUR);
-  return { sim, client, observed, stop: () => bridge.stop() };
-}
-
-/** Publish a command exactly as the server would (envelope on the device topic). */
-function sendCommand(
-  client: InMemoryBrokerClient,
-  device_id: string,
-  command_type: string,
-  payload: unknown,
-): void {
-  const envelope = JSON.stringify({ command_type, payload });
-  client.publish(`railway/commands/${device_id}`, new TextEncoder().encode(envelope));
-}
-
 describe('reverse authority — simulator enactment (ADR-022)', () => {
-  it('backs the train up to the granted marker, reporting each marker it crosses', () => {
-    const { sim, client, observed, stop } = setup(5);
+  it('backs the train up to the granted marker, reporting the marker it crosses', () => {
+    /* A reverse-capable loco placed at M3 facing forward. It has driven up to
+       here; a reverse grant backs it one block, from M3 to M2. */
+    env.spawnTrain('T1', { atMarker: 'M3', facing: 1, canReverse: true });
+    env.advance(200); // settle the spawn-time marker read at M3
 
-    /* Place the train with its head at SM, occupying the run S1->SM->...: it has
-       driven L2->S1->SM. `grant_reverse` will back it from SM to S1. */
-    const train = sim.spawnTrain('T1', {
-      startEdge: { from_marker_id: 'S1', to_marker_id: 'SM' },
-      config: PRISTINE,
-    });
-    /* Snap the head onto SM (end of the S1->SM block) — its occupied position. */
-    train.placeAt({ from_marker_id: 'S1', to_marker_id: 'SM' }, 200);
-    expect(train.getCurrentEdge()).toEqual({ from_marker_id: 'S1', to_marker_id: 'SM' });
+    grantReverse('M2', [{ from: 'M2', to: 'M3' }]);
 
-    observed.length = 0; // ignore the spawn-time observation
+    /* Advance the clock; the body backs up under physics. Deterministic. */
+    env.advance(6000);
 
-    /* The scheduler-issued reverse grant: back to S1, over the held edge S1->SM
-       (head-first). Published on the wire exactly as the server would. */
-    sendCommand(client, 'T1', 'grant_reverse', {
-      limit_marker_id: 'S1',
-      edges: [{ from_marker_id: 'S1', to_marker_id: 'SM' }],
-      reason: 'deadlock_reverse',
-    });
-
-    /* Advance the virtual clock; the train backs up. Deterministic — same seed,
-       same motion. */
-    for (let t = 0; t < 10_000; t += 50) {
-      sim.advance(50);
-      if (train.getCurrentEdge()?.from_marker_id === 'S1' && train.getDistanceIntoEdge() === 0) {
-        break;
-      }
-    }
-    /* One more advance to flush the detection-latency-scheduled marker emit for
-       the marker reached on the final tick. */
-    sim.advance(50);
-
-    /* The head has reached S1 (distance 0 at the from-end of S1->SM) and stopped. */
-    expect(train.getDistanceIntoEdge()).toBe(0);
-    expect(train.getVelocity()).toBe(0);
-    /* It reported backing onto S1 — the scheduler tracks the retreat from this. */
-    expect(observed.some((o) => o.device_id === 'T1' && o.tag_id === 'S1')).toBe(true);
-
-    stop();
+    /* It reported backing onto M2 — the scheduler tracks the retreat from this. */
+    expect(reverseMarks()).toContain('M2');
+    /* The body has stopped, and stopped near M2 without backing on past it to M1
+       (it gave up exactly the one block it was granted). */
+    expect(bodySpeed()).toBeLessThan(1);
+    expect(bodyX()).toBeLessThan(markerX(2) + 30); // not still up at M3
+    expect(bodyX()).toBeGreaterThan(markerX(1) + 60); // never reached M1's block
   });
 
   it('backs up across multiple held edges to a deeper target, in order', () => {
-    const { sim, client, observed, stop } = setup(9);
+    /* At M3 facing forward; reverse two blocks back to M1 across two held edges
+       {M2->M3, M1->M2}, head-first. */
+    env.spawnTrain('T1', { atMarker: 'M3', facing: 1, canReverse: true });
+    env.advance(200);
 
-    /* Head at SM having driven L2->S1->SM; reverse all the way back to L2 across
-       two held edges {S1->SM, L2->S1}, head-first. */
-    const train = sim.spawnTrain('T1', {
-      startEdge: { from_marker_id: 'S1', to_marker_id: 'SM' },
-      config: PRISTINE,
-    });
-    train.placeAt({ from_marker_id: 'S1', to_marker_id: 'SM' }, 200);
-    observed.length = 0;
+    grantReverse('M1', [
+      { from: 'M2', to: 'M3' },
+      { from: 'M1', to: 'M2' },
+    ]);
+    env.advance(10_000);
 
-    sendCommand(client, 'T1', 'grant_reverse', {
-      limit_marker_id: 'L2',
-      edges: [
-        { from_marker_id: 'S1', to_marker_id: 'SM' },
-        { from_marker_id: 'L2', to_marker_id: 'S1' },
-      ],
-      reason: 'deadlock_reverse',
-    });
-
-    for (let t = 0; t < 20_000; t += 50) {
-      sim.advance(50);
-      if (train.getCurrentEdge()?.from_marker_id === 'L2' && train.getDistanceIntoEdge() === 0) {
-        break;
-      }
-    }
-    /* Flush the latency-scheduled emit for the final marker (L2). */
-    sim.advance(50);
-
-    /* Reached L2, stopped, and reported S1 (intermediate) BEFORE L2 (target). */
-    expect(train.getCurrentEdge()).toEqual({ from_marker_id: 'L2', to_marker_id: 'S1' });
-    expect(train.getDistanceIntoEdge()).toBe(0);
-    expect(train.getVelocity()).toBe(0);
-    const t1marks = observed.filter((o) => o.device_id === 'T1').map((o) => o.tag_id);
-    expect(t1marks.indexOf('S1')).toBeGreaterThanOrEqual(0);
-    expect(t1marks.indexOf('L2')).toBeGreaterThan(t1marks.indexOf('S1'));
-
-    stop();
+    /* Reached M1, stopped, and reported M2 (intermediate) BEFORE M1 (target). */
+    const marks = reverseMarks();
+    expect(marks.indexOf('M2')).toBeGreaterThanOrEqual(0);
+    expect(marks.indexOf('M1')).toBeGreaterThan(marks.indexOf('M2'));
+    expect(bodySpeed()).toBeLessThan(1);
+    expect(bodyX()).toBeLessThan(markerX(1) + 30); // stopped at/near M1
+    expect(bodyX()).toBeGreaterThan(markerX(0) + 60); // never reached M0's block
   });
 
   it('revoke_clearance ends the reverse and the train stops giving ground', () => {
-    const { sim, client, stop } = setup(3);
-    const train = sim.spawnTrain('T1', {
-      startEdge: { from_marker_id: 'S1', to_marker_id: 'SM' },
-      config: PRISTINE,
-    });
-    train.placeAt({ from_marker_id: 'S1', to_marker_id: 'SM' }, 200);
+    env.spawnTrain('T1', { atMarker: 'M3', facing: 1, canReverse: true });
+    env.advance(200);
 
-    sendCommand(client, 'T1', 'grant_reverse', {
-      limit_marker_id: 'L2',
-      edges: [
-        { from_marker_id: 'S1', to_marker_id: 'SM' },
-        { from_marker_id: 'L2', to_marker_id: 'S1' },
-      ],
-      reason: 'deadlock_reverse',
-    });
-    sim.advance(500); // back up partway
-    const distMidReverse = train.getDistanceIntoEdge();
+    grantReverse('M1', [
+      { from: 'M2', to: 'M3' },
+      { from: 'M1', to: 'M2' },
+    ]);
+    env.advance(500); // back up partway, not yet to the deeper target
+
+    const xMidReverse = bodyX();
+    expect(xMidReverse).toBeLessThan(markerX(3)); // it has begun retreating
+    expect(xMidReverse).toBeGreaterThan(markerX(1)); // not yet at the target
 
     /* Revoke ends reversing: the train decelerates to a stop and does not reach
-       the deeper target. */
-    sendCommand(client, 'T1', 'revoke_clearance', { reason: 'admin', immediate: true });
-    for (let t = 0; t < 3_000; t += 50) sim.advance(50);
-    expect(train.getVelocity()).toBe(0);
-    /* It did not complete the reverse to L2 — it stopped where revoke caught it
-       (still on the first backward edge S1->SM, having moved less than a full
-       edge back). */
-    expect(train.getCurrentEdge()?.from_marker_id).toBe('S1');
-    expect(distMidReverse).toBeLessThan(200);
+       the deeper target M1. */
+    env.server.publishCommand('T1', 'revoke_clearance', { reason: 'admin', immediate: true });
+    env.advance(4000);
 
-    stop();
+    expect(bodySpeed()).toBeLessThan(1);
+    /* It did not complete the reverse to M1 — it stopped where revoke caught it,
+       short of M1's marker. */
+    expect(bodyX()).toBeGreaterThan(markerX(1) + 30);
+    expect(reverseMarks()).not.toContain('M1');
   });
 });

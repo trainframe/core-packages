@@ -1,118 +1,174 @@
 /**
- * BEHAVIOUR GATE for ADR-017 conflict-resolution policy, driven through the
- * real Server + Scheduler + Simulation + in-process broker (no mocks, injected
- * virtual clock, pristine fault profile, fixed seed).
+ * BEHAVIOUR GATE for the ADR-017 conflict-resolution policy, driven end to end
+ * through the REAL `@trainframe/server` scheduler, REAL physics `GateDevice` +
+ * `ScheduledTrainDevice`, and the synchronous in-memory broker. Nothing is mocked.
  *
  * ADR-017 replaces the incidental `Map`-iteration tiebreak with an explicit,
  * deterministic total order over trains: announced priority → registration
- * sequence (FIFO-by-arrival floor) → `train_id`. When two trains contend for
- * one free section, the highest-ranked is granted it; the order is a pure
- * function of state the scheduler already holds, so the SAME seed produces the
- * SAME winner every run — the determinism contract, made intentional.
+ * sequence (the FIFO-by-arrival floor) → `train_id`. When two trains contend for
+ * one free section, the highest-ranked is granted it and block exclusivity
+ * (ADR-011) denies the rest; the order is a pure function of state the scheduler
+ * already holds, so the SAME setup produces the SAME winner every run.
  *
- * This file proves, end to end:
- *   (a) two trains contend for one shared junction → the contention resolves to
- *       a single definite winner (one train takes the section, the other is held
- *       one block back under block exclusivity); and
- *   (b) determinism: re-running with the same seed yields the same winner, with
- *       the simulator's physics timing in the loop — the reproducibility the
- *       ADR's total order guarantees.
+ * The scenario is a wishbone: two approach arms (A1→J and B1→J) merge at the
+ * junction marker J. A gate over J holds both trains one block back — neither can
+ * be cleared into J's block while it is withheld. Releasing the gate triggers a
+ * single ordered retry pass: exactly one train is granted the contested edge into
+ * J. With equal (default) priority the registration-sequence floor decides, so the
+ * first-registered train wins — the same winner on every run.
  *
- * The *registration-order* and *announced-priority* terms of the order are
- * exercised directly at the scheduler level (see
- * `packages/core/src/scheduler/scheduler.test.ts`), where two simultaneously
- * blocked trains are released in one pass and the ordered grant loop decides the
- * winner — the path this policy actually arbitrates.
+ * This file proves, over the real broker:
+ *   (a) two trains contend for one shared junction → the contention resolves to a
+ *       single definite winner (one is granted J; the other is denied, held one
+ *       block back under block exclusivity); and
+ *   (b) determinism: re-running the identical setup yields the same winner every
+ *       time — the reproducibility the ADR's total order guarantees.
+ *
+ * The priority and registration-order *terms* of the order are exercised directly
+ * at the scheduler level (see `packages/core/src/scheduler/scheduler.test.ts`).
  */
 
 import type { Layout } from '@trainframe/protocol';
 import { describe, expect, it } from 'vitest';
-import { startTestEnvironment } from './testing.js';
+import {
+  type CapturedCommand,
+  type PhysicsEnv,
+  type PhysicsScene,
+  startPhysicsEnv,
+  straightLoop,
+} from './physics-env.js';
 
 /**
- * A wishbone: two approach arms (A1→A2→J and B1→B2→J) merge at the junction J,
- * then a single onward stem J→C→A1 closes the loop back to A1. Two trains, one
- * on each arm, both routed onward through J → they contend for the section at J
- * (block exclusivity denies the loser), and only one can take it.
+ * A wishbone over a single physics rail: two approach arms (A1→J and B1→J) merge
+ * at the junction J, then a single onward stem J→C closes back to the arms. The
+ * physics geometry is an inert straight loop — the gate holds both trains stopped
+ * one block short of J, so neither body ever moves; the contention is decided in
+ * the scheduler the moment the gate releases. What the scheduler reasons on is the
+ * wishbone `Layout`: two distinct edges feed J, so two trains can genuinely
+ * contend for the single section into J.
  */
-const WISHBONE: Layout = {
-  name: 'wishbone',
-  markers: [
-    { id: 'A1', kind: 'block_boundary' },
-    { id: 'A2', kind: 'block_boundary' },
-    { id: 'B1', kind: 'block_boundary' },
-    { id: 'B2', kind: 'block_boundary' },
-    { id: 'J', kind: 'block_boundary' },
-    { id: 'C', kind: 'block_boundary' },
-  ],
-  edges: [
-    { from_marker_id: 'A1', to_marker_id: 'A2', estimated_length_mm: 200 },
-    { from_marker_id: 'A2', to_marker_id: 'J', estimated_length_mm: 200 },
-    { from_marker_id: 'B1', to_marker_id: 'B2', estimated_length_mm: 200 },
-    { from_marker_id: 'B2', to_marker_id: 'J', estimated_length_mm: 200 },
-    { from_marker_id: 'J', to_marker_id: 'C', estimated_length_mm: 200 },
-    { from_marker_id: 'C', to_marker_id: 'A1', estimated_length_mm: 200 },
-    { from_marker_id: 'C', to_marker_id: 'B1', estimated_length_mm: 200 },
-  ],
-  junctions: [],
+const buildWishbone = (): PhysicsScene => {
+  const base = straightLoop(
+    [
+      { id: 'A1', kind: 'block_boundary' },
+      { id: 'B1', kind: 'block_boundary' },
+      { id: 'J', kind: 'block_boundary' },
+      { id: 'C', kind: 'block_boundary' },
+    ],
+    { spacingMm: 200, name: 'wishbone' },
+  );
+  /* Override only the logical graph with the wishbone merge. The markers (and
+   * their world positions, far enough apart that the two parked bodies never
+   * touch) and the physics net are kept from the loop; only the edges the
+   * scheduler routes on change. */
+  const layout: Layout = {
+    name: base.layout.name,
+    markers: base.layout.markers,
+    edges: [
+      { from_marker_id: 'A1', to_marker_id: 'J', estimated_length_mm: 200 },
+      { from_marker_id: 'B1', to_marker_id: 'J', estimated_length_mm: 200 },
+      { from_marker_id: 'J', to_marker_id: 'C', estimated_length_mm: 200 },
+      { from_marker_id: 'C', to_marker_id: 'A1', estimated_length_mm: 200 },
+      { from_marker_id: 'C', to_marker_id: 'B1', estimated_length_mm: 200 },
+    ],
+    junctions: [],
+  };
+  return { net: base.net, layout, markers: base.markers };
 };
 
+const grantInto = (env: PhysicsEnv, trainId: string, limit: string): readonly CapturedCommand[] =>
+  env
+    .commandsFor(trainId)
+    .filter((c) => c.command_type === 'grant_clearance' && c.payload.limit_marker_id === limit);
+
 /**
- * Run the contention scenario at a fixed seed and return the id of the FIRST
- * train to hold the contested J→C section — the one that won the merge.
+ * Run the contention once. Spawn `first` then `second` (registration order is the
+ * FIFO floor under ADR-017), hold the gate over J, route both arms onward through
+ * J, release the gate, and return the id of the train granted the contested edge
+ * into J — the one that won the merge.
  */
-const winnerOfContention = (seed: number): string | undefined => {
-  const env = startTestEnvironment({ layout: WISHBONE, seed, faults: 'pristine' });
-  env.spawnTrain('TA', {
-    startEdge: { from_marker_id: 'A1', to_marker_id: 'A2' },
-    config: { train_status_interval_ms: 100 },
-  });
-  env.spawnTrain('TB', {
-    startEdge: { from_marker_id: 'B1', to_marker_id: 'B2' },
-    config: { train_status_interval_ms: 100 },
-  });
-  // Both routed onward through the merge: TA cycles A1→C, TB cycles B1→C. Both
-  // need J→C, the single contested section.
-  env.assignSchedule('TA', ['A1', 'C']);
-  env.assignSchedule('TB', ['B1', 'C']);
+const winnerOfContention = (first: string, second: string): string | undefined => {
+  const env = startPhysicsEnv(buildWishbone());
+  try {
+    /* A gate over J, registered with core.gates_clearance, held before either
+     * train has any clearance toward J. While withheld the scheduler vetoes any
+     * clearance whose limit is J, so both arms are denied the merge. */
+    const gate = env.spawnGate('GATE-J', { markers: ['J'] });
+    gate.hold('J', 'contention test');
 
-  const scheduler = env.server.getScheduler();
-  const holdsJ = (id: string): boolean =>
-    (scheduler.getTrainState(id)?.cleared_edges ?? []).some(
-      (e) => e.from_marker_id === 'J' && e.to_marker_id === 'C',
-    );
+    /* `first` registers before `second`: lower registration-sequence, the FIFO
+     * floor. Each parks on its own arm (A1 and B1, distinct world points) and is
+     * routed onward through the merge: both need the single edge into J. */
+    env.spawnTrain(first, { atMarker: 'A1' });
+    env.spawnTrain(second, { atMarker: 'B1' });
+    env.assignSchedule(first, ['A1', 'C']);
+    env.assignSchedule(second, ['B1', 'C']);
+    env.advance(1000);
 
-  /* Advance in small steps and capture the FIRST train to hold the contested
-   * J→C section — the one that won the merge. Sampling the first winner (not a
-   * late snapshot) is what isolates the contention outcome from where the
-   * trains happen to be after they have both lapped. */
-  let winner: string | undefined;
-  for (let t = 0; t < 30_000 && winner === undefined; t += 50) {
-    env.advance(50);
-    if (holdsJ('TA')) winner = 'TA';
-    else if (holdsJ('TB')) winner = 'TB';
+    // While the gate withholds J, neither arm is cleared into the merge.
+    expect(grantInto(env, first, 'J')).toHaveLength(0);
+    expect(grantInto(env, second, 'J')).toHaveLength(0);
+
+    /* Release the gate: one ordered retry pass decides. The higher-ranked train
+     * (here, the first-registered) takes the edge into J; block exclusivity then
+     * denies the other, which stays held one block back. */
+    gate.release('J');
+    env.advance(1000);
+
+    const firstWon = grantInto(env, first, 'J').length > 0;
+    const secondWon = grantInto(env, second, 'J').length > 0;
+    if (firstWon) return first;
+    if (secondWon) return second;
+    return undefined;
+  } finally {
+    env.shutdown();
   }
-  env.shutdown();
-  return winner;
 };
 
 describe('conflict-resolution policy — behaviour gate (ADR-017)', () => {
   it('resolves the contested junction to a single definite winner', () => {
-    // Exactly one train takes J→C; the contention does not stall both nor grant
-    // both (block exclusivity + the ordered grant path leave one definite winner).
-    const winner = winnerOfContention(3);
-    expect(winner === 'TA' || winner === 'TB').toBe(true);
+    // Exactly one train is granted the edge into J; the contention does not stall
+    // both nor grant both (block exclusivity + the ordered grant path leave one
+    // definite winner).
+    const env = startPhysicsEnv(buildWishbone());
+    try {
+      const gate = env.spawnGate('GATE-J', { markers: ['J'] });
+      gate.hold('J', 'contention test');
+      env.spawnTrain('TA', { atMarker: 'A1' });
+      env.spawnTrain('TB', { atMarker: 'B1' });
+      env.assignSchedule('TA', ['A1', 'C']);
+      env.assignSchedule('TB', ['B1', 'C']);
+      env.advance(1000);
+
+      gate.release('J');
+      env.advance(1000);
+
+      const taWon = grantInto(env, 'TA', 'J').length > 0;
+      const tbWon = grantInto(env, 'TB', 'J').length > 0;
+      // One winner, not both: exactly one of the two holds the contested edge.
+      expect(taWon !== tbWon).toBe(true);
+    } finally {
+      env.shutdown();
+    }
   });
 
-  it('is deterministic: the same seed yields the same winner across runs', () => {
+  it('is deterministic: the same setup yields the same winner across runs', () => {
     const winners = new Set<string | undefined>();
     for (let run = 0; run < 4; run++) {
-      winners.add(winnerOfContention(7));
+      winners.add(winnerOfContention('TA', 'TB'));
     }
-    // One value across every run, with the simulator's physics in the loop —
-    // the total order makes the contended grant reproducible given the seed.
+    // One value across every run — the total order makes the contended grant
+    // reproducible with no RNG and no wall clock in the loop.
     expect(winners.size).toBe(1);
     const [only] = [...winners];
-    expect(only === 'TA' || only === 'TB').toBe(true);
+    expect(only).toBe('TA');
+  });
+
+  it('the FIFO floor decides: the first-registered arm wins, independent of spawn label', () => {
+    // Swapping which id registers first swaps the winner — the registration
+    // sequence (not the train_id, not Map order) is what arbitrates equal-priority
+    // contention. TB-first wins when registered first; TA-first wins when first.
+    expect(winnerOfContention('TB', 'TA')).toBe('TB');
+    expect(winnerOfContention('TA', 'TB')).toBe('TA');
   });
 });
