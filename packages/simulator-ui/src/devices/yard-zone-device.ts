@@ -40,7 +40,7 @@
  */
 import { type CoreEvent, PROTOCOL_VERSION } from '@trainframe/protocol';
 import type { DeviceManifest } from '@trainframe/protocol';
-import type { BranchingScene } from '../physics/branching-scene.js';
+import type { YardLayout } from '../physics/yard.js';
 import { Crane } from './crane.js';
 import type { MotorActuator } from './motor-actuator.js';
 import { ParentPlatform } from './parent-platform.js';
@@ -66,13 +66,25 @@ const SHED_LENGTH_MM = 136;
  *  wire shapes if ever bridged out. */
 const INTERIOR_LOCO_ID = '0a0d0001-0000-4000-8000-000000000001';
 
+/** The opaque-yard layout the zone device needs — the throat marker it gates, the
+ *  drive-through `YardLayout` (slot geometry + leads), and which slots the visitor
+ *  enters and the spares occupy. PURE layout data — NOT the track. Any yard shape
+ *  (the bezier `BranchingScene`, the parallelogram drive-through) satisfies it, so
+ *  ONE zone device + ONE `YardController` swap serve every yard. */
+export interface YardZoneScene {
+  readonly yard: YardLayout;
+  readonly throatMarker: string;
+  readonly entrySlot: string;
+  readonly sparesSlot: string;
+}
+
 export interface YardZoneDeps {
   /** The device's link to REAL core (the broker in the gate/script, an in-process
    *  bus in unit tests). */
   readonly platform: PlatformProvider;
-  /** The scene: throat marker, yard layout (slot geom), entry/spares slots. PURE
-   *  layout data — NOT the track. */
-  readonly scene: BranchingScene;
+  /** The yard's layout: throat marker, drive-through layout (slot geom), entry/spares
+   *  slots. PURE layout data — NOT the track. */
+  readonly scene: YardZoneScene;
   /** Total slots the zone admits into (= slotCount − reserved spares). */
   readonly capacity: number;
   /* The device perceives + acts ONLY through these injected providers — it never
