@@ -86,6 +86,19 @@ async function main() {
     }
   });
 
+  /* LIVE mode (TF_LIVE=1): no headless capture — just keep the harness up so YOU can
+   *  open the page in your own Chrome. Schedules are assigned the moment your browser's
+   *  devices register. Ctrl-C to stop. */
+  if (process.env.TF_LIVE) {
+    log(`LIVE. In Chrome, open ${SIM}?physics=interesting-demo`);
+    log('then run this once in the DevTools console to point it at this broker:');
+    log(
+      `  localStorage.setItem('trainframe.simulator-ui.brokerUrl','${harness.brokerWsUrl}'); location.reload()`,
+    );
+    await new Promise(() => {}); // run until killed
+    return;
+  }
+
   /* Browser = the DEVICE + RENDER side, pointed at the same broker. */
   const browser = await chromium.launch();
   const context = await browser.newContext({
