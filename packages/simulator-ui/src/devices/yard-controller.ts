@@ -77,10 +77,12 @@ export class YardController {
   private readonly crane: Crane;
   private phase: Phase = 'route-in';
   private timer = 0;
-  /** The loco's sensed rest x in the entry slot (set when it's seen to arrive). */
-  private restX = 0;
-  /** The sensed east edge of the spares (found by scanning the spares slot). */
-  private sparesEastX = 0;
+  /** The loco's sensed rest point in the entry slot (set when it's seen to arrive). */
+  private restPoint: { x: number; y: number } = { x: 0, y: 0 };
+  /** The sensed FOOT-most spares car, as a distance (mm) from the spares slot's foot,
+   *  found by scanning the slot. `sparesFound` guards it (the distance may be 0). */
+  private sparesD = 0;
+  private sparesFound = false;
   /** The cut's world point, once the rake has been scanned (null until then). */
   private cut: { x: number; y: number } | null = null;
 
@@ -113,14 +115,14 @@ export class YardController {
          *  reacts to what it senses rather than anticipating the route. */
         return this.crane.pos;
       case 'decouple':
-        return this.cut ?? { x: this.restX - 1.5 * CAR_SPACING, y: entry.by };
+        return this.cut ?? this.alongFromFoot(entry, REST_INSET + 1.5 * CAR_SPACING);
       case 'pull-clear':
         return this.eastLeadPoint();
       case 'to-spares':
       case 'settle':
-        return { x: this.sparesEastX || spares.ax + 200, y: spares.by };
+        return this.alongFromFoot(spares, this.sparesFound ? this.sparesD : 200);
       default:
-        return { x: this.slot(this.d.layout.leadEast).bx - 60, y: spares.by };
+        return this.alongFromFoot(this.slot(this.d.layout.leadEast), 60);
     }
   }
 
@@ -131,16 +133,33 @@ export class YardController {
     return g;
   }
 
-  /** The far (east) end of a slot — the rest target for a westbound arrival. */
+  /** Unit vector along a slot from its FOOT (`b`, the far end a westbound arrival
+   *  rests at) toward its MOUTH (`a`, where it enters). Slots may run at any angle —
+   *  horizontal in the bezier yard, 45° in the parallelogram — so every position is
+   *  reasoned about as a distance along THIS axis, not a fixed-y horizontal scan. */
+  private footToMouth(g: YardSegGeom): { x: number; y: number } {
+    const dx = g.ax - g.bx;
+    const dy = g.ay - g.by;
+    const len = Math.hypot(dx, dy) || 1;
+    return { x: dx / len, y: dy / len };
+  }
+
+  /** The world point `d` mm from a slot's FOOT toward its mouth (negative `d` runs
+   *  past the foot onto the lead). For a horizontal slot this is just `(bx − d, by)`. */
+  private alongFromFoot(g: YardSegGeom, d: number): { x: number; y: number } {
+    const u = this.footToMouth(g);
+    return { x: g.bx + u.x * d, y: g.by + u.y * d };
+  }
+
+  /** The far (foot) end of a slot — the rest target for an arrival. */
   private slotFarEnd(id: string): { x: number; y: number } {
-    const g = this.slot(id);
-    return { x: g.bx - REST_INSET, y: g.by };
+    return this.alongFromFoot(this.slot(id), REST_INSET);
   }
 
   /** A point out on the east lead, clear of the ladder. */
   private eastLeadPoint(): { x: number; y: number } {
     const g = this.slot(this.d.layout.leadEast);
-    return { x: (g.ax + g.bx) / 2, y: g.by };
+    return { x: (g.ax + g.bx) / 2, y: (g.ay + g.by) / 2 };
   }
 
   tick(dtS: number): void {
@@ -198,7 +217,7 @@ export class YardController {
     const at = this.slotFarEnd(this.d.entrySlot);
     if (this.d.look(at.x, at.y).occupied) {
       this.d.train.stop();
-      this.restX = at.x;
+      this.restPoint = at;
       this.to('decouple');
       return;
     }
@@ -220,29 +239,31 @@ export class YardController {
     this.to('pull-clear');
   }
 
-  /** Scan the entry slot to find the rear cut's coupling point. */
+  /** Scan the entry slot ALONG ITS AXIS to find the rear cut's coupling point. */
   private findCut(): { x: number; y: number } {
-    const y = this.slot(this.d.entrySlot).by;
+    const g = this.slot(this.d.entrySlot);
     const r = this.d.cameraRadius;
-    // Find the loco's front edge (eastmost occupied) by scanning east→west; its
-    // centre is one camera-radius back from where the camera first sees it.
-    let frontX = this.restX;
-    for (let x = this.restX + 200; x > this.restX - 200; x -= 6) {
-      if (this.d.look(x, y).occupied) {
-        frontX = x;
+    // Find the loco's front edge (nearest the foot) by scanning foot→mouth; its
+    // centre is one camera-radius further along from where the camera first sees it.
+    let frontD = REST_INSET;
+    for (let d = REST_INSET - 200; d < REST_INSET + 200; d += 6) {
+      const p = this.alongFromFoot(g, d);
+      if (this.d.look(p.x, p.y).occupied) {
+        frontD = d;
         break;
       }
     }
-    const locoCentre = frontX - r;
-    // Count carriages by looking at each car centre behind the loco.
+    const locoCentreD = frontD + r;
+    // Count carriages by looking at each car centre behind the loco (toward the mouth).
     let cars = 0;
     for (let k = 1; k <= 8; k++) {
-      if (this.d.look(locoCentre - k * CAR_SPACING, y).occupied) cars = k;
+      const p = this.alongFromFoot(g, locoCentreD + k * CAR_SPACING);
+      if (this.d.look(p.x, p.y).occupied) cars = k;
       else break;
     }
     // Keep the loco + (cars − SHED_CARS) front carriages; split off the rear cut.
     const keptCars = Math.max(0, cars - SHED_CARS);
-    return { x: locoCentre - (keptCars + 0.5) * CAR_SPACING, y };
+    return this.alongFromFoot(g, locoCentreD + (keptCars + 0.5) * CAR_SPACING);
   }
 
   /** Open the slot's east exit and pull forward onto the lead, clear of the slot. */
@@ -264,20 +285,25 @@ export class YardController {
   private toSpares(): void {
     if (this.timer < 0.4) return;
     const g = this.slot(this.d.sparesSlot);
-    if (this.sparesEastX === 0) {
-      for (let x = g.bx; x > g.ax; x -= 6) {
-        if (this.d.look(x, g.by).occupied) {
-          this.sparesEastX = x;
+    if (!this.sparesFound) {
+      const len = Math.hypot(g.ax - g.bx, g.ay - g.by);
+      let d = 200; // fallback: somewhere inside the slot
+      for (let s = 0; s <= len; s += 6) {
+        const p = this.alongFromFoot(g, s);
+        if (this.d.look(p.x, p.y).occupied) {
+          d = s;
           break;
         }
       }
-      if (this.sparesEastX === 0) this.sparesEastX = g.ax + 200; // fallback
+      this.sparesD = d;
+      this.sparesFound = true;
       this.d.eastPoints.set(this.sparesSlotPos());
       this.d.train.reverse();
       return;
     }
-    // The rake's rear reaches just east of the spares → coupled by proximity.
-    if (this.d.look(this.sparesEastX + 20, g.by).occupied) {
+    // The rake's rear reaches just foot-side of the spares → coupled by proximity.
+    const probe = this.alongFromFoot(g, this.sparesD - 20);
+    if (this.d.look(probe.x, probe.y).occupied) {
       this.d.train.stop();
       this.to('settle');
     }
@@ -296,8 +322,8 @@ export class YardController {
     this.d.eastPoints.set(this.sparesSlotPos());
     this.d.train.forward();
     // Done once the train has cleared out onto the east lead.
-    const g = this.slot(this.d.layout.leadEast);
-    if (this.d.look(g.bx - 60, g.by).occupied) {
+    const at = this.alongFromFoot(this.slot(this.d.layout.leadEast), 60);
+    if (this.d.look(at.x, at.y).occupied) {
       this.d.train.stop();
       this.to('done');
     }
