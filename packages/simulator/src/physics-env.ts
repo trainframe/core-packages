@@ -29,7 +29,6 @@ import { mqttPlatform } from './broker/mqtt-platform.js';
 import { GateDevice } from './devices/gate-device.js';
 import { ScheduledTrainDevice } from './devices/scheduled-train-device.js';
 import { SwitchDevice } from './devices/switch-device.js';
-import { ZoneDevice } from './devices/zone-device.js';
 import { type RailNetwork, buildNetwork } from './physics/network.js';
 import type { Rail } from './physics/rail.js';
 import { PhysicsWorld } from './physics/world.js';
@@ -134,15 +133,6 @@ export interface SpawnSwitchOptions {
   readonly positions: readonly string[];
 }
 
-export interface SpawnYardZoneOptions {
-  /** The throat marker at which admission is gated. */
-  readonly throatMarker: string;
-  /** The zone's capacity (slots). */
-  readonly capacity: number;
-  /** Occupancy asserted at registration (default 0). */
-  readonly initialOccupancy?: number;
-}
-
 export interface CapturedEvent {
   readonly at_ms: number;
   readonly event_type: string;
@@ -166,15 +156,12 @@ export interface PhysicsEnv {
   spawnTrain(trainId: string, options?: SpawnTrainOptions): ScheduledTrainDevice;
   spawnGate(deviceId: string, options: SpawnGateOptions): GateDevice;
   spawnSwitch(deviceId: string, options: SpawnSwitchOptions): SwitchDevice;
-  spawnYardZone(deviceId: string, options: SpawnYardZoneOptions): ZoneDevice;
   assignSchedule(trainId: string, stops: readonly string[], routeId?: string): void;
   /** Advance the world + every device + the scheduler clock in lockstep by `ms`. */
   advance(ms: number): void;
   /** Commands the scheduler sent to `deviceId`, in order. */
   commandsFor(deviceId: string): ReadonlyArray<CapturedCommand>;
   eventsOfType(eventType: string): ReadonlyArray<CapturedEvent>;
-  /** The latest retained state published on `topic` (e.g. `railway/state/devices/T1`). */
-  stateOf(topic: string): Record<string, unknown> | undefined;
   shutdown(): void;
 }
 
@@ -230,12 +217,6 @@ export function startPhysicsEnv(scene: PhysicsScene): PhysicsEnv {
       device_id: message.topic.split('/').pop() ?? '',
       payload: asRecord(env.payload),
     });
-  });
-
-  const state = new Map<string, Record<string, unknown>>();
-  bus.subscribe('railway/state/+/+', (message) => {
-    const decoded = decodeJson(message.payload);
-    state.set(message.topic, decoded === null ? {} : asRecord(decoded));
   });
 
   const server = new Server({ layout: scene.layout, client: serverClient, newId, now });
@@ -314,21 +295,6 @@ export function startPhysicsEnv(scene: PhysicsScene): PhysicsEnv {
       teardown.push(() => device.stop());
       return device;
     },
-    spawnYardZone(deviceId, options) {
-      const device = new ZoneDevice(deviceId, {
-        platform: mqttPlatform(bus, deviceId, { newId, now: nowIso }),
-        zoneMarker: options.throatMarker,
-        capacity: options.capacity,
-        ...(options.initialOccupancy === undefined
-          ? {}
-          : { initialOccupancy: options.initialOccupancy }),
-        newId,
-        now: nowIso,
-      });
-      device.start();
-      teardown.push(() => device.stop());
-      return device;
-    },
     assignSchedule(trainId, stops, routeId) {
       server.assignSchedule(trainId, routeId ?? `route-${trainId}-${clockMs}`, [...stops]);
     },
@@ -345,9 +311,6 @@ export function startPhysicsEnv(scene: PhysicsScene): PhysicsEnv {
     },
     eventsOfType(eventType) {
       return events.filter((e) => e.event_type === eventType);
-    },
-    stateOf(topic) {
-      return state.get(topic);
     },
     shutdown() {
       for (const off of teardown) off();
