@@ -28,11 +28,21 @@ export default defineConfig({
         'src/**/*.test.{ts,tsx}',
         'src/test-setup.ts',
         'src/main.tsx',
-        // Pure type definitions — no runtime code to cover.
-        'src/broker/client.ts',
-        // System-boundary adapter for the `mqtt` lib. Exercised only against a
-        // real broker; the contract is covered via InMemoryBrokerSubscriber.
-        'src/broker/mqtt-client.ts',
+        /* Visual demo-scenario views — pure SVG scaffolding that mounts the physics
+         * engine and renders it. There is no logic to unit-test (the engine they
+         * drive lives in `@trainframe/simulator` and is tested there); they are
+         * verified end-to-end via the Playwright `?physics=` journeys, not units.
+         * Excluded so the floor measures the logic-bearing rendering code, not the
+         * coverage of SVG markup. */
+        'src/components/BridgeRunoffScenarioView.tsx',
+        'src/components/CraneDropScenarioView.tsx',
+        'src/components/DepotScenarioView.tsx',
+        'src/components/InterestingLayoutView.tsx',
+        'src/components/LiftBridgeArt.tsx',
+        'src/components/LiftBridgeScenarioView.tsx',
+        'src/components/RailyardPiecesView.tsx',
+        'src/components/TurntableScenarioView.tsx',
+        'src/components/YardScenarioView.tsx',
       ],
       thresholds: {
         lines: 80,

@@ -1,3 +1,9 @@
+import type { LinkActuator } from '@trainframe/simulator/devices/link-actuator.js';
+import { TrainDevice } from '@trainframe/simulator/devices/train-device.js';
+import { buildLiftBridgeLayout } from '@trainframe/simulator/physics/lift-bridge.js';
+import { type BodyPose, PhysicsWorld } from '@trainframe/simulator/physics/world.js';
+import { physicsLinkActuator } from '@trainframe/simulator/sim/link-actuator.js';
+import { physicsMotorActuator } from '@trainframe/simulator/sim/motor-actuator.js';
 /**
  * The CONTRASTING lift-bridge demo (ADR-030, ADR-031, experimental/005). It is the
  * `?physics=lift-bridge` scene with the safety taken away: there is NO
@@ -17,12 +23,6 @@
  * the harness can assert the train's fate is `ran-off` (it was NOT held).
  */
 import { useEffect, useMemo, useState } from 'react';
-import type { LinkActuator } from '../devices/link-actuator.js';
-import { TrainDevice } from '../devices/train-device.js';
-import { buildLiftBridgeLayout } from '../physics/lift-bridge.js';
-import { type BodyPose, PhysicsWorld } from '../physics/world.js';
-import { physicsLinkActuator } from '../sim/link-actuator.js';
-import { physicsMotorActuator } from '../sim/motor-actuator.js';
 import { LiftBridgeArt } from './LiftBridgeArt.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';

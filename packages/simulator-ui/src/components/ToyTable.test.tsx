@@ -1,10 +1,10 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { PROTOCOL_VERSION } from '@trainframe/protocol';
+import { InMemoryBrokerClient } from '@trainframe/simulator/broker/in-memory-client.js';
+import type { TrackPiece } from '@trainframe/simulator/track/pieces.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
-import { InMemoryBrokerClient } from '../broker/in-memory-client.js';
-import type { TrackPiece } from '../track/pieces.js';
 import { SCANBOX_DATA_MIME } from './ScanBox.js';
 import { ToyTable, type TrainLayerSource, effectiveLayer } from './ToyTable.js';
 

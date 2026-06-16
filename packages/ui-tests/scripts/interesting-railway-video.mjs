@@ -24,7 +24,7 @@ import {
   INTERESTING_MARKERS as M,
   buildMainLoopScene,
   interestingToLayout,
-} from '../../simulator-ui/src/demo/index.ts';
+} from '@trainframe/simulator';
 import { startUiHarness } from '../src/test-harness.ts';
 
 const SIM = process.env.TF_SIM_URL ?? 'http://localhost:5274';

@@ -1,3 +1,10 @@
+import { Crane } from '@trainframe/simulator/devices/crane.js';
+import { TrainDevice } from '@trainframe/simulator/devices/train-device.js';
+import { YardController, craneBounds } from '@trainframe/simulator/devices/yard-controller.js';
+import { type BodyPose, PhysicsWorld } from '@trainframe/simulator/physics/world.js';
+import { buildYardLayout } from '@trainframe/simulator/physics/yard.js';
+import { physicsMotorActuator } from '@trainframe/simulator/sim/motor-actuator.js';
+import { physicsSwitchActuator } from '@trainframe/simulator/sim/switch-actuator.js';
 /**
  * The railyard service, rendered (ADR-030 Plan §4). Builds the yard interior as a
  * switched network, stages a visiting loco+rake on the west lead and a spare cut
@@ -9,13 +16,6 @@
  * video harness can assert the service happened.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { Crane } from '../devices/crane.js';
-import { TrainDevice } from '../devices/train-device.js';
-import { YardController, craneBounds } from '../devices/yard-controller.js';
-import { type BodyPose, PhysicsWorld } from '../physics/world.js';
-import { buildYardLayout } from '../physics/yard.js';
-import { physicsMotorActuator } from '../sim/motor-actuator.js';
-import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 

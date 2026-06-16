@@ -1,6 +1,10 @@
+import { InMemoryBrokerClient } from '@trainframe/simulator/broker/in-memory-client.js';
+import type {
+  CarriageColorId,
+  RotationDeg,
+  TrackPiece,
+} from '@trainframe/simulator/track/pieces.js';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { InMemoryBrokerClient } from '../broker/in-memory-client.js';
-import type { CarriageColorId, RotationDeg, TrackPiece } from '../track/pieces.js';
 import { ToyHardware } from './toy-hardware.js';
 
 let nextId = 0;

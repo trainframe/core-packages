@@ -1,3 +1,8 @@
+import { JibCrane } from '@trainframe/simulator/devices/jib-crane.js';
+import { TrainDevice } from '@trainframe/simulator/devices/train-device.js';
+import { type BodyPose, PhysicsWorld } from '@trainframe/simulator/physics/world.js';
+import { straightSeg } from '@trainframe/simulator/physics/yard.js';
+import { physicsMotorActuator } from '@trainframe/simulator/sim/motor-actuator.js';
 /**
  * Crane-drop accident, rendered (ADR-030/031). A DOCKSIDE JIB CRANE — a static
  * tower set beside the running line whose boom SLEWS about the tower (angle θ)
@@ -15,11 +20,6 @@
  * unchanged from the gantry version, so the existing CHECK keeps passing.
  */
 import { useEffect, useState } from 'react';
-import { JibCrane } from '../devices/jib-crane.js';
-import { TrainDevice } from '../devices/train-device.js';
-import { type BodyPose, PhysicsWorld } from '../physics/world.js';
-import { straightSeg } from '../physics/yard.js';
-import { physicsMotorActuator } from '../sim/motor-actuator.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 

@@ -3,19 +3,14 @@
   "version": "0.1.0",
   "description": "Virtual device population and test harness for Trainframe.",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    },
-    "./testing": {
-      "types": "./dist/testing.d.ts",
-      "import": "./dist/testing.js"
-    }
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts",
+    "./*": "./src/*"
   },
-  "files": ["dist"],
+  "files": ["src"],
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
@@ -24,11 +19,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@sinclair/typebox": "^0.33.0",
     "@trainframe/core": "workspace:*",
     "@trainframe/protocol": "workspace:*",
-    "@trainframe/server": "workspace:*"
+    "@trainframe/server": "workspace:*",
+    "mqtt": "^5.10.0"
   },
   "devDependencies": {
+    "aedes": "^1.0.2",
     "vitest": "^2.1.0",
     "typescript": "^5.6.0"
   }

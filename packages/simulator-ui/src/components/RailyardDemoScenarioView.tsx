@@ -1,3 +1,18 @@
+import {
+  RailyardDemoController,
+  type RailyardDemoTrain,
+  type RailyardLoopRun,
+  type YardJob,
+} from '@trainframe/simulator/devices/railyard-demo-controller.js';
+import { TrainDevice } from '@trainframe/simulator/devices/train-device.js';
+import {
+  type RailyardScene,
+  type Station,
+  buildRailyardScene,
+} from '@trainframe/simulator/physics/railyard-scene.js';
+import { type BodyPose, PhysicsWorld } from '@trainframe/simulator/physics/world.js';
+import { physicsMotorActuator } from '@trainframe/simulator/sim/motor-actuator.js';
+import { physicsSwitchActuator } from '@trainframe/simulator/sim/switch-actuator.js';
 /**
  * The RAILYARD DEMO, rendered (ADR-030). A multi-loop layout: a rounded MAIN loop with
  * real curved corners that ENCLOSES the railyard (a JUNCTION splits trains off into
@@ -17,17 +32,6 @@
  * Exposes `window.__tfPhysics` so the video harness can assert progress + the swaps.
  */
 import { useEffect, useMemo, useState } from 'react';
-import {
-  RailyardDemoController,
-  type RailyardDemoTrain,
-  type RailyardLoopRun,
-  type YardJob,
-} from '../devices/railyard-demo-controller.js';
-import { TrainDevice } from '../devices/train-device.js';
-import { type RailyardScene, type Station, buildRailyardScene } from '../physics/railyard-scene.js';
-import { type BodyPose, PhysicsWorld } from '../physics/world.js';
-import { physicsMotorActuator } from '../sim/motor-actuator.js';
-import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 

@@ -30,7 +30,7 @@
 
 import process from 'node:process';
 import { MqttBrokerClient, Server } from '@trainframe/server';
-import { buildBridgeDemo } from '../../simulator-ui/src/demo/bridge-demo.ts';
+import { buildBridgeDemo } from '@trainframe/simulator/demo/bridge-demo.js';
 import { compileLayout } from '../../simulator-ui/src/track/layout-from-pieces.ts';
 
 function parseBroker() {

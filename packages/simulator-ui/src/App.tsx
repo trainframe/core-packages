@@ -1,7 +1,7 @@
+import type { BrokerClient } from '@trainframe/simulator/broker/client.js';
+import { MqttBrokerClient } from '@trainframe/simulator/broker/mqtt-client.js';
 import { useEffect, useMemo, useState } from 'react';
 import { BrokerProvider } from './broker/broker-context.js';
-import type { BrokerClient } from './broker/client.js';
-import { MqttBrokerClient } from './broker/mqtt-client.js';
 import { BranchingSceneView } from './components/BranchingSceneView.js';
 import { BridgeRunoffScenarioView } from './components/BridgeRunoffScenarioView.js';
 import { CraneDropScenarioView } from './components/CraneDropScenarioView.js';

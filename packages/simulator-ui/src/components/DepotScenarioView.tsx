@@ -1,3 +1,10 @@
+import { DepotController } from '@trainframe/simulator/devices/depot-controller.js';
+import { TrainDevice } from '@trainframe/simulator/devices/train-device.js';
+import { TurntableActuator } from '@trainframe/simulator/devices/turntable-actuator.js';
+import { type DepotLayout, buildDepotLayout } from '@trainframe/simulator/physics/depot.js';
+import { type BodyPose, PhysicsWorld } from '@trainframe/simulator/physics/world.js';
+import { physicsMotorActuator } from '@trainframe/simulator/sim/motor-actuator.js';
+import { physicsSwitchActuator } from '@trainframe/simulator/sim/switch-actuator.js';
 /**
  * The DEPOT / roundhouse service, rendered (ADR-032 — the first concrete two-level
  * nested opaque zone). Builds the depot interior as a switched network (an entry
@@ -19,13 +26,6 @@
  * so the video harness can assert both locos ended parked on distinct stalls.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { DepotController } from '../devices/depot-controller.js';
-import { TrainDevice } from '../devices/train-device.js';
-import { TurntableActuator } from '../devices/turntable-actuator.js';
-import { type DepotLayout, buildDepotLayout } from '../physics/depot.js';
-import { type BodyPose, PhysicsWorld } from '../physics/world.js';
-import { physicsMotorActuator } from '../sim/motor-actuator.js';
-import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 

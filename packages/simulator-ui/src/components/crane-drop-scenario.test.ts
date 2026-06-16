@@ -1,3 +1,8 @@
+import { JibCrane } from '@trainframe/simulator/devices/jib-crane.js';
+import { TrainDevice } from '@trainframe/simulator/devices/train-device.js';
+import { PhysicsWorld } from '@trainframe/simulator/physics/world.js';
+import { straightSeg } from '@trainframe/simulator/physics/yard.js';
+import { physicsMotorActuator } from '@trainframe/simulator/sim/motor-actuator.js';
 /**
  * Headless integration of the crane-drop accident driven by the DOCK JIB CRANE
  * (the same wiring `CraneDropScenarioView` runs, minus React): the jib slews a
@@ -7,11 +12,6 @@
  * proven without standing up a browser.
  */
 import { describe, expect, it } from 'vitest';
-import { JibCrane } from '../devices/jib-crane.js';
-import { TrainDevice } from '../devices/train-device.js';
-import { PhysicsWorld } from '../physics/world.js';
-import { straightSeg } from '../physics/yard.js';
-import { physicsMotorActuator } from '../sim/motor-actuator.js';
 
 const STEP_S = 1 / 120;
 const RAIL_Y = 600;

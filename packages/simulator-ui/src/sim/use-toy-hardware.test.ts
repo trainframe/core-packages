@@ -1,7 +1,7 @@
 import { act, renderHook } from '@testing-library/react';
+import { InMemoryBrokerClient } from '@trainframe/simulator/broker/in-memory-client.js';
+import type { RotationDeg, TrackPiece } from '@trainframe/simulator/track/pieces.js';
 import { describe, expect, it } from 'vitest';
-import { InMemoryBrokerClient } from '../broker/in-memory-client.js';
-import type { RotationDeg, TrackPiece } from '../track/pieces.js';
 import { useToyHardware } from './use-toy-hardware.js';
 
 let nextId = 0;

@@ -70,10 +70,10 @@
       }
     },
     {
-      "include": ["packages/simulator-ui/src/devices/**"],
+      "include": ["packages/simulator/src/devices/**"],
       "ignore": [
-        "packages/simulator-ui/src/devices/**/*.test.ts",
-        "packages/simulator-ui/src/devices/**/*.test.tsx"
+        "packages/simulator/src/devices/**/*.test.ts",
+        "packages/simulator/src/devices/**/*.test.tsx"
       ],
       "linter": {
         "rules": {

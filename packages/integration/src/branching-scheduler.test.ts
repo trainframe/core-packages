@@ -36,7 +36,7 @@ import {
   buildBranchingScene,
   mqttPlatform,
   sceneToLayout,
-} from '@trainframe/simulator-ui/demo';
+} from '@trainframe/simulator';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { type Harness, startHarness } from './harness.js';
 

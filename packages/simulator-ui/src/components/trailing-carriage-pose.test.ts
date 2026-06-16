@@ -10,14 +10,14 @@
  */
 import type { Layout } from '@trainframe/protocol';
 import { Simulation } from '@trainframe/simulator';
-import { describe, expect, it } from 'vitest';
 import {
   type EdgePath,
   type TrailingPositionSource,
   composeEdgePath,
   trailingCarriagePose,
-} from '../track/edge-path.js';
-import type { TrackPiece } from '../track/pieces.js';
+} from '@trainframe/simulator/track/edge-path.js';
+import type { TrackPiece } from '@trainframe/simulator/track/pieces.js';
+import { describe, expect, it } from 'vitest';
 
 /* ---------------------------------------------------------------------------
    Fixtures

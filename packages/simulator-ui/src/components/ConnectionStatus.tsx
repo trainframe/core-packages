@@ -1,5 +1,5 @@
+import type { BrokerStatus } from '@trainframe/simulator/broker/client.js';
 import { useBroker } from '../broker/broker-context.js';
-import type { BrokerStatus } from '../broker/client.js';
 
 const LABELS: Record<BrokerStatus, string> = {
   disconnected: 'Disconnected',

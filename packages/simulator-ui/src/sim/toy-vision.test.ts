@@ -8,13 +8,13 @@
  * covered in `toy-hardware.test.ts`.
  */
 
-import { describe, expect, it } from 'vitest';
 import {
   type TrackPiece,
   VISION_FOOTPRINT_RADIUS_MM,
   VISION_MARKER_A_LX,
   VISION_MARKER_B_LX,
-} from '../track/pieces.js';
+} from '@trainframe/simulator/track/pieces.js';
+import { describe, expect, it } from 'vitest';
 import { ToyVisionStations, type TrainBody, stationRig } from './toy-vision.js';
 
 function visionPiece(x: number, rotationDeg: 0 | 90 = 0): TrackPiece {

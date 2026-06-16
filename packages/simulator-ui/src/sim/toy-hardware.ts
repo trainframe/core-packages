@@ -6,12 +6,17 @@ import {
   type VirtualGate,
   type VirtualSwitch,
 } from '@trainframe/simulator';
-import type { BrokerClient } from '../broker/client.js';
-import { encodeDeviceEvent } from '../broker/encode-event.js';
-import { COUPLING_DISTANCE_MM, computeTrainTrails } from '../track/coupling.js';
-import { compileLayout } from '../track/layout-from-pieces.js';
-import { TRAIN_LENGTH_MM, type TrackPiece, isDevicePiece, layerOf } from '../track/pieces.js';
-import { nearestMarkerId, nearestStartEdge } from './nearest-edge.js';
+import type { BrokerClient } from '@trainframe/simulator/broker/client.js';
+import { encodeDeviceEvent } from '@trainframe/simulator/broker/encode-event.js';
+import { nearestMarkerId, nearestStartEdge } from '@trainframe/simulator/sim/nearest-edge.js';
+import { COUPLING_DISTANCE_MM, computeTrainTrails } from '@trainframe/simulator/track/coupling.js';
+import { compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
+import {
+  TRAIN_LENGTH_MM,
+  type TrackPiece,
+  isDevicePiece,
+  layerOf,
+} from '@trainframe/simulator/track/pieces.js';
 import { ToyVisionStations, type TrainBody, trainBodyPositions } from './toy-vision.js';
 
 /** Slots a toy-table railyard owns. Plenty for a handful of trains + spares. */

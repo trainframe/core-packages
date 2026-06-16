@@ -1,6 +1,6 @@
+import type { BrokerClient } from '@trainframe/simulator/broker/client.js';
+import type { TrackPiece } from '@trainframe/simulator/track/pieces.js';
 import { useEffect, useRef } from 'react';
-import type { BrokerClient } from '../broker/client.js';
-import type { TrackPiece } from '../track/pieces.js';
 import { ToyHardware } from './toy-hardware.js';
 
 interface UseToyHardwareArgs {

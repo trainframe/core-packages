@@ -7,7 +7,7 @@
  *
  * Pure presentation: takes a `getPieceShape` result, draws it. No sim, no state.
  */
-import type { PieceFeature, getPieceShape } from '../track/pieces.js';
+import type { PieceFeature, getPieceShape } from '@trainframe/simulator/track/pieces.js';
 
 /** SVG gradient fill id defined in `WoodDefs`; referenced by url(). */
 export const WOOD_FILL = 'url(#tf-wood)';

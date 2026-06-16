@@ -1,22 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { useBroker } from '../broker/broker-context.js';
-import type { BrokerClient } from '../broker/client.js';
-import { encodeDeviceEvent } from '../broker/encode-event.js';
-import { buildBridgeDemo } from '../demo/bridge-demo.js';
-import { buildRailyardDemo } from '../demo/railyard-demo.js';
-import { nearestStartEdge } from '../sim/nearest-edge.js';
-import type { ToyHardware } from '../sim/toy-hardware.js';
-import { useToyHardware } from '../sim/use-toy-hardware.js';
-import { CARRIAGE_SPACING_MM, type WorldPosition, computeTrainTrails } from '../track/coupling.js';
+import type { BrokerClient } from '@trainframe/simulator/broker/client.js';
+import { encodeDeviceEvent } from '@trainframe/simulator/broker/encode-event.js';
+import { buildBridgeDemo } from '@trainframe/simulator/demo/bridge-demo.js';
+import { buildRailyardDemo } from '@trainframe/simulator/demo/railyard-demo.js';
+import { nearestStartEdge } from '@trainframe/simulator/sim/nearest-edge.js';
+import {
+  CARRIAGE_SPACING_MM,
+  type WorldPosition,
+  computeTrainTrails,
+} from '@trainframe/simulator/track/coupling.js';
 import {
   type EdgePath,
   composeEdgePath,
   pieceIdFromMarkerId,
   poseAt,
   trailingCarriagePose,
-} from '../track/edge-path.js';
-import { SNAP_DISTANCE, compileLayout } from '../track/layout-from-pieces.js';
-import { detectSameLayerOverlaps, pierSuppressed } from '../track/overlap.js';
+} from '@trainframe/simulator/track/edge-path.js';
+import { SNAP_DISTANCE, compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
+import { detectSameLayerOverlaps, pierSuppressed } from '@trainframe/simulator/track/overlap.js';
 import {
   CARRIAGE_COLOR_IDS,
   CRANE_GANTRY_X_MM,
@@ -64,12 +64,16 @@ import {
   supportColumn,
   turntableDeck,
   worldHalfPath,
-} from '../track/pieces.js';
+} from '@trainframe/simulator/track/pieces.js';
 import {
   computeMovePlacement,
   computePlacement,
   nearestConnectablePoint,
-} from '../track/placement.js';
+} from '@trainframe/simulator/track/placement.js';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { useBroker } from '../broker/broker-context.js';
+import type { ToyHardware } from '../sim/toy-hardware.js';
+import { useToyHardware } from '../sim/use-toy-hardware.js';
 import { ConnectionStatus } from './ConnectionStatus.js';
 import { ScanBox } from './ScanBox.js';
 import { Settings } from './Settings.js';

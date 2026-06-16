@@ -1,3 +1,13 @@
+import { Crane } from '@trainframe/simulator/devices/crane.js';
+import {
+  LadderYardController,
+  type SlotGeom,
+} from '@trainframe/simulator/devices/ladder-yard-controller.js';
+import { TrainDevice } from '@trainframe/simulator/devices/train-device.js';
+import { buildFullRailyardScene } from '@trainframe/simulator/physics/railyard-pieces.js';
+import { type BodyPose, PhysicsWorld } from '@trainframe/simulator/physics/world.js';
+import { physicsMotorActuator } from '@trainframe/simulator/sim/motor-actuator.js';
+import { physicsSwitchActuator } from '@trainframe/simulator/sim/switch-actuator.js';
 /**
  * The real-piece railyard, rendered (ADR-030/034). Builds the whole running circuit
  * from REAL track pieces (`buildFullRailyardScene` — straights, 45° curves, real
@@ -14,13 +24,6 @@
  * exposes `window.__tfPhysics` so the video harness can assert the service happened.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { Crane } from '../devices/crane.js';
-import { LadderYardController, type SlotGeom } from '../devices/ladder-yard-controller.js';
-import { TrainDevice } from '../devices/train-device.js';
-import { buildFullRailyardScene } from '../physics/railyard-pieces.js';
-import { type BodyPose, PhysicsWorld } from '../physics/world.js';
-import { physicsMotorActuator } from '../sim/motor-actuator.js';
-import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 

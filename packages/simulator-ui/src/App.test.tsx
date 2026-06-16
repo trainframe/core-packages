@@ -1,7 +1,7 @@
 import { act, render, screen } from '@testing-library/react';
+import { InMemoryBrokerClient } from '@trainframe/simulator/broker/in-memory-client.js';
 import { describe, expect, it } from 'vitest';
 import { App } from './App.js';
-import { InMemoryBrokerClient } from './broker/in-memory-client.js';
 
 describe('App', () => {
   it('renders the toy table heading', () => {

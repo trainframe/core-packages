@@ -1,3 +1,8 @@
+import { TrainDevice } from '@trainframe/simulator/devices/train-device.js';
+import { buildLiftBridgeLayout } from '@trainframe/simulator/physics/lift-bridge.js';
+import { PhysicsWorld } from '@trainframe/simulator/physics/world.js';
+import { physicsLinkActuator } from '@trainframe/simulator/sim/link-actuator.js';
+import { physicsMotorActuator } from '@trainframe/simulator/sim/motor-actuator.js';
 /**
  * Headless integration of the bridge run-off (the same wiring
  * `BridgeRunoffScenarioView` runs, minus React): the span is staged RAISED (its
@@ -8,11 +13,6 @@
  * the physics level, so the re-skin is proven without standing up a browser.
  */
 import { describe, expect, it } from 'vitest';
-import { TrainDevice } from '../devices/train-device.js';
-import { buildLiftBridgeLayout } from '../physics/lift-bridge.js';
-import { PhysicsWorld } from '../physics/world.js';
-import { physicsLinkActuator } from '../sim/link-actuator.js';
-import { physicsMotorActuator } from '../sim/motor-actuator.js';
 
 const STEP_S = 1 / 120;
 

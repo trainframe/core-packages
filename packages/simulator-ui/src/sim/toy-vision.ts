@@ -29,14 +29,17 @@
  */
 
 import type { Simulation } from '@trainframe/simulator';
-import type { CameraPerception, CameraProvider } from '../sensors/camera-provider.js';
-import { VisionStation } from '../sensors/vision-station.js';
-import { CARRIAGE_SPACING_MM, type WorldPosition } from '../track/coupling.js';
+import type {
+  CameraPerception,
+  CameraProvider,
+} from '@trainframe/simulator/sensors/camera-provider.js';
+import { VisionStation } from '@trainframe/simulator/sensors/vision-station.js';
+import { CARRIAGE_SPACING_MM, type WorldPosition } from '@trainframe/simulator/track/coupling.js';
 import {
   type EdgePath,
   type TrailingPositionSource,
   trailingCarriagePose,
-} from '../track/edge-path.js';
+} from '@trainframe/simulator/track/edge-path.js';
 import {
   type TrackPiece,
   VISION_BASELINE_MM,
@@ -44,7 +47,7 @@ import {
   VISION_MARKER_A_LX,
   VISION_MARKER_B_LX,
   transformPoint,
-} from '../track/pieces.js';
+} from '@trainframe/simulator/track/pieces.js';
 
 /** Body half-extents along the rail (mm), mirroring the physics CameraProvider:
  * a loco is ~68 mm long, a carriage ~60 mm. The camera sees a body when the

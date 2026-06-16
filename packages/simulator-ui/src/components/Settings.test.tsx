@@ -1,8 +1,8 @@
 import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { InMemoryBrokerClient } from '@trainframe/simulator/broker/in-memory-client.js';
 import { describe, expect, it } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
-import { InMemoryBrokerClient } from '../broker/in-memory-client.js';
 import { Settings } from './Settings.js';
 
 function renderSettings(client: InMemoryBrokerClient) {

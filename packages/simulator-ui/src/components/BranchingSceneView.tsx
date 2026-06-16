@@ -1,3 +1,15 @@
+import { MqttBrokerClient } from '@trainframe/simulator/broker/mqtt-client.js';
+import { mqttPlatform } from '@trainframe/simulator/broker/mqtt-platform.js';
+import {
+  type BranchingDemo,
+  buildBranchingDemo,
+} from '@trainframe/simulator/demo/branching-demo.js';
+import {
+  type BranchingScene,
+  type Station,
+  buildBranchingScene,
+} from '@trainframe/simulator/physics/branching-scene.js';
+import type { BodyPose } from '@trainframe/simulator/physics/world.js';
 /**
  * The BRANCHING layout, RENDERED (FROZEN SPEC §5). This view is the BROWSER-side
  * DEVICE composition root for `?physics=branching`: it builds the REAL
@@ -22,16 +34,7 @@
  * (frame the whole layout) the render script calls before scheduling.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { MqttBrokerClient } from '../broker/mqtt-client.js';
-import { mqttPlatform } from '../broker/mqtt-platform.js';
 import { loadBrokerUrl } from '../config/broker-config.js';
-import { type BranchingDemo, buildBranchingDemo } from '../demo/branching-demo.js';
-import {
-  type BranchingScene,
-  type Station,
-  buildBranchingScene,
-} from '../physics/branching-scene.js';
-import type { BodyPose } from '../physics/world.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 

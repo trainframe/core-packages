@@ -1,5 +1,5 @@
+import type { BrokerClient, BrokerStatus } from '@trainframe/simulator/broker/client.js';
 import { type ReactNode, createContext, useContext, useEffect, useState } from 'react';
-import type { BrokerClient, BrokerStatus } from './client.js';
 
 interface BrokerContextValue {
   client: BrokerClient;

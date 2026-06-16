@@ -1,3 +1,9 @@
+import { buildMainLoopScene } from '@trainframe/simulator/physics/interesting-layout.js';
+import { railOfPiece } from '@trainframe/simulator/physics/rail.js';
+import type { BodyPose } from '@trainframe/simulator/physics/world.js';
+import { buildInterestingDemo } from '@trainframe/simulator/sim/interesting-demo.js';
+import { pierSuppressed } from '@trainframe/simulator/track/overlap.js';
+import { layerOf } from '@trainframe/simulator/track/pieces.js';
 /**
  * The "interesting" layout, rendered (ADR-030) — a winding main loop of REAL track
  * pieces that crosses OVER itself once on a bridge (the `satB` crossover teardrop),
@@ -10,12 +16,6 @@
  * movement.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { buildMainLoopScene } from '../physics/interesting-layout.js';
-import { railOfPiece } from '../physics/rail.js';
-import type { BodyPose } from '../physics/world.js';
-import { buildInterestingDemo } from '../sim/interesting-demo.js';
-import { pierSuppressed } from '../track/overlap.js';
-import { layerOf } from '../track/pieces.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 

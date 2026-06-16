@@ -1,3 +1,20 @@
+import { TrainDevice } from '@trainframe/simulator/devices/train-device.js';
+import { buildRail } from '@trainframe/simulator/physics/rail.js';
+import {
+  type PhysicsScenario,
+  type TrackSpec,
+  buildScenario,
+} from '@trainframe/simulator/physics/scenarios.js';
+import { type BodyPose, PhysicsWorld } from '@trainframe/simulator/physics/world.js';
+import { physicsCameraProvider } from '@trainframe/simulator/sensors/camera-provider.js';
+import { VisionStation } from '@trainframe/simulator/sensors/vision-station.js';
+import { physicsMotorActuator } from '@trainframe/simulator/sim/motor-actuator.js';
+import {
+  PIECE_TINT,
+  type TrackPiece,
+  getEndpoints,
+  getPieceShape,
+} from '@trainframe/simulator/track/pieces.js';
 /**
  * A self-contained view that runs ONE physics acceptance scenario (ADR-030) and
  * renders it — the toy table's wooden pieces drawn from `getPieceShape`, the
@@ -8,14 +25,6 @@
  * `window.__tfPhysics` so the video harness can read body fates/poses and assert.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { TrainDevice } from '../devices/train-device.js';
-import { buildRail } from '../physics/rail.js';
-import { type PhysicsScenario, type TrackSpec, buildScenario } from '../physics/scenarios.js';
-import { type BodyPose, PhysicsWorld } from '../physics/world.js';
-import { physicsCameraProvider } from '../sensors/camera-provider.js';
-import { VisionStation } from '../sensors/vision-station.js';
-import { physicsMotorActuator } from '../sim/motor-actuator.js';
-import { PIECE_TINT, type TrackPiece, getEndpoints, getPieceShape } from '../track/pieces.js';
 import { PieceBody, WOOD_FILL, WoodDefs } from './piece-art.js';
 
 declare global {

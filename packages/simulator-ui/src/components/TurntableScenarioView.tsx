@@ -1,3 +1,10 @@
+import { TrainDevice } from '@trainframe/simulator/devices/train-device.js';
+import { TurntableActuator } from '@trainframe/simulator/devices/turntable-actuator.js';
+import { TurntableController } from '@trainframe/simulator/devices/turntable-controller.js';
+import { buildTurntableLayout, stubSensePoint } from '@trainframe/simulator/physics/turntable.js';
+import { type BodyPose, PhysicsWorld } from '@trainframe/simulator/physics/world.js';
+import { physicsMotorActuator } from '@trainframe/simulator/sim/motor-actuator.js';
+import { physicsSwitchActuator } from '@trainframe/simulator/sim/switch-actuator.js';
 /**
  * The turntable service, rendered (ADR-030, ADR-031, experimental/002). Builds the
  * turntable interior as a switched network, stages a visiting loco on the trunk,
@@ -11,13 +18,6 @@
  * video harness can assert the loco left via the intended stub with flipped facing.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { TrainDevice } from '../devices/train-device.js';
-import { TurntableActuator } from '../devices/turntable-actuator.js';
-import { TurntableController } from '../devices/turntable-controller.js';
-import { buildTurntableLayout, stubSensePoint } from '../physics/turntable.js';
-import { type BodyPose, PhysicsWorld } from '../physics/world.js';
-import { physicsMotorActuator } from '../sim/motor-actuator.js';
-import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 

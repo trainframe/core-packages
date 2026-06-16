@@ -1,3 +1,15 @@
+import { MqttBrokerClient } from '@trainframe/simulator/broker/mqtt-client.js';
+import { mqttPlatform } from '@trainframe/simulator/broker/mqtt-platform.js';
+import {
+  type InterestingRailwayDemo,
+  buildInterestingRailwayDemo,
+} from '@trainframe/simulator/demo/interesting-railway-demo.js';
+import { buildMainLoopScene } from '@trainframe/simulator/physics/interesting-layout.js';
+import { buildInterestingMarkers } from '@trainframe/simulator/physics/interesting-markers.js';
+import { railOfPiece } from '@trainframe/simulator/physics/rail.js';
+import type { BodyPose } from '@trainframe/simulator/physics/world.js';
+import { pierSuppressed } from '@trainframe/simulator/track/overlap.js';
+import { layerOf } from '@trainframe/simulator/track/pieces.js';
 /**
  * The 4-TRAIN INTERESTING-RAILWAY demo, rendered live (ADR-030) — the SAME headless
  * `buildInterestingRailwayDemo` assembly the integration gates drive, now drawn in the
@@ -11,19 +23,7 @@
  * non-fatal — the world renders idle. Exposes `window.__tfPhysics` for the video harness.
  */
 import { useEffect, useMemo, useState } from 'react';
-import { MqttBrokerClient } from '../broker/mqtt-client.js';
-import { mqttPlatform } from '../broker/mqtt-platform.js';
 import { loadBrokerUrl } from '../config/broker-config.js';
-import {
-  type InterestingRailwayDemo,
-  buildInterestingRailwayDemo,
-} from '../demo/interesting-railway-demo.js';
-import { buildMainLoopScene } from '../physics/interesting-layout.js';
-import { buildInterestingMarkers } from '../physics/interesting-markers.js';
-import { railOfPiece } from '../physics/rail.js';
-import type { BodyPose } from '../physics/world.js';
-import { pierSuppressed } from '../track/overlap.js';
-import { layerOf } from '../track/pieces.js';
 import { BodyG } from './PhysicsScenarioView.js';
 import { WoodDefs } from './piece-art.js';
 

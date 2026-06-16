@@ -21,7 +21,7 @@ import { mkdirSync, renameSync, rmSync } from 'node:fs';
 import process from 'node:process';
 import { chromium } from '@playwright/test';
 import { MqttBrokerClient } from '@trainframe/server';
-import { buildRailyardDemo } from '../../simulator-ui/src/demo/railyard-demo.ts';
+import { buildRailyardDemo } from '@trainframe/simulator/demo/railyard-demo.js';
 import { compileLayout } from '../../simulator-ui/src/track/layout-from-pieces.ts';
 import { startUiHarness } from '../src/test-harness.ts';
 
