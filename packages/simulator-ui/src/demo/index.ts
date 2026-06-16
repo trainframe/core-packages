@@ -21,10 +21,17 @@ export type { BranchingDemo, DemoRoute, PlatformFactory } from './branching-demo
 /* The interesting-railway demo — FOUR trains on the winding loop + drive-through yard,
  * driven by the REAL scheduler (the 4-train stress test). Same composition-root shape
  * as the branching demo. */
-export { buildInterestingRailwayDemo } from './interesting-railway-demo.js';
+export {
+  buildInterestingRailwayDemo,
+  INTERESTING_YARD_DEVICE_ID,
+} from './interesting-railway-demo.js';
 export type { InterestingRailwayDemo } from './interesting-railway-demo.js';
 export { buildMainLoopScene } from '../physics/interesting-layout.js';
-export { interestingToLayout, buildInterestingMarkers } from '../physics/interesting-markers.js';
+export {
+  interestingToLayout,
+  buildInterestingMarkers,
+  INTERESTING_MARKERS,
+} from '../physics/interesting-markers.js';
 export { buildBranchingScene } from '../physics/branching-scene.js';
 export type { BranchingScene, SceneMarker } from '../physics/branching-scene.js';
 export { sceneToLayout, markerAt, edgeRequiresSwitch } from '../physics/scene-markers.js';

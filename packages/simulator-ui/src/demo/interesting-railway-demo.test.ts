@@ -27,7 +27,11 @@ describe('buildInterestingRailwayDemo — 4-train composition root', () => {
     const { demo } = setup();
     expect(demo.layout.markers.length).toBeGreaterThan(0);
     expect(demo.trainIds).toEqual(['T1', 'T2', 'T3', 'T4']);
-    expect(demo.switchDeviceIds).toEqual(['SWITCH-M-satA-jn', 'SWITCH-M-satB-jn', 'SWITCH-M-yard']);
+    expect(demo.switchDeviceIds).toEqual([
+      'SWITCH-M-satA-jn',
+      'SWITCH-M-satB-jn',
+      'SWITCH-M-yard-jn',
+    ]);
     for (const id of demo.trainIds) expect(demo.routes.get(id)?.stops.length).toBeGreaterThan(0);
   });
 

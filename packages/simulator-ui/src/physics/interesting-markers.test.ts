@@ -31,7 +31,7 @@ describe('interesting-markers — sparse markers + station→station routing', (
 
   it('declares the satellites + yard as junctions', () => {
     const { junctions } = buildInterestingMarkers(buildMainLoopScene());
-    expect(junctions.map((j) => j.markerId).sort()).toEqual([M.satA, M.satB, M.yard].sort());
+    expect(junctions.map((j) => j.markerId).sort()).toEqual([M.satA, M.satB, M.yardJn].sort());
   });
 
   it('routes different trains to different satellite stations (only some visit each)', () => {
@@ -99,7 +99,7 @@ describe('interesting-markers — sparse markers + station→station routing', (
     }
     /* Every RUNNING-LINE marker must be passed close (the satellite STATIONS sit off
      *  the main, so a main-only lap skips them — not asserted here). */
-    for (const id of [M.north, M.satA, M.satB, M.yard, M.south])
+    for (const id of [M.north, M.satA, M.satB, M.yardJn, M.south])
       expect(minDist.get(id), `${id} closest approach (mm)`).toBeLessThan(40);
   });
 });

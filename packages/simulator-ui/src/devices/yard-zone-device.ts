@@ -76,6 +76,11 @@ export interface YardZoneScene {
   readonly throatMarker: string;
   readonly entrySlot: string;
   readonly sparesSlot: string;
+  /** Where the visitor PARKS at the throat — the world point the throat camera reads.
+   *  For an IN-LINE yard this is the west lead's start (the default). For a DETOUR
+   *  yard the throat sits on the running line, across the divert + lead-in from the
+   *  lead, so the composition supplies it explicitly. */
+  readonly throatPoint?: { x: number; y: number };
 }
 
 export interface YardZoneDeps {
@@ -342,8 +347,10 @@ export class YardZoneDevice {
     });
   }
 
-  /** The throat's world point (the west lead's start, where a visitor parks). */
+  /** The throat's world point (where a visitor parks). An explicit `throatPoint`
+   *  (the detour case) wins; otherwise the west lead's start (the in-line case). */
   private throatWorldPoint(): { x: number; y: number } {
+    if (this.d.scene.throatPoint !== undefined) return this.d.scene.throatPoint;
     const g = this.d.scene.yard.geom.get(this.d.scene.yard.leadWest);
     if (g === undefined) return { x: 0, y: 0 };
     return { x: g.ax, y: g.ay };

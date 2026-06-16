@@ -25,6 +25,12 @@ export const INTERESTING_MARKERS = {
   satAStation: 'M-satA',
   satB: 'M-satB-jn',
   satBStation: 'M-satB',
+  /** The yard DIVERT junction on the running line — circulating trains cross it on the
+   *  bypass; a visitor is switched off here into the yard. */
+  yardJn: 'M-yard-jn',
+  /** The yard ZONE THROAT — a marker on the yard's own approach lead, reached ONLY by a
+   *  train switched into the yard. A train whose route terminates here is handed to the
+   *  `gates_zone` device for service; circulating trains never reach it. */
   yard: 'M-yard',
   /* Intermediate BLOCK markers (no stop, no junction) that split the long running-line
    *  sections into shorter blocks. A single-track ring grants clearance per marker, so
@@ -124,17 +130,21 @@ export function buildInterestingMarkers(scene: MainLoopScene): InterestingMarker
       distAlongMm: mid('semi-l'),
       kind: 'unspecified',
     },
-    /* The yard THROAT — the divert point on the running line (the start of the divert
-     *  branch, which a circulating train crosses on the bypass and a serviced train
-     *  takes into the yard). The drive-through detour sits below it. */
-    { id: M.yard, segment: yardTap.branchSeg, end: 'start', kind: 'yard_entry' },
+    /* The DIVERT junction on the running line (the start of the divert branch, where the
+     *  bypass and the into-yard branch split). A circulating train crosses it on the
+     *  bypass; the scheduler throws it to `divert` to send a visitor into the yard. */
+    { id: M.yardJn, segment: yardTap.branchSeg, end: 'start', kind: 'junction' },
+    /* The ZONE THROAT — on the yard's own approach lead (`topLeadIn`), reached ONLY by a
+     *  train switched into the yard, so a circulating train never parks here and the
+     *  zone never mistakes a passer for a visitor. */
+    { id: M.yard, segment: yardTap.yard.topLeadIn, end: 'start', kind: 'yard_entry' },
   ];
 
   const junctions: SceneJunction[] = [
     { markerId: M.satA, switchId: a.switchId, positions: [a.mainPos, a.loopPos] },
     { markerId: M.satB, switchId: bsat.switchId, positions: [bsat.mainPos, bsat.loopPos] },
     {
-      markerId: M.yard,
+      markerId: M.yardJn,
       switchId: yardTap.switchId,
       positions: [yardTap.mainPos, yardTap.divertPos],
     },
@@ -157,8 +167,10 @@ export function buildInterestingMarkers(scene: MainLoopScene): InterestingMarker
     { from: M.satBStation, to: M.east },
     { from: M.east, to: M.blkEY1 },
     { from: M.blkEY1, to: M.blkEY2 },
-    { from: M.blkEY2, to: M.yard },
-    { from: M.yard, to: M.south, requiresSwitch: yardTap.mainPos }, // bypass the yard
+    { from: M.blkEY2, to: M.yardJn },
+    { from: M.yardJn, to: M.south, requiresSwitch: yardTap.mainPos }, // bypass the yard
+    { from: M.yardJn, to: M.yard, requiresSwitch: yardTap.divertPos }, // divert into the yard
+    { from: M.yard, to: M.south }, // released visitor rejoins past the merge (opaque interior)
     { from: M.south, to: M.west },
     { from: M.west, to: M.blkWN },
     { from: M.blkWN, to: M.north },
