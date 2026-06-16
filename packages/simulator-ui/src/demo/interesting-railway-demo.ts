@@ -71,14 +71,13 @@ const TRAINS: readonly TrainPlacement[] = [
 
 /** The yard zone device id (gates_zone at the yard throat). */
 export const INTERESTING_YARD_DEVICE_ID = 'YARD-INTERESTING';
-/** The yard's service capacity. The parallelogram has FIVE roads; the gate denies +
- *  queues only when all five are occupied. Below that, circulating trains pass the
- *  throat freely (the detour's bypass is never gated) and one visitor is serviced at a
- *  time (single-mover interior — the swap controller works one rake at a time). */
-const YARD_CAPACITY = 5;
-/** Which slots the visitor enters and the spares occupy (inner roads — an outer corner
- *  curve can't be made a dead-end the loco rests in). */
-const ENTRY_SLOT_INDEX = 2;
+/** The yard's service capacity — the gate admits up to this many visitors (queued, one
+ *  serviced at a time) before denying. One slot always holds the (rotating) spares, so
+ *  it is one fewer than the slot count; below it, circulating trains pass the throat
+ *  freely (the detour's bypass is never gated). */
+const YARD_CAPACITY = 4;
+/** Which slot the INITIAL spares cut is stabled in (an inner road). From here it
+ *  rotates — each visitor's shed cut becomes the next visitor's spares. */
 const SPARES_SLOT_INDEX = 1;
 /** The throat camera only counts a STOPPED loco as an arrival to service, so a train
  *  merely passing the throat on the bypass is never grabbed (mm/s). */
@@ -226,10 +225,9 @@ export function buildInterestingRailwayDemo(
    *  running line, swaps its rear cut for the stabled spares (crane decouples only —
    *  on-rail throughout), and releases it back onto the line past the merge. */
   const yardSeg = scene.yard;
-  const entrySlot = yardSeg.slots[ENTRY_SLOT_INDEX];
   const sparesSlot = yardSeg.slots[SPARES_SLOT_INDEX];
-  if (entrySlot === undefined || sparesSlot === undefined) {
-    throw new Error('interesting-demo: yard needs at least 3 slots');
+  if (sparesSlot === undefined) {
+    throw new Error('interesting-demo: yard needs at least 2 slots');
   }
   seedSpares(world, scene, sparesSlot);
   const YARD_CAM_R = 20;
@@ -241,7 +239,6 @@ export function buildInterestingRailwayDemo(
     scene: {
       yard: parallelogramYardLayout(scene.net, scene.geom, yardSeg),
       throatMarker: M.yard,
-      entrySlot,
       sparesSlot,
     },
     capacity: YARD_CAPACITY,

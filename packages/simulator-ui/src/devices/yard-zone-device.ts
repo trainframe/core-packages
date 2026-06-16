@@ -74,7 +74,8 @@ const INTERIOR_LOCO_ID = '0a0d0001-0000-4000-8000-000000000001';
 export interface YardZoneScene {
   readonly yard: YardLayout;
   readonly throatMarker: string;
-  readonly entrySlot: string;
+  /** The slot the INITIAL spares cut is stabled in. From here it rotates: each serviced
+   *  visitor's shed cut becomes the next visitor's spares, in the visitor's own slot. */
   readonly sparesSlot: string;
   /** Where the visitor PARKS at the throat — the world point the throat camera reads.
    *  For an IN-LINE yard this is the west lead's start (the default). For a DETOUR
@@ -110,10 +111,16 @@ export interface YardZoneDeps {
 }
 
 /** A train resident in the yard: its core id (the id core knows it by, == the
- *  interior loco body id the world steps) and the controller servicing it. */
+ *  interior loco body id the world steps) and — once it becomes the active service —
+ *  the slot it pulls into and the controller servicing it. Slot + controller are bound
+ *  LAZILY at service start (not at admit), so the controller always sees the CURRENT
+ *  spares (which rotates as each prior visitor leaves its cut behind). */
 interface Resident {
   readonly trainId: string;
-  readonly controller: YardController;
+  controller: YardController | null;
+  /** The free slot this visitor pulls into (its shed cut stays here, becoming the next
+   *  visitor's spares). Assigned when its service starts. */
+  entrySlot: string | null;
   /** Whether release + length reconciliation have already been emitted. */
   released: boolean;
 }
@@ -144,9 +151,18 @@ export class YardZoneDevice {
   /** Monotonic counter for deterministic envelope ids (the device stays pure). */
   private seq = 0;
 
+  /** Which slot currently holds the pick-up-able SPARES cut. It ROTATES: each serviced
+   *  visitor leaves its own shed cut in its entry slot, and that cut becomes the spares
+   *  for the next visitor (the old spares having left coupled to the train). */
+  private sparesSlot: string;
+  /** Round-robin cursor over the slots, so successive visitors spread across ALL of
+   *  them rather than reusing the same one or two. */
+  private entryHint = 0;
+
   constructor(deviceId: string, deps: YardZoneDeps) {
     this.deviceId = deviceId;
     this.d = deps;
+    this.sparesSlot = deps.scene.sparesSlot;
     const bounds = craneBounds(deps.scene.yard);
     this.crane = new Crane(bounds, {
       x: (bounds.minX + bounds.maxX) / 2,
@@ -154,6 +170,26 @@ export class YardZoneDevice {
     });
     this.westPoints = deps.westPoints;
     this.eastPoints = deps.eastPoints;
+  }
+
+  /** A free slot for the next visitor to pull into — not the spares slot, not a slot a
+   *  not-yet-departed resident is already using — scanned round-robin so all slots get
+   *  used over time. */
+  private pickFreeSlot(): string {
+    const slots = this.d.scene.yard.slots;
+    const taken = new Set<string>([this.sparesSlot]);
+    for (const r of this.residents) if (r.entrySlot !== null) taken.add(r.entrySlot);
+    for (let i = 0; i < slots.length; i++) {
+      const idx = (this.entryHint + i) % slots.length;
+      const slot = slots[idx];
+      if (slot !== undefined && !taken.has(slot)) {
+        this.entryHint = (idx + 1) % slots.length;
+        return slot;
+      }
+    }
+    /* Every slot taken (should not happen below capacity): fall back to the spares slot
+     *  so the controller still has a defined target. */
+    return this.sparesSlot;
   }
 
   /** The platform provider the interior loco is wired from (ADR-032). To it this
@@ -252,18 +288,20 @@ export class YardZoneDevice {
     this.admit(arrival);
   }
 
-  /** Begin a `YardController` service on a newly-arrived train and take a slot. */
+  /** Admit a newly-arrived train as a resident (queued). Its slot + controller are NOT
+   *  bound yet — that happens when it becomes the active service, so it picks up the
+   *  spares as they stand THEN (after any earlier visitor has rotated them). */
   private admit(trainId: string): void {
     this.admitted.add(trainId);
-    const controller = this.makeController(trainId);
-    this.residents.push({ trainId, controller, released: false });
+    this.residents.push({ trainId, controller: null, entrySlot: null, released: false });
     this.announce();
   }
 
-  /** Build a `YardController` for the visiting train. The controller drives the
-   *  train's own body (it self-drives the real interior rails) through the crane
-   *  camera + wedge + ladder points. */
-  private makeController(trainId: string): YardController {
+  /** Build a `YardController` for the visiting train, pulling into `entrySlot` and
+   *  collecting the spares from the CURRENT `sparesSlot`. The controller drives the
+   *  train's own body (it self-drives the real interior rails) through the crane camera
+   *  + wedge + ladder points. */
+  private makeController(trainId: string, entrySlot: string): YardController {
     const train = new TrainDevice(trainId, this.d.motorFor(trainId));
     return new YardController({
       layout: this.d.scene.yard,
@@ -274,16 +312,21 @@ export class YardZoneDevice {
       cameraRadius: CAMERA_RADIUS,
       wedgeAt: this.d.wedgeAt,
       crane: this.crane,
-      entrySlot: this.d.scene.entrySlot,
-      sparesSlot: this.d.scene.sparesSlot,
+      entrySlot,
+      sparesSlot: this.sparesSlot,
     });
   }
 
-  /** Advance the single active service (single-mover interior); release a train
-   *  whose service is `done`. */
+  /** Advance the single active service (single-mover interior). The active resident
+   *  binds its slot + controller lazily on its first tick (so it gets the current
+   *  spares); release a train whose service is `done`. */
   private serviceResidents(dtS: number): void {
     const active = this.residents.find((r) => !r.released);
     if (active === undefined) return;
+    if (active.controller === null) {
+      active.entrySlot = this.pickFreeSlot();
+      active.controller = this.makeController(active.trainId, active.entrySlot);
+    }
     active.controller.tick(dtS);
     if (active.controller.currentPhase === 'done') this.release(active);
   }
@@ -298,10 +341,13 @@ export class YardZoneDevice {
     const idx = this.residents.indexOf(resident);
     if (idx !== -1) this.residents.splice(idx, 1);
     this.admitted.delete(resident.trainId);
-    /* The serviced train has cleared out onto the east lead (`exit` phase). Restore
-     *  the interior ladder to the through spine so the next NON-serviced train runs
-     *  straight through the in-line yard — and so the just-released train, now
-     *  beyond the east leg on `M-yard-far`, continues onto the main loop. */
+    /* ROTATE THE SPARES: the train has driven off coupled to the old spares, leaving its
+     *  OWN shed cut in its entry slot. That cut is now the spares the NEXT visitor picks
+     *  up — the old spares slot is empty. (If the service never bound a slot — a
+     *  defensive guard — the spares stand.) */
+    if (resident.entrySlot !== null) this.sparesSlot = resident.entrySlot;
+    /* Restore the interior ladder to neutral so the next NON-serviced train runs
+     *  straight through and the just-released train continues onto the main loop. */
     this.westPoints.set('thru');
     this.eastPoints.set('thru');
     this.announce();
