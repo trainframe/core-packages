@@ -266,10 +266,16 @@ export function InterestingRailwayDemoView() {
       for (let i = 0; i <= n; i++) out.push(r.at((r.length * i) / n));
       return out;
     });
-  const minX = Math.min(...pts.map((p) => p.x)) - 120;
-  const maxX = Math.max(...pts.map((p) => p.x)) + 120;
-  const minY = Math.min(...pts.map((p) => p.y)) - 120;
-  const maxY = Math.max(...pts.map((p) => p.y)) + 120;
+  /* `?railyard` frames the view tight on the YARD (the gantry + slots) so a capture
+   *  shows the swap up close, rather than the whole wide loop. */
+  const yardOnly =
+    typeof window !== 'undefined' &&
+    new URLSearchParams(window.location.search).get('railyard') !== null;
+  const fy = furniture.yard;
+  const minX = yardOnly ? fy.minX - 160 : Math.min(...pts.map((p) => p.x)) - 120;
+  const maxX = yardOnly ? fy.maxX + 160 : Math.max(...pts.map((p) => p.x)) + 120;
+  const minY = yardOnly ? fy.minY - 200 : Math.min(...pts.map((p) => p.y)) - 120;
+  const maxY = yardOnly ? fy.maxY + 120 : Math.max(...pts.map((p) => p.y)) + 120;
 
   const bridgePieces = scene.pieces.filter((p) => layerOf(p) >= 1 || p.type === 'ramp');
   const raisedDecks = bridgePieces.map((p) => ({ id: p.id, d: railPath(railOfPiece(p, 0, 1)) }));
