@@ -8,6 +8,7 @@ import {
   buildInterestingMarkers,
   interestingToLayout,
 } from './interesting-markers.js';
+import { PhysicsWorld } from './world.js';
 
 /* Demo marker ids aren't uuids; validate STRUCTURE only (matches the railyard). */
 FormatRegistry.Set('uuid', () => true);
@@ -61,5 +62,44 @@ describe('interesting-markers — sparse markers + station→station routing', (
     for (const id of [M.satAStation, M.satBStation, M.south, M.yard])
       expect(seen.has(id)).toBe(true);
     expect(edges.some((e) => e.to === M.north)).toBe(true); // loops back
+  });
+
+  it('every running-line marker lies on the lapping path (logical graph matches physics)', () => {
+    const scene = buildMainLoopScene();
+    const { markers } = buildInterestingMarkers(scene);
+    const pts = markers.map((m) => {
+      const r = scene.net.railOf(m.segment);
+      const d = m.distAlongMm ?? (m.end === 'start' ? 0 : r.length);
+      const p = r.at(d);
+      return { id: m.id, x: p.x, y: p.y };
+    });
+    /* A train lapping the running line (every junction on `main`). */
+    const w = new PhysicsWorld(scene.net);
+    w.setSwitch(scene.branches.yard.switchId, scene.branches.yard.mainPos);
+    w.setSwitch(scene.branches.satA.switchId, scene.branches.satA.mainPos);
+    w.setSwitch(scene.branches.satB.switchId, scene.branches.satB.mainPos);
+    w.addBody({
+      id: 'T',
+      kind: 'loco',
+      railPos: 10,
+      facing: 1,
+      segment: scene.startSegment,
+      motion: 'forward',
+      maxSpeed: 240,
+    });
+    const minDist = new Map(pts.map((p) => [p.id, Number.POSITIVE_INFINITY]));
+    for (let i = 0; i < 60 * 120; i++) {
+      w.step(1 / 60);
+      const b = w.bodies()[0];
+      if (b === undefined) break;
+      for (const p of pts) {
+        const d = Math.hypot(b.x - p.x, b.y - p.y);
+        if (d < (minDist.get(p.id) ?? Number.POSITIVE_INFINITY)) minDist.set(p.id, d);
+      }
+    }
+    /* Every RUNNING-LINE marker must be passed close (the satellite STATIONS sit off
+     *  the main, so a main-only lap skips them — not asserted here). */
+    for (const id of [M.north, M.satA, M.satB, M.yard, M.south])
+      expect(minDist.get(id), `${id} closest approach (mm)`).toBeLessThan(40);
   });
 });

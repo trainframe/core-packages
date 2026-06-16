@@ -74,7 +74,10 @@ export function buildInterestingMarkers(scene: MainLoopScene): InterestingMarker
       distAlongMm: mid('bot-c'),
       kind: 'station_stop',
     },
-    { id: M.yard, segment: yardTap.branchSeg, end: 'end', kind: 'yard_entry' },
+    /* The yard THROAT — the divert point on the running line (the start of the divert
+     *  branch, which a circulating train crosses on the bypass and a serviced train
+     *  takes into the yard). The drive-through detour sits below it. */
+    { id: M.yard, segment: yardTap.branchSeg, end: 'start', kind: 'yard_entry' },
   ];
 
   const junctions: SceneJunction[] = [
@@ -87,27 +90,28 @@ export function buildInterestingMarkers(scene: MainLoopScene): InterestingMarker
     },
   ];
 
-  /* The running-line cycle, with each satellite as a diamond (junction → station →
-   *  rejoin, or straight past) and the yard a divert off the south side. */
+  /* The running-line cycle in PHYSICAL order (the bypass a circulating train takes):
+   *  north → satA → satB → yard throat → south → north. Each satellite is a diamond
+   *  (junction → station → rejoin, or straight past); the yard throat sits on the
+   *  bottom run BEFORE south, the drive-through yard diverting BELOW it. */
   const edges: EdgeSpec[] = [
     { from: M.north, to: M.satA },
     { from: M.satA, to: M.satB, requiresSwitch: a.mainPos }, // stay on the main
     { from: M.satA, to: M.satAStation, requiresSwitch: a.loopPos }, // divert into the loop
     { from: M.satAStation, to: M.satB },
-    { from: M.satB, to: M.south, requiresSwitch: bsat.mainPos },
+    { from: M.satB, to: M.yard, requiresSwitch: bsat.mainPos },
     { from: M.satB, to: M.satBStation, requiresSwitch: bsat.loopPos },
-    { from: M.satBStation, to: M.south },
-    { from: M.south, to: M.yard },
-    { from: M.yard, to: M.north, requiresSwitch: yardTap.mainPos }, // continue the loop
-    // (yard divert → sidings is opaque/dead-end; not a routable through edge)
+    { from: M.satBStation, to: M.yard },
+    { from: M.yard, to: M.south, requiresSwitch: yardTap.mainPos }, // bypass the yard
+    { from: M.south, to: M.north },
+    // (yard divert → the drive-through interior is the gated zone — milestone 3)
   ];
 
   const routes: DemoRoute[] = [
-    /* The express visits satellite A's station; the other visits B's — only SOME
-     *  trains target each, exactly as asked. The third stables in the yard. */
+    /* Distinct station rotas — only SOME trains target each satellite station. */
     { trainId: 'T-express', stops: [M.north, M.satAStation, M.south] },
     { trainId: 'T-local', stops: [M.north, M.satBStation, M.south] },
-    { trainId: 'T-trip', stops: [M.south, M.yard] },
+    { trainId: 'T-shuttle', stops: [M.south, M.north] },
   ];
 
   return { markers, junctions, edges, throatMarker: M.yard, routes };
