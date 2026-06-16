@@ -75,6 +75,92 @@ function SegArt({ d, raised = false }: { d: string; raised?: boolean }) {
   );
 }
 
+/** A latticework girder of the gantry, a chevron web between two chords at the crane's x. */
+function Truss({ x, top, bot }: { x: number; top: number; bot: number }) {
+  const w = 9;
+  const bays = Math.max(4, Math.round((bot - top) / 70));
+  const web: string[] = [];
+  for (let i = 0; i < bays; i++) {
+    const y0 = top + ((bot - top) * i) / bays;
+    const y1 = top + ((bot - top) * (i + 1)) / bays;
+    web.push(`M${x - w} ${y0} L${x + w} ${y1}`);
+    web.push(`M${x + w} ${y0} L${x - w} ${y1}`);
+  }
+  return (
+    <g data-testid="yard-truss">
+      <line x1={x - w} y1={top} x2={x - w} y2={bot} stroke="#8893a0" strokeWidth={3} />
+      <line x1={x + w} y1={top} x2={x + w} y2={bot} stroke="#8893a0" strokeWidth={3} />
+      <path d={web.join(' ')} fill="none" stroke="#a7b1bd" strokeWidth={2} />
+    </g>
+  );
+}
+
+/** The yard's CV gantry: two foundation rails, the truss at the crane's x, and the crane
+ *  head (camera + wedge) at the device-driven position. */
+function YardGantry({
+  bounds,
+  crane,
+}: {
+  bounds: { minX: number; maxX: number; top: number; bot: number };
+  crane: { x: number; y: number };
+}) {
+  const { minX, maxX, top, bot } = bounds;
+  return (
+    <g data-testid="yard-gantry">
+      {[top, bot].map((gy) => (
+        <g key={gy}>
+          <rect
+            x={minX}
+            y={gy - 5}
+            width={maxX - minX}
+            height={10}
+            rx={2}
+            fill="#8893a0"
+            stroke="#5e6772"
+            strokeWidth={1}
+          />
+          <line x1={minX} y1={gy} x2={maxX} y2={gy} stroke="#c3cbd4" strokeWidth={1.5} />
+        </g>
+      ))}
+      <Truss x={crane.x} top={top} bot={bot} />
+      <g transform={`translate(${crane.x},${crane.y})`} data-testid="yard-crane">
+        <rect
+          x={-17}
+          y={-17}
+          width={34}
+          height={34}
+          rx={4}
+          fill="#5a6470"
+          stroke="#39414b"
+          strokeWidth={2}
+        />
+        <circle cx={0} cy={-4} r={4.5} fill="#bcdcea" stroke="#5d7f8e" strokeWidth={1} />
+        <line x1={0} y1={6} x2={0} y2={22} stroke="#39414b" strokeWidth={3} />
+        <path d="M -6 22 L 0 32 L 6 22 Z" fill="#caa033" stroke="#8a6c1f" strokeWidth={1} />
+      </g>
+    </g>
+  );
+}
+
+/** A station platform: a planked slab beside the line with a coloured edge. */
+function StationPlatform({ x, y }: { x: number; y: number }) {
+  return (
+    <g data-testid="station">
+      <rect
+        x={x - 34}
+        y={y - 30}
+        width={68}
+        height={15}
+        rx={3}
+        fill="#c9b48c"
+        stroke="#6f4c28"
+        strokeWidth={1.5}
+      />
+      <rect x={x - 34} y={y - 16} width={68} height={3} fill="#8a6a3e" />
+    </g>
+  );
+}
+
 /** Build the REAL interesting-railway demo as the DEVICE side, each device on its own
  *  broker client through `mqttPlatform`. Connecting + starting are guarded so an
  *  unreachable broker renders idle rather than throwing. */
@@ -235,55 +321,23 @@ export function InterestingRailwayDemoView() {
         {raisedDecks.map((deck) => (
           <SegArt key={deck.id} d={deck.d} raised />
         ))}
-        {/* Station platforms — a sleeper-coloured slab beside each station marker. */}
+        {/* Station platforms beside each station marker. */}
         {furniture.stations.map((s) => (
-          <g key={`stn-${s.id}`} data-testid="station">
-            <rect
-              x={s.x - 30}
-              y={s.y - 26}
-              width={60}
-              height={13}
-              rx={3}
-              fill="#c9b48c"
-              stroke="#6f4c28"
-              strokeWidth={1.5}
-            />
-          </g>
+          <StationPlatform key={`stn-${s.id}`} x={s.x} y={s.y} />
         ))}
         {poses.map((p) => (
           <BodyG key={p.id} pose={p} />
         ))}
-        {/* The yard gantry crane: a metal truss spanning the yard, riding rails along its
-         *  top + bottom, with the CV head where the device has driven it (live). */}
-        <g data-testid="yard-gantry">
-          <line
-            x1={furniture.yard.minX - 12}
-            y1={furniture.yard.minY - 18}
-            x2={furniture.yard.maxX + 12}
-            y2={furniture.yard.minY - 18}
-            stroke="#7a7f88"
-            strokeWidth={4}
-          />
-          <line
-            x1={furniture.yard.minX - 12}
-            y1={furniture.yard.maxY + 18}
-            x2={furniture.yard.maxX + 12}
-            y2={furniture.yard.maxY + 18}
-            stroke="#7a7f88"
-            strokeWidth={4}
-          />
-          {/* The travelling bridge of the gantry, at the crane head's x. */}
-          <line
-            x1={crane.x}
-            y1={furniture.yard.minY - 18}
-            x2={crane.x}
-            y2={furniture.yard.maxY + 18}
-            stroke="#9aa0aa"
-            strokeWidth={5}
-          />
-          {/* The hoist/wedge head, at the device-driven (x,y). */}
-          <circle cx={crane.x} cy={crane.y} r={9} fill="#d94f3a" stroke="#5a2017" strokeWidth={2} />
-        </g>
+        {/* The yard's CV gantry — metal truss riding foundation rails, with the live head. */}
+        <YardGantry
+          bounds={{
+            minX: furniture.yard.minX - 12,
+            maxX: furniture.yard.maxX + 12,
+            top: furniture.yard.minY - 20,
+            bot: furniture.yard.maxY + 20,
+          }}
+          crane={crane}
+        />
       </svg>
     </div>
   );
