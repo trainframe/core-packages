@@ -91,9 +91,11 @@ export function buildNetwork(
     return r;
   };
   /** The currently-active link among `candidates`: a switch-matched one if any,
-   *  else the first unconditional one, else undefined. A DISCONNECTED link (its
-   *  id marked inactive — a raised span) is filtered out first, so it never wins
-   *  selection: the body then meets the rail end as if nothing were connected. */
+   *  else the first unconditional one, else — when a single switch-gated link is
+   *  the ONLY way on — that one regardless of the switch (a TRAILING-POINT merge,
+   *  below), else undefined. A DISCONNECTED link (its id marked inactive — a raised
+   *  span) is filtered out first, so it never wins selection: the body then meets
+   *  the rail end as if nothing were connected. */
   const active = (
     candidates: NetLink[],
     switches: ReadonlyMap<string, string>,
@@ -104,7 +106,14 @@ export function buildNetwork(
       (l) => l.when !== undefined && switches.get(l.when.switchId) === l.when.position,
     );
     if (matched !== undefined) return matched;
-    return connected.find((l) => l.when === undefined);
+    const unconditional = connected.find((l) => l.when === undefined);
+    if (unconditional !== undefined) return unconditional;
+    /* TRAILING POINT: a single connected link with no alternative is a merge —
+     *  the body arrives on a leg with only the trunk ahead, so it trails THROUGH
+     *  regardless of the switch position (a real trailing point yields). Only a
+     *  FACING move, which presents two+ legs to choose between, gates on the
+     *  switch (and so returns undefined above when none matches). */
+    return connected.length === 1 ? connected[0] : undefined;
   };
   const NONE: ReadonlyMap<string, boolean> = new Map();
   return {

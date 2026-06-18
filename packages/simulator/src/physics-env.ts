@@ -49,6 +49,9 @@ export interface PhysicsScene {
   readonly net: RailNetwork;
   readonly layout: Layout;
   readonly markers: readonly MarkerPoint[];
+  /** Optional segment→height-layer map. Supply it (with layered `markers`) for a
+   *  grade-separated scene so a body under a deck ignores the deck's markers. */
+  readonly segmentLayer?: ReadonlyMap<string, number>;
 }
 
 /** One marker on a `straightLoop` (id + the logical kind the scheduler sees). */
@@ -107,6 +110,15 @@ export function straightLoop(
 export interface SpawnTrainOptions {
   /** Which marker the loco's nose starts at (default: the layout's first marker). */
   readonly atMarker?: string;
+  /**
+   * Segment the body is seeded on. Defaults to `'main'` (the single-segment
+   * `straightLoop` rail). A multi-segment net (e.g. a `compileNetwork` layout)
+   * must pass the marker's real segment — paired with `railPos`.
+   */
+  readonly segment?: string;
+  /** Distance along `segment` the body starts at (mm). Defaults to the marker's
+   *  world x (correct only for the single-rail `straightLoop`). */
+  readonly railPos?: number;
   /** Heading along the rail (+1 forward / -1 reverse). Default +1. */
   readonly facing?: 1 | -1;
   /** Declares `core.can_reverse` (a zone-admission prerequisite). Default true. */
@@ -248,15 +260,21 @@ export function startPhysicsEnv(scene: PhysicsScene): PhysicsEnv {
       world.addBody({
         id: trainId,
         kind: 'loco',
-        segment: 'main',
-        railPos: start?.x ?? 0,
+        segment: options?.segment ?? 'main',
+        railPos: options?.railPos ?? start?.x ?? 0,
         facing: options?.facing ?? 1,
         maxSpeed: options?.maxSpeed ?? 400,
       });
       const device = new ScheduledTrainDevice(trainId, {
         platform: mqttPlatform(bus, trainId, { newId, now: nowIso }),
         motor: physicsMotorActuator(world, trainId),
-        sensor: physicsMarkerSensor(world, trainId, [...scene.markers]),
+        sensor: physicsMarkerSensor(
+          world,
+          trainId,
+          [...scene.markers],
+          undefined,
+          scene.segmentLayer,
+        ),
         layout: scene.layout,
         lengthMm: options?.lengthMm ?? 120,
         canReverse: options?.canReverse ?? true,

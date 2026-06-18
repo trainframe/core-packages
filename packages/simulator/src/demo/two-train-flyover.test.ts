@@ -2,14 +2,15 @@
  * STRICT DETERMINISTIC TWO-TRAIN FLYOVER GATE.
  *
  * This is the definition of done for the bridge demo: a real
- * Server + Scheduler + Simulation + in-process broker (no mocks), a fixed seed,
- * the pristine fault profile (zero sensor noise so a long correctness run never
- * flakes), and the injected virtual clock from the dwell-clock fix so a
- * synchronous `env.advance(ms)` deterministically expires station dwell.
+ * Server + Scheduler + PhysicsWorld + in-process broker (no mocks), driven through
+ * `startPhysicsEnv` — inherently deterministic and noise-free, so a long
+ * correctness run never flakes and a synchronous `env.advance(ms)` is complete.
  *
- * It boots the EXACT `buildBridgeDemo()` topology, registers both length-aware
- * trains and the diverge-junction switch motor, assigns the two proven
- * schedules, advances a long run, and asserts ALL of:
+ * It compiles the EXACT `buildBridgeDemo()` pieces to BOTH a physics net
+ * (`compileNetwork`) and the matching server layout (`compileLayout`), registers
+ * both length-aware trains and the diverge-junction (J1) switch motor — the merge
+ * (J2) needs none, a body trails through it — assigns the two proven schedules,
+ * advances a long run, and asserts ALL of:
  *
  *   (a) NO DEADLOCK / continuous: each train visits its own ground station
  *       >= 2 times (>= 2 full laps) AND makes steady marker progress right up
@@ -27,12 +28,13 @@
  * observation as the gate the clean topology + schedules are tuned against.
  */
 
-import { startTestEnvironment } from '@trainframe/simulator/testing';
 import { describe, expect, it } from 'vitest';
+import { startPhysicsEnv } from '../physics-env.js';
+import { compileNetwork } from '../physics/network-from-pieces.js';
 import { compileLayout } from '../track/layout-from-pieces.js';
+import { layerOf } from '../track/pieces.js';
 import { buildBridgeDemo } from './bridge-demo.js';
 
-const SEED = 7;
 const RUN_MS = 600_000;
 
 /** The ordered marker stream a train crossed, from `marker_traversed` events. */
@@ -92,9 +94,34 @@ function orderedRepeats(stream: ReadonlyArray<string>, needles: ReadonlyArray<st
 describe('two-train flyover — strict deterministic gate', () => {
   it('both trains circulate forever; A rides the full bridge, B stays grounded, the switch flips', () => {
     const demo = buildBridgeDemo();
+    /* The physics net + the matching server layout are compiled from the SAME
+     *  pieces (geometry sibling of compileLayout): the body rides the real
+     *  grade-separated flyover, the scheduler reasons over the marker graph. */
+    const compiled = compileNetwork(demo.pieces);
     const layout = compileLayout(demo.pieces, 'bridge-demo');
+    const pieceById = new Map(demo.pieces.map((p) => [p.id, p]));
+    const pieceOfMarker = (markerId: string): string =>
+      markerId.startsWith('M-') ? markerId.slice(2) : markerId;
+    /* The bridge is grade-separated: tag each marker + each segment with its
+     *  piece's height layer so a train UNDER the deck ignores the deck markers
+     *  whose world x,y it shares at the crossing. */
+    const markers = layout.markers.map((m) => {
+      const piece = pieceById.get(pieceOfMarker(m.id));
+      return {
+        id: m.id,
+        x: m.position?.x_mm ?? 0,
+        y: m.position?.y_mm ?? 0,
+        layer: piece === undefined ? 0 : layerOf(piece),
+      };
+    });
+    const segmentLayer = new Map<string, number>();
+    for (const piece of demo.pieces) {
+      for (const seg of compiled.segmentsForPiece.get(piece.id) ?? []) {
+        segmentLayer.set(seg, layerOf(piece));
+      }
+    }
 
-    const env = startTestEnvironment({ layout, seed: SEED, faults: 'pristine' });
+    const env = startPhysicsEnv({ net: compiled.net, layout, markers, segmentLayer });
 
     const [groundA, groundB] = demo.groundStations;
     if (groundA === undefined || groundB === undefined) {
@@ -102,23 +129,42 @@ describe('two-train flyover — strict deterministic gate', () => {
     }
     const { rampUp, upper, rampDown } = demo.bridgeSpine;
 
-    // Spawn the diverge-junction switch motor and BOTH length-aware trains. We do
-    // NOT pre-pin the switch: the scheduler autonomously throws it (commit
-    // f22ea41), and assertion (d) verifies that.
-    env.simulation.spawnSwitch('SWITCH-j1', demo.junctionId);
-    // Each train starts ON its home ground station, facing the circulation
-    // direction (the forward outgoing edge). stops[0] of each schedule equals
-    // the start marker, as the scheduler requires. We spawn via `env.spawnTrain`
-    // (NOT `env.simulation.spawnTrain`) so the PRISTINE fault profile is applied
-    // — the raw simulation path defaults to noisy physics (1% miss), which would
-    // make this strict correctness gate flaky.
+    /* The body is seeded on the marker's real compiled segment (a multi-segment
+     *  net has no single 'main' rail), a touch inside it so the first sensed
+     *  crossing is the home stop. */
+    const segmentForMarker = (markerId: string): string => {
+      const seg = compiled.segmentsForPiece.get(pieceOfMarker(markerId))?.[0];
+      if (seg === undefined) throw new Error(`flyover: no segment for ${markerId}`);
+      return seg;
+    };
+
+    /* Spawn the diverge-junction switch motor and BOTH length-aware trains. We do
+     *  NOT pre-pin the switch: the scheduler autonomously throws it, and assertion
+     *  (d) verifies that. The switch label in the compiled net is the junction's
+     *  marker id; its positions are 'main' / 'divert'. The physics env is inherently
+     *  deterministic + noise-free (no seed / fault profile needed). */
+    env.spawnSwitch('SWITCH-j1', {
+      junctionMarkerId: demo.junctionId,
+      switchLabel: demo.junctionId,
+      positions: ['main', 'divert'],
+    });
+    /* J2 is the MERGE: two legs (A's descent, B's bypass) converge onto one
+     *  trunk. It needs NO switch device — a body trails through a merge whatever
+     *  the points say (network `active()` trailing-point rule); only the FACING
+     *  diverge J1 is a scheduler-driven switch. */
     env.spawnTrain(demo.trainAId, {
-      startEdge: { from_marker_id: groundA, to_marker_id: demo.forwardFromGroundA },
-      config: { length_mm: 60 },
+      atMarker: groundA,
+      segment: segmentForMarker(groundA),
+      railPos: 30,
+      facing: 1,
+      lengthMm: 60,
     });
     env.spawnTrain(demo.trainBId, {
-      startEdge: { from_marker_id: groundB, to_marker_id: demo.forwardFromGroundB },
-      config: { length_mm: 60 },
+      atMarker: groundB,
+      segment: segmentForMarker(groundB),
+      railPos: 30,
+      facing: 1,
+      lengthMm: 60,
     });
     // Let device_registered + first tag_observed reach the server's scheduler.
     env.advance(500);
@@ -177,7 +223,7 @@ describe('two-train flyover — strict deterministic gate', () => {
     // ---- (d) the diverge switch flips both ways across the run ----
     const switchPositions = new Set(
       env
-        .getEventsOfType('switch_state_changed')
+        .eventsOfType('switch_state_changed')
         .map((e) => (e.payload as { position?: unknown }).position)
         .filter((p): p is string => typeof p === 'string'),
     );
