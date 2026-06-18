@@ -16,6 +16,14 @@ export interface MarkerPoint {
   readonly id: string;
   readonly x: number;
   readonly y: number;
+  /**
+   * Discrete height layer the marker sits on (0 = ground). Optional: when set —
+   * and the reader knows the body's own layer — a crossing only fires if the two
+   * agree, so a ground train passing UNDER a grade-separated deck does not trip a
+   * marker on the deck overhead (their world x,y coincide at the crossing). Absent
+   * ⇒ pure 2D proximity (the single-layer default).
+   */
+  readonly layer?: number;
 }
 
 /** A single marker crossing: which marker, and the travel sense relative to the

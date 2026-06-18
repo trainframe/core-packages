@@ -29,16 +29,28 @@ export function physicsMarkerSensor(
   bodyId: string,
   markers: readonly MarkerPoint[],
   captureRadius: number = DEFAULT_CAPTURE_RADIUS,
+  /** Maps each network segment to its height layer. When supplied, a marker that
+   *  declares a `layer` only fires while the body is on a same-layer segment — the
+   *  grade-separation guard (a ground train ignores a deck marker overhead). Omit
+   *  for single-layer scenes (pure 2D proximity). */
+  segmentLayer?: ReadonlyMap<string, number>,
 ): MarkerSensor {
   const handlers = new Set<MarkerObservation>();
   /** Marker ids the body is currently within range of — armed-off until it leaves. */
   const within = new Set<string>();
   let prev: { x: number; y: number } | undefined;
 
-  const poseOf = (): { x: number; y: number; headingDeg: number } | undefined => {
+  const poseOf = ():
+    | { x: number; y: number; headingDeg: number; layer: number | undefined }
+    | undefined => {
     const body = world.bodies().find((b) => b.id === bodyId);
     if (body === undefined) return undefined;
-    return { x: body.x, y: body.y, headingDeg: body.rotationDeg };
+    return {
+      x: body.x,
+      y: body.y,
+      headingDeg: body.rotationDeg,
+      layer: segmentLayer?.get(body.segment),
+    };
   };
 
   const directionFrom = (
@@ -61,10 +73,14 @@ export function physicsMarkerSensor(
    *  crossing the first tick the body enters range and re-arming once it leaves. */
   const visit = (
     m: MarkerPoint,
-    pose: { x: number; y: number },
+    pose: { x: number; y: number; layer: number | undefined },
     direction: 'forward' | 'reverse',
   ): void => {
-    const inRange = Math.hypot(pose.x - m.x, pose.y - m.y) <= captureRadius;
+    /* Grade-separation guard: a marker on a known layer is invisible to a body
+     *  known to be on a different one (the deck-over-bypass crossing). When either
+     *  layer is unknown, fall back to pure 2D proximity. */
+    const wrongLayer = m.layer !== undefined && pose.layer !== undefined && m.layer !== pose.layer;
+    const inRange = !wrongLayer && Math.hypot(pose.x - m.x, pose.y - m.y) <= captureRadius;
     if (inRange && !within.has(m.id)) {
       within.add(m.id);
       fire(m.id, direction);
