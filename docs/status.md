@@ -73,6 +73,18 @@ Coverage thresholds: 75 lines / 75 branches (low to allow for remaining LayoutSt
 
 Source: [`docs/spec/simulator-v0.1.md`](spec/simulator-v0.1.md); [`ADR-006`](adr/006-physical-mishap-simulation.md)
 
+> **2026-06-17 — `@trainframe/simulator` is now PHYSICS-ONLY (ADR-030).** The
+> pre-physics virtual-device sim has been **deleted**: `Simulation`,
+> `Virtual{Train,Gate,Railyard,Switch}`, `BrokerBridge`, `VirtualClock`,
+> `SeededRandom`, and `testing.ts` (`startTestEnvironment`) no longer exist.
+> The rows below that name those classes describe the **historical** design;
+> the live device world is now the `PhysicsWorld` + `ScheduledTrainDevice` /
+> `GateDevice` / `SwitchDevice` stack, and the test harness is `startPhysicsEnv`
+> (see that row + the ADR-030 row at the bottom of this file). The toy-table and
+> ui-tests harness run on physics too. A full row-by-row rewrite of this section
+> is pending; treat class names like `VirtualTrain`/`VirtualSwitch` below as
+> "the physics equivalent now".
+
 | Area                                              | Status | Notes                                                                          |
 | ------------------------------------------------- | :----: | ------------------------------------------------------------------------------ |
 | In-process `Simulation` (devices + physics, no scheduler) | shipped | Pure-TS, broker-free, deterministic. The scheduler moved to `@trainframe/server` per ADR-013 — the simulator is virtual hardware only. |

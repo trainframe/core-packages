@@ -76,6 +76,7 @@ import { computeTrainTrails } from '@trainframe/simulator/track/coupling.js';
 import { compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
 import {
   TRAIN_LENGTH_MM,
+  TURNTABLE_POSITIONS,
   type TrackPiece,
   isDevicePiece,
   layerOf,
@@ -436,7 +437,7 @@ export class ToyHardware {
      *  spares + the interior switch state), then trains (their bodies seed last so the
      *  yard's slots/leads exist for a visitor). */
     for (const p of pieces) {
-      if (liveIds.has(p.id) && (p.type === 'junction' || isGatePiece(p)))
+      if (liveIds.has(p.id) && (p.type === 'junction' || p.type === 'turntable' || isGatePiece(p)))
         this.spawnPiece(p, pieces);
     }
     for (const p of pieces)
@@ -582,6 +583,9 @@ export class ToyHardware {
       case 'junction':
         this.spawnSwitch(piece);
         return;
+      case 'turntable':
+        this.spawnSwitch(piece);
+        return;
       case 'crane-station':
         this.spawnGate(`CRANE-${piece.id}`, piece);
         return;
@@ -599,7 +603,8 @@ export class ToyHardware {
     if (piece.type === 'train') ids.push(`T-${piece.id}`);
     else if (piece.type === 'gate') ids.push(`GATE-${piece.id}`);
     else if (piece.type === 'railyard') ids.push(`YARD-${piece.id}`);
-    else if (piece.type === 'junction') ids.push(`SWITCH-${piece.id}`);
+    else if (piece.type === 'junction' || piece.type === 'turntable')
+      ids.push(`SWITCH-${piece.id}`);
     else if (piece.type === 'crane-station') ids.push(`CRANE-${piece.id}`);
     else if (piece.type === 'lift-bridge') ids.push(`BRIDGE-${piece.id}`);
     for (const id of ids) this.platformFor(id).publish(this.disconnectEvent(id));
@@ -699,17 +704,22 @@ export class ToyHardware {
 
   // ---- switches ---------------------------------------------------------
 
-  /** Spawn a switch device over a junction piece, throwing the compiled junction
-   *  switch. Re-asserts any snapshotted position across a rebuild. */
+  /** Spawn a switch device over a junction OR turntable piece, throwing the
+   *  compiled switch. A junction is a two-way diverge ('main'/'divert'); a
+   *  turntable is the N-way deck (`TURNTABLE_POSITIONS`) — deferred in the physics
+   *  net (a non-routing gap), so its `world.setSwitch` is a harmless position
+   *  store that the deck angle + `switch_state_changed` read off. Re-asserts any
+   *  snapshotted position across a rebuild. */
   private spawnSwitch(piece: TrackPiece): void {
     const deviceId = switchDeviceIdFor(piece);
     if (this.switches.has(deviceId)) return;
     const junctionMarkerId = `M-${piece.id}`;
+    const positions = piece.type === 'turntable' ? [...TURNTABLE_POSITIONS] : ['main', 'divert'];
     const device = new SwitchDevice(deviceId, {
       platform: this.platformFor(deviceId),
       actuator: physicsSwitchActuator(this.world, junctionMarkerId),
       junctionMarkerId,
-      positions: ['main', 'divert'],
+      positions,
       newId: this.newId,
     });
     device.start();
