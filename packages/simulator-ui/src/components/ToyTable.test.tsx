@@ -340,11 +340,11 @@ describe('ToyTable — palette and placement', () => {
     expect(markerIdx).toBeLessThan(trainIdx);
   });
 
-  it('shows the livery swatches only when the carriage tool is armed', async () => {
+  it('fans out the livery options when the carriage tool is armed', async () => {
     const user = userEvent.setup();
     renderToyTable();
 
-    // No carriage armed → no swatches.
+    // No carriage armed → no fan.
     expect(screen.queryByTestId('toybox-carriage-color-purple')).toBeNull();
 
     await user.click(screen.getByTestId('toybox-carriage'));
@@ -352,30 +352,29 @@ describe('ToyTable — palette and placement', () => {
     expect(screen.getByTestId('toybox-carriage-color-purple')).toBeInTheDocument();
   });
 
-  it('places a carriage in the livery picked from the swatch row', async () => {
+  it('places a carriage in the picked livery (arm → pick → re-arm → place)', async () => {
     const user = userEvent.setup();
     renderToyTable();
 
-    await user.click(screen.getByTestId('toybox-carriage'));
-    await user.click(screen.getByTestId('toybox-carriage-color-purple'));
-    await user.click(screen.getByTestId('toy-table-canvas'));
+    await user.click(screen.getByTestId('toybox-carriage')); // arm + fan out
+    await user.click(screen.getByTestId('toybox-carriage-color-purple')); // pick → collapse + disarm
+    await user.click(screen.getByTestId('toybox-carriage')); // re-arm to the chosen variant
+    await user.click(screen.getByTestId('toy-table-canvas')); // place
 
     const placed = document.querySelector('[data-testid^="piece-carriage-"]') as HTMLElement | null;
     if (!placed) throw new Error('no carriage placed');
     // The carriage body path is filled with the purple livery, not the default
     // blue — the wagon carries its colour intrinsically so it stays trackable.
-    // (The first path is the seam-hiding rim-light with fill="none"; the body
-    // fill is a later path.)
     const fills = Array.from(placed.querySelectorAll('path')).map((p) => p.getAttribute('fill'));
     expect(fills).toContain('#8c5bb0');
     expect(fills).not.toContain('#3f6fa6'); // not the default blue
   });
 
-  it('shows the straight length chips only when the straight tool is armed', async () => {
+  it('fans out the length options when the straight tool is armed', async () => {
     const user = userEvent.setup();
     renderToyTable();
 
-    // No straight armed → no length chips.
+    // No straight armed → no fan.
     expect(screen.queryByTestId('toybox-straight-length-60')).toBeNull();
 
     await user.click(screen.getByTestId('toybox-straight'));
@@ -385,16 +384,34 @@ describe('ToyTable — palette and placement', () => {
     expect(screen.getByTestId('toybox-straight-length-200')).toBeInTheDocument();
   });
 
-  it('places a straight at the length picked from the chip strip', async () => {
+  it('picking a length collapses the fan + disarms; pressing again re-arms to it', async () => {
+    const user = userEvent.setup();
+    renderToyTable();
+
+    const straight = screen.getByTestId('toybox-straight');
+    await user.click(straight); // arm + fan out
+    expect(straight).toHaveAttribute('aria-pressed', 'true');
+
+    await user.click(screen.getByTestId('toybox-straight-length-60')); // pick
+    // "resets arm": the fan collapsed AND the tile disarmed.
+    expect(screen.queryByTestId('toybox-straight-length-60')).toBeNull();
+    expect(straight).toHaveAttribute('aria-pressed', 'false');
+
+    // Pressing again re-arms (and re-opens the fan) — now to the chosen 60 mm.
+    await user.click(straight);
+    expect(straight).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('toybox-straight-length-60')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('places a straight at the picked length (arm → pick → re-arm → place)', async () => {
     const user = userEvent.setup();
     renderToyTable();
 
     await user.click(screen.getByTestId('toybox-straight'));
-    await user.click(screen.getByTestId('toybox-straight-length-60'));
+    await user.click(screen.getByTestId('toybox-straight-length-60')); // configure
+    await user.click(screen.getByTestId('toybox-straight')); // re-arm to 60 mm
     await user.click(screen.getByTestId('toy-table-canvas'));
 
-    // The placed straight carries the picked 60 mm override (exposed for the
-    // hand-build helpers + so the compiled topology uses the shorter plank).
     const placed = document.querySelector('[data-testid^="piece-straight-"]') as HTMLElement | null;
     if (!placed) throw new Error('no straight placed');
     expect(placed.getAttribute('data-length-mm')).toBe('60');
@@ -404,8 +421,7 @@ describe('ToyTable — palette and placement', () => {
     const user = userEvent.setup();
     renderToyTable();
 
-    // Arm the straight but leave the default pick (200 mm) — an untouched pick
-    // must leave lengthMm absent, so an ordinary plank stays a plain default.
+    // Arm the straight but leave the default (200 mm) — place straight away.
     await user.click(screen.getByTestId('toybox-straight'));
     await user.click(screen.getByTestId('toy-table-canvas'));
 
@@ -414,7 +430,19 @@ describe('ToyTable — palette and placement', () => {
     expect(placed.getAttribute('data-length-mm')).toBeNull();
   });
 
-  it('shows the livery swatches when the train tool is armed', async () => {
+  it('collapses the variant fan when a different piece is armed', async () => {
+    const user = userEvent.setup();
+    renderToyTable();
+
+    await user.click(screen.getByTestId('toybox-straight'));
+    expect(screen.getByTestId('toybox-straight-length-60')).toBeInTheDocument();
+
+    // Arming another piece collapses the open fan.
+    await user.click(screen.getByTestId('toybox-curve'));
+    expect(screen.queryByTestId('toybox-straight-length-60')).toBeNull();
+  });
+
+  it('fans out the livery options when the train tool is armed', async () => {
     const user = userEvent.setup();
     renderToyTable();
 
@@ -422,16 +450,17 @@ describe('ToyTable — palette and placement', () => {
 
     await user.click(screen.getByTestId('toybox-train'));
     expect(screen.getByTestId('toybox-train-color-green')).toBeInTheDocument();
-    // The loco defaults to red — its swatch is the pressed one.
+    // The loco defaults to red — its option is the current one.
     expect(screen.getByTestId('toybox-train-color-red')).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('places a train in the livery picked from the swatch row', async () => {
+  it('places a train in the picked livery (arm → pick → re-arm → place)', async () => {
     const user = userEvent.setup();
     renderToyTable();
 
     await user.click(screen.getByTestId('toybox-train'));
     await user.click(screen.getByTestId('toybox-train-color-green'));
+    await user.click(screen.getByTestId('toybox-train')); // re-arm to green
     await user.click(screen.getByTestId('toy-table-canvas'));
 
     const placed = document.querySelector('[data-testid^="piece-train-"]') as HTMLElement | null;

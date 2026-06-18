@@ -263,68 +263,81 @@ body {
   gap: 0.45rem;
 }
 
-.tf-toybox__swatches {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+/* A tile sits in a slot so its variant fan can pop ABOVE it without shoving the
+   tray around. */
+.tf-toybox__slot {
+  position: relative;
+}
+
+/* The variant option fan — animates out above an armed family's tile, holding
+   the GRAPHICAL options (length planks at proportional sizes, livery pieces). */
+.tf-toybox__fan {
+  position: absolute;
+  bottom: calc(100% + 0.55rem);
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
+  align-items: center;
   gap: 0.4rem;
+  padding: 0.5rem;
+  background: linear-gradient(180deg, #fbf3e1 0%, #f1e4cb 100%);
+  border: 1px solid #ddc79c;
+  border-radius: 12px;
+  box-shadow: 0 8px 20px rgba(90, 60, 25, 0.22);
+  z-index: 30;
+  animation: tf-fan-in 0.16s ease-out;
 }
 
-.tf-toybox__swatch {
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  cursor: pointer;
-  border: 2px solid #e0cda3;
-  border-radius: 50%;
-  box-shadow: 0 1px 1.5px rgba(90, 60, 25, 0.15);
-  transition: transform 0.08s ease, border-color 0.12s ease;
+/* A small downward beak so the fan reads as belonging to its tile. */
+.tf-toybox__fan::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 7px solid transparent;
+  border-top-color: #f1e4cb;
 }
 
-.tf-toybox__swatch:hover {
-  transform: scale(1.1);
+@keyframes tf-fan-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(8px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
 }
 
-.tf-toybox__swatch[aria-pressed="true"] {
-  border-color: #5e4626;
-  transform: scale(1.12);
-}
-
-.tf-toybox__variations {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.tf-toybox__variant {
   display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-}
-
-.tf-toybox__variation {
-  min-width: 32px;
-  padding: 0.2rem 0.45rem;
+  align-items: center;
+  justify-content: center;
+  padding: 0.3rem;
   cursor: pointer;
-  font-size: 0.72rem;
-  font-variant-numeric: tabular-nums;
-  color: #5e4626;
-  background: #f2e3c2;
+  background: var(--tf-color-surface);
   border: 2px solid #e0cda3;
-  border-radius: 5px;
-  box-shadow: 0 1px 1.5px rgba(90, 60, 25, 0.15);
+  border-radius: 8px;
+  box-shadow: 0 1px 1.5px rgba(90, 60, 25, 0.12);
   transition: transform 0.08s ease, border-color 0.12s ease, background 0.12s ease;
 }
 
-.tf-toybox__variation:hover {
-  transform: scale(1.08);
+.tf-toybox__variant:hover {
+  transform: translateY(-2px);
+  background: var(--tf-color-surface-hover);
 }
 
-.tf-toybox__variation[aria-pressed="true"] {
+.tf-toybox__variant--current {
   border-color: #5e4626;
-  background: #e6cf9c;
-  transform: scale(1.08);
+  background: var(--tf-color-accent-soft);
+}
+
+/* The preview inside a fan option. Length options share a 200 mm frame, so a
+   short plank renders proportionally short within an equal-sized box. */
+.tf-toybox__variant .tf-toybox__preview {
+  width: 60px;
+  height: 30px;
 }
 
 .tf-toybox__button {

@@ -2007,7 +2007,9 @@ export function getPieceShape(piece: TrackPiece): PieceShape {
   const descriptor = PIECES[piece.type];
   const body = descriptor.body(piece);
   const grooves = descriptor
-    .railLines(piece.radiusMm)
+    /* lengthMm too — else a short straight's silhouette resizes but its rail
+     *  grooves keep the 200 mm length and overhang the plank. */
+    .railLines(piece.radiusMm, piece.lengthMm)
     .flatMap((rail) => [offsetGroove(rail, 1), offsetGroove(rail, -1)]);
   return {
     svgPath: body.svgPath,

@@ -246,10 +246,17 @@ export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): 
     return btn?.getAttribute('aria-pressed') === 'true';
   }, type);
 
-  // Pick the carriage livery — only AFTER the carriage tool is confirmed armed,
-  // since the swatch row only renders then.
+  // Pick the carriage livery from the fan that opens when the carriage tool is
+  // armed. Picking a variant reconfigures the family and RESETS the arm (a
+  // configuration gesture, not a placement one), so re-arm to the chosen variant
+  // before placing — exactly the operator flow (press → pick → press → place).
   if (type === 'carriage' && carriageColor !== undefined) {
     await sim.getByTestId(`toybox-carriage-color-${carriageColor}`).click();
+    await toyboxBtn.click();
+    await sim.waitForFunction((t: string) => {
+      const btn = document.querySelector(`[data-testid="toybox-${t}"]`);
+      return btn?.getAttribute('aria-pressed') === 'true';
+    }, type);
   }
 
   // Capture the piece IDs that exist before the click, so we can diff. The

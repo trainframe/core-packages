@@ -967,6 +967,10 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /** Which piece type the operator has "armed" from the toybox, if any. */
   const [armedType, setArmedType] = useState<TrackPieceType | null>(null);
+  /** Which variant family's option fan is currently expanded (open) in the
+   *  toybox, if any. Arming a variant piece opens its fan; picking an option or
+   *  arming another piece collapses it. */
+  const [expandedType, setExpandedType] = useState<TrackPieceType | null>(null);
   /** Livery applied to the next carriage placed (the toybox swatch selection). */
   const [armedCarriageColor, setArmedCarriageColor] = useState<CarriageColorId>('blue');
   /** Livery applied to the next loco placed. Defaults to the iconic red, so an
@@ -1176,8 +1180,37 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     return () => window.removeEventListener('pagehide', handlePageHide);
   }, [client]);
 
-  const armPieceType = useCallback((type: TrackPieceType) => {
-    setArmedType((prev) => (prev === type ? null : type));
+  // Arming a piece: clicking an already-armed piece disarms (and collapses any
+  // fan); clicking a fresh one arms it and — if it has variants — fans its
+  // options open. Arming a different piece collapses the previous fan.
+  const armPieceType = useCallback(
+    (type: TrackPieceType) => {
+      if (armedType === type) {
+        setArmedType(null);
+        setExpandedType(null);
+        return;
+      }
+      setArmedType(type);
+      setExpandedType(PIECE_VARIATIONS[type] !== undefined ? type : null);
+    },
+    [armedType],
+  );
+
+  // Picking a variant reconfigures that family, then collapses the fan AND
+  // disarms ("resets arm") — the tile now shows the chosen variant, and a fresh
+  // press re-arms to it. `value` is a length (mm) for a length family.
+  const pickStraightLength = useCallback((mm: number) => {
+    setArmedStraightLength(mm);
+    setExpandedType(null);
+    setArmedType(null);
+  }, []);
+
+  // ...and a livery for a colour family (carriage / loco keep separate picks).
+  const pickColour = useCallback((type: TrackPieceType, colour: CarriageColorId) => {
+    if (type === 'train') setArmedTrainColor(colour);
+    else setArmedCarriageColor(colour);
+    setExpandedType(null);
+    setArmedType(null);
   }, []);
 
   const placePiece = useCallback(
@@ -1603,11 +1636,13 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
           Drag a wooden part up onto the table to place it. */}
       <Toybox
         armedType={armedType}
+        expandedType={expandedType}
         onArm={armPieceType}
         straightLength={armedStraightLength}
-        onPickStraightLength={setArmedStraightLength}
-        colour={armedType === 'train' ? armedTrainColor : armedCarriageColor}
-        onPickColour={armedType === 'train' ? setArmedTrainColor : setArmedCarriageColor}
+        carriageColour={armedCarriageColor}
+        trainColour={armedTrainColor}
+        onPickLength={pickStraightLength}
+        onPickColour={pickColour}
       />
     </div>
   );
@@ -1619,28 +1654,19 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
 
 interface ToyboxProps {
   readonly armedType: TrackPieceType | null;
+  /** The variant family whose option fan is open, if any. */
+  readonly expandedType: TrackPieceType | null;
   readonly onArm: (type: TrackPieceType) => void;
+  /** Each colour family keeps its own pick + default (carriage blue, loco red),
+   *  so both tiles show their own livery; the straight keeps its chosen length. */
   readonly straightLength: number;
-  readonly onPickStraightLength: (mm: number) => void;
-  /** The livery selection for the armed colour family (carriage / train),
-   *  already resolved to that family by the parent so each keeps its own pick
-   *  and its own default (a carriage is blue, a loco red). */
-  readonly colour: CarriageColorId;
-  readonly onPickColour: (color: CarriageColorId) => void;
+  readonly carriageColour: CarriageColorId;
+  readonly trainColour: CarriageColorId;
+  readonly onPickLength: (mm: number) => void;
+  readonly onPickColour: (type: TrackPieceType, colour: CarriageColorId) => void;
 }
 
-function Toybox({
-  armedType,
-  onArm,
-  straightLength,
-  onPickStraightLength,
-  colour,
-  onPickColour,
-}: ToyboxProps) {
-  // A family with variations shows a chip strip while it is armed — the
-  // straight's LILLABO lengths, a carriage's or loco's livery; the pick is
-  // stamped on the next piece placed.
-  const variation = armedType !== null ? PIECE_VARIATIONS[armedType] : undefined;
+function Toybox(props: ToyboxProps) {
   // Tray groups come straight from the registry (TOYBOX_TRAYS): the Track and
   // Devices staples, then the "Experiments" box — the shared home for the
   // docs/experimental viability-test pieces, kept apart so an operator
@@ -1648,113 +1674,136 @@ function Toybox({
   return (
     <div className="tf-toybox" aria-label="Parts tray">
       {TOYBOX_TRAYS.map((tray) => (
-        <ToyboxGroup
-          key={tray.heading}
-          heading={tray.heading}
-          types={tray.types}
-          armedType={armedType}
-          onArm={onArm}
-        />
+        <ToyboxGroup key={tray.heading} heading={tray.heading} types={tray.types} {...props} />
       ))}
-      {variation !== undefined && armedType !== null && (
-        <VariationPicker
-          pieceType={armedType}
-          variation={variation}
-          length={straightLength}
-          onPickLength={onPickStraightLength}
-          colour={colour}
-          onPickColour={onPickColour}
-        />
-      )}
     </div>
   );
 }
 
-interface VariationPickerProps {
+/** The chosen-variant preview props for a tile (what the toybox button shows):
+ *  a straight at its picked length (framed to the longest variant so the length
+ *  reads), a carriage/loco in its livery, plain for everything else. */
+function tileVariantProps(
+  variation: PieceVariation | undefined,
+  straightLength: number,
+  colour: CarriageColorId,
+): { lengthMm?: number; colorId?: CarriageColorId; frameMm?: number } {
+  if (variation === undefined) return {};
+  if (variation.axis === 'length') {
+    return { lengthMm: straightLength, frameMm: Math.max(...variation.options) };
+  }
+  return { colorId: colour };
+}
+
+interface VariantFanProps {
   readonly pieceType: TrackPieceType;
   readonly variation: PieceVariation;
-  readonly length: number;
-  readonly onPickLength: (mm: number) => void;
+  readonly straightLength: number;
   readonly colour: CarriageColorId;
-  readonly onPickColour: (color: CarriageColorId) => void;
+  readonly onPickLength: (mm: number) => void;
+  readonly onPickColour: (type: TrackPieceType, colour: CarriageColorId) => void;
 }
 
 /**
- * The variations chip strip shown when a family is armed. A LENGTH family (the
- * straight) offers the LILLABO length chips — a 60 mm plank closes a loop a row
- * of 200s + curves leaves just short of meeting. A COLOUR family (carriage /
- * loco) offers livery swatches — the colour is intrinsic to the placed piece, so
- * a rake stays recognisable through a shunt and trains read apart at a glance.
+ * The variant option fan that animates out above an armed family's tile —
+ * GRAPHICAL options, not numbers. A LENGTH family (the straight) fans its
+ * LILLABO planks at proportional sizes (a 30 mm stub reads short beside the
+ * 200 mm plank), a COLOUR family (carriage / loco) fans the piece in each
+ * livery. Picking one reconfigures the family and collapses the fan.
  */
-function VariationPicker({
+function VariantFan({
   pieceType,
   variation,
-  length,
-  onPickLength,
+  straightLength,
   colour,
+  onPickLength,
   onPickColour,
-}: VariationPickerProps) {
+}: VariantFanProps) {
+  const label = `${variation.label} options`;
+  if (variation.axis === 'length') {
+    const frameMm = Math.max(...variation.options);
+    return (
+      <div className="tf-toybox__fan" aria-label={label}>
+        {variation.options.map((mm) => (
+          <button
+            key={mm}
+            type="button"
+            className={`tf-toybox__variant${straightLength === mm ? ' tf-toybox__variant--current' : ''}`}
+            data-testid={`toybox-${pieceType}-length-${mm}`}
+            aria-label={`${mm} mm`}
+            aria-pressed={straightLength === mm}
+            onClick={() => onPickLength(mm)}
+          >
+            <PiecePreview type={pieceType} lengthMm={mm} frameMm={frameMm} />
+          </button>
+        ))}
+      </div>
+    );
+  }
   return (
-    <section className="tf-toybox__group" aria-label={`${variation.label} variations`}>
-      <h2 className="tf-toybox__heading">{variation.label}</h2>
-      {variation.axis === 'length' ? (
-        <ul className="tf-toybox__variations">
-          {variation.options.map((mm) => (
-            <li key={mm}>
-              <button
-                type="button"
-                className="tf-toybox__variation"
-                data-testid={`toybox-${pieceType}-length-${mm}`}
-                aria-label={`${mm} mm`}
-                aria-pressed={length === mm}
-                onClick={() => onPickLength(mm)}
-              >
-                {mm}
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <ul className="tf-toybox__swatches">
-          {variation.options.map((id) => (
-            <li key={id}>
-              <button
-                type="button"
-                className="tf-toybox__swatch"
-                data-testid={`toybox-${pieceType}-color-${id}`}
-                aria-label={id}
-                aria-pressed={colour === id}
-                style={{ background: CARRIAGE_COLORS[id] }}
-                onClick={() => onPickColour(id)}
-              />
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
+    <div className="tf-toybox__fan" aria-label={label}>
+      {variation.options.map((id) => (
+        <button
+          key={id}
+          type="button"
+          className={`tf-toybox__variant${colour === id ? ' tf-toybox__variant--current' : ''}`}
+          data-testid={`toybox-${pieceType}-color-${id}`}
+          aria-label={id}
+          aria-pressed={colour === id}
+          onClick={() => onPickColour(pieceType, id)}
+        >
+          <PiecePreview type={pieceType} colorId={id} />
+        </button>
+      ))}
+    </div>
   );
 }
 
+/** Body fill for a toybox preview: a carriage/loco's chosen livery, else the
+ *  piece's flat device colour or beech wood. */
+function previewFill(type: TrackPieceType, colorId: CarriageColorId | undefined): string {
+  if ((type === 'carriage' || type === 'train') && colorId !== undefined) {
+    return CARRIAGE_COLORS[colorId];
+  }
+  return isDevicePiece(type) ? DEVICE_FILL[type] : WOOD_FILL;
+}
+
+interface PiecePreviewProps {
+  readonly type: TrackPieceType;
+  /** Length variant to draw (straight); absent ⇒ the piece's default plank. */
+  readonly lengthMm?: number;
+  /** Livery to draw (carriage / loco); absent ⇒ the default body colour. */
+  readonly colorId?: CarriageColorId;
+  /** Size the viewBox to THIS length rather than the drawn one, so a row of
+   *  length variants reads at proportional sizes (a 30 mm plank looks short
+   *  beside a 200 mm one instead of each scaling to fill its box). */
+  readonly frameMm?: number;
+}
+
 /**
- * A small wooden render of a piece type — the actual shape the operator drags
- * onto the table, drawn with the same body/groove/feature spec as the live
- * pieces (referencing the shared wood gradients in the page `<defs>`).
+ * A small wooden render of a piece — the shape the operator drags onto the
+ * table — drawn at a chosen variant (length / livery) so the toybox tile shows
+ * the piece as currently configured and the fan shows each option graphically.
  */
-function PiecePreview({ type }: { type: TrackPieceType }) {
-  const shape = getPieceShape({
+function PiecePreview({ type, lengthMm, colorId, frameMm }: PiecePreviewProps) {
+  const piece: TrackPiece = {
     id: type,
     type,
     position: { x: 0, y: 0 },
     rotationDeg: 0,
     tagged: false,
-  });
+    ...(lengthMm !== undefined ? { lengthMm } : {}),
+    ...(colorId !== undefined ? { colorId } : {}),
+  };
+  const shape = getPieceShape(piece);
+  const frame = frameMm !== undefined ? getPieceShape({ ...piece, lengthMm: frameMm }) : shape;
   const isDevice = isDevicePiece(type);
   // An experimental piece's moving parts (deck, span) are not in the static
   // body — preview them at their resting pose so the tray shows the whole toy.
   const restingVisual = restingExperimentVisual(type);
   const pad = 14;
-  const w = shape.width + pad * 2;
-  const h = shape.height + pad * 2;
+  const w = frame.width + pad * 2;
+  const h = frame.height + pad * 2;
   return (
     <svg
       className="tf-toybox__preview"
@@ -1764,7 +1813,7 @@ function PiecePreview({ type }: { type: TrackPieceType }) {
     >
       <PieceBody
         shape={shape}
-        bodyFill={isDevicePiece(type) ? DEVICE_FILL[type] : WOOD_FILL}
+        bodyFill={previewFill(type, colorId)}
         tint={PIECE_TINT[type]}
         isDevice={isDevice}
         dim={1}
@@ -1774,23 +1823,49 @@ function PiecePreview({ type }: { type: TrackPieceType }) {
   );
 }
 
-interface ToyboxGroupProps {
+interface ToyboxGroupProps extends ToyboxProps {
   readonly heading: string;
   readonly types: ReadonlyArray<TrackPieceType>;
-  readonly armedType: TrackPieceType | null;
-  readonly onArm: (type: TrackPieceType) => void;
 }
 
-function ToyboxGroup({ heading, types, armedType, onArm }: ToyboxGroupProps) {
+function ToyboxGroup({
+  heading,
+  types,
+  armedType,
+  expandedType,
+  onArm,
+  straightLength,
+  carriageColour,
+  trainColour,
+  onPickLength,
+  onPickColour,
+}: ToyboxGroupProps) {
   return (
     <section className="tf-toybox__group" aria-label={heading}>
       <h2 className="tf-toybox__heading">{heading}</h2>
       <ul className="tf-toybox__list">
         {types.map((type) => {
-          const armed = armedType === type;
+          const variation = PIECE_VARIATIONS[type];
+          // A loco keeps its own livery pick, distinct from a carriage's.
+          const colour = type === 'train' ? trainColour : carriageColour;
           return (
-            <li key={type}>
-              <ToyboxButton type={type} armed={armed} onArm={onArm} />
+            <li key={type} className="tf-toybox__slot">
+              {expandedType === type && variation !== undefined && (
+                <VariantFan
+                  pieceType={type}
+                  variation={variation}
+                  straightLength={straightLength}
+                  colour={colour}
+                  onPickLength={onPickLength}
+                  onPickColour={onPickColour}
+                />
+              )}
+              <ToyboxButton
+                type={type}
+                armed={armedType === type}
+                variantProps={tileVariantProps(variation, straightLength, colour)}
+                onArm={onArm}
+              />
             </li>
           );
         })}
@@ -1802,10 +1877,12 @@ function ToyboxGroup({ heading, types, armedType, onArm }: ToyboxGroupProps) {
 interface ToyboxButtonProps {
   readonly type: TrackPieceType;
   readonly armed: boolean;
+  /** Chosen-variant preview props so the tile shows the piece as configured. */
+  readonly variantProps: { lengthMm?: number; colorId?: CarriageColorId; frameMm?: number };
   readonly onArm: (type: TrackPieceType) => void;
 }
 
-function ToyboxButton({ type, armed, onArm }: ToyboxButtonProps) {
+function ToyboxButton({ type, armed, variantProps, onArm }: ToyboxButtonProps) {
   function handleDragStart(e: React.DragEvent<HTMLButtonElement>) {
     e.dataTransfer.setData(TOYBOX_DRAG_MIME, type);
     e.dataTransfer.effectAllowed = 'copy';
@@ -1822,7 +1899,7 @@ function ToyboxButton({ type, armed, onArm }: ToyboxButtonProps) {
       title={`${PIECE_LABELS[type]} — drag onto the table`}
       data-testid={`toybox-${type}`}
     >
-      <PiecePreview type={type} />
+      <PiecePreview type={type} {...variantProps} />
       <span className="tf-toybox__label">{PIECE_LABELS[type]}</span>
     </button>
   );
