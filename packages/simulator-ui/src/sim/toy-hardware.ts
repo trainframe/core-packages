@@ -58,7 +58,10 @@ import type { BrokerClient } from '@trainframe/simulator/broker/client.js';
 import { mqttPlatform } from '@trainframe/simulator/broker/mqtt-platform.js';
 import { GateDevice } from '@trainframe/simulator/devices/gate-device.js';
 import type { PlatformProvider } from '@trainframe/simulator/devices/platform-provider.js';
-import { ScheduledTrainDevice } from '@trainframe/simulator/devices/scheduled-train-device.js';
+import {
+  ScheduledTrainDevice,
+  type TrainDriveState,
+} from '@trainframe/simulator/devices/scheduled-train-device.js';
 import { SwitchDevice } from '@trainframe/simulator/devices/switch-device.js';
 import { YardZoneDevice } from '@trainframe/simulator/devices/yard-zone-device.js';
 import {
@@ -240,6 +243,10 @@ export class ToyHardware {
   /** Mechanical device state captured just before a rebuild, re-asserted on respawn. */
   private pendingDeviceState = new Map<string, DeviceState>();
 
+  /** Running trains' pose + driving state captured just before a rebuild, restored
+   *  on respawn so editing track elsewhere doesn't stop or rewind a moving train. */
+  private pendingTrainState = new Map<string, { pose: BodyPose; drive: TrainDriveState }>();
+
   /** Carriage PIECE ids a live train's rake claimed this build — the rest, parked over
    *  a gantry, become its spares. Recomputed each `rebuildDevices`. */
   private claimedCarriagePieceIds = new Set<string>();
@@ -405,6 +412,9 @@ export class ToyHardware {
   private rebuild(pieces: ReadonlyArray<TrackPiece>, topology: string): void {
     this.topology = topology;
     this.pendingDeviceState = this.snapshotDeviceState();
+    /* Capture running trains BEFORE teardown (the old world + devices are still
+     *  live here) so each is restored at its current pose, still driving. */
+    this.pendingTrainState = this.snapshotTrainState();
     const stillLive = this.lastLive;
     const piecesById = new Map<string, TrackPiece>();
     for (const p of pieces) piecesById.set(p.id, p);
@@ -617,8 +627,17 @@ export class ToyHardware {
    *  Defers (registers but seeds no body) if no rail originates near the piece. */
   private spawnTrain(piece: TrackPiece, pieces: ReadonlyArray<TrackPiece>): void {
     const deviceId = deviceIdForDevicePiece(piece);
-    const rad = (piece.rotationDeg * Math.PI) / 180;
-    const seat = this.seatNearest(piece.position, { x: Math.cos(rad), y: Math.sin(rad) });
+    /* A train captured running before this rebuild is re-seated at its CURRENT
+     *  pose (still on the new net, by world position) rather than its piece's
+     *  placement — and its driving state is restored below, so a track edit
+     *  elsewhere neither stops nor rewinds it. */
+    const pending = this.pendingTrainState.get(deviceId);
+    this.pendingTrainState.delete(deviceId);
+    const seatPos =
+      pending !== undefined ? { x: pending.pose.x, y: pending.pose.y } : piece.position;
+    const seatDeg = pending !== undefined ? pending.pose.rotationDeg : piece.rotationDeg;
+    const rad = (seatDeg * Math.PI) / 180;
+    const seat = this.seatNearest(seatPos, { x: Math.cos(rad), y: Math.sin(rad) });
     let carriageBodyIds: string[] = [];
     let lengthMm = TRAIN_LENGTH_MM;
     if (seat !== undefined) {
@@ -645,6 +664,10 @@ export class ToyHardware {
       newId: this.newId,
     });
     device.start();
+    /* Resume a preserved train mid-run: route, clearance, and motion are
+     *  re-asserted onto the now-seated body. Skipped when the body couldn't be
+     *  re-seated (its track was removed under it) — then it stops, fairly. */
+    if (pending !== undefined && seat !== undefined) device.restoreDrive(pending.drive);
     this.trains.set(deviceId, { device, bodyId: deviceId, carriageBodyIds });
   }
 
@@ -786,6 +809,22 @@ export class ToyHardware {
   }
 
   // ---- device state snapshot / restore ----------------------------------
+
+  /** Snapshot every live train's current body pose + driving state, so a rebuild
+   *  (triggered by a track edit) restores it where it was, still running, rather
+   *  than re-seeding it at its piece's placement and stopped. Reads the OLD world
+   *  + devices, so it must run BEFORE teardown. A train with no body yet (deferred,
+   *  never seeded) has nothing to preserve. */
+  private snapshotTrainState(): Map<string, { pose: BodyPose; drive: TrainDriveState }> {
+    const out = new Map<string, { pose: BodyPose; drive: TrainDriveState }>();
+    const poses = new Map(this.world.bodies().map((b) => [b.id, b] as const));
+    for (const [deviceId, live] of this.trains) {
+      const pose = poses.get(live.bodyId);
+      if (pose === undefined) continue;
+      out.set(deviceId, { pose, drive: live.device.snapshotDrive() });
+    }
+    return out;
+  }
 
   /** Snapshot the mechanical state of every tracked switch / gate device before a
    *  teardown. Only non-default state is recorded. */

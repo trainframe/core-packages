@@ -236,6 +236,37 @@ describe('ToyHardware — placement is inert; only the scan flow commissions', (
     }
   });
 
+  it('a RUNNING train keeps its pose + keeps moving when track is edited elsewhere', () => {
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId, maxTickMs: 1000 });
+    try {
+      const { pieces, train } = twoStraightsAndATrain();
+      const deviceId = `T-${train.id}`;
+      hardware.syncLayout(pieces);
+      hardware.syncLive(pieces, new Set([train.id]));
+      driveExploration(client, deviceId);
+      // Run it well past its placement (x=110) along the line.
+      for (let i = 0; i < 3; i++) hardware.tick(200);
+      const advancedX = locoPose(hardware, deviceId)?.x ?? 0;
+      expect(advancedX).toBeGreaterThan(150);
+
+      // Edit track ELSEWHERE — extend the line ahead. This changes topology, so
+      // the world rebuilds; the running train must NOT snap back to placement.
+      const extra = piece('straight', 500, 100);
+      hardware.syncLayout([...pieces, extra]);
+      const afterEditX = locoPose(hardware, deviceId)?.x ?? 0;
+      expect(Math.abs(afterEditX - advancedX)).toBeLessThan(30); // held its pose, not reset
+
+      // ...and it is still driving: more ticks carry it further forward.
+      for (let i = 0; i < 3; i++) hardware.tick(200);
+      const laterX = locoPose(hardware, deviceId)?.x ?? 0;
+      expect(laterX).toBeGreaterThan(afterEditX + 10);
+    } finally {
+      hardware.dispose();
+    }
+  });
+
   it('caps tick advance at maxTickMs (a backgrounded tab cannot fast-forward minutes)', () => {
     const client = new InMemoryBrokerClient();
     client.connect('inmem://');

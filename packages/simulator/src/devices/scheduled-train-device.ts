@@ -40,6 +40,19 @@ import type { PlatformProvider } from './platform-provider.js';
  *  `assign_route` payload (the protocol package exports no standalone type). */
 type RouteEdge = AssignRoute['payload']['edges'][number];
 
+/** A loco's driving state, snapshotted across a world rebuild (see
+ *  `snapshotDrive`/`restoreDrive`) so a running train survives a track edit. */
+export interface TrainDriveState {
+  readonly route: readonly RouteEdge[];
+  readonly progress: number;
+  readonly distance: number;
+  readonly limitMarker: string | undefined;
+  readonly intent: Motion;
+  readonly speedScale: number;
+  readonly reversing: boolean;
+  readonly exploring: boolean;
+}
+
 export interface ScheduledTrainDeps {
   /** The device↔core link (mqtt in the gate/script, in-process in unit tests). */
   readonly platform: PlatformProvider;
@@ -167,6 +180,39 @@ export class ScheduledTrainDevice {
     this.offSensor?.();
     this.offCommand = undefined;
     this.offSensor = undefined;
+  }
+
+  /**
+   * Capture the driving state — route, clearance, odometry, motion — so a loco
+   * can be carried across a world rebuild (the toy-table recompiles the physics
+   * net when the operator edits track). Editing track elsewhere must not stop or
+   * rewind a running train; the body pose is restored separately by the host.
+   */
+  snapshotDrive(): TrainDriveState {
+    return {
+      route: this.route,
+      progress: this.progress,
+      distance: this.distance,
+      limitMarker: this.limitMarker,
+      intent: this.intent,
+      speedScale: this.speedScale,
+      reversing: this.reversing,
+      exploring: this.exploring,
+    };
+  }
+
+  /** Re-assert a snapshotted driving state onto a freshly-respawned device (its
+   *  body already re-seeded at the captured pose), so it resumes mid-run. */
+  restoreDrive(state: TrainDriveState): void {
+    this.route = state.route;
+    this.progress = state.progress;
+    this.distance = state.distance;
+    this.limitMarker = state.limitMarker;
+    this.speedScale = state.speedScale;
+    this.reversing = state.reversing;
+    this.exploring = state.exploring;
+    /* `drive` re-asserts the motion intent through the (new world's) motor. */
+    this.drive(state.intent);
   }
 
   /** Motion intent each tick. Samples the sensor, dead-reckons forward (or
