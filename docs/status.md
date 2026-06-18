@@ -96,7 +96,7 @@ Source: [`docs/spec/simulator-v0.1.md`](spec/simulator-v0.1.md); [`ADR-006`](adr
 | `WiFiTransport` / `EspNowTransport`               | not started | Spec defines; the package today has no transport abstraction (in-process only).|
 | Virtual bridge with frame loss/reorder/latency    | not started | Bridge fault injection.                                                        |
 | Fault profiles (`pristine`/`realistic`/`hostile`) | shipped | `FAULT_PROFILES` map in `@trainframe/simulator/testing`. Tests pick by name; per-train overrides win. |
-| `startTestEnvironment` harness API                | shipped | `@trainframe/simulator/testing` exports `startTestEnvironment({layout, seed, faults, tags})`. Bundles a seeded `Simulation` with identity-tag seeding and `waitForEvent`, `advance`, `spawnTrain`, `assignRoute` helpers. In-process today; broker-backed variant deferred. |
+| `startPhysicsEnv` harness API                | shipped | `@trainframe/simulator` exports `startPhysicsEnv(scene)` — the physics replacement for the deleted `startTestEnvironment`/`@trainframe/simulator/testing`. Wires a real `@trainframe/server` to a real `InMemoryBrokerClient` + real physics devices on a real `PhysicsWorld`; `straightLoop(markers)` builds tiny loops, or pass any `RailNetwork`+`Layout`. Deterministic synchronous `advance(ms)`; `spawnTrain`/`spawnGate`/`spawnSwitch`/`assignSchedule`/`eventsOfType`. |
 | `registerVirtualCapability` extensibility         | not started | Satellite virtual devices have nowhere to register. `extraCapabilities` only handles core-side hooks. |
 | `attachDevice` (load real device into harness)    | not started | For satellite-author testing; depends on the harness API.                      |
 
@@ -202,7 +202,7 @@ Private workspace package. Spawns an in-process [aedes](https://www.npmjs.com/pa
 | aedes-based test harness                          | shipped | `startHarness({ layout })` → `{ server, testClient, shutdown }`. Random port, MQTT 3.1.1. |
 | `TestClient` device/operator surrogate            | shipped | `publishEvent`, `waitForCommand`, `waitForState`, `commandsFor`, `retained`, `events`. |
 | Clearance flow E2E test                           | shipped | Initial grant, gate withholds, gate releases, retained layout bootstrap.       |
-| Simulator-driven E2E (sim publishes device events)| shipped | `simulator-bridge.test.ts` drives a `Simulation` (device-only mode) through `BrokerBridge` against the real server. |
+| Physics-driven E2E (devices publish events)| shipped | The integration suite (`branching-*`, `interesting-railway-*`, `two-train-flyover`) drives real physics devices on a `PhysicsWorld` against the real server over the broker. (The old `simulator-bridge.test.ts` + virtual-device sim were removed.) |
 | Browser-driven UI E2E (clicks + SVG assertions)   | shipped | Lives in `@trainframe/ui-tests` (separate package, Playwright + Chromium). |
 
 Coverage thresholds: disabled. The package IS the cross-cutting coverage; gating itself on its own coverage is circular.
@@ -216,7 +216,7 @@ Private workspace package. Spawns the simulator-ui Vite preview, an aedes broker
 | Area                                              | Status | Notes                                                                          |
 | ------------------------------------------------- | :----: | ------------------------------------------------------------------------------ |
 | Playwright + Chromium setup                       | shipped | `playwright.config.ts` with `webServer` for `vite preview`; chromium-only project. |
-| `startUiHarness` (aedes WS + server + bridged sim)| shipped | WebSocket listener with MQTT-subprotocol selection. Also wires a device-only `Simulation` to the broker via `BrokerBridge`, so admin HTTP commands actually reach virtual trains/gates. Reused by per-spec `beforeAll`. |
+| `startUiHarness` (aedes WS + server + physics devices)| shipped | WebSocket listener with MQTT-subprotocol selection. Wires a real `PhysicsWorld` + `ScheduledTrainDevice`/`SwitchDevice` to the broker via a second `MqttBrokerClient`, so admin HTTP commands reach real physics trains/switches. Loop scenes via `straightLoop`; the branch via `buildBranchingUiScene`. `harness.spawnTrain` / `advance`. Reused by per-spec `beforeAll`. |
 | Lifecycle smoke test                              | shipped | Start, Spawn, Step against the embedded sim (no broker required). Extended with: edgeless-layout hint, duplicate-ID error flow. |
 | Connected-to-broker test                          | shipped | UI connects to aedes via WS, `device_registered` round-trips through the server. |
 | Operator journeys                                 | shipped | `multi-train-journey`, `tag-assignment`, `discovery`, `feature-showcase`, plus five new specs: `route-reassignment` (expects `cleared_edges`-wipe fix), `unknown-tag-closure` (bound-tag → train lands on marker), `spawn-form-mishaps` (overshoot knob → anomaly in EventLog), `layout-swap` (preset swap + invalid-JSON error), `gate-hold-release` (admin HTTP hold/release → train stops/advances). |
