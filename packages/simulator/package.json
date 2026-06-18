@@ -1,13 +1,12 @@
 {
   "name": "@trainframe/simulator",
   "version": "0.1.0",
-  "description": "Virtual device population and test harness for Trainframe.",
+  "description": "The Trainframe physics simulator (ADR-030): the real device world for tests, demos, and the toy table.",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./testing": "./src/testing.ts",
     "./*": "./src/*"
   },
   "files": ["src"],

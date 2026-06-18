@@ -85,7 +85,7 @@ test.describe
       // moves on the server's M1–M4 graph. The harness bridge publishes
       // marker_traversed + train_status events the visualiser can position.
       // The duplicate device_registered is handled idempotently by the server.
-      harness.simulation.spawnTrain(trainDeviceId, {
+      harness.spawnTrain(trainDeviceId, {
         startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
       });
 

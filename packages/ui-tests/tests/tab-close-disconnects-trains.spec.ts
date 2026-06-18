@@ -81,7 +81,7 @@ test.describe
       // Spawn the same train ID in the Node-side harness simulation so it moves
       // on the server's M1–M4 graph and emits marker_traversed events the
       // visualiser can use to position the icon.
-      harness.simulation.spawnTrain(trainDeviceId, {
+      harness.spawnTrain(trainDeviceId, {
         startEdge: { from_marker_id: 'M1', to_marker_id: 'M2' },
       });
 
