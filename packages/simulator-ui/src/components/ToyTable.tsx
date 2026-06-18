@@ -9,7 +9,6 @@ import { composeEdgePath, pieceIdFromMarkerId } from '@trainframe/simulator/trac
 import { SNAP_DISTANCE, compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
 import { detectSameLayerOverlaps, pierSuppressed } from '@trainframe/simulator/track/overlap.js';
 import {
-  CARRIAGE_COLOR_IDS,
   CRANE_GANTRY_X_MM,
   CRANE_INITIAL_CRATES,
   CRANE_REACH_MM,
@@ -120,6 +119,31 @@ const CARRIAGE_COLORS: Record<CarriageColorId, string> = {
 /** Body fill for a carriage piece: its intrinsic livery, or the default blue. */
 function carriageFill(piece: TrackPiece): string {
   return piece.colorId !== undefined ? CARRIAGE_COLORS[piece.colorId] : DEVICE_FILL.carriage;
+}
+
+/** The armed toybox picks a placed piece may carry. */
+interface VariationPicks {
+  readonly carriageColour: CarriageColorId;
+  readonly trainColour: CarriageColorId;
+  readonly straightLength: number;
+}
+
+/**
+ * The variation override a placed piece carries from the toybox picks — a
+ * carriage's livery (always), a loco's livery (only when non-default red), a
+ * straight's length (only when not the standard plank). Empty for any other
+ * piece or a default pick, so an untouched piece stays plain.
+ */
+function variationOverride(
+  pieceType: TrackPieceType,
+  picks: VariationPicks,
+): Pick<TrackPiece, 'colorId' | 'lengthMm'> {
+  if (pieceType === 'carriage') return { colorId: picks.carriageColour };
+  if (pieceType === 'train' && picks.trainColour !== 'red') return { colorId: picks.trainColour };
+  if (pieceType === 'straight' && picks.straightLength !== STRAIGHT_LENGTH_MM) {
+    return { lengthMm: picks.straightLength };
+  }
+  return {};
 }
 
 /** A soft, near-omnidirectional contact shadow under every piece (rotation- and
@@ -945,6 +969,10 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   const [armedType, setArmedType] = useState<TrackPieceType | null>(null);
   /** Livery applied to the next carriage placed (the toybox swatch selection). */
   const [armedCarriageColor, setArmedCarriageColor] = useState<CarriageColorId>('blue');
+  /** Livery applied to the next loco placed. Defaults to the iconic red, so an
+   *  untouched pick leaves the train its standard colour (no colorId stamped);
+   *  a non-default pick lets several trains read apart at a glance. */
+  const [armedTrainColor, setArmedTrainColor] = useState<CarriageColorId>('red');
   /** Length (mm) applied to the next straight placed — the toybox length-chip
    *  selection. Defaults to the standard plank; a non-default pick is what closes
    *  an otherwise-asymmetric hand-built loop. */
@@ -1175,21 +1203,19 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
         // Only stamp a layer when authoring above ground. exactOptionalPropertyTypes
         // forbids writing `layer: undefined`, and absent ⇒ ground anyway.
         ...(activeLayer !== 0 ? { layer: activeLayer } : {}),
-        // A carriage carries the armed livery so it stays trackable through a
-        // shunt. Other pieces never get a colorId.
-        ...(pieceType === 'carriage' ? { colorId: armedCarriageColor } : {}),
-        // A straight carries the armed length only when it differs from the
-        // standard plank — an untouched pick leaves lengthMm absent (the default).
-        ...(pieceType === 'straight' && armedStraightLength !== STRAIGHT_LENGTH_MM
-          ? { lengthMm: armedStraightLength }
-          : {}),
+        // The toybox variation pick (livery / length) the piece carries.
+        ...variationOverride(pieceType, {
+          carriageColour: armedCarriageColor,
+          trainColour: armedTrainColor,
+          straightLength: armedStraightLength,
+        }),
       };
       setPieces((prev) => [...prev, piece]);
       setSelectedId(piece.id);
       // Stay armed so the operator can drop multiple of the same type without
       // re-clicking the toybox.
     },
-    [armedType, activeLayer, armedCarriageColor, armedStraightLength],
+    [armedType, activeLayer, armedCarriageColor, armedTrainColor, armedStraightLength],
   );
 
   // Reposition an already-placed piece (dragged across the canvas). Snaps +
@@ -1578,10 +1604,10 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       <Toybox
         armedType={armedType}
         onArm={armPieceType}
-        carriageColor={armedCarriageColor}
-        onPickCarriageColor={setArmedCarriageColor}
         straightLength={armedStraightLength}
         onPickStraightLength={setArmedStraightLength}
+        colour={armedType === 'train' ? armedTrainColor : armedCarriageColor}
+        onPickColour={armedType === 'train' ? setArmedTrainColor : setArmedCarriageColor}
       />
     </div>
   );
@@ -1594,22 +1620,26 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
 interface ToyboxProps {
   readonly armedType: TrackPieceType | null;
   readonly onArm: (type: TrackPieceType) => void;
-  readonly carriageColor: CarriageColorId;
-  readonly onPickCarriageColor: (color: CarriageColorId) => void;
   readonly straightLength: number;
   readonly onPickStraightLength: (mm: number) => void;
+  /** The livery selection for the armed colour family (carriage / train),
+   *  already resolved to that family by the parent so each keeps its own pick
+   *  and its own default (a carriage is blue, a loco red). */
+  readonly colour: CarriageColorId;
+  readonly onPickColour: (color: CarriageColorId) => void;
 }
 
 function Toybox({
   armedType,
   onArm,
-  carriageColor,
-  onPickCarriageColor,
   straightLength,
   onPickStraightLength,
+  colour,
+  onPickColour,
 }: ToyboxProps) {
-  // A family with variations (e.g. the straight's LILLABO lengths) shows a chip
-  // strip while it is armed; the pick is stamped on the next piece placed.
+  // A family with variations shows a chip strip while it is armed — the
+  // straight's LILLABO lengths, a carriage's or loco's livery; the pick is
+  // stamped on the next piece placed.
   const variation = armedType !== null ? PIECE_VARIATIONS[armedType] : undefined;
   // Tray groups come straight from the registry (TOYBOX_TRAYS): the Track and
   // Devices staples, then the "Experiments" box — the shared home for the
@@ -1626,14 +1656,14 @@ function Toybox({
           onArm={onArm}
         />
       ))}
-      {armedType === 'carriage' && (
-        <CarriageLiveryPicker selected={carriageColor} onPick={onPickCarriageColor} />
-      )}
-      {variation !== undefined && (
+      {variation !== undefined && armedType !== null && (
         <VariationPicker
+          pieceType={armedType}
           variation={variation}
-          selected={straightLength}
-          onPick={onPickStraightLength}
+          length={straightLength}
+          onPickLength={onPickStraightLength}
+          colour={colour}
+          onPickColour={onPickColour}
         />
       )}
     </div>
@@ -1641,71 +1671,66 @@ function Toybox({
 }
 
 interface VariationPickerProps {
+  readonly pieceType: TrackPieceType;
   readonly variation: PieceVariation;
-  readonly selected: number;
-  readonly onPick: (mm: number) => void;
+  readonly length: number;
+  readonly onPickLength: (mm: number) => void;
+  readonly colour: CarriageColorId;
+  readonly onPickColour: (color: CarriageColorId) => void;
 }
 
 /**
- * Chip strip shown when a family with variations is armed — the straight's
- * LILLABO length options. The pick is stamped on the next piece placed, so an
- * operator can drop a 60 mm straight to close a loop a row of 200 mm planks
- * leaves just short of meeting.
+ * The variations chip strip shown when a family is armed. A LENGTH family (the
+ * straight) offers the LILLABO length chips — a 60 mm plank closes a loop a row
+ * of 200s + curves leaves just short of meeting. A COLOUR family (carriage /
+ * loco) offers livery swatches — the colour is intrinsic to the placed piece, so
+ * a rake stays recognisable through a shunt and trains read apart at a glance.
  */
-function VariationPicker({ variation, selected, onPick }: VariationPickerProps) {
+function VariationPicker({
+  pieceType,
+  variation,
+  length,
+  onPickLength,
+  colour,
+  onPickColour,
+}: VariationPickerProps) {
   return (
     <section className="tf-toybox__group" aria-label={`${variation.label} variations`}>
       <h2 className="tf-toybox__heading">{variation.label}</h2>
-      <ul className="tf-toybox__variations">
-        {variation.options.map((mm) => (
-          <li key={mm}>
-            <button
-              type="button"
-              className="tf-toybox__variation"
-              data-testid={`toybox-straight-length-${mm}`}
-              aria-label={`${mm} mm`}
-              aria-pressed={selected === mm}
-              onClick={() => onPick(mm)}
-            >
-              {mm}
-            </button>
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
-interface CarriageLiveryPickerProps {
-  readonly selected: CarriageColorId;
-  readonly onPick: (color: CarriageColorId) => void;
-}
-
-/**
- * Swatch row shown when the carriage tool is armed: pick the livery the next
- * carriage carries. The colour is intrinsic to the placed wagon, so the
- * operator can build a same-coloured rake per train (and a wagon stays
- * recognisable when a railyard shunts it onto a different train).
- */
-function CarriageLiveryPicker({ selected, onPick }: CarriageLiveryPickerProps) {
-  return (
-    <section className="tf-toybox__group" aria-label="Carriage livery">
-      <h2 className="tf-toybox__heading">Livery</h2>
-      <ul className="tf-toybox__swatches">
-        {CARRIAGE_COLOR_IDS.map((color) => (
-          <li key={color}>
-            <button
-              type="button"
-              className="tf-toybox__swatch"
-              data-testid={`toybox-carriage-color-${color}`}
-              aria-label={color}
-              aria-pressed={selected === color}
-              style={{ background: CARRIAGE_COLORS[color] }}
-              onClick={() => onPick(color)}
-            />
-          </li>
-        ))}
-      </ul>
+      {variation.axis === 'length' ? (
+        <ul className="tf-toybox__variations">
+          {variation.options.map((mm) => (
+            <li key={mm}>
+              <button
+                type="button"
+                className="tf-toybox__variation"
+                data-testid={`toybox-${pieceType}-length-${mm}`}
+                aria-label={`${mm} mm`}
+                aria-pressed={length === mm}
+                onClick={() => onPickLength(mm)}
+              >
+                {mm}
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <ul className="tf-toybox__swatches">
+          {variation.options.map((id) => (
+            <li key={id}>
+              <button
+                type="button"
+                className="tf-toybox__swatch"
+                data-testid={`toybox-${pieceType}-color-${id}`}
+                aria-label={id}
+                aria-pressed={colour === id}
+                style={{ background: CARRIAGE_COLORS[id] }}
+                onClick={() => onPickColour(id)}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }
@@ -2687,7 +2712,9 @@ function powerLabelSuffix(live: boolean, powered: boolean): string {
  *  type guard so `piece.type` narrows to a `DEVICE_FILL` key.) */
 function pieceBodyFill(piece: TrackPiece): string {
   if (!isDevicePiece(piece.type)) return WOOD_FILL;
+  // Carriage and loco both carry an intrinsic livery; everything else is flat.
   if (piece.type === 'carriage') return carriageFill(piece);
+  if (piece.type === 'train' && piece.colorId !== undefined) return CARRIAGE_COLORS[piece.colorId];
   return DEVICE_FILL[piece.type];
 }
 

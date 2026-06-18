@@ -628,7 +628,9 @@ export class ToyHardware {
         segment: seat.segment,
         railPos: seat.railPos,
         facing: seat.facing,
-        color: '#c0392b',
+        // The loco's livery (toybox pick) drives its body colour; absent ⇒ the
+        // iconic red. Keeps the moving body in step with its toy-table piece.
+        color: piece.colorId !== undefined ? liveryHex(piece.colorId) : '#c0392b',
       });
       carriageBodyIds = this.seedRake(deviceId, piece, pieces, seat);
       lengthMm = TRAIN_LENGTH_MM + carriageBodyIds.length * CARRIAGE_SPACING_MM;

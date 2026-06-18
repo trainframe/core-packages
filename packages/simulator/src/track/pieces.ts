@@ -1877,16 +1877,27 @@ export const TOYBOX_TRAYS: ReadonlyArray<{
  * planks + curves leaves, so a hand-built loop need not be perfectly symmetric to
  * close. (Colour variations — carriage/train liveries — fold in on the same shape.)
  */
-export interface PieceVariation {
-  readonly axis: 'length';
-  /** Tray heading for the chip strip ("Length"). */
-  readonly label: string;
-  /** The selectable values (mm), in display order. */
-  readonly options: readonly number[];
-  /** The value a freshly-armed piece carries — equal to the piece's intrinsic
-   *  default, so an untouched pick stamps no override. */
-  readonly defaultMm: number;
-}
+export type PieceVariation =
+  | {
+      readonly axis: 'length';
+      /** Tray heading for the chip strip ("Length"). */
+      readonly label: string;
+      /** The selectable lengths (mm), in display order. */
+      readonly options: readonly number[];
+      /** The length a freshly-armed straight carries — equal to the standard
+       *  plank, so an untouched pick stamps no override. */
+      readonly defaultMm: number;
+    }
+  | {
+      readonly axis: 'colour';
+      /** Tray heading for the swatch row ("Livery"). */
+      readonly label: string;
+      /** The selectable liveries, in display order. */
+      readonly options: readonly CarriageColorId[];
+      /** The livery a freshly-armed piece carries (a carriage is blue, a loco
+       *  red) — its intrinsic default, so an untouched pick stamps no override. */
+      readonly defaultColour: CarriageColorId;
+    };
 
 /** Per-type toybox variation families. Absent ⇒ the piece has one fixed form. */
 export const PIECE_VARIATIONS: Partial<Record<TrackPieceType, PieceVariation>> = {
@@ -1895,6 +1906,18 @@ export const PIECE_VARIATIONS: Partial<Record<TrackPieceType, PieceVariation>> =
     label: 'Length',
     options: LILLABO_STRAIGHT_LENGTHS_MM,
     defaultMm: STRAIGHT_LENGTH_MM,
+  },
+  carriage: {
+    axis: 'colour',
+    label: 'Livery',
+    options: CARRIAGE_COLOR_IDS,
+    defaultColour: 'blue',
+  },
+  train: {
+    axis: 'colour',
+    label: 'Livery',
+    options: CARRIAGE_COLOR_IDS,
+    defaultColour: 'red',
   },
 };
 

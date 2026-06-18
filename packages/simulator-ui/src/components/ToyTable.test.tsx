@@ -413,6 +413,48 @@ describe('ToyTable — palette and placement', () => {
     if (!placed) throw new Error('no straight placed');
     expect(placed.getAttribute('data-length-mm')).toBeNull();
   });
+
+  it('shows the livery swatches when the train tool is armed', async () => {
+    const user = userEvent.setup();
+    renderToyTable();
+
+    expect(screen.queryByTestId('toybox-train-color-green')).toBeNull();
+
+    await user.click(screen.getByTestId('toybox-train'));
+    expect(screen.getByTestId('toybox-train-color-green')).toBeInTheDocument();
+    // The loco defaults to red — its swatch is the pressed one.
+    expect(screen.getByTestId('toybox-train-color-red')).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('places a train in the livery picked from the swatch row', async () => {
+    const user = userEvent.setup();
+    renderToyTable();
+
+    await user.click(screen.getByTestId('toybox-train'));
+    await user.click(screen.getByTestId('toybox-train-color-green'));
+    await user.click(screen.getByTestId('toy-table-canvas'));
+
+    const placed = document.querySelector('[data-testid^="piece-train-"]') as HTMLElement | null;
+    if (!placed) throw new Error('no train placed');
+    // The loco body carries the green livery, not the default red.
+    const fills = Array.from(placed.querySelectorAll('path')).map((p) => p.getAttribute('fill'));
+    expect(fills).toContain('#3f8f54'); // green livery
+    expect(fills).not.toContain('#cf4436'); // not the default red loco
+  });
+
+  it('leaves a default (red) train its standard colour with no livery override', async () => {
+    const user = userEvent.setup();
+    renderToyTable();
+
+    // Arm the train but leave the default red pick — the loco keeps DEVICE_FILL.
+    await user.click(screen.getByTestId('toybox-train'));
+    await user.click(screen.getByTestId('toy-table-canvas'));
+
+    const placed = document.querySelector('[data-testid^="piece-train-"]') as HTMLElement | null;
+    if (!placed) throw new Error('no train placed');
+    const fills = Array.from(placed.querySelectorAll('path')).map((p) => p.getAttribute('fill'));
+    expect(fills).toContain('#cf4436'); // the standard red loco
+  });
 });
 
 /** Place an armed piece of the given type and return its piece id. */
