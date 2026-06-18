@@ -697,7 +697,7 @@ const STRAIGHT_ENDPOINTS: readonly LocalEndpoint[] = [
 ];
 
 /** Default straight length (mm) — the standard 200 mm plank. */
-const STRAIGHT_LENGTH_MM = 200;
+export const STRAIGHT_LENGTH_MM = 200;
 
 /** The IKEA LILLABO straight-length family (mm), for `lengthMm`-overridden
  *  straights. 200 mm is the default plank; the shorter members let a layout be
@@ -1868,6 +1868,35 @@ export const TOYBOX_TRAYS: ReadonlyArray<{
   { heading: 'Devices', types: ALL_PIECE_TYPES.filter((type) => PIECES[type].tray === 'devices') },
   { heading: 'Experiments', types: EXPERIMENT_PIECE_TYPES },
 ];
+
+/**
+ * A toybox family's pick-list — the variations an operator chooses BEFORE placing
+ * a piece, surfaced as a chip strip when that family is armed. The pick is stamped
+ * on the placed `TrackPiece` (`lengthMm` for a length axis). Length variations are
+ * the loop-closer: a short LILLABO straight fits the residual gap a row of 200 mm
+ * planks + curves leaves, so a hand-built loop need not be perfectly symmetric to
+ * close. (Colour variations — carriage/train liveries — fold in on the same shape.)
+ */
+export interface PieceVariation {
+  readonly axis: 'length';
+  /** Tray heading for the chip strip ("Length"). */
+  readonly label: string;
+  /** The selectable values (mm), in display order. */
+  readonly options: readonly number[];
+  /** The value a freshly-armed piece carries — equal to the piece's intrinsic
+   *  default, so an untouched pick stamps no override. */
+  readonly defaultMm: number;
+}
+
+/** Per-type toybox variation families. Absent ⇒ the piece has one fixed form. */
+export const PIECE_VARIATIONS: Partial<Record<TrackPieceType, PieceVariation>> = {
+  straight: {
+    axis: 'length',
+    label: 'Length',
+    options: LILLABO_STRAIGHT_LENGTHS_MM,
+    defaultMm: STRAIGHT_LENGTH_MM,
+  },
+};
 
 /**
  * The marker kind a piece contributes. Devices declare `null` and resolve to

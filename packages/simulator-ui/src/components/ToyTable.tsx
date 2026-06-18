@@ -22,12 +22,15 @@ import {
   LIFT_BRIDGE_SPAN_HALF_MM,
   PIECE_LABELS,
   PIECE_TINT,
+  PIECE_VARIATIONS,
   type PieceFeature,
+  type PieceVariation,
   RAILYARD_GANTRY_X,
   RAILYARD_HEAD_Y,
   RAILYARD_RAIL_Y,
   RAILYARD_SLOT_YS,
   type RotationDeg,
+  STRAIGHT_LENGTH_MM,
   type SupportColumn,
   TOYBOX_TRAYS,
   TRAIN_LENGTH_MM,
@@ -942,6 +945,10 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   const [armedType, setArmedType] = useState<TrackPieceType | null>(null);
   /** Livery applied to the next carriage placed (the toybox swatch selection). */
   const [armedCarriageColor, setArmedCarriageColor] = useState<CarriageColorId>('blue');
+  /** Length (mm) applied to the next straight placed — the toybox length-chip
+   *  selection. Defaults to the standard plank; a non-default pick is what closes
+   *  an otherwise-asymmetric hand-built loop. */
+  const [armedStraightLength, setArmedStraightLength] = useState<number>(STRAIGHT_LENGTH_MM);
   /** The deck the operator is currently authoring on (0 = ground). New pieces
    * land on this layer and snapping is gated to it, so an upper-deck loop can be
    * built directly over the ground loop without the two merging. */
@@ -1171,13 +1178,18 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
         // A carriage carries the armed livery so it stays trackable through a
         // shunt. Other pieces never get a colorId.
         ...(pieceType === 'carriage' ? { colorId: armedCarriageColor } : {}),
+        // A straight carries the armed length only when it differs from the
+        // standard plank — an untouched pick leaves lengthMm absent (the default).
+        ...(pieceType === 'straight' && armedStraightLength !== STRAIGHT_LENGTH_MM
+          ? { lengthMm: armedStraightLength }
+          : {}),
       };
       setPieces((prev) => [...prev, piece]);
       setSelectedId(piece.id);
       // Stay armed so the operator can drop multiple of the same type without
       // re-clicking the toybox.
     },
-    [armedType, activeLayer, armedCarriageColor],
+    [armedType, activeLayer, armedCarriageColor, armedStraightLength],
   );
 
   // Reposition an already-placed piece (dragged across the canvas). Snaps +
@@ -1568,6 +1580,8 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
         onArm={armPieceType}
         carriageColor={armedCarriageColor}
         onPickCarriageColor={setArmedCarriageColor}
+        straightLength={armedStraightLength}
+        onPickStraightLength={setArmedStraightLength}
       />
     </div>
   );
@@ -1582,9 +1596,21 @@ interface ToyboxProps {
   readonly onArm: (type: TrackPieceType) => void;
   readonly carriageColor: CarriageColorId;
   readonly onPickCarriageColor: (color: CarriageColorId) => void;
+  readonly straightLength: number;
+  readonly onPickStraightLength: (mm: number) => void;
 }
 
-function Toybox({ armedType, onArm, carriageColor, onPickCarriageColor }: ToyboxProps) {
+function Toybox({
+  armedType,
+  onArm,
+  carriageColor,
+  onPickCarriageColor,
+  straightLength,
+  onPickStraightLength,
+}: ToyboxProps) {
+  // A family with variations (e.g. the straight's LILLABO lengths) shows a chip
+  // strip while it is armed; the pick is stamped on the next piece placed.
+  const variation = armedType !== null ? PIECE_VARIATIONS[armedType] : undefined;
   // Tray groups come straight from the registry (TOYBOX_TRAYS): the Track and
   // Devices staples, then the "Experiments" box — the shared home for the
   // docs/experimental viability-test pieces, kept apart so an operator
@@ -1603,7 +1629,50 @@ function Toybox({ armedType, onArm, carriageColor, onPickCarriageColor }: Toybox
       {armedType === 'carriage' && (
         <CarriageLiveryPicker selected={carriageColor} onPick={onPickCarriageColor} />
       )}
+      {variation !== undefined && (
+        <VariationPicker
+          variation={variation}
+          selected={straightLength}
+          onPick={onPickStraightLength}
+        />
+      )}
     </div>
+  );
+}
+
+interface VariationPickerProps {
+  readonly variation: PieceVariation;
+  readonly selected: number;
+  readonly onPick: (mm: number) => void;
+}
+
+/**
+ * Chip strip shown when a family with variations is armed — the straight's
+ * LILLABO length options. The pick is stamped on the next piece placed, so an
+ * operator can drop a 60 mm straight to close a loop a row of 200 mm planks
+ * leaves just short of meeting.
+ */
+function VariationPicker({ variation, selected, onPick }: VariationPickerProps) {
+  return (
+    <section className="tf-toybox__group" aria-label={`${variation.label} variations`}>
+      <h2 className="tf-toybox__heading">{variation.label}</h2>
+      <ul className="tf-toybox__variations">
+        {variation.options.map((mm) => (
+          <li key={mm}>
+            <button
+              type="button"
+              className="tf-toybox__variation"
+              data-testid={`toybox-straight-length-${mm}`}
+              aria-label={`${mm} mm`}
+              aria-pressed={selected === mm}
+              onClick={() => onPick(mm)}
+            >
+              {mm}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
@@ -2768,6 +2837,7 @@ function PieceRenderer({
       style={{ cursor: cursorStyle, touchAction: 'none', filter }}
       data-testid={`piece-${piece.id}`}
       data-piece-id={piece.id}
+      data-length-mm={piece.lengthMm}
       data-live={live ? 'true' : 'false'}
       data-powered={powered ? 'true' : 'false'}
       data-coupled-to={coupledToTrainId}

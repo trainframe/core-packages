@@ -370,6 +370,49 @@ describe('ToyTable — palette and placement', () => {
     expect(fills).toContain('#8c5bb0');
     expect(fills).not.toContain('#3f6fa6'); // not the default blue
   });
+
+  it('shows the straight length chips only when the straight tool is armed', async () => {
+    const user = userEvent.setup();
+    renderToyTable();
+
+    // No straight armed → no length chips.
+    expect(screen.queryByTestId('toybox-straight-length-60')).toBeNull();
+
+    await user.click(screen.getByTestId('toybox-straight'));
+    // The LILLABO family — the short members are the loop-closers.
+    expect(screen.getByTestId('toybox-straight-length-30')).toBeInTheDocument();
+    expect(screen.getByTestId('toybox-straight-length-60')).toBeInTheDocument();
+    expect(screen.getByTestId('toybox-straight-length-200')).toBeInTheDocument();
+  });
+
+  it('places a straight at the length picked from the chip strip', async () => {
+    const user = userEvent.setup();
+    renderToyTable();
+
+    await user.click(screen.getByTestId('toybox-straight'));
+    await user.click(screen.getByTestId('toybox-straight-length-60'));
+    await user.click(screen.getByTestId('toy-table-canvas'));
+
+    // The placed straight carries the picked 60 mm override (exposed for the
+    // hand-build helpers + so the compiled topology uses the shorter plank).
+    const placed = document.querySelector('[data-testid^="piece-straight-"]') as HTMLElement | null;
+    if (!placed) throw new Error('no straight placed');
+    expect(placed.getAttribute('data-length-mm')).toBe('60');
+  });
+
+  it('stamps no length override on a straight placed at the default 200 mm', async () => {
+    const user = userEvent.setup();
+    renderToyTable();
+
+    // Arm the straight but leave the default pick (200 mm) — an untouched pick
+    // must leave lengthMm absent, so an ordinary plank stays a plain default.
+    await user.click(screen.getByTestId('toybox-straight'));
+    await user.click(screen.getByTestId('toy-table-canvas'));
+
+    const placed = document.querySelector('[data-testid^="piece-straight-"]') as HTMLElement | null;
+    if (!placed) throw new Error('no straight placed');
+    expect(placed.getAttribute('data-length-mm')).toBeNull();
+  });
 });
 
 /** Place an armed piece of the given type and return its piece id. */
