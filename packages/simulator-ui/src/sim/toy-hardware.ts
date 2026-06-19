@@ -740,16 +740,44 @@ export class ToyHardware {
     if (this.switches.has(deviceId)) return;
     const junctionMarkerId = `M-${piece.id}`;
     const positions = piece.type === 'turntable' ? [...TURNTABLE_POSITIONS] : ['main', 'divert'];
+    const actuator = physicsSwitchActuator(this.world, junctionMarkerId);
     const device = new SwitchDevice(deviceId, {
       platform: this.platformFor(deviceId),
-      actuator: physicsSwitchActuator(this.world, junctionMarkerId),
+      actuator,
       junctionMarkerId,
       positions,
       newId: this.newId,
     });
     device.start();
     this.switches.set(deviceId, device);
-    this.restoreSwitch(deviceId, junctionMarkerId);
+    /* Re-assert this junction's position onto the freshly-compiled world. Every
+     *  rebuild makes a NEW `PhysicsWorld` whose switch map starts empty — unless the
+     *  position is set, the net gates the junction's facing move CLOSED, so an
+     *  exploring/scheduled train can never cross it and the track beyond is never
+     *  discovered. The desired position is: a pre-rebuild snapshot if any (the
+     *  `rebuild()` path), else the position carried across a `syncLive` rebuild
+     *  (which doesn't snapshot), else the through-leg REST default — a turnout has a
+     *  defined rest position. Set the world DIRECTLY via the actuator (synchronous,
+     *  no bus round-trip on every rebuild); only when the position actually CHANGES
+     *  do we go through `commandSwitch` to publish a `switch_state_changed`. */
+    const snap = this.pendingDeviceState.get(deviceId);
+    this.pendingDeviceState.delete(deviceId);
+    const snapPosition = snap?.kind === 'switch' ? snap.position : undefined;
+    const desired = snapPosition ?? this.switchPositions.get(deviceId) ?? positions[0];
+    if (desired === undefined) return;
+    if (desired === positions[0]) {
+      /* The through-leg REST position: set the world SILENTLY (no bus chatter on
+       *  every rebuild — a turnout at rest doesn't keep announcing itself). The
+       *  direct actuator.set is what opens the facing move on the freshly-compiled
+       *  world; without it the junction is gated closed and undiscoverable. */
+      actuator.set(desired);
+      this.switchPositions.set(deviceId, desired);
+    } else {
+      /* A THROWN (non-default) position re-asserts itself on the bus when the
+       *  device respawns — like a held gate announcing where it stands after a
+       *  rebuild — so observers see the live position. */
+      this.commandSwitch(deviceId, junctionMarkerId, desired);
+    }
   }
 
   // ---- railyard gantry --------------------------------------------------
@@ -842,14 +870,6 @@ export class ToyHardware {
     this.switchPositions.clear();
     this.gateWithholds.clear();
     return out;
-  }
-
-  /** Re-seat a respawned switch at its pre-rebuild position (re-confirms on the bus). */
-  private restoreSwitch(deviceId: string, junctionMarkerId: string): void {
-    const state = this.pendingDeviceState.get(deviceId);
-    if (state?.kind !== 'switch') return;
-    this.pendingDeviceState.delete(deviceId);
-    this.commandSwitch(deviceId, junctionMarkerId, state.position);
   }
 
   /** Re-assert a respawned gate's withholds (a raised span stays raised). */
