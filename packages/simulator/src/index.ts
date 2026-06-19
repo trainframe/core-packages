@@ -33,3 +33,9 @@ export type {
   SpawnTrainOptions,
 } from './physics-env.js';
 export type { RailNetwork } from './physics/network.js';
+
+/* Track-piece geometry: the world endpoints of a placed piece. Public so a
+ *  geometry-aware consumer (a test chaining pieces, a layout tool) can read where
+ *  a piece's rails end without recomputing the arc/junction maths. */
+export { getEndpoints } from './track/pieces.js';
+export type { TrackPiece, TrackPieceType } from './track/pieces.js';
