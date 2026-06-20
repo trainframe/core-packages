@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { type ClosureResult, selectAnchor, solveClose, solveFollow } from './flex-solver.js';
 import { FLEX_BUDGET_DEG, effectivePoses, jointKey } from './flex.js';
-import { buildJoints } from './loops.js';
+import { buildJoints, findLoops } from './loops.js';
 import {
   type RotationDeg,
   type TrackEndpoint,
@@ -89,6 +89,67 @@ function buildOpenChainOfFive(): TrackPiece[] {
   }
 
   return pieces;
+}
+
+/*
+ * An OPEN chain of `n` curves snapped end-to-end (ids C0..C{n-1}) but NOT
+ * joined back into a ring. For n < 8 this is a genuine open arc — findLoops
+ * sees no cycle — so the dragged piece's free endpoint is a real free end.
+ */
+function buildOpenCurveChain(n: number): TrackPiece[] {
+  const pieces: TrackPiece[] = [];
+  const first = computePlacement(450, 300, 'curve', pieces);
+  pieces.push(piece('C0', 'curve', first.x, first.y, first.rotationDeg));
+  for (let i = 1; i < n; i++) {
+    const prev = pieces[i - 1];
+    if (prev === undefined) throw new Error('unreachable');
+    const exit = getEndpoints(prev)[1];
+    if (exit === undefined) throw new Error('unreachable');
+    const placement = computePlacement(exit.x, exit.y, 'curve', pieces);
+    pieces.push(piece(`C${i}`, 'curve', placement.x, placement.y, placement.rotationDeg));
+  }
+  return pieces;
+}
+
+/*
+ * A closure target that is the dragged piece's rest free-endpoint pose rigidly
+ * swung `swingDeg` about the anchor centre. The swing keeps the target
+ * kinematically reachable by a few flexed joints (the CCD drives position only,
+ * so an arbitrary nudge would leave a heading the solver can't fix). Returns the
+ * target endpoint (with anti-parallel outgoing) and the rest-pose gap to it.
+ */
+function swungClosureTarget(
+  pieces: ReadonlyArray<TrackPiece>,
+  anchorId: string,
+  dragged: TrackPiece,
+  freeEndpointIdx: number,
+  swingDeg: number,
+): { target: TrackEndpoint; restGap: number } {
+  const restPoses = effectivePoses(pieces, new Map(), anchorId);
+  const anchorPose = restPoses.get(anchorId);
+  const draggedPose = restPoses.get(dragged.id);
+  if (anchorPose === undefined || draggedPose === undefined) throw new Error('unreachable');
+  const restFree = getEndpointsAt(dragged, draggedPose)[freeEndpointIdx];
+  if (restFree === undefined) throw new Error('unreachable');
+  const rad = (swingDeg * Math.PI) / 180;
+  const vx = restFree.x - anchorPose.x;
+  const vy = restFree.y - anchorPose.y;
+  const target: TrackEndpoint = {
+    x: anchorPose.x + vx * Math.cos(rad) - vy * Math.sin(rad),
+    y: anchorPose.y + vx * Math.sin(rad) + vy * Math.cos(rad),
+    /* Anti-parallel at the swung pose: the free heading swings by swingDeg too. */
+    outgoingAngleDeg: restFree.outgoingAngleDeg + swingDeg - 180,
+    layer: 0,
+  };
+  return { target, restGap: dist(restFree, target) };
+}
+
+/* Smallest |angle| (deg) between `heading` and anti-parallel to `targetOutgoing`. */
+function antiParallelHeadingError(heading: number, targetOutgoing: number): number {
+  let d = (heading - (targetOutgoing + 180)) % 360;
+  if (d > 180) d -= 360;
+  if (d <= -180) d += 360;
+  return Math.abs(d);
 }
 
 /* ---------------------------------------------------------------------------
@@ -350,5 +411,60 @@ describe('solveClose', () => {
     const solo: TrackPiece[] = [piece('SOLO', 'straight', 0, 0, 0)];
     const target: TrackEndpoint = { x: 500, y: 200, outgoingAngleDeg: 180, layer: 0 };
     expect(solveClose(solo, 'SOLO', 0, target).feasible).toBe(false);
+  });
+
+  it('closes a genuine non-zero gap with non-empty flex', () => {
+    /*
+     * The other closure tests use the 8-curve ring, which closes EXACTLY at
+     * rest (8 × 45° = 360°): the residual is 0 mm and the solver returns an
+     * empty flex — so they never prove the solver actually FLEXES a real gap
+     * shut. This test builds a genuinely OPEN chain (a quarter-ring of four
+     * curves; findLoops sees no cycle) and asks the solver to close a real,
+     * non-zero gap that the ±FLEX_BUDGET_DEG-per-joint budget can reach.
+     *
+     * To make the gap kinematically reachable (the CCD drives position only;
+     * heading is a feasibility gate), the target is the rest free-endpoint pose
+     * rigidly swung a small angle about the anchor — exactly the kind of small
+     * rotation a few flexed joints can reproduce. The swing here is ~10 mm of
+     * positional gap, well within the chain's reach but far from zero.
+     */
+    const chain = buildOpenCurveChain(4);
+    const draggedId = 'C3';
+    const freeEndpointIdx = 1;
+    const anchorId = selectAnchor(chain, draggedId);
+    const dragged = chain.find((p) => p.id === draggedId);
+    if (dragged === undefined) throw new Error('unreachable');
+
+    /* The chain is genuinely open — no cycle exists at rest. */
+    expect(findLoops(chain)).toHaveLength(0);
+
+    const { target, restGap } = swungClosureTarget(chain, anchorId, dragged, freeEndpointIdx, 1.5);
+
+    /* The gap the solver must close is real and well above 1 mm. */
+    expect(restGap).toBeGreaterThan(5);
+
+    const res: ClosureResult = solveClose(chain, draggedId, freeEndpointIdx, target);
+
+    /* Feasible, and the flex is genuinely non-empty (joints actually rotated). */
+    expect(res.feasible).toBe(true);
+    const flexedJoints = [...res.flex.values()].filter((f) => Math.abs(f.deg) > 1e-6);
+    expect(flexedJoints.length).toBeGreaterThan(0);
+    for (const f of flexedJoints) {
+      expect(Math.abs(f.deg)).toBeLessThanOrEqual(FLEX_BUDGET_DEG + 1e-6);
+    }
+
+    /* Applying the flex brings the free endpoint onto the target: position
+     * gap < 1 mm and heading anti-parallel within 1°. */
+    const closedPoses = effectivePoses(chain, res.flex, anchorId);
+    expect(gapAt(closedPoses, dragged, freeEndpointIdx, target)).toBeLessThan(1.0);
+    const closedPose = closedPoses.get(draggedId);
+    if (closedPose === undefined) throw new Error('unreachable');
+    const closedFree = getEndpointsAt(dragged, closedPose)[freeEndpointIdx];
+    if (closedFree === undefined) throw new Error('unreachable');
+    const headingErr = antiParallelHeadingError(
+      closedFree.outgoingAngleDeg,
+      target.outgoingAngleDeg,
+    );
+    expect(headingErr).toBeLessThan(1.0);
   });
 });
