@@ -1374,12 +1374,37 @@ describe('ToyTable — velocity gate (flex / detach)', () => {
 
       /* After a slow drag, flex is applied: B's effective rotation is non-zero.
          The transform shows the flexed rotation (a small angle, within ±2°). */
-      const transform = bEl.getAttribute('transform') ?? '';
-      const rotMatch = /rotate\(([-\d.]+)\)/.exec(transform);
-      const rotDeg =
-        rotMatch !== null && rotMatch[1] !== undefined ? Number.parseFloat(rotMatch[1]) : 0;
-      expect(Math.abs(rotDeg)).toBeGreaterThan(0);
-      expect(Math.abs(rotDeg)).toBeLessThanOrEqual(2 + 1e-3); /* within ±FLEX_BUDGET_DEG */
+      const transformDuringDrag = bEl.getAttribute('transform') ?? '';
+      const rotMatchDuring = /rotate\(([-\d.]+)\)/.exec(transformDuringDrag);
+      const rotDegDuring =
+        rotMatchDuring !== null && rotMatchDuring[1] !== undefined
+          ? Number.parseFloat(rotMatchDuring[1])
+          : 0;
+      expect(Math.abs(rotDegDuring)).toBeGreaterThan(0);
+      expect(Math.abs(rotDegDuring)).toBeLessThanOrEqual(2 + 1e-3); /* within ±FLEX_BUDGET_DEG */
+
+      /* Release the pointer — flex must PERSIST (design: hold whatever flex the
+         chain was given; no snap-back on pointer-up). */
+      act(() => {
+        bEl.dispatchEvent(
+          new MouseEvent('pointerup', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            clientX: 1300,
+            clientY: 540,
+          }),
+        );
+      });
+
+      const transformAfterRelease = bEl.getAttribute('transform') ?? '';
+      const rotMatchAfter = /rotate\(([-\d.]+)\)/.exec(transformAfterRelease);
+      const rotDegAfter =
+        rotMatchAfter !== null && rotMatchAfter[1] !== undefined
+          ? Number.parseFloat(rotMatchAfter[1])
+          : 0;
+      /* Flex is persistent — the bent rotation is still non-zero after pointer-up. */
+      expect(Math.abs(rotDegAfter)).toBeGreaterThan(0);
     } finally {
       restore();
     }

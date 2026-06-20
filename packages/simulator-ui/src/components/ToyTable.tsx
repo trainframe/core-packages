@@ -2704,8 +2704,6 @@ function Table({
 
   function handlePieceDragEnd(pieceId: string, clientX: number, clientY: number) {
     setPieceDragPreview(null);
-    /* Clear any live flex — the chain snaps back to rest pose on release. */
-    onDragFlex(new Map());
     // Released over the scan box → scan it (same confirm flow as an HTML5 drop).
     const target =
       typeof document.elementFromPoint === 'function'
