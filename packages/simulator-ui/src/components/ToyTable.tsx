@@ -6,7 +6,12 @@ import type { BodyPose } from '@trainframe/simulator/physics/observation.js';
 import { nearestStartEdge } from '@trainframe/simulator/sim/nearest-edge.js';
 import { type WorldPosition, computeTrainTrails } from '@trainframe/simulator/track/coupling.js';
 import { composeEdgePath, pieceIdFromMarkerId } from '@trainframe/simulator/track/edge-path.js';
-import { solveFollow } from '@trainframe/simulator/track/flex-solver.js';
+import {
+  type ClosureResult,
+  selectAnchor,
+  solveClose,
+  solveFollow,
+} from '@trainframe/simulator/track/flex-solver.js';
 import { type FlexState, effectivePoses, jointKey } from '@trainframe/simulator/track/flex.js';
 import { SNAP_DISTANCE, compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
 import { buildJoints } from '@trainframe/simulator/track/loops.js';
@@ -38,6 +43,7 @@ import {
   TRAIN_LENGTH_MM,
   TURNTABLE_POSITIONS,
   TURNTABLE_POSITION_ANGLE_DEG,
+  type TrackEndpoint,
   type TrackPiece,
   type TrackPieceType,
   VISION_LED,
@@ -46,6 +52,7 @@ import {
   craneCratePath,
   craneTrolley,
   getEndpoints,
+  getEndpointsAt,
   getPieceShape,
   isDevicePiece,
   isWireDevice,
@@ -59,6 +66,7 @@ import {
   turntableDeck,
 } from '@trainframe/simulator/track/pieces.js';
 import {
+  CONNECT_CAPTURE_MM,
   computeMovePlacement,
   computePlacement,
   nearestConnectablePoint,
@@ -2380,6 +2388,104 @@ interface TableProps {
   readonly onDragDetach: (pieceId: string) => void;
 }
 
+/* Endpoint reference carrying the owning piece ID (for coincidence checks). */
+interface TaggedEndpoint {
+  readonly x: number;
+  readonly y: number;
+  readonly outgoingAngleDeg: number;
+  readonly layer: number;
+  readonly pieceId: string;
+}
+
+/*
+ * Open endpoints on pieces other than `excludePieceId`. "Open" = not coincident
+ * (within SNAP_DISTANCE) with any endpoint from a DIFFERENT piece in the list.
+ * Coincident endpoints are already joined; only open ones are closure targets.
+ */
+function openEndpointsOf(
+  trackPieces: ReadonlyArray<TrackPiece>,
+  excludePieceId: string,
+): ReadonlyArray<TaggedEndpoint> {
+  const others = trackPieces.filter((p) => p.id !== excludePieceId);
+  const all: TaggedEndpoint[] = others.flatMap((p) =>
+    getEndpoints(p).map((ep) => ({ ...ep, pieceId: p.id })),
+  );
+  return all.filter(
+    (candidate) =>
+      !all.some(
+        (other) =>
+          other !== candidate &&
+          other.pieceId !== candidate.pieceId &&
+          Math.hypot(other.x - candidate.x, other.y - candidate.y) <= SNAP_DISTANCE,
+      ),
+  );
+}
+
+/*
+ * Free endpoint of the dragged piece = the endpoint farthest from the anchor.
+ * Returns `{ ep, idx }` or null when the piece has no endpoints.
+ */
+function freeEndpointOf(
+  piece: TrackPiece,
+  pose: { x: number; y: number; rotationDeg: number },
+  anchorPos: { x: number; y: number },
+): { ep: TrackEndpoint; idx: number } | null {
+  const eps = getEndpointsAt(piece, pose);
+  let best: TrackEndpoint | undefined;
+  let bestIdx = 0;
+  let bestDist = -1;
+  for (let i = 0; i < eps.length; i++) {
+    const ep = eps[i];
+    if (ep === undefined) continue;
+    const d = Math.hypot(ep.x - anchorPos.x, ep.y - anchorPos.y);
+    if (d > bestDist) {
+      bestDist = d;
+      best = ep;
+      bestIdx = i;
+    }
+  }
+  return best !== undefined ? { ep: best, idx: bestIdx } : null;
+}
+
+/**
+ * Try to close a loop: find the dragged piece's free endpoint in its current
+ * effective pose, check if any open endpoint on another piece is within
+ * CONNECT_CAPTURE_MM, and if so run solveClose. Returns the feasible result or
+ * null. Pure — no React state, no refs.
+ */
+function detectLoopClosure(
+  trackPieces: ReadonlyArray<TrackPiece>,
+  pieceId: string,
+  flex: FlexState,
+  anchorId: string,
+): ClosureResult | null {
+  const poses = effectivePoses(trackPieces, flex, anchorId);
+  const draggedPiece = trackPieces.find((p) => p.id === pieceId);
+  const anchorPose = poses.get(anchorId);
+  const draggedPose = poses.get(pieceId);
+  if (draggedPiece === undefined || anchorPose === undefined || draggedPose === undefined) {
+    return null;
+  }
+
+  const free = freeEndpointOf(draggedPiece, draggedPose, anchorPose);
+  if (free === null) return null;
+
+  const open = openEndpointsOf(trackPieces, pieceId);
+  let closureTarget: TaggedEndpoint | undefined;
+  let closureTargetDist = CONNECT_CAPTURE_MM;
+  for (const candidate of open) {
+    const d = Math.hypot(candidate.x - free.ep.x, candidate.y - free.ep.y);
+    if (d < closureTargetDist) {
+      closureTargetDist = d;
+      closureTarget = candidate;
+    }
+  }
+  if (closureTarget === undefined) return null;
+
+  const result = solveClose(trackPieces, pieceId, free.idx, closureTarget);
+  return result.feasible ? result : null;
+}
+
 function Table({
   pieces,
   liveIds,
@@ -2480,6 +2586,16 @@ function Table({
   /** The open endpoint a dragged toybox piece will snap onto, highlighted
    * during dragover. */
   const [snapHighlight, setSnapHighlight] = useState<SnapTarget | null>(null);
+
+  /* Closure flash: the piece ID whose free endpoint is currently within reach
+     of an open endpoint AND solveClose returned feasible. Null when no closure
+     is imminent. Stored as state so PieceRenderer re-renders the flash glyph. */
+  const [closureAvailableId, setClosureAvailableId] = useState<string | null>(null);
+  /* The solved flex that closes the loop — committed to onDragFlex on drop
+     when closureAvailableId is set. Stored in a ref so handlePieceDragEnd can
+     read the latest value without a stale closure, and without needing a
+     re-render cycle between the last move and the drop. */
+  const closureFlexRef = useRef<ClosureResult | null>(null);
 
   // Pan state stored in refs — no render needed while panning in progress.
   const isPanningRef = useRef(false);
@@ -2668,6 +2784,8 @@ function Table({
     const moving = pieces.find((p) => p.id === pieceId);
     if (moving === undefined) {
       /* Piece was detached earlier this drag — follow cursor freely. */
+      closureFlexRef.current = null;
+      setClosureAvailableId(null);
       setPieceDragPreview({ id: pieceId, x, y, rotationDeg: 0 });
       return;
     }
@@ -2676,6 +2794,8 @@ function Table({
       /* Fast drag: yank the piece free from its chain. onDragDetach removes it
          from rest-pose pieces; subsequent move events hit the undefined branch
          above and follow the cursor as a free placement. */
+      closureFlexRef.current = null;
+      setClosureAvailableId(null);
       onDragDetach(pieceId);
       setPieceDragPreview({ id: pieceId, x, y, rotationDeg: asTrackPiece(moving).rotationDeg });
       return;
@@ -2688,8 +2808,25 @@ function Table({
       /* The piece is in a chain — bend it live and keep the visual at its
          current rest position (the chain bends, the piece does not jump). */
       onDragFlex(flex);
+
+      /* Closure detection: check whether the dragged piece's free endpoint is
+         near an open endpoint on another piece and a loop closure is solvable. */
+      const anchorId = selectAnchor(trackPieces, pieceId);
+      const closureResult = detectLoopClosure(trackPieces, pieceId, flex, anchorId);
+      if (closureResult !== null) {
+        closureFlexRef.current = closureResult;
+        setClosureAvailableId(pieceId);
+      } else {
+        closureFlexRef.current = null;
+        setClosureAvailableId(null);
+      }
+
       return;
     }
+
+    /* No chain — clear any stale closure state. */
+    closureFlexRef.current = null;
+    setClosureAvailableId(null);
 
     /* Free piece (no joints) — snap-preview as before. */
     const others = asTrackPieces(pieces.filter((p) => p.id !== pieceId));
@@ -2704,6 +2841,17 @@ function Table({
 
   function handlePieceDragEnd(pieceId: string, clientX: number, clientY: number) {
     setPieceDragPreview(null);
+
+    /* Closure commit: if a feasible closure was found on the last move event,
+       commit it now so the loop closes and persists. Clear closure state. */
+    const closure = closureFlexRef.current;
+    closureFlexRef.current = null;
+    setClosureAvailableId(null);
+    if (closure?.feasible === true) {
+      onDragFlex(closure.flex);
+      return;
+    }
+
     // Released over the scan box → scan it (same confirm flow as an HTML5 drop).
     const target =
       typeof document.elementFromPoint === 'function'
@@ -2864,6 +3012,7 @@ function Table({
               }
               onDragMove={handlePieceDragMove}
               onDragEnd={handlePieceDragEnd}
+              closureAvailable={closureAvailableId === p.id}
             />
           );
           return (
@@ -3019,6 +3168,10 @@ interface PieceRendererProps {
   /** Drag released (client coords) — reposition the piece, or scan it if let
    * go over the scan box. */
   readonly onDragEnd: (pieceId: string, clientX: number, clientY: number) => void;
+  /* True while this piece is being slow-dragged and its free endpoint is close
+     enough to an open endpoint that a loop closure is feasible — renders the
+     flash affordance so the operator sees that releasing will snap the loop shut. */
+  readonly closureAvailable: boolean;
 }
 
 /** The pointer cursor for a piece body: crosshair while a type is armed
@@ -3063,6 +3216,7 @@ function PieceRenderer({
   dragOverride,
   onDragMove,
   onDragEnd,
+  closureAvailable,
 }: PieceRendererProps) {
   const shape = getPieceShape(asTrackPiece(piece));
   const isDevice = isDevicePiece(piece.type);
@@ -3242,6 +3396,7 @@ function PieceRenderer({
       data-powered={powered ? 'true' : 'false'}
       data-coupled-to={coupledToTrainId}
       data-invalid-overlap={invalidOverlap ? 'true' : undefined}
+      data-closure-available={closureAvailable ? 'true' : undefined}
       aria-label={ariaLabel}
     >
       <PieceBody shape={shape} bodyFill={bodyFill} tint={tint} isDevice={isDevice} dim={dim} />
