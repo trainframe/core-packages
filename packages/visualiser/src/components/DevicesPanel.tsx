@@ -1,5 +1,6 @@
-import { Panel } from '@trainframe/ui-kit';
-import { useMemo } from 'react';
+import { Button, Panel } from '@trainframe/ui-kit';
+import { useMemo, useState } from 'react';
+import { deleteTrain, revokeClearance } from '../api/admin-client.js';
 import { useLastScanned } from '../state/use-last-scanned.js';
 import { type VisualiserMarker, useLayoutState } from '../state/use-layout-state.js';
 import { type RegisteredDevice, useRegisteredDevices } from '../state/use-registered-devices.js';
@@ -7,6 +8,7 @@ import { type ScheduleEntry, useScheduleState } from '../state/use-schedule-stat
 import { useTrainPositions } from '../state/use-train-positions.js';
 import { type TrainStatus, useTrainStatuses } from '../state/use-train-statuses.js';
 import { trainColor } from '../train-color.js';
+import { ConfirmButton } from './ConfirmButton.js';
 import './DevicesPanel.css';
 
 const CAPABILITY_CONTROLS_MOTION = 'core.controls_motion';
@@ -20,7 +22,7 @@ const CAPABILITY_ASSIGNS_TAGS = 'core.assigns_tags';
  * (`tag_observed` / `tag_assignment`), the matching row briefly highlights
  * so "the visualiser recognises what I just scanned" is visible at a glance.
  */
-export function DevicesPanel() {
+export function DevicesPanel({ adminApiUrl }: { readonly adminApiUrl: string }) {
   const devices = useRegisteredDevices();
   const layout = useLayoutState();
   const schedules = useScheduleState();
@@ -47,6 +49,7 @@ export function DevicesPanel() {
                 marker={positions.get(train.device_id)}
                 status={statuses.get(train.device_id)}
                 highlighted={train.device_id === lastScanned}
+                adminApiUrl={adminApiUrl}
               />
             ))}
           </ul>
@@ -137,10 +140,18 @@ interface TrainRowProps {
   readonly marker: string | undefined;
   readonly status: TrainStatus | undefined;
   readonly highlighted: boolean;
+  readonly adminApiUrl: string;
 }
 
-function TrainRow({ device, schedule, marker, status, highlighted }: TrainRowProps) {
+function TrainRow({ device, schedule, marker, status, highlighted, adminApiUrl }: TrainRowProps) {
   const where = describeTrainPosition(marker, status);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = (action: () => Promise<void>) => () => {
+    setError(null);
+    action().catch((err) => setError(err instanceof Error ? err.message : 'request failed'));
+  };
+
   return (
     <li
       className={rowClass(highlighted)}
@@ -158,6 +169,25 @@ function TrainRow({ device, schedule, marker, status, highlighted }: TrainRowPro
         {schedule ? `route ${schedule.stops.join(' → ')}` : 'no schedule'}
       </span>
       <span className="tf-devices__row-meta">{where}</span>
+      <span className="tf-devices__row-actions">
+        <Button
+          variant="secondary"
+          onClick={run(() => revokeClearance(adminApiUrl, device.device_id))}
+        >
+          Stop
+        </Button>
+        <ConfirmButton
+          label="Delete"
+          confirmLabel="Confirm delete"
+          variant="danger"
+          onConfirm={run(() => deleteTrain(adminApiUrl, device.device_id))}
+        />
+      </span>
+      {error !== null && (
+        <span className="tf-devices__row-error" role="alert">
+          {error}
+        </span>
+      )}
     </li>
   );
 }

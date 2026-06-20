@@ -57,6 +57,9 @@ export class Server {
   private readonly newId: () => string;
   private unsubscribe: (() => void) | null = null;
   private unsubscribeOperator: (() => void) | null = null;
+  /* Ledger of every retained railway/state/* topic the broker is holding. */
+  private readonly retainedStateTopics = new Set<string>();
+  private unsubscribeState: (() => void) | null = null;
 
   constructor(private readonly options: ServerOptions) {
     this.registry = new CapabilityRegistry();
@@ -91,6 +94,16 @@ export class Server {
     this.unsubscribeOperator = this.options.client.subscribe('railway/operator/+', (msg) =>
       this.handleOperatorCommand(msg.topic, msg.payload),
     );
+    /*
+     * Maintain a ledger of retained state topics. The broker replays every
+     * retained railway/state/* message on subscribe, so this picks up ghosts
+     * published by a previous server instance or the simulator — exactly the
+     * topics reset() must tombstone. Our own retained publishes feed back here
+     * too, which is harmless (re-adding a topic we already track).
+     */
+    this.unsubscribeState = this.options.client.subscribe('railway/state/#', (msg) => {
+      this.retainedStateTopics.add(msg.topic);
+    });
     this.publishLayoutState();
     this.publishInitialDeadlockState();
     this.learnMode.publishInitialState();
@@ -102,6 +115,8 @@ export class Server {
     this.unsubscribe = null;
     this.unsubscribeOperator?.();
     this.unsubscribeOperator = null;
+    this.unsubscribeState?.();
+    this.unsubscribeState = null;
   }
 
   /**
@@ -200,6 +215,38 @@ export class Server {
   }
 
   /**
+   * Forget a train entirely (operator "delete from memory"). Returns false if
+   * no such device is registered, so the HTTP layer can 404. Shares the same
+   * forgetDevice path as device_disconnected.
+   */
+  deleteTrain(trainId: string): boolean {
+    const fx = this.scheduler.forgetDevice(trainId);
+    if (fx.length === 0) return false;
+    this.dispatchEffects(fx);
+    return true;
+  }
+
+  /**
+   * Remove every orphaned (zero-edge) marker from the live layout and
+   * republish the pruned graph. Returns the removed marker ids.
+   */
+  pruneOrphanMarkers(): string[] {
+    const pruned = this.scheduler.getLayout().pruneOrphanMarkers();
+    if (pruned.length > 0) {
+      const layout = this.scheduler.getLayout();
+      this.dispatchEffects([
+        {
+          kind: 'update_state_snapshot',
+          entity_type: 'layout',
+          entity_id: layout.name,
+          state: layout.toLayout(),
+        },
+      ]);
+    }
+    return pruned;
+  }
+
+  /**
    * Inject an event into the scheduler exactly as if it had arrived on the
    * wire, then dispatch any effects. Used by the admin HTTP API for things
    * like operator-driven `tag_assignment`. Internal: prefer publishing on
@@ -236,6 +283,39 @@ export class Server {
   /** Test/observability hook. */
   getLearnMode(): LearnMode {
     return this.learnMode;
+  }
+
+  /**
+   * Blank-slate the railway: forget all in-memory state and tombstone every
+   * retained railway/state/* topic the broker is holding, then re-establish
+   * clean baselines. Synchronous — the topic ledger is maintained from start().
+   */
+  reset(): { topics_cleared: number } {
+    let cleared = 0;
+    for (const topic of this.retainedStateTopics) {
+      const payload = emptyPayloadForStateTopic(topic);
+      if (!payload) continue;
+      this.options.client.publish(topic, payload, { retain: true });
+      cleared += 1;
+    }
+    this.scheduler.reset();
+    /*
+     * Re-establish the singleton baselines (layout/deadlock/track_learning),
+     * overwriting whatever the ledger loop left. The layout is the live, now
+     * empty graph — not the static declared layout.
+     */
+    const layout = this.scheduler.getLayout();
+    this.dispatchEffects([
+      {
+        kind: 'update_state_snapshot',
+        entity_type: 'layout',
+        entity_id: layout.name,
+        state: layout.toLayout(),
+      },
+    ]);
+    this.publishInitialDeadlockState();
+    this.learnMode.publishInitialState();
+    return { topics_cleared: cleared };
   }
 
   // ----------------- internals -----------------
@@ -360,6 +440,30 @@ function parseJsonEnvelope(payload: Uint8Array): IncomingEnvelope | null {
 
 function encodeJson(value: unknown): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(value));
+}
+
+/**
+ * The recognised-empty retained payload that tells each state-family consumer
+ * "this entity is gone". Per-id families get a crafted tombstone; the singleton
+ * families (layout/deadlock/track_learning) are re-published as clean baselines
+ * by reset() directly, so this returns null for them.
+ */
+function emptyPayloadForStateTopic(topic: string): Uint8Array | null {
+  const parts = topic.split('/');
+  const family = parts[2];
+  const id = parts.slice(3).join('/');
+  if (family === 'devices') return encodeJson({});
+  if (family === 'schedule') return encodeJson({ train_id: id });
+  if (family === 'clearance') return encodeJson({ train_id: id, cleared_edges: [] });
+  /* Tags are published as { assigned_kind, target_id } on assignment; any
+   * recognised payload tombstones the retained slot and signals the consumer
+   * (use-unknown-tags) to drop the entry from its pending list. */
+  if (family === 'tags') return encodeJson({});
+  /* Switches are published as { position, confirmed } on switch_state_changed;
+   * no visualiser consumer exists yet, but we still clear the retained slot so
+   * the broker never diverges from the in-memory scheduler state after reset. */
+  if (family === 'switches') return encodeJson({});
+  return null;
 }
 
 function defaultNewId(): string {

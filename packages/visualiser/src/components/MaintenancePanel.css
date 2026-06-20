@@ -1,0 +1,27 @@
+.tf-maintenance {
+  border: 2px solid var(--tf-vis-color-warn-border);
+  background-color: var(--tf-vis-color-warn-bg);
+}
+
+.tf-maintenance__hint {
+  color: var(--tf-vis-color-warn-text);
+  margin: 0 0 0.5rem;
+  font-size: 0.9em;
+}
+
+.tf-maintenance__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.tf-maintenance__message {
+  color: var(--tf-vis-color-fg);
+  margin: 0.5rem 0 0;
+}
+
+.tf-maintenance__error {
+  color: var(--tf-vis-color-warn-text);
+  margin: 0.5rem 0 0;
+}

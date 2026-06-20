@@ -281,6 +281,149 @@ describe('Server — operator commands on railway/operator/+', () => {
   });
 });
 
+describe('device disconnect clears retained device registration', () => {
+  it('tombstones railway/state/devices/<id> so the train does not resurrect', () => {
+    const { client } = makeServer();
+    publishWireEvent(client, 'device_registered', 'T1', { capabilities: ['core.controls_motion'] });
+
+    /* Sanity: the device is registered as a non-empty retained snapshot. */
+    const registered = client.retained.get('railway/state/devices/T1');
+    expect(registered).toBeDefined();
+    if (!registered) throw new Error('unreachable');
+    expect(decode<{ capabilities: string[] }>(registered.payload).capabilities).toContain(
+      'core.controls_motion',
+    );
+
+    publishWireEvent(client, 'device_disconnected', 'T1', {});
+
+    /* The retained device topic is now an empty tombstone (no capabilities). */
+    const after = client.retained.get('railway/state/devices/T1');
+    expect(after).toBeDefined();
+    if (!after) throw new Error('unreachable');
+    expect(decode<Record<string, unknown>>(after.payload)).toEqual({});
+  });
+});
+
+describe('scheduler reset clears all in-memory state', () => {
+  it('forgets trains and learned layout', () => {
+    const { server, client } = makeServer();
+    publishWireEvent(client, 'device_registered', 'T1', { capabilities: ['core.controls_motion'] });
+    expect(server.getScheduler().getTrainIds()).toContain('T1');
+
+    server.getScheduler().reset();
+
+    expect(server.getScheduler().getTrainIds()).toEqual([]);
+    expect(server.getScheduler().getTrainState('T1')).toBeUndefined();
+    /* Layout reverts to the declared baseline (SIMPLE_LOOP has 4 markers). */
+    expect(server.getScheduler().getLayout().toLayout().markers).toHaveLength(4);
+  });
+});
+
+describe('Server.reset blank-slates server and broker', () => {
+  it('tombstones retained ghosts the server never registered', () => {
+    const { server, client } = makeServer();
+    /*
+     * Simulate a ghost left by a previous server/sim instance: a retained
+     * device snapshot published directly to the broker after start(). The
+     * server's railway/state/# ledger should still pick it up.
+     */
+    client.publish(
+      'railway/state/devices/GHOST',
+      new TextEncoder().encode(JSON.stringify({ capabilities: ['core.controls_motion'] })),
+      { retain: true },
+    );
+    client.publish(
+      'railway/state/schedule/GHOST',
+      new TextEncoder().encode(
+        JSON.stringify({ train_id: 'GHOST', route_id: 'r', stops: ['M1'], current_stop_index: 0 }),
+      ),
+      { retain: true },
+    );
+
+    const summary = server.reset();
+
+    expect(summary.topics_cleared).toBeGreaterThanOrEqual(2);
+
+    const ghostDevice = client.retained.get('railway/state/devices/GHOST');
+    expect(ghostDevice).toBeDefined();
+    if (!ghostDevice) throw new Error('unreachable');
+    expect(decode<Record<string, unknown>>(ghostDevice.payload)).toEqual({});
+
+    const ghostSchedule = client.retained.get('railway/state/schedule/GHOST');
+    expect(ghostSchedule).toBeDefined();
+    if (!ghostSchedule) throw new Error('unreachable');
+    expect(decode<Record<string, unknown>>(ghostSchedule.payload)).toEqual({ train_id: 'GHOST' });
+
+    /* Deadlock baseline re-established. */
+    const deadlock = client.retained.get('railway/state/deadlock/active');
+    expect(deadlock).toBeDefined();
+    if (!deadlock) throw new Error('unreachable');
+    expect(decode<{ trains: string[] }>(deadlock.payload).trains).toEqual([]);
+  });
+
+  it('tombstones retained switches and tags ghosts', () => {
+    const { server, client } = makeServer();
+    /* Plant retained ghosts for the two families that were previously skipped
+     * by emptyPayloadForStateTopic (it returned null → reset silently skipped
+     * them, leaving the broker/scheduler diverged after reset). */
+    client.publish(
+      'railway/state/tags/TAG-1',
+      new TextEncoder().encode(JSON.stringify({ assigned_kind: 'train', target_id: 'T1' })),
+      { retain: true },
+    );
+    client.publish(
+      'railway/state/switches/M-JCT',
+      new TextEncoder().encode(JSON.stringify({ position: 'diverge', confirmed: true })),
+      { retain: true },
+    );
+
+    server.reset();
+
+    /* Both families must now carry a tombstone — not the stale snapshot. */
+    const ghostTag = client.retained.get('railway/state/tags/TAG-1');
+    expect(ghostTag).toBeDefined();
+    if (!ghostTag) throw new Error('unreachable');
+    expect(decode<Record<string, unknown>>(ghostTag.payload)).toEqual({});
+
+    const ghostSwitch = client.retained.get('railway/state/switches/M-JCT');
+    expect(ghostSwitch).toBeDefined();
+    if (!ghostSwitch) throw new Error('unreachable');
+    expect(decode<Record<string, unknown>>(ghostSwitch.payload)).toEqual({});
+  });
+});
+
+describe('Server.deleteTrain', () => {
+  it('forgets a known train and reports success; 404s an unknown one', () => {
+    const { server, client } = makeServer();
+    publishWireEvent(client, 'device_registered', 'T1', { capabilities: ['core.controls_motion'] });
+
+    expect(server.deleteTrain('NOPE')).toBe(false);
+    expect(server.deleteTrain('T1')).toBe(true);
+    expect(server.getScheduler().getTrainState('T1')).toBeUndefined();
+
+    const deviceMsg = client.retained.get('railway/state/devices/T1');
+    expect(deviceMsg).toBeDefined();
+    if (!deviceMsg) throw new Error('unreachable');
+    expect(decode<Record<string, unknown>>(deviceMsg.payload)).toEqual({});
+  });
+});
+
+describe('Server.pruneOrphanMarkers', () => {
+  it('removes zero-edge markers and republishes the layout', () => {
+    const { server, client } = makeServer();
+    server.getScheduler().getLayout().upsertMarker('ORPHAN', 'block_boundary');
+
+    const pruned = server.pruneOrphanMarkers();
+
+    expect(pruned).toEqual(['ORPHAN']);
+    const layoutMsg = client.retained.get('railway/state/layout/simple-loop');
+    expect(layoutMsg).toBeDefined();
+    if (!layoutMsg) throw new Error('unreachable');
+    const layout = decode<{ markers: Array<{ id: string }> }>(layoutMsg.payload);
+    expect(layout.markers.map((m) => m.id)).not.toContain('ORPHAN');
+  });
+});
+
 function countCommands(
   client: InMemoryBrokerClient,
   train_id: string,

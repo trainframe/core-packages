@@ -255,3 +255,64 @@ describe('LayoutState — switch pairing', () => {
     expect(layout.switchDeviceForMarker('M2')).toBe('SWITCH-M2');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Pruning orphaned markers
+// ---------------------------------------------------------------------------
+
+describe('LayoutState.pruneOrphanMarkers', () => {
+  it('removes markers with no incident edges and returns their ids', () => {
+    const layout = new LayoutState(SIMPLE_LOOP, { now: () => 0 });
+    /* Add two disconnected markers (the "floating dots" case). */
+    layout.upsertMarker('ORPHAN-A', 'block_boundary');
+    layout.upsertMarker('ORPHAN-B', 'station_stop');
+
+    const removed = layout.pruneOrphanMarkers();
+
+    expect(removed).toEqual(['ORPHAN-A', 'ORPHAN-B']);
+    expect(layout.hasMarker('ORPHAN-A')).toBe(false);
+    expect(layout.hasMarker('ORPHAN-B')).toBe(false);
+    /* Connected markers in the loop survive. */
+    expect(layout.hasMarker('M1')).toBe(true);
+    expect(layout.hasMarker('M3')).toBe(true);
+  });
+
+  it('returns an empty array when every marker has edges', () => {
+    const layout = new LayoutState(SIMPLE_LOOP, { now: () => 0 });
+    expect(layout.pruneOrphanMarkers()).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// reset()
+// ---------------------------------------------------------------------------
+
+describe('LayoutState.reset', () => {
+  it('reverts learned markers and edges to the constructed baseline', () => {
+    const layout = new LayoutState(SIMPLE_LOOP, { now: () => 0 });
+    /* Learn a brand-new marker + edge by traversal (discovery). */
+    layout.upsertMarker('LEARNED', 'block_boundary');
+    layout.recordTraversal('M2', 'LEARNED', 'T1');
+    expect(layout.hasMarker('LEARNED')).toBe(true);
+
+    layout.reset();
+
+    expect(layout.hasMarker('LEARNED')).toBe(false);
+    expect(
+      layout
+        .toLayout()
+        .markers.map((m) => m.id)
+        .sort(),
+    ).toEqual(['M1', 'M2', 'M3', 'M4']);
+    expect(layout.toLayout().edges).toHaveLength(4);
+  });
+
+  it('reverts to an empty graph when constructed empty (discovery mode)', () => {
+    const empty: Layout = { name: 'discovery', markers: [], edges: [], junctions: [] };
+    const layout = new LayoutState(empty, { now: () => 0 });
+    layout.upsertMarker('A', 'block_boundary');
+    layout.upsertMarker('B', 'block_boundary');
+    layout.reset();
+    expect(layout.toLayout().markers).toHaveLength(0);
+  });
+});

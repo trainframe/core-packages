@@ -76,12 +76,22 @@ export class LayoutState {
    */
   private readonly lastRecordedAtByTrain = new Map<string, number>();
   private readonly now: () => number;
+  private readonly initialLayout: Layout;
 
   constructor(layout: Layout, options: LayoutStateOptions) {
     this.name = layout.name;
     this.confirmTraversals = options.confirmTraversals ?? 3;
     this.now = options.now;
+    this.initialLayout = layout;
+    this.loadFromLayout(layout);
+  }
 
+  /*
+   * Build the graph maps from a declared layout. Used by the constructor and
+   * by reset(). Validates that every edge references a known marker — the same
+   * guard enforced inline before this extraction.
+   */
+  private loadFromLayout(layout: Layout): void {
     for (const marker of layout.markers) {
       this.markers.set(marker.id, marker);
       this.outgoingEdges.set(marker.id, []);
@@ -98,6 +108,26 @@ export class LayoutState {
         this.switchPositions.set(junction.marker_id, junction.initial_state);
       }
     }
+  }
+
+  /*
+   * Revert the live graph to the layout it was constructed with, discarding
+   * every learned marker, edge, switch position, and traversal statistic. In
+   * discovery mode (constructed empty) this clears the graph entirely.
+   */
+  reset(): void {
+    this.markers.clear();
+    this.outgoingEdges.clear();
+    this.incomingEdges.clear();
+    this.switchPositions.clear();
+    this.switchDeviceByMarker.clear();
+    this.junctionsByMarkerId.clear();
+    this.traversalCounts.clear();
+    this.learnedMs.clear();
+    this.learnedMsByTrain.clear();
+    this.lastRecordedAtByTrain.clear();
+    this.lastRecordedAt = null;
+    this.loadFromLayout(this.initialLayout);
   }
 
   private addEdgeInternal(edge: LayoutEdge): void {
@@ -220,6 +250,30 @@ export class LayoutState {
     this.outgoingEdges.set(id, []);
     this.incomingEdges.set(id, []);
     return true;
+  }
+
+  /**
+   * Remove every marker that has no incoming and no outgoing edges — the
+   * disconnected "floating dots" left behind by deleted track. Returns the
+   * removed marker ids in ascending order. Edge-keyed maps (traversalCounts,
+   * learnedMs) need no cleanup: an orphan has no edges, so no key references it.
+   */
+  pruneOrphanMarkers(): string[] {
+    const removed: string[] = [];
+    for (const id of [...this.markers.keys()]) {
+      const out = this.outgoingEdges.get(id)?.length ?? 0;
+      const inc = this.incomingEdges.get(id)?.length ?? 0;
+      if (out !== 0 || inc !== 0) continue;
+      this.markers.delete(id);
+      this.outgoingEdges.delete(id);
+      this.incomingEdges.delete(id);
+      this.switchPositions.delete(id);
+      this.switchDeviceByMarker.delete(id);
+      this.junctionsByMarkerId.delete(id);
+      removed.push(id);
+    }
+    removed.sort((a, b) => a.localeCompare(b));
+    return removed;
   }
 
   /**

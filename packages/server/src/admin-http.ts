@@ -122,11 +122,23 @@ export class AdminHttpServer {
     if (method === 'GET' && url === '/api/state') {
       return { needsBody: false, handler: (_b, res) => this.state(res) };
     }
-    if (method === 'GET') {
-      return this.matchQueryRoute(url, query);
+    if (method === 'GET') return this.matchQueryRoute(url, query);
+    if (method === 'DELETE') {
+      const del = url.match(/^\/api\/trains\/([^/]+)$/);
+      if (del?.[1]) {
+        const id = decodeURIComponent(del[1]);
+        return { needsBody: false, handler: (_b, res) => this.deleteTrain(id, res) };
+      }
+      return undefined;
     }
-    if (method !== 'POST') return undefined;
+    if (method === 'POST') return this.matchPostRoute(url);
+    return undefined;
+  }
 
+  /* POST-only routes extracted to keep matchRoute under the complexity limit. */
+  private matchPostRoute(
+    url: string,
+  ): { needsBody: boolean; handler: (body: unknown, res: ServerResponse) => void } | undefined {
     const route = url.match(/^\/api\/trains\/([^/]+)\/route$/);
     if (route?.[1]) {
       const id = decodeURIComponent(route[1]);
@@ -149,6 +161,12 @@ export class AdminHttpServer {
     }
     if (url === '/api/tags') {
       return { needsBody: true, handler: (body, res) => this.assignTag(body, res) };
+    }
+    if (url === '/api/maintenance/prune-markers') {
+      return { needsBody: false, handler: (_b, res) => this.pruneMarkers(res) };
+    }
+    if (url === '/api/maintenance/reset') {
+      return { needsBody: false, handler: (_b, res) => this.resetState(res) };
     }
     return undefined;
   }
@@ -318,6 +336,22 @@ export class AdminHttpServer {
     });
   }
 
+  private deleteTrain(trainId: string, res: ServerResponse): void {
+    if (!this.server.deleteTrain(trainId)) {
+      json(res, 404, { error: `Unknown train: ${trainId}`, code: 'not_found' });
+      return;
+    }
+    json(res, 200, { deleted: trainId });
+  }
+
+  private pruneMarkers(res: ServerResponse): void {
+    json(res, 200, { pruned: this.server.pruneOrphanMarkers() });
+  }
+
+  private resetState(res: ServerResponse): void {
+    json(res, 200, this.server.reset());
+  }
+
   private assignSchedule(trainId: string, body: unknown, res: ServerResponse): void {
     const { route_id, stops } = requireFields(body, ['route_id', 'stops']);
     if (typeof route_id !== 'string') throw new Error('route_id must be a string');
@@ -406,7 +440,7 @@ function noContent(res: ServerResponse): void {
 
 function addCors(res: ServerResponse): void {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 }
 

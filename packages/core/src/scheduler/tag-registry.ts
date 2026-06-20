@@ -48,6 +48,11 @@ export class TagRegistry {
     this.bindings.delete(tag_id);
   }
 
+  /** Forget all tag bindings. */
+  clear(): void {
+    this.bindings.clear();
+  }
+
   /** Snapshot of the current bindings. Test/debug helper. */
   entries(): ReadonlyArray<readonly [string, TagAssignment]> {
     return [...this.bindings.entries()];

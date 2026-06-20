@@ -1,5 +1,6 @@
-import { act, render, screen, waitFor, within } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import * as adminClient from '../api/admin-client.js';
 import { BrokerProvider } from '../broker/broker-context.js';
 import { InMemoryBrokerSubscriber } from '../broker/in-memory-client.js';
 import { DevicesPanel } from './DevicesPanel.js';
@@ -67,12 +68,14 @@ function deliverTagObserved(client: InMemoryBrokerSubscriber, deviceId: string, 
   });
 }
 
+const TEST_ADMIN_URL = 'http://127.0.0.1:3000';
+
 function renderPanel() {
   const client = new InMemoryBrokerSubscriber();
   client.connect('ws://test');
   const utils = render(
     <BrokerProvider client={client}>
-      <DevicesPanel />
+      <DevicesPanel adminApiUrl={TEST_ADMIN_URL} />
     </BrokerProvider>,
   );
   return { client, ...utils };
@@ -180,5 +183,35 @@ describe('DevicesPanel', () => {
     expect(screen.getByText(/No gating devices registered yet\./)).toBeInTheDocument();
     expect(screen.getByText(/No tag-assigning devices registered yet\./)).toBeInTheDocument();
     expect(screen.getByText(/No markers on the layout yet\./)).toBeInTheDocument();
+  });
+
+  it('deletes a train from memory via the admin client', async () => {
+    const deleteSpy = vi.spyOn(adminClient, 'deleteTrain').mockResolvedValue();
+    const { client } = renderPanel();
+    act(() => {
+      deliverDevice(client, 'T1', ['core.controls_motion']);
+    });
+    await screen.findByTestId('device-row-T1');
+    fireEvent.click(
+      within(screen.getByTestId('device-row-T1')).getByRole('button', { name: /delete/i }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
+    await waitFor(() => expect(deleteSpy).toHaveBeenCalledWith('http://127.0.0.1:3000', 'T1'));
+  });
+
+  it('surfaces delete errors inline on the train row', async () => {
+    const deleteSpy = vi.spyOn(adminClient, 'deleteTrain').mockRejectedValue(new Error('boom'));
+    const { client } = renderPanel();
+    act(() => {
+      deliverDevice(client, 'T1', ['core.controls_motion']);
+    });
+    await screen.findByTestId('device-row-T1');
+    fireEvent.click(
+      within(screen.getByTestId('device-row-T1')).getByRole('button', { name: /delete/i }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }));
+    await waitFor(() => expect(deleteSpy).toHaveBeenCalledWith('http://127.0.0.1:3000', 'T1'));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent('boom');
   });
 });

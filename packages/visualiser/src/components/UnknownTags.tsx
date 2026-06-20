@@ -1,4 +1,5 @@
 import { type FormEvent, useEffect, useState } from 'react';
+import { assignTag } from '../api/admin-client.js';
 import { useLayoutState } from '../state/use-layout-state.js';
 import { useUnknownTags } from '../state/use-unknown-tags.js';
 
@@ -70,17 +71,9 @@ function AssignRow({ tagId, adminApiUrl, layout }: AssignRowProps) {
     setSubmitting(true);
     setError(null);
     try {
-      const res = await fetch(`${adminApiUrl}/api/tags`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tag_id: tagId, assigned_kind: kind, target_id: targetId }),
-      });
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new Error(`Server returned ${res.status}: ${text || res.statusText}`);
-      }
-      // The row will disappear when railway/state/tags/<id> arrives via
-      // useUnknownTags; nothing else to do here.
+      await assignTag(adminApiUrl, { tagId, kind, targetId });
+      /* The row will disappear when railway/state/tags/<id> arrives via
+         useUnknownTags; nothing else to do here. */
     } catch (err) {
       setError(err instanceof Error ? err.message : 'unknown error');
     } finally {

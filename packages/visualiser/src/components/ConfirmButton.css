@@ -1,0 +1,12 @@
+.tf-confirm {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: center;
+}
+.tf-confirm__phrase {
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--tf-vis-color-warn-border);
+  border-radius: 4px;
+  font: inherit;
+  width: 6rem;
+}

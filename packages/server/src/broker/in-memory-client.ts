@@ -9,7 +9,7 @@ import type { BrokerClient, BrokerMessage, MessageListener, PublishOptions } fro
  */
 export class InMemoryBrokerClient implements BrokerClient {
   private readonly subs = new Map<string, Set<MessageListener>>();
-  private readonly retained = new Map<string, BrokerMessage>();
+  readonly retained = new Map<string, BrokerMessage>();
   readonly published: BrokerMessage[] = [];
 
   // The interface signature is async to match the mqtt-backed client; in-memory

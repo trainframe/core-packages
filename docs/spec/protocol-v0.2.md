@@ -109,6 +109,8 @@ Events use the `event_type` segment so consumers can subscribe selectively (the 
 
 `capabilities` is always present. `train_length_mm` is present only when the device declared `core.controls_motion` and supplied a positive length on registration; omitted otherwise. Subscribers may use `train_length_mm` to render a length-scaled consist (ADR-016).
 
+A retained `railway/state/devices/{device_id}` payload with no `capabilities` field (e.g. `{}`) is a **deregister tombstone**: the server publishes it when a device disconnects or is deleted from memory, and subscribers drop the device from their roster. This is consistent with how the other per-entity state families signal "gone" (an empty `schedule`/`clearance` snapshot); no version bump — no shape change.
+
 ### Quality of service
 
 QoS 1 (at-least-once) for events and commands. Idempotency is enforced via `event_id` / `command_id` UUIDs; receivers deduplicate.

@@ -172,6 +172,24 @@ export class Scheduler {
     return this.layout;
   }
 
+  /*
+   * Forget all runtime state — trains, devices, tags, deadlock/zone
+   * bookkeeping — and revert the layout to its declared baseline. Pure
+   * in-memory; the server is responsible for clearing the matching retained
+   * broker topics (see Server.reset).
+   */
+  reset(): void {
+    this.trains.clear();
+    this.devices.clear();
+    this.tags.clear();
+    this.currentDeadlock = [];
+    this.requestedSwitchPositions.clear();
+    this.zoneBoundaries.clear();
+    this.zoneOwnedMarkers.clear();
+    this.nextRegistrationSeq = 0;
+    this.layout.reset();
+  }
+
   // ---------- event entry point ----------
 
   handleEvent(event: {
@@ -347,18 +365,18 @@ export class Scheduler {
 
   // ---------- device disconnect ----------
 
-  /**
-   * A device vanished. Run every capability's `onDeviceDisconnect` hook so
-   * capability-owned state (e.g. gates_clearance withholds) is released,
-   * translate any intents the hooks produced, then drop the device record.
-   * If the device declared `core.controls_motion`, drop its train state too
-   * so the block it owned in `cleared_edges` no longer denies peers.
-   *
-   * Finally retry blocked clearances: peers waiting on a withhold the
-   * vanished device held, or on an edge the vanished train was hogging,
-   * should be granted now in the same handler call.
-   */
   private handleDeviceDisconnect(deviceId: string): ReadonlyArray<SchedulerEffect> {
+    return this.forgetDevice(deviceId);
+  }
+
+  /*
+   * Remove a device entirely: run each capability's disconnect hook, drop it
+   * from the registry and (if it drives motion) the train table, and tombstone
+   * its retained state so the visualiser and a freshly-reconnecting broker both
+   * forget it. Shared by the `device_disconnected` event and the operator
+   * "delete from memory" action so the two paths cannot drift.
+   */
+  forgetDevice(deviceId: string): ReadonlyArray<SchedulerEffect> {
     const device = this.devices.get(deviceId);
     if (!device) return [];
 
@@ -373,10 +391,17 @@ export class Scheduler {
     }
 
     this.devices.delete(deviceId);
+    /*
+     * Tombstone the retained device registration. Without this the broker keeps
+     * replaying `railway/state/devices/<id>` to every new subscriber and the
+     * dead device reappears as "registered, position unknown". An object with
+     * no `capabilities` field is the devices view's recognised-empty shape.
+     */
+    out.push(effects.updateState('devices', deviceId, {}));
+
     if (device.capabilities.includes('core.controls_motion')) {
-      // Emit empty clearance + schedule snapshots so the visualiser removes
-      // the overlay and schedule-list entry for this train. Publish before
-      // deleting the train record.
+      /* Emit empty clearance + schedule snapshots so the visualiser removes
+       * the overlay and schedule-list entry for this train. */
       out.push(
         effects.updateState('clearance', deviceId, {
           train_id: deviceId,
