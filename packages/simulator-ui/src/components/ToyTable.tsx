@@ -19,12 +19,7 @@ import {
   jointKey,
 } from '@trainframe/simulator/track/flex.js';
 import { SNAP_DISTANCE, compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
-import {
-  type JointId,
-  type Loop,
-  buildJoints,
-  findLoops,
-} from '@trainframe/simulator/track/loops.js';
+import { type JointId, buildJoints, findLoops } from '@trainframe/simulator/track/loops.js';
 import { detectSameLayerOverlaps, pierSuppressed } from '@trainframe/simulator/track/overlap.js';
 import {
   CRANE_GANTRY_X_MM,
@@ -1513,11 +1508,11 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     });
   }, []);
 
-  /* When a drop commits a loop closure, compute the newly-closed loop's rail
-     centreline and mount the ClosureWave for one run. Uses the REST-pose pieces
-     state (not effective) so applyFlex can re-derive the closed positions. */
-  const handleClosureCommit = useCallback((closureFlex: FlexState) => {
-    const pts = newLoopCenterline(piecesRef.current, closureFlex);
+  /* When a drop commits a loop closure, find the cycle containing the dragged
+     piece in the committed effective geometry and mount the ClosureWave for one
+     run. Uses the REST-pose pieces (applyFlex re-derives closed positions). */
+  const handleClosureCommit = useCallback((closureFlex: FlexState, draggedPieceId: string) => {
+    const pts = newLoopCenterline(piecesRef.current, closureFlex, draggedPieceId);
     if (pts !== null) setClosureWavePoints(pts);
   }, []);
 
@@ -2442,10 +2437,10 @@ interface TableProps {
      bends live. The parent (ToyTable) owns flex state and calls setFlex. */
   readonly onDragFlex: (flex: FlexState) => void;
   /* Called ONLY when a successful loop closure is committed on drop, with the
-     flex state that closes the loop. Gives ToyTable a chance to mount the
-     ClosureWave overlay without having to distinguish closure commits from
-     ordinary drag-flex updates. */
-  readonly onClosureCommit: (closureFlex: FlexState) => void;
+     flex state that closes the loop and the id of the dragged piece that just
+     joined the cycle. Gives ToyTable a chance to mount the ClosureWave overlay
+     without having to distinguish closure commits from ordinary drag-flex updates. */
+  readonly onClosureCommit: (closureFlex: FlexState, draggedPieceId: string) => void;
   /* Pre-composed overlay element to render inside the canvas SVG. ToyTable
      computes this from closureWavePoints so Table stays free of the ternary. */
   readonly waveOverlay: ReactNode;
@@ -2590,12 +2585,6 @@ function detectLoopClosure(
 /* Samples per half-path when building a loop's rail centreline for the wave. */
 const WAVE_SAMPLES_PER_HALF = 8;
 
-/* True when `loop` does not match any set in `beforeSets` by piece-ID membership. */
-function isNewLoop(loop: Loop, beforeSets: ReadonlyArray<ReadonlySet<string>>): boolean {
-  const set = new Set(loop.pieceIds);
-  return !beforeSets.some((bs) => bs.size === set.size && [...set].every((id) => bs.has(id)));
-}
-
 /* Returns the {entry, exit} endpoint indices for `pieceId` at position `i` in the loop. */
 function entryExitEps(
   pieceId: string,
@@ -2667,11 +2656,15 @@ function sampleLoopPiece(
 export function newLoopCenterline(
   restPieces: ReadonlyArray<TrackPiece>,
   closureFlex: FlexState,
+  draggedPieceId: string,
 ): ReadonlyArray<{ readonly x: number; readonly y: number }> | null {
-  const beforeSets = findLoops(restPieces).map((l) => new Set(l.pieceIds));
   const afterEffective = applyFlex(restPieces, closureFlex);
   const afterPieces = asTrackPieces(afterEffective);
-  const newLoop = findLoops(afterPieces).find((loop) => isNewLoop(loop, beforeSets));
+  /* Find the cycle that contains the dragged piece in the committed effective
+     geometry. We do NOT diff against rest-pose topology — clustering already
+     decided connectivity there, so the before/after sets are identical for any
+     closure whose gap is within SNAP_DISTANCE_MM. Fire on commit, not on diff. */
+  const newLoop = findLoops(afterPieces).find((loop) => loop.pieceIds.includes(draggedPieceId));
   if (newLoop === undefined) return null;
 
   const poseMap = new Map<string, { x: number; y: number; rotationDeg: number }>();
@@ -3079,7 +3072,7 @@ function Table({
     setClosureAvailableId(null);
     if (closure?.feasible === true) {
       onDragFlex(closure.flex);
-      onClosureCommit(closure.flex);
+      onClosureCommit(closure.flex, pieceId);
       return;
     }
 

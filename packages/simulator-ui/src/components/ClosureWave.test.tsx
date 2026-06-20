@@ -259,13 +259,28 @@ function rect(): { a: TrackPiece; b: TrackPiece; c: TrackPiece; d: TrackPiece } 
 describe('newLoopCenterline', () => {
   it('returns null for an open 2-piece chain', () => {
     const { a, b } = rect();
-    expect(newLoopCenterline([a, b], EMPTY_FLEX)).toBeNull();
+    /* No cycle contains 'A' in a 2-piece open chain. */
+    expect(newLoopCenterline([a, b], EMPTY_FLEX, 'A')).toBeNull();
   });
 
-  it('returns null when the loop already exists in restPieces before the flex', () => {
-    /* All four pieces already form the closed rectangle in rest pose → findLoops
-       finds the loop both before and after the identity flex → diff is empty → null. */
+  it('returns null when no cycle contains the dragged piece', () => {
+    /* All four pieces form a closed rectangle, but we ask for a piece id that
+       does not exist in the layout — guard branch must return null cleanly. */
     const { a, b, c, d } = rect();
-    expect(newLoopCenterline([a, b, c, d], EMPTY_FLEX)).toBeNull();
+    expect(newLoopCenterline([a, b, c, d], EMPTY_FLEX, 'GHOST')).toBeNull();
+  });
+
+  it('fires for a loop already present in rest pose when draggedPieceId is part of it', () => {
+    /* This is the key regression case: the old isNewLoop diff would suppress the
+       wave because findLoops(rest) already returns the loop. The new trigger fires
+       on the closure commit — if the dragged piece is inside a cycle in the
+       effective geometry, return the centreline regardless of rest-pose topology. */
+    const { a, b, c, d } = rect();
+    /* All four pieces are coincident at rest (closed rectangle, EMPTY_FLEX).
+       Dragging piece 'D' onto the already-clustered endpoint still commits a
+       closure — the wave must fire. */
+    const pts = newLoopCenterline([a, b, c, d], EMPTY_FLEX, 'D');
+    expect(pts).not.toBeNull();
+    expect(pts?.length).toBeGreaterThanOrEqual(2);
   });
 });

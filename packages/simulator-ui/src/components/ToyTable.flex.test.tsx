@@ -496,13 +496,18 @@ describe('ToyTable — closure flash + commit', () => {
  *   solveClose feasible → handleClosureCommit → newLoopCenterline returns points
  *   → setClosureWavePoints → <ClosureWave data-testid="closure-wave"> is mounted.
  *
- * findLoops is mocked for the two calls inside newLoopCenterline:
- *   call 1 (before): return [] — no pre-existing loops.
- *   call 2 (after):  return a genuine 4-piece Loop — the newly-closed cycle.
+ * findLoops is mocked for the single call inside newLoopCenterline (after the
+ * flex is applied). It returns a genuine 4-piece Loop containing the dragged
+ * piece — the newly-closed cycle. The old "before" call no longer exists: the
+ * trigger is now commit-based, not topology-diff-based.
  *
  * The mocked Loop carries real piece-IDs (from the placed pieces) and valid
  * JointId entries (0/1 endpoint indices) so newLoopCenterline can compute
  * getCentreLinePathAt for each piece and return a non-null point array.
+ *
+ * Key regression: a loop whose endpoints are already within clustering distance
+ * at rest (so findLoops(rest) already returns it) STILL fires the wave, because
+ * we no longer suppress via a before/after diff.
  * --------------------------------------------------------------------------- */
 
 describe('ToyTable — ClosureWave mounts after loop-closing drop', () => {
@@ -521,10 +526,10 @@ describe('ToyTable — ClosureWave mounts after loop-closing drop', () => {
      * We place 4 pieces; A–B are auto-connected; C and D are independent.
      *
      * Mock solveClose to return feasible (triggers the closure-commit branch on
-     * pointerup). Mock findLoops so that:
-     *   - the "before" call returns [] (no pre-existing loops)
-     *   - the "after" call returns a 4-piece Loop using the actual placed
-     *     piece IDs — giving newLoopCenterline real pieces to sample paths from.
+     * pointerup). Mock findLoops to return a 4-piece Loop (containing the dragged
+     * piece id) on its single call — the effective-geometry call after flex is
+     * applied. newLoopCenterline finds the cycle by draggedPieceId membership, not
+     * by a before/after diff, so the wave fires even when the loop existed at rest.
      *
      * This exercises the path: handleClosureCommit → newLoopCenterline
      * → setClosureWavePoints(pts) → <ClosureWave> mounts.
@@ -566,9 +571,13 @@ describe('ToyTable — ClosureWave mounts after loop-closing drop', () => {
       };
       const mockLoop: Loop = { pieceIds: [aId, bId, cId, dId], joints: [j0, j1, j2, j3] };
 
-      /* findLoops call 1 (before): no pre-existing loops.
-         findLoops call 2 (after):  the newly-closed 4-piece cycle. */
-      vi.mocked(findLoops).mockReturnValueOnce([]).mockReturnValueOnce([mockLoop]);
+      /* findLoops is called once (after applying committed flex). It returns the
+         newly-closed 4-piece cycle containing the dragged piece. No "before" call
+         exists any more — the trigger is commit-based, not topology-diff-based.
+         This also exercises the regression case: even when the loop would have
+         existed in rest-pose topology, the wave fires because we look for the
+         dragged piece id in the effective-geometry loops. */
+      vi.mocked(findLoops).mockReturnValueOnce([mockLoop]);
 
       /* solveClose must return feasible to trigger the closure-commit branch. */
       vi.mocked(solveClose).mockReturnValue({ feasible: true, flex: new Map() });
