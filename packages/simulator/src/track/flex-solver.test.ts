@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { selectAnchor, solveFollow } from './flex-solver.js';
+import { type ClosureResult, selectAnchor, solveClose, solveFollow } from './flex-solver.js';
 import { FLEX_BUDGET_DEG, effectivePoses, jointKey } from './flex.js';
 import { buildJoints } from './loops.js';
-import { type RotationDeg, type TrackPiece, getEndpoints, getEndpointsAt } from './pieces.js';
+import {
+  type RotationDeg,
+  type TrackEndpoint,
+  type TrackPiece,
+  getEndpoints,
+  getEndpointsAt,
+} from './pieces.js';
 import { computePlacement } from './placement.js';
 
 /* ---------------------------------------------------------------------------
@@ -206,5 +212,143 @@ describe('solveFollow', () => {
     const solo: TrackPiece[] = [piece('SOLO', 'straight', 0, 0, 0)];
     const flex = solveFollow(solo, 'SOLO', { x: 500, y: 200 });
     expect(flex.size).toBe(0);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * solveClose
+ * --------------------------------------------------------------------------- */
+
+/*
+ * Build an 8-curve ring laid out as a snapped open chain (C0..C7 connected end
+ * to end but NOT joined back). The free endpoint of C7 naturally falls very close
+ * to C0's entry endpoint (within < 1 mm) because 8 × 45° = 360° — so the ring
+ * nearly closes at rest. This layout is the "almost-closed" test case:
+ * the solver must bring the free endpoint of C7 onto C0's entry within budget.
+ *
+ * Returns the pieces and the target endpoint (C0's entry, anti-parallel).
+ */
+function buildNearlyClosedRing(): {
+  pieces: TrackPiece[];
+  draggedId: string;
+  freeEndpointIdx: number;
+  target: TrackEndpoint;
+} {
+  const pieces: TrackPiece[] = [];
+  const first = computePlacement(450, 300, 'curve', pieces);
+  pieces.push(piece('C0', 'curve', first.x, first.y, first.rotationDeg));
+
+  for (let i = 1; i < 8; i++) {
+    const prev = pieces[i - 1];
+    if (prev === undefined) throw new Error('unreachable');
+    const exit = getEndpoints(prev)[1];
+    if (exit === undefined) throw new Error('unreachable');
+    const placement = computePlacement(exit.x, exit.y, 'curve', pieces);
+    pieces.push(piece(`C${i}`, 'curve', placement.x, placement.y, placement.rotationDeg));
+  }
+
+  /* The target is C0's entry endpoint (index 0). The free endpoint is C7's exit
+   * (index 1). The two endpoints are anti-parallel when the ring closes. */
+  const c0 = pieces[0];
+  if (c0 === undefined) throw new Error('unreachable');
+  const entry = getEndpoints(c0)[0];
+  if (entry === undefined) throw new Error('unreachable');
+
+  return { pieces, draggedId: 'C7', freeEndpointIdx: 1, target: entry };
+}
+
+/*
+ * Build a ring whose closing gap is ~30 mm — far beyond what the combined joint
+ * budget (7 joints × 2° each) can cover at the radius of the 8-curve circle.
+ * Achieved by replacing C7 with a straight (a fundamentally different geometry)
+ * and retaining C0's entry as the target, so the heading and/or position error
+ * after relaxation will exceed tolerance.
+ */
+function buildRingWithExcessiveGap(): {
+  pieces: TrackPiece[];
+  draggedId: string;
+  freeEndpointIdx: number;
+  target: TrackEndpoint;
+} {
+  /* Build the first 7 curves as a chain. */
+  const pieces: TrackPiece[] = [];
+  const first = computePlacement(450, 300, 'curve', pieces);
+  pieces.push(piece('C0', 'curve', first.x, first.y, first.rotationDeg));
+
+  for (let i = 1; i < 7; i++) {
+    const prev = pieces[i - 1];
+    if (prev === undefined) throw new Error('unreachable');
+    const exit = getEndpoints(prev)[1];
+    if (exit === undefined) throw new Error('unreachable');
+    const placement = computePlacement(exit.x, exit.y, 'curve', pieces);
+    pieces.push(piece(`C${i}`, 'curve', placement.x, placement.y, placement.rotationDeg));
+  }
+
+  /* Attach a straight as the dragged piece instead of the 8th curve.
+   * A straight extends eastward from C6's exit; it cannot curve back toward C0,
+   * leaving a gap of ~200 mm which is orders of magnitude beyond budget. */
+  const c6 = pieces[6];
+  if (c6 === undefined) throw new Error('unreachable');
+  const c6Exit = getEndpoints(c6)[1];
+  if (c6Exit === undefined) throw new Error('unreachable');
+  const straightPlacement = computePlacement(c6Exit.x, c6Exit.y, 'straight', pieces);
+  pieces.push(
+    piece(
+      'S7',
+      'straight',
+      straightPlacement.x,
+      straightPlacement.y,
+      straightPlacement.rotationDeg,
+    ),
+  );
+
+  /* Target is still C0's entry endpoint. */
+  const c0 = pieces[0];
+  if (c0 === undefined) throw new Error('unreachable');
+  const entry = getEndpoints(c0)[0];
+  if (entry === undefined) throw new Error('unreachable');
+
+  return { pieces, draggedId: 'S7', freeEndpointIdx: 1, target: entry };
+}
+
+/*
+ * Position gap between a computed endpoint and the target position.
+ */
+function gapAt(
+  poses: ReadonlyMap<string, { x: number; y: number; rotationDeg: number }>,
+  draggedPiece: TrackPiece,
+  freeEndpointIdx: number,
+  target: { x: number; y: number },
+): number {
+  const pose = poses.get(draggedPiece.id);
+  if (pose === undefined) return Number.POSITIVE_INFINITY;
+  const ep = getEndpointsAt(draggedPiece, pose)[freeEndpointIdx];
+  if (ep === undefined) return Number.POSITIVE_INFINITY;
+  return Math.hypot(ep.x - target.x, ep.y - target.y);
+}
+
+describe('solveClose', () => {
+  it('closes a near-complete ring whose residual is within total budget', () => {
+    const { pieces, draggedId, freeEndpointIdx, target } = buildNearlyClosedRing();
+    const res: ClosureResult = solveClose(pieces, draggedId, freeEndpointIdx, target);
+    expect(res.feasible).toBe(true);
+
+    const anchorId = selectAnchor(pieces, draggedId);
+    const poses = effectivePoses(pieces, res.flex, anchorId);
+    const dragged = pieces.find((p) => p.id === draggedId);
+    if (dragged === undefined) throw new Error('unreachable');
+
+    expect(gapAt(poses, dragged, freeEndpointIdx, target)).toBeLessThan(1.0);
+  });
+
+  it('refuses when the residual exceeds the combined budget', () => {
+    const { pieces, draggedId, freeEndpointIdx, target } = buildRingWithExcessiveGap();
+    expect(solveClose(pieces, draggedId, freeEndpointIdx, target).feasible).toBe(false);
+  });
+
+  it('returns feasible:false for a single isolated piece (no joints)', () => {
+    const solo: TrackPiece[] = [piece('SOLO', 'straight', 0, 0, 0)];
+    const target: TrackEndpoint = { x: 500, y: 200, outgoingAngleDeg: 180, layer: 0 };
+    expect(solveClose(solo, 'SOLO', 0, target).feasible).toBe(false);
   });
 });

@@ -1,5 +1,6 @@
 /**
- * Flex solver: anchor selection and CCD-style follow-cursor relaxation.
+ * Flex solver: anchor selection, CCD-style follow-cursor relaxation, and
+ * loop-closure feasibility check.
  *
  * The solver operates on the joint graph built by `buildJoints`. It treats
  * each joint as a rotational degree of freedom bounded to ±FLEX_BUDGET_DEG.
@@ -320,4 +321,109 @@ export function solveFollow(
   }
 
   return flexMap as FlexState;
+}
+
+/* ---------------------------------------------------------------------------
+ * solveClose — loop-closure feasibility + solution
+ * --------------------------------------------------------------------------- */
+
+/** Result of a loop-closure solve attempt. */
+export interface ClosureResult {
+  readonly feasible: boolean;
+  readonly flex: FlexState;
+}
+
+/*
+ * Normalise an angle to the range (-180, 180] degrees.
+ * Used to compute the smallest signed difference between two headings.
+ */
+function normaliseDeg(deg: number): number {
+  let d = deg % 360;
+  if (d > 180) d -= 360;
+  if (d <= -180) d += 360;
+  return d;
+}
+
+/*
+ * The endpoint at `freeEndpointIdx` of the dragged piece in its current effective pose.
+ * Returns undefined if the pose or endpoint is missing.
+ */
+function freeEndpointOf(
+  draggedPiece: TrackPiece,
+  poses: ReadonlyMap<string, { x: number; y: number; rotationDeg: number }>,
+  freeEndpointIdx: number,
+): { x: number; y: number; outgoingAngleDeg: number } | undefined {
+  const pose = poses.get(draggedPiece.id);
+  if (pose === undefined) return undefined;
+  return getEndpointsAt(draggedPiece, pose)[freeEndpointIdx];
+}
+
+/*
+ * Check whether the dragged piece's free endpoint meets the target pose:
+ * - position gap < posToleranceMm
+ * - heading difference (anti-parallel) < headingToleranceDeg
+ */
+function meetsClosureTolerance(
+  ep: { x: number; y: number; outgoingAngleDeg: number },
+  target: { x: number; y: number; outgoingAngleDeg: number },
+  posToleranceMm: number,
+  headingToleranceDeg: number,
+): boolean {
+  const gap = Math.hypot(ep.x - target.x, ep.y - target.y);
+  /* Anti-parallel: the free endpoint exits opposite to the target's exit direction. */
+  const headingDiff = Math.abs(normaliseDeg(ep.outgoingAngleDeg - (target.outgoingAngleDeg + 180)));
+  return gap < posToleranceMm && headingDiff < headingToleranceDeg;
+}
+
+/**
+ * Solve for a flex configuration that brings the dragged piece's free endpoint
+ * onto `targetEndpoint` in BOTH position (≤ 1 mm) and heading (anti-parallel
+ * within 1°), within every joint's ±FLEX_BUDGET_DEG budget.
+ *
+ * Reuses the CCD follow-cursor relaxation with the target position, then checks
+ * the final heading residual to determine feasibility. If the gap or heading
+ * error after relaxation exceeds the tolerance, `feasible` is false and the
+ * returned flex is the best attempt. Pure, deterministic, no I/O.
+ */
+export function solveClose(
+  pieces: ReadonlyArray<TrackPiece>,
+  draggedPieceId: string,
+  freeEndpointIdx: number,
+  targetEndpoint: { x: number; y: number; outgoingAngleDeg: number },
+): ClosureResult {
+  const joints = buildJoints(pieces);
+  const empty: FlexState = new Map<string, JointFlex>();
+  if (joints.length === 0) return { feasible: false, flex: empty };
+
+  const adj = buildAdj(pieces, joints);
+  const anchorId = selectAnchor(pieces, draggedPieceId);
+  const path = findPath(anchorId, draggedPieceId, adj);
+  if (path === undefined || path.joints.length === 0) return { feasible: false, flex: empty };
+
+  const pieceById = new Map<string, TrackPiece>();
+  for (const p of pieces) pieceById.set(p.id, p);
+  const draggedPiece = pieceById.get(draggedPieceId);
+  if (draggedPiece === undefined) return { feasible: false, flex: empty };
+
+  const target = { x: targetEndpoint.x, y: targetEndpoint.y };
+  const flexMap = new Map<string, JointFlex>();
+
+  /* CCD iterations toward the target position. */
+  for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+    const poses = effectivePoses(pieces, flexMap as FlexState, anchorId);
+    const ep = freeEndpointOf(draggedPiece, poses, freeEndpointIdx);
+    if (ep === undefined) break;
+    if (Math.hypot(ep.x - target.x, ep.y - target.y) < 0.1) break;
+    ccdPass(path, pieceById, pieces, draggedPiece, anchorId, target, flexMap);
+  }
+
+  const flex = flexMap as FlexState;
+
+  /* Final feasibility check: position + heading must both be within tolerance. */
+  const finalPoses = effectivePoses(pieces, flex, anchorId);
+  const finalEp = freeEndpointOf(draggedPiece, finalPoses, freeEndpointIdx);
+  if (finalEp === undefined) return { feasible: false, flex };
+
+  const feasible = meetsClosureTolerance(finalEp, targetEndpoint, 1.0, 1.0);
+  return { feasible, flex };
 }
