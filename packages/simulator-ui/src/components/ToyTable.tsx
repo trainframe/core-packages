@@ -6,7 +6,9 @@ import type { BodyPose } from '@trainframe/simulator/physics/observation.js';
 import { nearestStartEdge } from '@trainframe/simulator/sim/nearest-edge.js';
 import { type WorldPosition, computeTrainTrails } from '@trainframe/simulator/track/coupling.js';
 import { composeEdgePath, pieceIdFromMarkerId } from '@trainframe/simulator/track/edge-path.js';
+import { type FlexState, effectivePoses, jointKey } from '@trainframe/simulator/track/flex.js';
 import { SNAP_DISTANCE, compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
+import { buildJoints } from '@trainframe/simulator/track/loops.js';
 import { detectSameLayerOverlaps, pierSuppressed } from '@trainframe/simulator/track/overlap.js';
 import {
   CRANE_GANTRY_X_MM,
@@ -60,7 +62,7 @@ import {
   computePlacement,
   nearestConnectablePoint,
 } from '@trainframe/simulator/track/placement.js';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useBroker } from '../broker/broker-context.js';
 import type { ToyHardware } from '../sim/toy-hardware.js';
 import { useToyHardware } from '../sim/use-toy-hardware.js';
@@ -71,6 +73,154 @@ import { Feature, Groove, PieceBody, WOOD_FILL, WoodDefs } from './piece-art.js'
 
 // Canvas scale: 1 mm = SCALE px. Matches the old TrackBuilder so coordinates
 // translate one-for-one across the refactor.
+// ---------------------------------------------------------------------------
+// EffectivePiece — rest-pose TrackPiece widened to continuous rotation
+// ---------------------------------------------------------------------------
+
+/**
+ * A track piece whose position and rotation have been resolved through the
+ * flex model. Unlike `TrackPiece`, `rotationDeg` is a continuous `number`
+ * (not the quantised `RotationDeg` union) because flex can bend a joint by a
+ * fractional degree. All other fields are structurally identical to `TrackPiece`.
+ *
+ * Used only within ToyTable's render and compile paths; the rest of the system
+ * continues to work with rest-pose `TrackPiece` values.
+ */
+export type EffectivePiece = Omit<TrackPiece, 'rotationDeg'> & { readonly rotationDeg: number };
+
+/**
+ * Lift `EffectivePiece[]` to `TrackPiece[]` at the boundary where an external
+ * function requires the quantised union type.
+ *
+ * Sound because `EffectivePiece` differs from `TrackPiece` only in the
+ * declared type of `rotationDeg` (`number` vs `RotationDeg`). With empty flex
+ * the values ARE quantised `RotationDeg` members; with non-zero flex they are
+ * small deviations (≤ ±FLEX_BUDGET_DEG = 2°) that all geometry functions —
+ * `getEndpoints`, `collectEndpoints`, `compileLayout`, `compileNetwork` — pass
+ * straight through to trigonometric functions, which accept any `number`.
+ * No coercion or rounding occurs; the only unsound part is the TypeScript
+ * annotation.
+ */
+function asTrackPieces(eps: ReadonlyArray<EffectivePiece>): ReadonlyArray<TrackPiece> {
+  return eps as ReadonlyArray<TrackPiece>;
+}
+
+/**
+ * Single-piece variant of `asTrackPieces`. Same soundness argument.
+ * Extracts the adapter to one place so no call site uses a raw `as`.
+ */
+function asTrackPiece(ep: EffectivePiece): TrackPiece {
+  return ep as unknown as TrackPiece;
+}
+
+/**
+ * Compute a connected-component partition of the given pieces using the
+ * joint graph. Returns an array of piece-id sets, one per component.
+ */
+function connectedComponents(
+  pieces: ReadonlyArray<TrackPiece>,
+): ReadonlyArray<ReadonlySet<string>> {
+  const joints = buildJoints(pieces);
+  /* Union-find map: id → root id. */
+  const parent = new Map<string, string>();
+  for (const p of pieces) parent.set(p.id, p.id);
+
+  function find(id: string): string {
+    const p = parent.get(id) ?? id;
+    if (p === id) return id;
+    const root = find(p);
+    parent.set(id, root);
+    return root;
+  }
+
+  function union(a: string, b: string): void {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  }
+
+  for (const j of joints) {
+    union(j.a.pieceId, j.b.pieceId);
+  }
+
+  /* Group by root. */
+  const groups = new Map<string, Set<string>>();
+  for (const p of pieces) {
+    const root = find(p.id);
+    const g = groups.get(root);
+    if (g === undefined) groups.set(root, new Set([p.id]));
+    else g.add(p.id);
+  }
+  return [...groups.values()];
+}
+
+/**
+ * Apply `flex` to `pieces`, returning effective-pose pieces whose `position`
+ * and `rotationDeg` reflect any joint deviations in `flex`. With an empty
+ * `FlexState` the result is structurally identical to the input (every piece
+ * returns its rest pose), so rendering through `applyFlex` is a no-op today.
+ *
+ * One anchor is chosen per connected component (the first piece in iteration
+ * order). The anchor stays at its rest pose; all other pieces in the component
+ * are walked outward from it via `effectivePoses`.
+ *
+ * Pure: no I/O, no mutation of inputs.
+ */
+export function applyFlex(
+  pieces: ReadonlyArray<TrackPiece>,
+  flex: FlexState,
+): ReadonlyArray<EffectivePiece> {
+  if (pieces.length === 0) return [];
+
+  /* Fast path: empty flex means every piece returns its rest pose unchanged. */
+  if (flex.size === 0) {
+    return pieces.map((p) => ({
+      ...p,
+      rotationDeg: p.rotationDeg,
+    }));
+  }
+
+  /* Check which joints the flex map actually references. */
+  const joints = buildJoints(pieces);
+  const activeJoints = joints.filter((j) => flex.has(jointKey(j)));
+  if (activeJoints.length === 0) {
+    return pieces.map((p) => ({
+      ...p,
+      rotationDeg: p.rotationDeg,
+    }));
+  }
+
+  /* Per-component forward kinematics. */
+  const components = connectedComponents(pieces);
+  const pieceById = new Map<string, TrackPiece>();
+  for (const p of pieces) pieceById.set(p.id, p);
+
+  /* Build a pose map covering all components. */
+  const poses = new Map<string, { x: number; y: number; rotationDeg: number }>();
+  for (const component of components) {
+    /* Pick the first piece as anchor (stable: Map iteration order = insertion order). */
+    const anchorId = [...component][0];
+    if (anchorId === undefined) continue;
+    const componentPieces = [...component]
+      .map((id) => pieceById.get(id))
+      .filter((p): p is TrackPiece => p !== undefined);
+    const effectiveMap = effectivePoses(componentPieces, flex, anchorId);
+    for (const [id, pose] of effectiveMap) {
+      poses.set(id, pose);
+    }
+  }
+
+  return pieces.map((p) => {
+    const pose = poses.get(p.id);
+    if (pose === undefined) return { ...p, rotationDeg: p.rotationDeg };
+    return {
+      ...p,
+      position: { x: pose.x, y: pose.y },
+      rotationDeg: pose.rotationDeg,
+    };
+  });
+}
+
 const SCALE = 2;
 const CANVAS_W_MM = 900;
 const CANVAS_H_MM = 600;
@@ -853,6 +1003,9 @@ interface TrainframeSimHandle {
    * escape hatch for the live-driving playbook + screenshot harnesses to read
    * the world's body population (loco/carriage/spare poses) from the page. */
   readonly bodies: () => readonly BodyPose[] | null;
+  /** Set the flex state programmatically (for tests and orchestrator scripts).
+   * Bends the rendered and compiled layout without touching rest-pose pieces. */
+  readonly setFlex: (flex: FlexState) => void;
 }
 
 declare global {
@@ -964,6 +1117,11 @@ interface ToyTableProps {
 export function ToyTable({ initialUrl }: ToyTableProps) {
   const { client } = useBroker();
   const [pieces, setPieces] = useState<ReadonlyArray<TrackPiece>>([]);
+  /* Flex state for the track: a map from joint key to JointFlex deviation.
+   * Empty by default (rest pose). Set programmatically (no drag interaction
+   * yet — Task 7). When non-empty, applyFlex bends the rendered and compiled
+   * layout without touching the rest-pose pieces. */
+  const [flex, setFlex] = useState<FlexState>(new Map());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /** Which piece type the operator has "armed" from the toybox, if any. */
   const [armedType, setArmedType] = useState<TrackPieceType | null>(null);
@@ -1031,6 +1189,15 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
    * the tick loop re-renders when a part moves while no train is. */
   const experimentSigRef = useRef('');
 
+  /* Effective pieces: rest-pose pieces bent through the current flex state.
+   * Memoised on pieces + flex so the reference is stable across re-renders that
+   * only bump tickCount — if pieces/flex haven't changed, the array reference is
+   * identical and useToyHardware's reconciliation useEffect does not re-fire. */
+  const effectivePieces = useMemo(() => applyFlex(pieces, flex), [pieces, flex]);
+
+  /* Stable TrackPiece view of effectivePieces — same memo guard. */
+  const hardwarePieces = useMemo(() => asTrackPieces(effectivePieces), [effectivePieces]);
+
   // Stand up an in-browser physics simulation wired to the broker. It hosts
   // the virtual trains and gates the operator scans onto the bus, and reacts
   // to clearance commands the real server publishes. Layout is *private* to
@@ -1038,7 +1205,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   // are; the server still infers the public layout from `tag_assignment`
   // events ToyTable emits on scan.
   const { hardwareRef } = useToyHardware({
-    pieces,
+    pieces: hardwarePieces,
     liveIds,
     poweredOffIds,
     client,
@@ -1075,6 +1242,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       resume: () => {},
       step: () => {},
       bodies: () => hardwareRef.current?.bodies() ?? null,
+      setFlex,
     };
     window.trainframeSim = handle;
     return () => {
@@ -1608,7 +1776,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
           corner — drag a placed piece onto it to put it on the bus. */}
         <div className="tf-toytable__stage">
           <Table
-            pieces={pieces}
+            pieces={effectivePieces}
             liveIds={liveIds}
             poweredOffIds={poweredOffIds}
             selectedId={selectedId}
@@ -2147,7 +2315,7 @@ function ActionBar({
 // ---------------------------------------------------------------------------
 
 interface TableProps {
-  readonly pieces: ReadonlyArray<TrackPiece>;
+  readonly pieces: ReadonlyArray<EffectivePiece>;
   readonly liveIds: ReadonlySet<string>;
   /** Subset of live train ids powered OFF in place (rendered dark / inert). */
   readonly poweredOffIds: ReadonlySet<string>;
@@ -2251,7 +2419,7 @@ function Table({
       for (const p of pieces) {
         xs.push(p.position.x);
         ys.push(p.position.y);
-        for (const e of getEndpoints(p)) {
+        for (const e of getEndpoints(asTrackPiece(p))) {
           xs.push(e.x);
           ys.push(e.y);
         }
@@ -2390,7 +2558,14 @@ function Table({
     // Armed: snap + orient the new piece to continue from a nearby open
     // endpoint so curved loops can be built by clicking, not pixel-nudging.
     // Gated to the active layer so an upper-deck piece ignores ground joints.
-    const placement = computePlacement(xMm, yMm, armedType, pieces, false, activeLayer);
+    const placement = computePlacement(
+      xMm,
+      yMm,
+      armedType,
+      asTrackPieces(pieces),
+      false,
+      activeLayer,
+    );
     onCanvasClick(placement.x, placement.y, armedType, placement.rotationDeg);
   }
 
@@ -2421,7 +2596,7 @@ function Table({
     // readable mid-drag, so highlight the nearest open endpoint (the join a
     // track piece would orient onto); harmless for device drags.
     const { x: xMm, y: yMm } = clientToMm(getRect(), e.clientX, e.clientY, viewport);
-    setSnapHighlight(nearestConnectablePoint(xMm, yMm, pieces));
+    setSnapHighlight(nearestConnectablePoint(xMm, yMm, asTrackPieces(pieces)));
   }
 
   function handleDragLeave() {
@@ -2440,7 +2615,14 @@ function Table({
     // piece in connects it instead of dropping it loose.
     const pieceType = e.dataTransfer.getData(TOYBOX_DRAG_MIME) as TrackPieceType | '';
     if (pieceType === '') return;
-    const placement = computePlacement(xMm, yMm, pieceType, pieces, false, activeLayer);
+    const placement = computePlacement(
+      xMm,
+      yMm,
+      pieceType,
+      asTrackPieces(pieces),
+      false,
+      activeLayer,
+    );
     onCanvasClick(placement.x, placement.y, pieceType, placement.rotationDeg);
   }
 
@@ -2458,8 +2640,8 @@ function Table({
     // Preview the *snapped* pose: bring the piece's end near a neighbour's open
     // end and it visibly clicks into the joint, oriented to continue. Release
     // commits exactly this (movePiece runs the same placement on the same mm).
-    const others = pieces.filter((p) => p.id !== pieceId);
-    const placement = computeMovePlacement(moving, x, y, others);
+    const others = asTrackPieces(pieces.filter((p) => p.id !== pieceId));
+    const placement = computeMovePlacement(asTrackPiece(moving), x, y, others);
     setPieceDragPreview({
       id: pieceId,
       x: placement.x,
@@ -2494,7 +2676,7 @@ function Table({
   // of the ground loop under a bridge with opaque fills. A live train reads the
   // higher of its current edge's two layers so it draws ON TOP of the ground
   // loop it crosses mid-bridge, not under it.
-  const piecesById = new Map<string, TrackPiece>();
+  const piecesById = new Map<string, EffectivePiece>();
   for (const p of pieces) piecesById.set(p.id, p);
   /* TODO(B): a live train should draw on the higher of its current edge's two
      layers while crossing a bridge, so it sits ON TOP of the ground loop it
@@ -2505,11 +2687,20 @@ function Table({
      `effectiveLayer` seam stays wired (returning a null-edge source ⇒ static
      `layerOf`) so it lights up the moment the mapping lands. */
   const layerSource = hardware !== null ? bodyTrainLayerSource() : null;
-  const layerOfPiece = (p: TrackPiece): number =>
-    layerSource !== null
-      ? effectiveLayer(p, layerSource, carriageCoupledTo, piecesById)
-      : layerOf(p);
-  const byLayer = new Map<number, TrackPiece[]>();
+  /* effectiveLayer / layerOf accept TrackPiece; use asTrackPieces at the
+     boundary. With empty flex effective rotation equals rest rotation,
+     so layer values are unchanged. */
+  const trackPiecesById = new Map<string, TrackPiece>(
+    asTrackPieces([...piecesById.values()]).map((tp) => [tp.id, tp]),
+  );
+  const layerOfPiece = (p: EffectivePiece): number => {
+    const [tp] = asTrackPieces([p]);
+    if (tp === undefined) return 0;
+    return layerSource !== null
+      ? effectiveLayer(tp, layerSource, carriageCoupledTo, trackPiecesById)
+      : layerOf(tp);
+  };
+  const byLayer = new Map<number, EffectivePiece[]>();
   for (const p of pieces) {
     const layer = layerOfPiece(p);
     const bucket = byLayer.get(layer);
@@ -2522,7 +2713,7 @@ function Table({
   // footprint on the SAME layer with no shared endpoint is an authoring mistake
   // (a bridge crossing is the legitimate different-layer case, never flagged).
   // Offending pieces get a red error outline; the status bar surfaces a count.
-  const overlapIds = detectSameLayerOverlaps(pieces);
+  const overlapIds = detectSameLayerOverlaps(asTrackPieces(pieces));
 
   return (
     <>
@@ -2577,11 +2768,13 @@ function Table({
             pier is omitted where track runs directly beneath (a bridge crossing)
             so a column never lands on the rail it spans over. Drawn UNFILTERED,
             before the deck, so the deck body caps each column. */
+          const trackPiecesArr = asTrackPieces(pieces);
           const supportColumns =
             layer > 0
               ? trackPieces.flatMap((p) => {
-                  if (pierSuppressed(p, pieces)) return [];
-                  const column = supportColumn(p, layerStyle(layer).dy);
+                  const [tp] = asTrackPieces([p]);
+                  if (tp === undefined || pierSuppressed(tp, trackPiecesArr)) return [];
+                  const column = supportColumn(tp, layerStyle(layer).dy);
                   return column !== null ? [{ id: p.id, column }] : [];
                 })
               : [];
@@ -2590,7 +2783,7 @@ function Table({
             the one disambiguation a stacked 2D view needs. Quiet, and only while
             authoring; normal viewing shows every deck at full strength. */
           const dimmed = armedType !== null && layer !== activeLayer;
-          const renderPiece = (p: TrackPiece) => (
+          const renderPiece = (p: EffectivePiece) => (
             <PieceRenderer
               key={p.id}
               piece={p}
@@ -2603,7 +2796,9 @@ function Table({
               renderPosition={renderPositions.get(p.id)}
               experimentVisual={experimentVisuals.get(p.id)}
               cranePose={
-                p.type === 'railyard' && liveIds.has(p.id) ? yardCranePose(p, hardware) : null
+                p.type === 'railyard' && liveIds.has(p.id)
+                  ? yardCranePose(asTrackPiece(p), hardware)
+                  : null
               }
               onAction={(action) => onPieceAction(p.id, action)}
               dragOverride={
@@ -2676,7 +2871,7 @@ const MARKER_DOT_RADIUS = 3;
  * the selection blue. Drawn between the track band and the devices in its layer
  * group, so a train passing over it is never pierced.
  */
-function MarkerDot({ piece, selected }: { piece: TrackPiece; selected: boolean }) {
+function MarkerDot({ piece, selected }: { piece: EffectivePiece; selected: boolean }) {
   return (
     <circle
       cx={piece.position.x}
@@ -2722,7 +2917,7 @@ function SupportLeg({ column }: { column: SupportColumn }) {
 }
 
 interface PieceRendererProps {
-  readonly piece: TrackPiece;
+  readonly piece: EffectivePiece;
   readonly selected: boolean;
   /** On the bus / scanned (spawned in the sim). For a train this stays true
    * while powered off — power is not lifecycle. */
@@ -2811,14 +3006,14 @@ function PieceRenderer({
   onDragMove,
   onDragEnd,
 }: PieceRendererProps) {
-  const shape = getPieceShape(piece);
+  const shape = getPieceShape(asTrackPiece(piece));
   const isDevice = isDevicePiece(piece.type);
   // Track pieces are filled with the beech-wood gradient + their functional
   // tint; device pieces (train/gate/carriage) get their own solid colour. A
   // carriage's colour is its intrinsic livery (so a wagon stays trackable as it
   // is shunted between trains), defaulting to the standard blue.
   const tint = PIECE_TINT[piece.type];
-  const bodyFill = pieceBodyFill(piece);
+  const bodyFill = pieceBodyFill(asTrackPiece(piece));
   // Wire devices (train / gate) can be powered off by clicking when live.
   // Carriages are wire-invisible — clicking a live carriage just selects it.
   const isWire = isWireDevice(piece.type);
@@ -3210,7 +3405,7 @@ function PowerDot({
   cy,
   onTogglePower,
 }: {
-  readonly piece: TrackPiece;
+  readonly piece: EffectivePiece;
   readonly live: boolean;
   readonly powered: boolean;
   readonly armed: boolean;
