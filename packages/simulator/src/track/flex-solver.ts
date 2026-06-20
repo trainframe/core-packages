@@ -1,19 +1,21 @@
 /**
- * Flex solver: anchor selection, CCD-style follow-cursor relaxation, and
- * loop-closure feasibility check.
+ * Flex solver: anchor selection, damped-least-squares (Levenberg–Marquardt)
+ * follow-cursor relaxation, and loop-closure feasibility check.
  *
  * The solver operates on the joint graph built by `buildJoints`. It treats
- * each joint as a rotational degree of freedom bounded to ±FLEX_BUDGET_DEG.
- * Given a dragged piece and a cursor target, it walks the chain from the
- * anchor toward the dragged piece, rotating each joint to bring the dragged
- * piece's handle toward the target. Pure, deterministic, no I/O.
+ * each joint along the anchor→dragged chain as a rotational degree of freedom
+ * bounded to ±FLEX_BUDGET_DEG. The chain's free endpoint pose is a function of
+ * the per-joint δ vector; the solver drives that pose onto a target (position,
+ * and — for closure — heading) by iterated damped-least-squares IK steps over
+ * the δ vector. Unlike classic CCD, DLS damping keeps the step well-conditioned
+ * on long, near-closed chains (≥5 joints, including the 8-curve ring) where CCD
+ * diverges. Pure, deterministic, no I/O, no randomness.
  */
 
 import {
   FLEX_BUDGET_DEG,
   type FlexState,
   type JointFlex,
-  clampFlex,
   effectivePoses,
   jointKey,
 } from './flex.js';
@@ -22,8 +24,22 @@ import { buildJoints } from './loops.js';
 import { getEndpointsAt } from './pieces.js';
 import type { TrackPiece } from './pieces.js';
 
-/* Maximum CCD iterations before we stop (keeps runtime bounded). */
-const MAX_ITERATIONS = 16;
+/* Maximum DLS iterations before we stop (keeps runtime bounded). */
+const MAX_ITERATIONS = 30;
+
+/* Finite-difference perturbation per joint, in degrees, for the Jacobian. */
+const FD_EPS_DEG = 1e-3;
+
+/* Convergence tolerance on the weighted error norm (the loop stops below it). */
+const ERR_TOL = 1e-4;
+
+/*
+ * Heading weight: a per-radian heading error is scaled by this lever arm (mm)
+ * so it is commensurate with positional error in the combined error vector.
+ * A few hundred mm matches the arc radii in play, so position and heading are
+ * driven together without either swamping the other.
+ */
+const HEADING_LEVER_MM = 150;
 
 /* ---------------------------------------------------------------------------
  * Internal graph helpers
@@ -175,152 +191,384 @@ export function selectAnchor(pieces: ReadonlyArray<TrackPiece>, draggedPieceId: 
 }
 
 /* ---------------------------------------------------------------------------
- * solveFollow — CCD relaxation
+ * Damped-least-squares (Levenberg–Marquardt) relaxation core
  * --------------------------------------------------------------------------- */
 
-/*
- * Derive the "handle" (the endpoint of the dragged piece farthest from the
- * anchor) from the current effective poses.
- */
-function handleOf(
-  draggedPiece: TrackPiece,
-  poses: ReadonlyMap<string, { x: number; y: number; rotationDeg: number }>,
-  anchorId: string,
-): { x: number; y: number } | undefined {
-  const pose = poses.get(draggedPiece.id);
+/* A pose target: position always, heading optional (anti-parallel goal). */
+interface PoseTarget {
+  readonly x: number;
+  readonly y: number;
+  /* When set, the free endpoint heading is driven anti-parallel to this. */
+  readonly outgoingAngleDeg?: number;
+}
+
+/* Everything the DLS loop needs that does not change between iterations. */
+interface RelaxContext {
+  readonly pieces: ReadonlyArray<TrackPiece>;
+  readonly draggedPiece: TrackPiece;
+  readonly anchorId: string;
+  readonly freeEndpointIdx: number;
+  /* The chain joints, anchor→dragged order; the δ vector aligns with this. */
+  readonly joints: ReadonlyArray<JointId>;
+}
+
+/* Normalise an angle to (-180, 180] degrees. */
+function normaliseDeg(deg: number): number {
+  let d = deg % 360;
+  if (d > 180) d -= 360;
+  if (d <= -180) d += 360;
+  return d;
+}
+
+/* Convert degrees to radians. */
+function toRad(deg: number): number {
+  return (deg * Math.PI) / 180;
+}
+
+/* Build a FlexState from a δ vector aligned with `ctx.joints`. */
+function flexFromDeltas(joints: ReadonlyArray<JointId>, deltas: ReadonlyArray<number>): FlexState {
+  const map = new Map<string, JointFlex>();
+  for (let i = 0; i < joints.length; i++) {
+    const joint = joints[i];
+    const deg = deltas[i];
+    if (joint === undefined || deg === undefined) continue;
+    map.set(jointKey(joint), { joint, deg, dx: 0, dy: 0 });
+  }
+  return map;
+}
+
+/* The dragged piece's free endpoint pose for a given δ vector. */
+function freePoseFor(
+  ctx: RelaxContext,
+  deltas: ReadonlyArray<number>,
+): { x: number; y: number; outgoingAngleDeg: number } | undefined {
+  const poses = effectivePoses(ctx.pieces, flexFromDeltas(ctx.joints, deltas), ctx.anchorId);
+  const pose = poses.get(ctx.draggedPiece.id);
   if (pose === undefined) return undefined;
-  const eps = getEndpointsAt(draggedPiece, pose);
-  if (eps.length === 0) return pose;
-  const anchorPose = poses.get(anchorId);
-  if (anchorPose === undefined || eps.length === 1) return eps[0] ?? pose;
-  let best = eps[0];
-  let bestDist = -1;
-  for (const ep of eps) {
-    const d = Math.hypot(ep.x - anchorPose.x, ep.y - anchorPose.y);
-    if (d > bestDist) {
-      bestDist = d;
-      best = ep;
+  return getEndpointsAt(ctx.draggedPiece, pose)[ctx.freeEndpointIdx];
+}
+
+/*
+ * The weighted error vector e = [Δx, Δy, (heading residual)·lever]. Heading
+ * is included only when the target carries a heading goal; otherwise the third
+ * component is zero (position-only follow). All components are in mm-equivalent
+ * units so JᵀJ stays well-scaled.
+ */
+function errorVector(
+  free: { x: number; y: number; outgoingAngleDeg: number },
+  target: PoseTarget,
+): [number, number, number] {
+  const ex = target.x - free.x;
+  const ey = target.y - free.y;
+  if (target.outgoingAngleDeg === undefined) return [ex, ey, 0];
+  /* Anti-parallel goal: free heading should oppose the target's exit. */
+  const headingErrDeg = normaliseDeg(target.outgoingAngleDeg + 180 - free.outgoingAngleDeg);
+  return [ex, ey, toRad(headingErrDeg) * HEADING_LEVER_MM];
+}
+
+/*
+ * Finite-difference Jacobian J (3×N): column i is d(weighted error)/dδ_i, per
+ * radian. Computed deterministically by perturbing each joint by FD_EPS_DEG and
+ * re-running the forward kinematics — no analytic shortcut, no randomness.
+ */
+function computeJacobian(
+  ctx: RelaxContext,
+  deltas: ReadonlyArray<number>,
+  baseError: ReadonlyArray<number>,
+  target: PoseTarget,
+): number[][] {
+  const n = ctx.joints.length;
+  const epsRad = toRad(FD_EPS_DEG);
+  const rows: number[][] = [[], [], []];
+  for (let i = 0; i < n; i++) {
+    const perturbed = deltas.slice();
+    perturbed[i] = (perturbed[i] ?? 0) + FD_EPS_DEG;
+    const free = freePoseFor(ctx, perturbed);
+    if (free === undefined) {
+      for (let r = 0; r < 3; r++) (rows[r] ?? [])[i] = 0;
+      continue;
+    }
+    const e = errorVector(free, target);
+    /* d(error)/dδ = (e − baseError)/ε; error decreases as we approach, so the
+     * Jacobian of the *residual* is the negative of that. We keep J as
+     * d(free-pose-contribution); since e = target − free, dE/dδ = −d(free)/dδ,
+     * and the gradient direction works out by using (baseError − e). */
+    for (let r = 0; r < 3; r++) {
+      (rows[r] ?? [])[i] = ((baseError[r] ?? 0) - (e[r] ?? 0)) / epsRad;
     }
   }
-  return best ?? pose;
+  return rows;
 }
 
-/* Signed angle (degrees) to rotate `handle` toward `target` about `pivot`. */
-function angleToward(
-  pivot: { x: number; y: number },
-  handle: { x: number; y: number },
-  target: { x: number; y: number },
-): number {
-  const hx = handle.x - pivot.x;
-  const hy = handle.y - pivot.y;
-  const tx = target.x - pivot.x;
-  const ty = target.y - pivot.y;
-  if (Math.hypot(hx, hy) < 1e-9 || Math.hypot(tx, ty) < 1e-9) return 0;
-  return (Math.atan2(hx * ty - hy * tx, hx * tx + hy * ty) * 180) / Math.PI;
+/* Cell access for an augmented matrix with the `?? 0` guard in one place. */
+function cell(m: number[][], r: number, c: number): number {
+  return (m[r] ?? [])[c] ?? 0;
 }
 
-/*
- * Compute the updated rotation δ for `joint` to rotate the dragged handle
- * toward `target`. `pivotPiece` is the anchor-side piece at this joint;
- * `pivotPose` is its current effective pose. Returns the new clamped deg.
- */
-function updatedJointDeg(
-  joint: JointId,
-  pivotPieceId: string,
-  pivotPose: { x: number; y: number; rotationDeg: number },
-  pivotPiece: TrackPiece,
-  handle: { x: number; y: number },
-  target: { x: number; y: number },
-  currentDeg: number,
-): number {
-  const idx = joint.a.pieceId === pivotPieceId ? joint.a.endpointIdx : joint.b.endpointIdx;
-  const jointPt = getEndpointsAt(pivotPiece, pivotPose)[idx];
-  if (jointPt === undefined) return currentDeg;
-  const delta = angleToward(jointPt, handle, target);
-  const proposed = currentDeg + delta;
-  return Math.max(-FLEX_BUDGET_DEG, Math.min(FLEX_BUDGET_DEG, proposed));
+/* Row index of the largest-magnitude entry in `col` at or below `col` (partial
+ * pivoting). */
+function pivotRowIndex(m: number[][], col: number, n: number): number {
+  let pivot = col;
+  for (let r = col + 1; r < n; r++) {
+    if (Math.abs(cell(m, r, col)) > Math.abs(cell(m, pivot, col))) pivot = r;
+  }
+  return pivot;
 }
 
-/*
- * One CCD pass over the joint chain: update each joint in sequence to move
- * the dragged piece's handle toward `target`. Mutates `flexMap` in place.
- */
-function ccdPass(
-  path: ChainPath,
-  pieceById: ReadonlyMap<string, TrackPiece>,
-  pieces: ReadonlyArray<TrackPiece>,
-  draggedPiece: TrackPiece,
-  anchorId: string,
-  target: { x: number; y: number },
-  flexMap: Map<string, JointFlex>,
-): void {
-  for (let ji = 0; ji < path.joints.length; ji++) {
-    const joint = path.joints[ji];
-    const pivotId = path.pieceIds[ji];
-    if (joint === undefined || pivotId === undefined) continue;
-    const pivotPiece = pieceById.get(pivotId);
-    if (pivotPiece === undefined) continue;
-
-    /* Re-evaluate after each joint update for classic CCD behaviour. */
-    const poses = effectivePoses(pieces, flexMap as FlexState, anchorId);
-    const pivotPose = poses.get(pivotId);
-    if (pivotPose === undefined) continue;
-    const handle = handleOf(draggedPiece, poses, anchorId);
-    if (handle === undefined) continue;
-
-    const key = jointKey(joint);
-    const currentDeg = flexMap.get(key)?.deg ?? 0;
-    const newDeg = updatedJointDeg(
-      joint,
-      pivotId,
-      pivotPose,
-      pivotPiece,
-      handle,
-      target,
-      currentDeg,
-    );
-    const clamped = clampFlex(newDeg, 0, 0);
-    flexMap.set(key, { joint, deg: clamped.deg, dx: 0, dy: 0 });
+/* Subtract the pivot row from every other row to zero out `col`. */
+function eliminateColumn(m: number[][], col: number, n: number, pivotVal: number): void {
+  const pivotRow = m[col] ?? [];
+  for (let r = 0; r < n; r++) {
+    if (r === col) continue;
+    const row = m[r] ?? [];
+    const factor = (row[col] ?? 0) / pivotVal;
+    for (let c = col; c <= n; c++) row[c] = (row[c] ?? 0) - factor * (pivotRow[c] ?? 0);
   }
 }
 
+/* Solve the N×N linear system A x = b by Gauss–Jordan elimination with partial
+ * pivoting. Deterministic; singular pivots are skipped (treated as zero). */
+function solveLinearSystem(a: number[][], b: ReadonlyArray<number>): number[] {
+  const n = b.length;
+  const m = a.map((row, i) => [...row, b[i] ?? 0]);
+  for (let col = 0; col < n; col++) {
+    const pivot = pivotRowIndex(m, col, n);
+    const tmp = m[col];
+    m[col] = m[pivot] ?? [];
+    if (tmp !== undefined) m[pivot] = tmp;
+    const pivotVal = cell(m, col, col);
+    if (Math.abs(pivotVal) < 1e-12) continue;
+    eliminateColumn(m, col, n, pivotVal);
+  }
+  const x: number[] = new Array(n).fill(0);
+  for (let i = 0; i < n; i++) {
+    const diag = cell(m, i, i);
+    x[i] = Math.abs(diag) < 1e-12 ? 0 : cell(m, i, n) / diag;
+  }
+  return x;
+}
+
+/* Clamp every component of a δ vector to ±FLEX_BUDGET_DEG. */
+function clampDeltas(deltas: ReadonlyArray<number>): number[] {
+  return deltas.map((d) => Math.max(-FLEX_BUDGET_DEG, Math.min(FLEX_BUDGET_DEG, d)));
+}
+
+/*
+ * Build the LM normal equations (JᵀJ + λI)·step = Jᵀe and solve for the step
+ * (in radians). `j` is the 3×N Jacobian, `error` the current 3-vector. A joint
+ * marked `locked` is held at its bound: its Jacobian column is dropped (so the
+ * remaining free joints absorb the motion) and its returned step is forced to
+ * zero. This is clamped-least-squares — it lets a saturated joint redistribute
+ * its demand onto unsaturated ones instead of the whole step stalling.
+ */
+/* Dot product of Jacobian columns i and k (a 3-row matrix). */
+function jColDot(j: number[][], i: number, k: number): number {
+  let v = 0;
+  for (let r = 0; r < 3; r++) v += ((j[r] ?? [])[i] ?? 0) * ((j[r] ?? [])[k] ?? 0);
+  return v;
+}
+
+/* Jacobian-transpose-times-error for column i (the i-th gradient component). */
+function jColDotError(j: number[][], i: number, error: ReadonlyArray<number>): number {
+  let g = 0;
+  for (let r = 0; r < 3; r++) g += ((j[r] ?? [])[i] ?? 0) * (error[r] ?? 0);
+  return g;
+}
+
+/* Build one row of JᵀJ + λI over the unlocked columns. */
+function normalEquationRow(
+  j: number[][],
+  i: number,
+  n: number,
+  lambda: number,
+  locked: ReadonlyArray<boolean>,
+): number[] {
+  const row = new Array(n).fill(0);
+  for (let k = 0; k < n; k++) {
+    if (locked[k] === true) continue;
+    row[k] = jColDot(j, i, k) + (i === k ? lambda : 0);
+  }
+  return row;
+}
+
+function dlsStep(
+  j: number[][],
+  error: ReadonlyArray<number>,
+  lambda: number,
+  locked: ReadonlyArray<boolean>,
+): number[] {
+  const n = (j[0] ?? []).length;
+  const jtj: number[][] = [];
+  const jte: number[] = [];
+  for (let i = 0; i < n; i++) {
+    if (locked[i] === true) {
+      /* Pin a locked joint to zero step: identity row, zero gradient. */
+      const row = new Array(n).fill(0);
+      row[i] = 1;
+      jtj[i] = row;
+      jte[i] = 0;
+      continue;
+    }
+    jtj[i] = normalEquationRow(j, i, n, lambda, locked);
+    jte[i] = jColDotError(j, i, error);
+  }
+  return solveLinearSystem(jtj, jte);
+}
+
+/*
+ * Clamped least-squares step: solve the LM system, then iteratively lock any
+ * joint that the step drives past its ±budget bound (outward) and re-solve over
+ * the remaining free joints. Returns the clamped trial δ vector. Bounded: each
+ * lock removes one DOF, so at most N inner solves.
+ */
+function clampedStep(
+  jacobian: number[][],
+  error: ReadonlyArray<number>,
+  lambda: number,
+  deltas: ReadonlyArray<number>,
+): number[] {
+  const n = deltas.length;
+  const locked: boolean[] = new Array(n).fill(false);
+  let trial = deltas.slice();
+  for (let pass = 0; pass <= n; pass++) {
+    const stepRad = dlsStep(jacobian, error, lambda, locked);
+    trial = deltas.map((d, i) =>
+      locked[i] === true
+        ? Math.max(-FLEX_BUDGET_DEG, Math.min(FLEX_BUDGET_DEG, d))
+        : d + (180 * (stepRad[i] ?? 0)) / Math.PI,
+    );
+    let newlyLocked = false;
+    for (let i = 0; i < n; i++) {
+      if (locked[i] === true) continue;
+      const v = trial[i] ?? 0;
+      if (v > FLEX_BUDGET_DEG || v < -FLEX_BUDGET_DEG) {
+        locked[i] = true;
+        newlyLocked = true;
+      }
+    }
+    if (!newlyLocked) break;
+  }
+  return clampDeltas(trial);
+}
+
+/* Squared length of an error vector. */
+function errorNormSq(e: ReadonlyArray<number>): number {
+  return (e[0] ?? 0) ** 2 + (e[1] ?? 0) ** 2 + (e[2] ?? 0) ** 2;
+}
+
+/*
+ * Iterated damped-least-squares relaxation. Drives the dragged piece's free
+ * endpoint onto `target` (position, plus heading if the target carries one) by
+ * repeatedly solving the LM normal equations and clamping each joint to budget.
+ * λ adapts: it shrinks on an accepted (error-reducing) step and grows on a
+ * rejected one, so the iteration is stable on long, near-closed chains where
+ * undamped CCD diverges. Returns the final δ vector (always clamped). Pure.
+ */
+function relaxDls(ctx: RelaxContext, target: PoseTarget): number[] {
+  let deltas: number[] = new Array(ctx.joints.length).fill(0);
+  let lambda = 1.0;
+
+  for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+    const free = freePoseFor(ctx, deltas);
+    if (free === undefined) break;
+    const error = errorVector(free, target);
+    const currentNormSq = errorNormSq(error);
+    if (currentNormSq < ERR_TOL * ERR_TOL) break;
+
+    const jacobian = computeJacobian(ctx, deltas, error, target);
+    const trial = clampedStep(jacobian, error, lambda, deltas);
+
+    const trialFree = freePoseFor(ctx, trial);
+    if (trialFree === undefined) break;
+    const trialNormSq = errorNormSq(errorVector(trialFree, target));
+
+    if (trialNormSq < currentNormSq) {
+      deltas = trial;
+      lambda = Math.max(lambda * 0.5, 1e-6);
+    } else {
+      /* Reject: keep δ, raise damping toward gradient descent and retry. */
+      lambda = Math.min(lambda * 4, 1e6);
+    }
+  }
+  return clampDeltas(deltas);
+}
+
+/* ---------------------------------------------------------------------------
+ * Chain setup shared by both solvers
+ * --------------------------------------------------------------------------- */
+
+/* Resolve the anchor, joint chain, and dragged piece for a drag operation. */
+function buildRelaxContext(
+  pieces: ReadonlyArray<TrackPiece>,
+  draggedPieceId: string,
+  freeEndpointIdx: number,
+): RelaxContext | undefined {
+  const joints = buildJoints(pieces);
+  if (joints.length === 0) return undefined;
+
+  const adj = buildAdj(pieces, joints);
+  const anchorId = selectAnchor(pieces, draggedPieceId);
+  const path = findPath(anchorId, draggedPieceId, adj);
+  if (path === undefined || path.joints.length === 0) return undefined;
+
+  const draggedPiece = pieces.find((p) => p.id === draggedPieceId);
+  if (draggedPiece === undefined) return undefined;
+
+  return { pieces, draggedPiece, anchorId, freeEndpointIdx, joints: path.joints };
+}
+
+/* ---------------------------------------------------------------------------
+ * solveFollow — position-only DLS relaxation
+ * --------------------------------------------------------------------------- */
+
 /**
- * Iterative CCD-style follow-cursor solver.
- *
- * Walks the chain of joints from the anchor toward the dragged piece. On each
- * pass, rotates each joint (within ±FLEX_BUDGET_DEG) to bring the dragged
- * piece's free handle toward `target`. Repeats up to MAX_ITERATIONS times or
- * until the handle is close enough (< 0.1 mm). Returns a FlexState; pure.
+ * Follow-cursor solver. Drives the dragged piece's free endpoint toward
+ * `target` (position only) by damped-least-squares relaxation over the
+ * anchor→dragged joint chain, every joint clamped to ±FLEX_BUDGET_DEG. Returns
+ * a FlexState; pure and deterministic. The "free endpoint" is the dragged
+ * piece's endpoint farthest from the anchor at rest (endpoint index 1 for a
+ * two-ended piece, which is the cursor-side handle for the open chains the UI
+ * drags).
  */
 export function solveFollow(
   pieces: ReadonlyArray<TrackPiece>,
   draggedPieceId: string,
   target: { x: number; y: number },
 ): FlexState {
-  const joints = buildJoints(pieces);
-  if (joints.length === 0) return new Map<string, JointFlex>();
+  const empty: FlexState = new Map<string, JointFlex>();
+  const ctx = buildRelaxContext(pieces, draggedPieceId, freeHandleIdx(pieces, draggedPieceId));
+  if (ctx === undefined) return empty;
 
-  const adj = buildAdj(pieces, joints);
+  const deltas = relaxDls(ctx, { x: target.x, y: target.y });
+  return flexFromDeltas(ctx.joints, deltas);
+}
+
+/*
+ * The endpoint index of the dragged piece's free handle: the endpoint farthest
+ * from the anchor at rest. Mirrors the old `handleOf` selection so solveFollow
+ * keeps targeting the cursor-side end. Falls back to index 0.
+ */
+function freeHandleIdx(pieces: ReadonlyArray<TrackPiece>, draggedPieceId: string): number {
+  const draggedPiece = pieces.find((p) => p.id === draggedPieceId);
+  if (draggedPiece === undefined) return 0;
   const anchorId = selectAnchor(pieces, draggedPieceId);
-  const path = findPath(anchorId, draggedPieceId, adj);
-  if (path === undefined || path.joints.length === 0) return new Map<string, JointFlex>();
-
-  const pieceById = new Map<string, TrackPiece>();
-  for (const p of pieces) pieceById.set(p.id, p);
-  const draggedPiece = pieceById.get(draggedPieceId);
-  if (draggedPiece === undefined) return new Map<string, JointFlex>();
-
-  const flexMap = new Map<string, JointFlex>();
-
-  for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
-    const poses = effectivePoses(pieces, flexMap as FlexState, anchorId);
-    const handle = handleOf(draggedPiece, poses, anchorId);
-    if (handle === undefined) break;
-    if (Math.hypot(handle.x - target.x, handle.y - target.y) < 0.1) break;
-    ccdPass(path, pieceById, pieces, draggedPiece, anchorId, target, flexMap);
+  const poses = effectivePoses(pieces, new Map<string, JointFlex>(), anchorId);
+  const pose = poses.get(draggedPieceId);
+  const anchorPose = poses.get(anchorId);
+  if (pose === undefined || anchorPose === undefined) return 0;
+  const eps = getEndpointsAt(draggedPiece, pose);
+  let bestIdx = 0;
+  let bestDist = -1;
+  for (let i = 0; i < eps.length; i++) {
+    const ep = eps[i];
+    if (ep === undefined) continue;
+    const d = Math.hypot(ep.x - anchorPose.x, ep.y - anchorPose.y);
+    if (d > bestDist) {
+      bestDist = d;
+      bestIdx = i;
+    }
   }
-
-  return flexMap as FlexState;
+  return bestIdx;
 }
 
 /* ---------------------------------------------------------------------------
@@ -334,34 +582,8 @@ export interface ClosureResult {
 }
 
 /*
- * Normalise an angle to the range (-180, 180] degrees.
- * Used to compute the smallest signed difference between two headings.
- */
-function normaliseDeg(deg: number): number {
-  let d = deg % 360;
-  if (d > 180) d -= 360;
-  if (d <= -180) d += 360;
-  return d;
-}
-
-/*
- * The endpoint at `freeEndpointIdx` of the dragged piece in its current effective pose.
- * Returns undefined if the pose or endpoint is missing.
- */
-function freeEndpointOf(
-  draggedPiece: TrackPiece,
-  poses: ReadonlyMap<string, { x: number; y: number; rotationDeg: number }>,
-  freeEndpointIdx: number,
-): { x: number; y: number; outgoingAngleDeg: number } | undefined {
-  const pose = poses.get(draggedPiece.id);
-  if (pose === undefined) return undefined;
-  return getEndpointsAt(draggedPiece, pose)[freeEndpointIdx];
-}
-
-/*
- * Check whether the dragged piece's free endpoint meets the target pose:
- * - position gap < posToleranceMm
- * - heading difference (anti-parallel) < headingToleranceDeg
+ * Whether the free endpoint meets the closure target: position gap below
+ * posToleranceMm AND heading anti-parallel within headingToleranceDeg.
  */
 function meetsClosureTolerance(
   ep: { x: number; y: number; outgoingAngleDeg: number },
@@ -370,20 +592,21 @@ function meetsClosureTolerance(
   headingToleranceDeg: number,
 ): boolean {
   const gap = Math.hypot(ep.x - target.x, ep.y - target.y);
-  /* Anti-parallel: the free endpoint exits opposite to the target's exit direction. */
   const headingDiff = Math.abs(normaliseDeg(ep.outgoingAngleDeg - (target.outgoingAngleDeg + 180)));
   return gap < posToleranceMm && headingDiff < headingToleranceDeg;
 }
 
 /**
  * Solve for a flex configuration that brings the dragged piece's free endpoint
- * onto `targetEndpoint` in BOTH position (≤ 1 mm) and heading (anti-parallel
- * within 1°), within every joint's ±FLEX_BUDGET_DEG budget.
+ * onto `targetEndpoint` in BOTH position (< 1 mm) and heading (anti-parallel
+ * within 1°), with every joint within ±FLEX_BUDGET_DEG.
  *
- * Reuses the CCD follow-cursor relaxation with the target position, then checks
- * the final heading residual to determine feasibility. If the gap or heading
- * error after relaxation exceeds the tolerance, `feasible` is false and the
- * returned flex is the best attempt. Pure, deterministic, no I/O.
+ * Uses damped-least-squares IK over the anchor→dragged joint chain, driving the
+ * full 3-DOF pose error (Δx, Δy, heading) to zero. This converges on long,
+ * near-closed chains (≥5 joints, including the 8-curve ring) where the previous
+ * CCD diverged. `feasible` reflects whether the final residual is within
+ * tolerance with all joints in budget; otherwise the best attempt is returned.
+ * Pure, deterministic, no I/O.
  */
 export function solveClose(
   pieces: ReadonlyArray<TrackPiece>,
@@ -391,37 +614,18 @@ export function solveClose(
   freeEndpointIdx: number,
   targetEndpoint: { x: number; y: number; outgoingAngleDeg: number },
 ): ClosureResult {
-  const joints = buildJoints(pieces);
   const empty: FlexState = new Map<string, JointFlex>();
-  if (joints.length === 0) return { feasible: false, flex: empty };
+  const ctx = buildRelaxContext(pieces, draggedPieceId, freeEndpointIdx);
+  if (ctx === undefined) return { feasible: false, flex: empty };
 
-  const adj = buildAdj(pieces, joints);
-  const anchorId = selectAnchor(pieces, draggedPieceId);
-  const path = findPath(anchorId, draggedPieceId, adj);
-  if (path === undefined || path.joints.length === 0) return { feasible: false, flex: empty };
+  const deltas = relaxDls(ctx, {
+    x: targetEndpoint.x,
+    y: targetEndpoint.y,
+    outgoingAngleDeg: targetEndpoint.outgoingAngleDeg,
+  });
+  const flex = flexFromDeltas(ctx.joints, deltas);
 
-  const pieceById = new Map<string, TrackPiece>();
-  for (const p of pieces) pieceById.set(p.id, p);
-  const draggedPiece = pieceById.get(draggedPieceId);
-  if (draggedPiece === undefined) return { feasible: false, flex: empty };
-
-  const target = { x: targetEndpoint.x, y: targetEndpoint.y };
-  const flexMap = new Map<string, JointFlex>();
-
-  /* CCD iterations toward the target position. */
-  for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
-    const poses = effectivePoses(pieces, flexMap as FlexState, anchorId);
-    const ep = freeEndpointOf(draggedPiece, poses, freeEndpointIdx);
-    if (ep === undefined) break;
-    if (Math.hypot(ep.x - target.x, ep.y - target.y) < 0.1) break;
-    ccdPass(path, pieceById, pieces, draggedPiece, anchorId, target, flexMap);
-  }
-
-  const flex = flexMap as FlexState;
-
-  /* Final feasibility check: position + heading must both be within tolerance. */
-  const finalPoses = effectivePoses(pieces, flex, anchorId);
-  const finalEp = freeEndpointOf(draggedPiece, finalPoses, freeEndpointIdx);
+  const finalEp = freePoseFor(ctx, deltas);
   if (finalEp === undefined) return { feasible: false, flex };
 
   const feasible = meetsClosureTolerance(finalEp, targetEndpoint, 1.0, 1.0);

@@ -467,4 +467,84 @@ describe('solveClose', () => {
     );
     expect(headingErr).toBeLessThan(1.0);
   });
+
+  it('closes a real loop: a 6-joint open chain (the 8-curve ring built open)', () => {
+    /*
+     * The headline behaviour. This is the 8-curve ring laid out as an OPEN
+     * chain of seven curves (C0..C6, six joints) — a genuine gap, not the
+     * degenerate 8×45°=360° rest closure. The chain has ≥5 joints, which is
+     * exactly the regime where the previous CCD solver DIVERGED (the
+     * investigation measured a 25–30 mm residual for a few-mm target). The
+     * damped-least-squares solver must drive the free end onto a real swung
+     * target in BOTH position (< 1 mm) and heading (anti-parallel < 1°).
+     */
+    const chain = buildOpenCurveChain(7);
+    const draggedId = 'C6';
+    const freeEndpointIdx = 1;
+    const anchorId = selectAnchor(chain, draggedId);
+    const dragged = chain.find((p) => p.id === draggedId);
+    if (dragged === undefined) throw new Error('unreachable');
+
+    /* Genuinely open — no cycle at rest. */
+    expect(findLoops(chain)).toHaveLength(0);
+
+    /* Chain between anchor and dragged is ≥5 joints (the CCD-divergent regime). */
+    const anchorAdj = buildJoints(chain);
+    expect(anchorAdj.length).toBeGreaterThanOrEqual(5);
+
+    const { target, restGap } = swungClosureTarget(chain, anchorId, dragged, freeEndpointIdx, 1.8);
+    /* A real, non-trivial gap well above the 1 mm tolerance. */
+    expect(restGap).toBeGreaterThan(5);
+
+    const res: ClosureResult = solveClose(chain, draggedId, freeEndpointIdx, target);
+    expect(res.feasible).toBe(true);
+
+    /* Flex is genuinely non-empty and every joint is within budget. */
+    const flexedJoints = [...res.flex.values()].filter((f) => Math.abs(f.deg) > 1e-6);
+    expect(flexedJoints.length).toBeGreaterThan(0);
+    for (const f of res.flex.values()) {
+      expect(Math.abs(f.deg)).toBeLessThanOrEqual(FLEX_BUDGET_DEG + 1e-6);
+    }
+
+    const closedPoses = effectivePoses(chain, res.flex, anchorId);
+    expect(gapAt(closedPoses, dragged, freeEndpointIdx, target)).toBeLessThan(1.0);
+    const closedPose = closedPoses.get(draggedId);
+    if (closedPose === undefined) throw new Error('unreachable');
+    const closedFree = getEndpointsAt(dragged, closedPose)[freeEndpointIdx];
+    if (closedFree === undefined) throw new Error('unreachable');
+    expect(
+      antiParallelHeadingError(closedFree.outgoingAngleDeg, target.outgoingAngleDeg),
+    ).toBeLessThan(1.0);
+  });
+
+  it('does NOT diverge on a ≥5-joint chain (the case the old CCD wrong-way-swung)', () => {
+    /*
+     * Guard against regression to CCD's failure mode. On a long chain (here
+     * five joints, six curves) the old CCD swung the sub-chain the wrong way
+     * and left a residual LARGER than the rest gap. The DLS solver must instead
+     * REDUCE the gap to within tolerance. We assert both: feasible, and the
+     * post-flex gap is far below the rest gap (proving genuine convergence, not
+     * the divergence the investigation recorded).
+     */
+    const chain = buildOpenCurveChain(6);
+    const draggedId = 'C5';
+    const freeEndpointIdx = 1;
+    const anchorId = selectAnchor(chain, draggedId);
+    const dragged = chain.find((p) => p.id === draggedId);
+    if (dragged === undefined) throw new Error('unreachable');
+
+    expect(buildJoints(chain).length).toBeGreaterThanOrEqual(5);
+
+    const { target, restGap } = swungClosureTarget(chain, anchorId, dragged, freeEndpointIdx, 1.5);
+    expect(restGap).toBeGreaterThan(5);
+
+    const res = solveClose(chain, draggedId, freeEndpointIdx, target);
+    expect(res.feasible).toBe(true);
+
+    const closedPoses = effectivePoses(chain, res.flex, anchorId);
+    const postGap = gapAt(closedPoses, dragged, freeEndpointIdx, target);
+    /* Genuine convergence: gap shrinks dramatically, not grows (CCD grew it). */
+    expect(postGap).toBeLessThan(1.0);
+    expect(postGap).toBeLessThan(restGap);
+  });
 });
