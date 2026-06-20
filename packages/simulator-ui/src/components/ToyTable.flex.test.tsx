@@ -118,6 +118,12 @@ function timedPtr(type: string, clientX: number, clientY: number, t: number): Mo
   return e;
 }
 
+/* Parse the rotation angle (degrees) from an SVG transform attribute string. */
+function parseRotDeg(transform: string): number {
+  const match = /rotate\(([-\d.]+)\)/.exec(transform);
+  return match !== null && match[1] !== undefined ? Number.parseFloat(match[1]) : 0;
+}
+
 /* ---------------------------------------------------------------------------
  * applyFlex — pure-function tests
  * --------------------------------------------------------------------------- */
@@ -443,6 +449,91 @@ describe('ToyTable — closure flash + commit', () => {
       const rotDeg = rotMatch?.[1] !== undefined ? Number.parseFloat(rotMatch[1]) : 0;
       expect(Math.abs(rotDeg)).toBeGreaterThan(0);
       expect(Math.abs(rotDeg)).toBeLessThanOrEqual(2 + 1e-3); /* within FLEX_BUDGET_DEG */
+    } finally {
+      restore();
+    }
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * ToyTable component — over-pull detach + remainder holds its flexed shape
+ *
+ * Layout:
+ *   A: placed at client (900, 600) → centre (450, 300) mm. A.E=(550,300).
+ *   B: placed at client (1100, 600) → snaps to A.E, centre (650, 300).
+ *      B.E=(750,300).
+ *   Pre-bend: slow-drag B from its east side (1490,600) to (1490,592) then
+ *   release at (1300,600) — B re-snaps to A.E so the chain stays intact but
+ *   the A–B joint holds ≈ −1.4° flex in state.
+ *   C: placed at client (1660, 600) → snaps to B.E, centre (850, 300).
+ *      C.E=(950,300).
+ *
+ * Over-pull: slow-drag C from (1660,600) to (2500,600) (same timestamp →
+ * speed = 0 → slow path). C.E at rest = (950,300); cursor = (1250,300);
+ * gap = 300 mm >> OVER_PULL_THRESHOLD_MM (20 mm) → detach triggered.
+ * --------------------------------------------------------------------------- */
+
+describe('ToyTable — over-pull detach + remainder holds its flexed shape', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.mocked(solveClose).mockReturnValue({ feasible: false, flex: new Map() });
+  });
+
+  it('slow drag past budget detaches the piece and the bent neighbour keeps its flex', () => {
+    const restore = mockCanvasRect();
+    try {
+      renderToyTableWithBroker();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+
+      /* Build the A–B–C chain. */
+      placePieceAt(canvas, 'straight', 900, 600); /* A centre (450,300) */
+      const bId = placePieceAt(canvas, 'straight', 1100, 600); /* B snaps to A.E */
+
+      /* Pre-bend A–B: drag from near B.E, release so B re-snaps to A. */
+      const bEl = canvas.querySelector(`[data-piece-id="${bId}"]`) as SVGGElement | null;
+      if (bEl === null) throw new Error('piece B not in DOM');
+      act(() => {
+        /* Pointerdown near B's east endpoint. */
+        bEl.dispatchEvent(timedPtr('pointerdown', 1490, 600, 50));
+        /* Pointermove slightly upward — first move, speed = 0 (same ts).
+           Target (745, 296) mm. B.E rest = (750, 300). Gap ≈ 6 mm < threshold. */
+        bEl.dispatchEvent(timedPtr('pointermove', 1490, 592, 50));
+      });
+      act(() => {
+        /* Release back near B.W — movePiece will snap B back to A.E. */
+        bEl.dispatchEvent(timedPtr('pointerup', 1300, 600, 55));
+      });
+
+      /* B's transform must show a non-zero rotation: the A–B flex is active. */
+      const rotBefore = parseRotDeg(bEl.getAttribute('transform') ?? '');
+      expect(Math.abs(rotBefore)).toBeGreaterThan(0);
+
+      /* Now place C so the chain is A–B–C. */
+      const cId = placePieceAt(canvas, 'straight', 1660, 600); /* C snaps to B.E */
+
+      /* Count pieces before the over-pull. */
+      const countBefore = canvas.querySelectorAll('[data-piece-id]').length;
+      expect(countBefore).toBeGreaterThanOrEqual(3);
+
+      /* Over-pull C: slow drag far to the right. C.E rest = (950,300).
+         Cursor at (1250,300) mm — 300 mm gap, well past the 20 mm threshold. */
+      const cEl = canvas.querySelector(`[data-piece-id="${cId}"]`) as SVGGElement | null;
+      if (cEl === null) throw new Error('piece C not in DOM');
+      act(() => {
+        cEl.dispatchEvent(timedPtr('pointerdown', 1660, 600, 100));
+        /* Large move, same timestamp → speed = 0 → slow path → over-pull. */
+        cEl.dispatchEvent(timedPtr('pointermove', 2500, 600, 100));
+      });
+
+      /* C must have been detached — piece count drops by one. */
+      const countAfter = canvas.querySelectorAll('[data-piece-id]').length;
+      expect(countAfter).toBe(countBefore - 1);
+      expect(canvas.querySelector(`[data-piece-id="${cId}"]`)).toBeNull();
+
+      /* B's A–B flex entry survived detach — its rendered rotation is unchanged. */
+      const rotAfter = parseRotDeg(bEl.getAttribute('transform') ?? '');
+      expect(Math.abs(rotAfter)).toBeGreaterThan(0);
+      expect(rotAfter).toBeCloseTo(rotBefore, 2);
     } finally {
       restore();
     }

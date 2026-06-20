@@ -12,7 +12,12 @@ import {
   solveClose,
   solveFollow,
 } from '@trainframe/simulator/track/flex-solver.js';
-import { type FlexState, effectivePoses, jointKey } from '@trainframe/simulator/track/flex.js';
+import {
+  FLEX_BUDGET_DEG,
+  type FlexState,
+  effectivePoses,
+  jointKey,
+} from '@trainframe/simulator/track/flex.js';
 import { SNAP_DISTANCE, compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
 import { buildJoints } from '@trainframe/simulator/track/loops.js';
 import { detectSameLayerOverlaps, pierSuppressed } from '@trainframe/simulator/track/overlap.js';
@@ -249,6 +254,16 @@ const TOYBOX_DRAG_MIME = 'application/x-trainframe-toybox-type';
  * Feels like a deliberate pull vs. a quick flick.
  */
 const DRAG_FLEX_MAX_SPEED = 1.5; /* px/ms */
+
+/*
+ * If the dragged piece's handle (free endpoint) remains farther than this
+ * from the cursor after solveFollow, the joints are saturated and can't
+ * reach — treat the slow drag as an over-pull and detach the piece.
+ * 20 mm is well beyond the maximum handle displacement achievable with one
+ * joint at ±FLEX_BUDGET_DEG (≈ 3.5 mm at 100 mm arm), even for a few
+ * joints in series.
+ */
+const OVER_PULL_THRESHOLD_MM = 10 * FLEX_BUDGET_DEG; /* = 20 mm */
 
 /**
  * The garage device id used by the toy-table when announcing tag bindings.
@@ -1469,8 +1484,18 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
      that follows the cursor. Called by Table when a fast-drag yank is detected. */
   const detachPiece = useCallback((pieceId: string) => {
     setPieces((prev) => prev.filter((p) => p.id !== pieceId));
-    /* Clear flex — the chain resets once the piece is gone. */
-    setFlex(new Map());
+    /* Drop only the joints that belong to the detached piece; the remainder of
+       the chain keeps its current flex so it holds its bent shape. */
+    setFlex((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Map(prev);
+      for (const [key, entry] of next) {
+        if (entry.joint.a.pieceId === pieceId || entry.joint.b.pieceId === pieceId) {
+          next.delete(key);
+        }
+      }
+      return next.size === prev.size ? prev : next;
+    });
   }, []);
 
   const rotateSelected = useCallback(() => {
@@ -2447,6 +2472,41 @@ function freeEndpointOf(
   return best !== undefined ? { ep: best, idx: bestIdx } : null;
 }
 
+/*
+ * Over-pull detection. Returns true when the CCD solver is fully saturated
+ * and the cursor is still outward (beyond the free handle, away from the
+ * anchor) by more than OVER_PULL_THRESHOLD_MM.
+ *
+ * The dot-product guard distinguishes a genuine outward yank (cursor past the
+ * free endpoint) from an inward push or a centre drag (cursor on the anchor
+ * side of the handle), which must never trigger a detach.
+ *
+ * Pure — no React state, no refs.
+ */
+function isOverPull(
+  trackPieces: ReadonlyArray<TrackPiece>,
+  pieceId: string,
+  flex: FlexState,
+  anchorId: string,
+  cursor: { x: number; y: number },
+): boolean {
+  const poses = effectivePoses(trackPieces, flex, anchorId);
+  const draggedPiece = trackPieces.find((p) => p.id === pieceId);
+  const anchorPose = poses.get(anchorId);
+  const draggedPose = poses.get(pieceId);
+  if (draggedPiece === undefined || anchorPose === undefined || draggedPose === undefined) {
+    return false;
+  }
+  const free = freeEndpointOf(draggedPiece, draggedPose, anchorPose);
+  const h = free?.ep ?? draggedPose;
+  const dist = Math.hypot(h.x - cursor.x, h.y - cursor.y);
+  if (dist <= OVER_PULL_THRESHOLD_MM) return false;
+  /* Dot test: cursor outward from handle relative to anchor → pull direction. */
+  const pullDx = h.x - anchorPose.x;
+  const pullDy = h.y - anchorPose.y;
+  return pullDx * (cursor.x - h.x) + pullDy * (cursor.y - h.y) > 0;
+}
+
 /**
  * Try to close a loop: find the dragged piece's free endpoint in its current
  * effective pose, check if any open endpoint on another piece is within
@@ -2805,13 +2865,30 @@ function Table({
     const trackPieces = asTrackPieces(pieces);
     const flex = solveFollow(trackPieces, pieceId, { x, y });
     if (flex.size > 0) {
+      /* Over-pull detection: if the cursor is outward from the handle and the
+         joints are fully saturated, detach. isOverPull encapsulates the pure
+         geometry check; detachPiece preserves all joints not belonging to the
+         departing piece so the remainder holds its bent shape. */
+      const anchorId = selectAnchor(trackPieces, pieceId);
+      if (isOverPull(trackPieces, pieceId, flex, anchorId, { x, y })) {
+        closureFlexRef.current = null;
+        setClosureAvailableId(null);
+        onDragDetach(pieceId);
+        setPieceDragPreview({
+          id: pieceId,
+          x,
+          y,
+          rotationDeg: asTrackPiece(moving).rotationDeg,
+        });
+        return;
+      }
+
       /* The piece is in a chain — bend it live and keep the visual at its
          current rest position (the chain bends, the piece does not jump). */
       onDragFlex(flex);
 
       /* Closure detection: check whether the dragged piece's free endpoint is
          near an open endpoint on another piece and a loop closure is solvable. */
-      const anchorId = selectAnchor(trackPieces, pieceId);
       const closureResult = detectLoopClosure(trackPieces, pieceId, flex, anchorId);
       if (closureResult !== null) {
         closureFlexRef.current = closureResult;
