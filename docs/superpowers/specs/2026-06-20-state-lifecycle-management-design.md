@@ -59,12 +59,38 @@ that matter most.
 ## Core principle
 
 Every destructive operation clears **broker-retained state directly**, not
-just the server's in-memory maps. To clear retained state the server
-enumerates retained topics (subscribe to the relevant `railway/state/#`
-wildcard, collect what the broker replays as retained) and publishes an empty
-payload to each to tombstone it. Empty-payload-as-tombstone is already the
-established pattern for `schedule` and `clearance`; we extend it to
-`devices/<id>` and drive it deliberately for reset.
+just the server's in-memory maps. The ghosts survive precisely because they
+live as retained MQTT messages independent of the server's memory: a restarted
+server has empty maps while the broker still replays the ghosts. So the server
+cannot enumerate what to clear from its own state — it must learn it from the
+broker.
+
+**Retained-topic ledger.** On `start()` the server subscribes to
+`railway/state/#`. The broker replays every retained state message — including
+ghosts published by a previous server instance or by the simulator — so the
+server accumulates a live `Set<string>` of retained state topics. Reset
+iterates that set.
+
+**Per-family tombstones (there is no universal tombstone).** Investigation of
+the visualiser consumers showed each state family recognises its *own* "empty"
+shape, and several ignore a zero-length payload outright. To tombstone a topic
+the server publishes the recognised-empty payload for that family, retained:
+
+| Topic family | Recognised-empty (tombstone) payload | Consumer behaviour on it |
+| --- | --- | --- |
+| `railway/state/devices/<id>` | `{}` (object lacking `capabilities`) | removed from roster |
+| `railway/state/schedule/<id>` | `{ "train_id": "<id>" }` (no `stops`) | schedule row removed |
+| `railway/state/clearance/<id>` | `{ "train_id": "<id>", "cleared_edges": [] }` | all that train's edges released |
+| `railway/state/layout/<name>` | `{ "name": "<name>", "markers": [], "edges": [], "junctions": [] }` | empty layout (zero-length is **ignored**) |
+| `railway/state/deadlock/active` | `{ "trains": [] }` | banner cleared |
+| `railway/state/track_learning/active` | learn-mode idle snapshot | idle (zero-length is **ignored**) |
+
+These all route through the existing `effects.updateState(entity_type,
+entity_id, state)` → `railway/state/<entity_type>/<entity_id>` retained-publish
+path, so no new broker primitive or effect kind is needed. (Note: the
+recognised-empty JSON is retained, not deleted, on a real broker — harmless
+cruft that every consumer reads as "gone". True zero-length deletion is
+avoided because the layout and track-learning consumers ignore it.)
 
 ## Design
 
@@ -92,12 +118,42 @@ which the server centralises.
   Response: `200` with a summary count of topics cleared.
 
 - **Bug fix:** `handleDeviceDisconnect` also tombstones retained
-  `railway/state/devices/:id`. This stops future disconnects from leaking the
-  ghost that caused this problem.
+  `railway/state/devices/:id` (with `{}`). This stops future disconnects from
+  leaking the ghost that caused this problem.
 
 `DELETE /api/trains/:id` and the disconnect handler share a single
 `forgetDevice(id)` scheduler method so the two code paths cannot drift in what
 "forget a device" means.
+
+#### New supporting methods (no new effect kinds)
+
+- **`LayoutState.pruneOrphanMarkers(): string[]`** — removes every marker with
+  no incident edges (and its entries in the aux maps: `outgoingEdges`,
+  `incomingEdges`, `traversalCounts`, `switchPositions`,
+  `junctionsByMarkerId`, `switchDeviceByMarker`), returning the removed ids.
+  `LayoutState` currently has only `upsertMarker` — no removal exists.
+- **`LayoutState.reset(): void`** — reverts the live graph to its
+  constructed-from-options baseline (in discovery mode this is empty). Stores
+  the constructor `layout`/`options` so it can rebuild the internal maps.
+- **`Scheduler.forgetDevice(deviceId): SchedulerEffect[]`** — the shared
+  removal: runs capability `onDeviceDisconnect`, deletes from `devices` and
+  (if a train) `trains`, emits the devices/schedule/clearance tombstones, and
+  retries blocked clearances. `handleDeviceDisconnect` and the `DELETE`
+  endpoint both call it.
+- **`Scheduler.reset(): void`** — clears `trains`, `devices`, and calls
+  `layout.reset()`. Pure in-memory; the server handles the broker side.
+- **Server `retainedStateTopics: Set<string>`** — populated by a
+  `railway/state/#` subscription added in `start()`. `server.reset()` calls
+  `scheduler.reset()`, then for each topic in the set publishes the per-family
+  tombstone from the table above (deriving the family from the topic's third
+  segment), and finally republishes the layout/deadlock/track-learning
+  baselines via the existing `publish*State` helpers. Synchronous — no async
+  drain needed, because the ledger is maintained continuously from boot.
+- **`Server.deleteTrain(id)` / `Server.pruneOrphanMarkers()` / `Server.reset()`**
+  — thin server methods that invoke the scheduler/layout mutations above and
+  `dispatchEffects` the results (prune dispatches
+  `updateState('layout', name, toLayout())`, the same effect the scheduler
+  already uses to publish the inferred layout).
 
 ### Visualiser
 
@@ -158,10 +214,11 @@ mocking of scheduler/registry/broker.
 
 ## Protocol note
 
-Add one line to the protocol spec: an empty retained payload on
-`railway/state/devices/<id>` is a deregister tombstone, consistent with the
-existing `schedule` and `clearance` tombstones. No version bump — no shape
-change.
+Add one line to the protocol spec: a retained `railway/state/devices/<id>`
+payload with no `capabilities` field (e.g. `{}`) is a deregister tombstone,
+matching how the visualiser's devices view already treats it. No version
+bump — no shape change. (Each state family already has its own recognised
+"empty" shape; see the Core principle table.)
 
 ## Decisions
 
