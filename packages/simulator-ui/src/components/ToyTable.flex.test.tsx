@@ -14,6 +14,7 @@ import { act, render, screen } from '@testing-library/react';
 import { InMemoryBrokerClient } from '@trainframe/simulator/broker/in-memory-client.js';
 import { type FlexState, clampFlex, jointKey } from '@trainframe/simulator/track/flex.js';
 import { buildJoints, findLoops } from '@trainframe/simulator/track/loops.js';
+import type { JointId, Loop } from '@trainframe/simulator/track/loops.js';
 import type { TrackPiece } from '@trainframe/simulator/track/pieces.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
@@ -32,6 +33,21 @@ vi.mock('@trainframe/simulator/track/flex-solver.js', async (importOriginal) => 
   return {
     ...original,
     solveClose: vi.fn().mockReturnValue({ feasible: false, flex: new Map() }),
+  };
+});
+
+/*
+ * Module-level mock for findLoops. Hoisted so ToyTable.tsx's static import of
+ * findLoops also gets the mocked version. The default implementation delegates
+ * to the real findLoops, so existing pure-function tests that call findLoops
+ * directly are unaffected. Individual tests can use mockReturnValueOnce to
+ * control what the "before" and "after" calls inside newLoopCenterline return.
+ */
+vi.mock('@trainframe/simulator/track/loops.js', async (importOriginal) => {
+  const original = await importOriginal<typeof import('@trainframe/simulator/track/loops.js')>();
+  return {
+    ...original,
+    findLoops: vi.fn().mockImplementation(original.findLoops),
   };
 });
 
@@ -472,6 +488,114 @@ describe('ToyTable — closure flash + commit', () => {
  * speed = 0 → slow path). C.E at rest = (950,300); cursor = (1250,300);
  * gap = 300 mm >> OVER_PULL_THRESHOLD_MM (20 mm) → detach triggered.
  * --------------------------------------------------------------------------- */
+
+/* ---------------------------------------------------------------------------
+ * ToyTable component — ClosureWave DOM mount after loop-closing drop
+ *
+ * This test verifies the full trigger path:
+ *   solveClose feasible → handleClosureCommit → newLoopCenterline returns points
+ *   → setClosureWavePoints → <ClosureWave data-testid="closure-wave"> is mounted.
+ *
+ * findLoops is mocked for the two calls inside newLoopCenterline:
+ *   call 1 (before): return [] — no pre-existing loops.
+ *   call 2 (after):  return a genuine 4-piece Loop — the newly-closed cycle.
+ *
+ * The mocked Loop carries real piece-IDs (from the placed pieces) and valid
+ * JointId entries (0/1 endpoint indices) so newLoopCenterline can compute
+ * getCentreLinePathAt for each piece and return a non-null point array.
+ * --------------------------------------------------------------------------- */
+
+describe('ToyTable — ClosureWave mounts after loop-closing drop', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.mocked(solveClose).mockReturnValue({ feasible: false, flex: new Map() });
+    /* Clear any residual mockReturnValueOnce entries from a previous (failed)
+       test run. The wave-mount test always sets its own values before acting. */
+    vi.mocked(findLoops).mockReset();
+  });
+
+  it('closure-wave element is present in the DOM after a loop-closing drop', () => {
+    /*
+     * Layout: A at (900,600) → (450,300)mm, B snaps to A.E → (650,300)mm,
+     * C at (1600,600) → (800,300)mm, D at (1800,600) → (900,300)mm.
+     * We place 4 pieces; A–B are auto-connected; C and D are independent.
+     *
+     * Mock solveClose to return feasible (triggers the closure-commit branch on
+     * pointerup). Mock findLoops so that:
+     *   - the "before" call returns [] (no pre-existing loops)
+     *   - the "after" call returns a 4-piece Loop using the actual placed
+     *     piece IDs — giving newLoopCenterline real pieces to sample paths from.
+     *
+     * This exercises the path: handleClosureCommit → newLoopCenterline
+     * → setClosureWavePoints(pts) → <ClosureWave> mounts.
+     */
+    const restore = mockCanvasRect();
+    try {
+      renderToyTableWithBroker();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+
+      const aId = placePieceAt(canvas, 'straight', 900, 600); /* A → (450,300) */
+      const bId = placePieceAt(canvas, 'straight', 1100, 600); /* B snaps to A.E */
+      const cId = placePieceAt(canvas, 'straight', 1600, 600); /* C independent */
+      const dId = placePieceAt(canvas, 'straight', 1800, 600); /* D independent */
+
+      /*
+       * Build a mock Loop whose joints follow the DFS convention:
+       * joints[i] connects pieceIds[i] → pieceIds[(i+1)%n].
+       * We assign endpoint indices to form a coherent traversal:
+       *   A: exits via ep1, enters via ep0.
+       *   B: exits via ep1, enters via ep0.
+       *   C: exits via ep1, enters via ep0.
+       *   D: exits via ep0, enters via ep1 (closing back to A).
+       */
+      const j0: JointId = {
+        a: { pieceId: aId, endpointIdx: 1 },
+        b: { pieceId: bId, endpointIdx: 0 },
+      };
+      const j1: JointId = {
+        a: { pieceId: bId, endpointIdx: 1 },
+        b: { pieceId: cId, endpointIdx: 0 },
+      };
+      const j2: JointId = {
+        a: { pieceId: cId, endpointIdx: 1 },
+        b: { pieceId: dId, endpointIdx: 0 },
+      };
+      const j3: JointId = {
+        a: { pieceId: dId, endpointIdx: 1 },
+        b: { pieceId: aId, endpointIdx: 0 },
+      };
+      const mockLoop: Loop = { pieceIds: [aId, bId, cId, dId], joints: [j0, j1, j2, j3] };
+
+      /* findLoops call 1 (before): no pre-existing loops.
+         findLoops call 2 (after):  the newly-closed 4-piece cycle. */
+      vi.mocked(findLoops).mockReturnValueOnce([]).mockReturnValueOnce([mockLoop]);
+
+      /* solveClose must return feasible to trigger the closure-commit branch. */
+      vi.mocked(solveClose).mockReturnValue({ feasible: true, flex: new Map() });
+
+      /* Slow drag of B (same timestamp → speed = 0 → slow path → detectLoopClosure
+         runs → closureFlexRef.current is set). */
+      const bEl = canvas.querySelector(`[data-piece-id="${bId}"]`) as SVGGElement | null;
+      if (bEl === null) throw new Error('piece B not found in DOM');
+
+      act(() => {
+        bEl.dispatchEvent(timedPtr('pointerdown', 1300, 600, 50));
+        bEl.dispatchEvent(timedPtr('pointermove', 1280, 600, 50));
+      });
+      expect(bEl.getAttribute('data-closure-available')).toBe('true');
+
+      /* Drop: triggers onDragFlex + onClosureCommit → handleClosureCommit
+         → newLoopCenterline → setClosureWavePoints → ClosureWave mounts. */
+      act(() => {
+        bEl.dispatchEvent(timedPtr('pointerup', 1280, 600, 50));
+      });
+
+      expect(screen.queryByTestId('closure-wave')).not.toBeNull();
+    } finally {
+      restore();
+    }
+  });
+});
 
 describe('ToyTable — over-pull detach + remainder holds its flexed shape', () => {
   beforeEach(() => {

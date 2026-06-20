@@ -19,7 +19,12 @@ import {
   jointKey,
 } from '@trainframe/simulator/track/flex.js';
 import { SNAP_DISTANCE, compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
-import { buildJoints, findLoops } from '@trainframe/simulator/track/loops.js';
+import {
+  type JointId,
+  type Loop,
+  buildJoints,
+  findLoops,
+} from '@trainframe/simulator/track/loops.js';
 import { detectSameLayerOverlaps, pierSuppressed } from '@trainframe/simulator/track/overlap.js';
 import {
   CRANE_GANTRY_X_MM,
@@ -28,6 +33,7 @@ import {
   CRANE_STACK_SLOTS,
   CRANE_TROLLEY_REST_Y_MM,
   type CarriageColorId,
+  type CentreLinePath,
   type DevicePieceType,
   LIFT_BRIDGE_FORESHORTEN,
   LIFT_BRIDGE_PIVOT,
@@ -2584,24 +2590,64 @@ function detectLoopClosure(
 /* Samples per half-path when building a loop's rail centreline for the wave. */
 const WAVE_SAMPLES_PER_HALF = 8;
 
-/* Sample one CentreLinePath half at regular intervals and append to `out`.
-   `reverse` walks from the far endpoint back to centre (ep → centre). */
-function sampleHalf(
-  piece: TrackPiece,
-  pose: { x: number; y: number; rotationDeg: number },
-  endpointIdx: number,
-  reverse: boolean,
+/* True when `loop` does not match any set in `beforeSets` by piece-ID membership. */
+function isNewLoop(loop: Loop, beforeSets: ReadonlyArray<ReadonlySet<string>>): boolean {
+  const set = new Set(loop.pieceIds);
+  return !beforeSets.some((bs) => bs.size === set.size && [...set].every((id) => bs.has(id)));
+}
+
+/* Returns the {entry, exit} endpoint indices for `pieceId` at position `i` in the loop. */
+function entryExitEps(
+  pieceId: string,
+  i: number,
+  joints: ReadonlyArray<JointId>,
+  n: number,
+): { entry: number; exit: number } | undefined {
+  const exitJoint = joints[i];
+  const entryJoint = joints[(i - 1 + n) % n];
+  if (exitJoint === undefined || entryJoint === undefined) return undefined;
+  const exit = exitJoint.a.pieceId === pieceId ? exitJoint.a.endpointIdx : exitJoint.b.endpointIdx;
+  const entry =
+    entryJoint.b.pieceId === pieceId ? entryJoint.b.endpointIdx : entryJoint.a.endpointIdx;
+  return { entry, exit };
+}
+
+/* Sample a CentreLinePath from the far endpoint inward (skipping outermost to deduplicate joints). */
+function sampleEntryHalf(
+  path: CentreLinePath,
+  halfCount: number,
   out: Array<{ x: number; y: number }>,
 ): void {
-  const half = getCentreLinePathAt(piece, pose, endpointIdx);
-  if (half === undefined) return;
-  const n = WAVE_SAMPLES_PER_HALF;
-  const start = reverse ? n : 0;
-  const step = reverse ? -1 : 1;
-  for (let i = start; reverse ? i >= 0 : i <= n; i += step) {
-    const p = half.at((i / n) * half.length);
+  for (let s = halfCount - 1; s >= 0; s--) {
+    const p = path.at((s / halfCount) * path.length);
     out.push({ x: p.x, y: p.y });
   }
+}
+
+/* Sample a CentreLinePath outward from the centre (skipping centre to deduplicate within piece). */
+function sampleExitHalf(
+  path: CentreLinePath,
+  halfCount: number,
+  out: Array<{ x: number; y: number }>,
+): void {
+  for (let s = 1; s <= halfCount; s++) {
+    const p = path.at((s / halfCount) * path.length);
+    out.push({ x: p.x, y: p.y });
+  }
+}
+
+/* Append the contiguous centreline points for one piece in the loop traversal. */
+function sampleLoopPiece(
+  piece: TrackPiece,
+  pose: { x: number; y: number; rotationDeg: number },
+  entryEp: number,
+  exitEp: number,
+  out: Array<{ x: number; y: number }>,
+): void {
+  const entryPath = getCentreLinePathAt(piece, pose, entryEp);
+  if (entryPath !== undefined) sampleEntryHalf(entryPath, WAVE_SAMPLES_PER_HALF, out);
+  const exitPath = getCentreLinePathAt(piece, pose, exitEp);
+  if (exitPath !== undefined) sampleExitHalf(exitPath, WAVE_SAMPLES_PER_HALF, out);
 }
 
 /**
@@ -2610,6 +2656,11 @@ function sampleHalf(
  *
  * Returns the points for the FIRST newly-closed loop found (in practice
  * exactly one loop closes per drop), or null when no new loop is detected.
+ *
+ * The traversal uses the loop's joints to determine which endpoint of each
+ * piece is the entry and which is the exit, so consecutive half-paths always
+ * share their meeting endpoint and the polyline is continuous (no jumps at
+ * joints). Duplicate vertices at joints are dropped (i < n on the entry half).
  *
  * Pure: no I/O, no side effects.
  */
@@ -2620,10 +2671,7 @@ export function newLoopCenterline(
   const beforeSets = findLoops(restPieces).map((l) => new Set(l.pieceIds));
   const afterEffective = applyFlex(restPieces, closureFlex);
   const afterPieces = asTrackPieces(afterEffective);
-  const newLoop = findLoops(afterPieces).find((loop) => {
-    const set = new Set(loop.pieceIds);
-    return !beforeSets.some((bs) => bs.size === set.size && [...set].every((id) => bs.has(id)));
-  });
+  const newLoop = findLoops(afterPieces).find((loop) => isNewLoop(loop, beforeSets));
   if (newLoop === undefined) return null;
 
   const poseMap = new Map<string, { x: number; y: number; rotationDeg: number }>();
@@ -2631,14 +2679,19 @@ export function newLoopCenterline(
     poseMap.set(ep.id, { x: ep.position.x, y: ep.position.y, rotationDeg: ep.rotationDeg });
   }
 
+  const { pieceIds, joints } = newLoop;
+  const n = pieceIds.length;
   const points: Array<{ x: number; y: number }> = [];
-  for (const pieceId of newLoop.pieceIds) {
+
+  for (let i = 0; i < n; i++) {
+    const pieceId = pieceIds[i];
+    if (pieceId === undefined) continue;
     const piece = afterPieces.find((p) => p.id === pieceId);
     const pose = poseMap.get(pieceId);
     if (piece === undefined || pose === undefined) continue;
-    /* Traverse: ep0 → centre (reverse), then centre → ep1 (forward). */
-    sampleHalf(piece, pose, 0, true, points);
-    sampleHalf(piece, pose, 1, false, points);
+    const eps = entryExitEps(pieceId, i, joints, n);
+    if (eps === undefined) continue;
+    sampleLoopPiece(piece, pose, eps.entry, eps.exit, points);
   }
 
   return points.length >= 2 ? points : null;
