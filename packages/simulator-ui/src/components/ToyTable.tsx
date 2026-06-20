@@ -6,6 +6,7 @@ import type { BodyPose } from '@trainframe/simulator/physics/observation.js';
 import { nearestStartEdge } from '@trainframe/simulator/sim/nearest-edge.js';
 import { type WorldPosition, computeTrainTrails } from '@trainframe/simulator/track/coupling.js';
 import { composeEdgePath, pieceIdFromMarkerId } from '@trainframe/simulator/track/edge-path.js';
+import { solveFollow } from '@trainframe/simulator/track/flex-solver.js';
 import { type FlexState, effectivePoses, jointKey } from '@trainframe/simulator/track/flex.js';
 import { SNAP_DISTANCE, compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
 import { buildJoints } from '@trainframe/simulator/track/loops.js';
@@ -231,6 +232,15 @@ const MAX_ZOOM = 10;
 
 /** MIME type for pieces being dragged from the toybox onto the canvas. */
 const TOYBOX_DRAG_MIME = 'application/x-trainframe-toybox-type';
+
+/*
+ * Pointer-drag velocity threshold for the flex/detach gate.
+ * Drags slower than this (px/ms) bend the chain live via solveFollow.
+ * Drags faster than this yank the piece free — it detaches from its neighbours.
+ * 1.5 px/ms ≈ 90 px/frame at 60 fps, which maps to ~45 mm/s at SCALE=2.
+ * Feels like a deliberate pull vs. a quick flick.
+ */
+const DRAG_FLEX_MAX_SPEED = 1.5; /* px/ms */
 
 /**
  * The garage device id used by the toy-table when announcing tag bindings.
@@ -1447,6 +1457,14 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     setSelectedId(pieceId);
   }, []);
 
+  /* Remove a piece from the rest-pose array so it becomes a free placement
+     that follows the cursor. Called by Table when a fast-drag yank is detected. */
+  const detachPiece = useCallback((pieceId: string) => {
+    setPieces((prev) => prev.filter((p) => p.id !== pieceId));
+    /* Clear flex — the chain resets once the piece is gone. */
+    setFlex(new Map());
+  }, []);
+
   const rotateSelected = useCallback(() => {
     if (selectedId === null) return;
     setPieces((prev) =>
@@ -1790,6 +1808,8 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
             onMovePiece={movePiece}
             onScanPiece={requestScan}
             onPieceAction={handlePiecePointerAction}
+            onDragFlex={setFlex}
+            onDragDetach={detachPiece}
           />
           <div className="tf-toytable__scanzone">
             <ScanBox
@@ -2352,6 +2372,12 @@ interface TableProps {
   /** Begin scanning a piece (pointer-dragged onto the scan box). */
   readonly onScanPiece: (pieceId: string) => void;
   readonly onPieceAction: (pieceId: string, action: 'select' | PowerToggleAction) => void;
+  /* Slow drag of a chained piece: apply the solved flex state so the chain
+     bends live. The parent (ToyTable) owns flex state and calls setFlex. */
+  readonly onDragFlex: (flex: FlexState) => void;
+  /* Fast drag ("yank"): detach the piece from its chain by removing it from
+     the rest-pose pieces array. It then follows the cursor as a free placement. */
+  readonly onDragDetach: (pieceId: string) => void;
 }
 
 function Table({
@@ -2369,6 +2395,8 @@ function Table({
   onMovePiece,
   onScanPiece,
   onPieceAction,
+  onDragFlex,
+  onDragDetach,
 }: TableProps) {
   const svgRef = useRef<SVGSVGElement>(null);
 
@@ -2630,16 +2658,40 @@ function Table({
   // Pointer-drag of a placed piece (move across canvas, or scan onto the bus)
   // ---------------------------------------------------------------------------
 
-  function handlePieceDragMove(pieceId: string, clientX: number, clientY: number) {
+  function handlePieceDragMove(
+    pieceId: string,
+    clientX: number,
+    clientY: number,
+    speedPxPerMs: number,
+  ) {
     const { x, y } = clientToMm(getRect(), clientX, clientY, viewport);
     const moving = pieces.find((p) => p.id === pieceId);
     if (moving === undefined) {
+      /* Piece was detached earlier this drag — follow cursor freely. */
       setPieceDragPreview({ id: pieceId, x, y, rotationDeg: 0 });
       return;
     }
-    // Preview the *snapped* pose: bring the piece's end near a neighbour's open
-    // end and it visibly clicks into the joint, oriented to continue. Release
-    // commits exactly this (movePiece runs the same placement on the same mm).
+
+    if (speedPxPerMs >= DRAG_FLEX_MAX_SPEED) {
+      /* Fast drag: yank the piece free from its chain. onDragDetach removes it
+         from rest-pose pieces; subsequent move events hit the undefined branch
+         above and follow the cursor as a free placement. */
+      onDragDetach(pieceId);
+      setPieceDragPreview({ id: pieceId, x, y, rotationDeg: asTrackPiece(moving).rotationDeg });
+      return;
+    }
+
+    /* Slow drag: check whether the piece is part of a snapped chain. */
+    const trackPieces = asTrackPieces(pieces);
+    const flex = solveFollow(trackPieces, pieceId, { x, y });
+    if (flex.size > 0) {
+      /* The piece is in a chain — bend it live and keep the visual at its
+         current rest position (the chain bends, the piece does not jump). */
+      onDragFlex(flex);
+      return;
+    }
+
+    /* Free piece (no joints) — snap-preview as before. */
     const others = asTrackPieces(pieces.filter((p) => p.id !== pieceId));
     const placement = computeMovePlacement(asTrackPiece(moving), x, y, others);
     setPieceDragPreview({
@@ -2652,6 +2704,8 @@ function Table({
 
   function handlePieceDragEnd(pieceId: string, clientX: number, clientY: number) {
     setPieceDragPreview(null);
+    /* Clear any live flex — the chain snaps back to rest pose on release. */
+    onDragFlex(new Map());
     // Released over the scan box → scan it (same confirm flow as an HTML5 drop).
     const target =
       typeof document.elementFromPoint === 'function'
@@ -2956,8 +3010,14 @@ interface PieceRendererProps {
    * can't use HTML5 DnD, so repositioning is done with pointer events.
    */
   readonly dragOverride: { x: number; y: number; rotationDeg: number } | undefined;
-  /** Pointer moved while dragging this piece (client coords). */
-  readonly onDragMove: (pieceId: string, clientX: number, clientY: number) => void;
+  /* Pointer moved while dragging this piece (client coords + pointer speed in
+     px/ms, computed from the event's own timeStamp — never Date.now). */
+  readonly onDragMove: (
+    pieceId: string,
+    clientX: number,
+    clientY: number,
+    speedPxPerMs: number,
+  ) => void;
   /** Drag released (client coords) — reposition the piece, or scan it if let
    * go over the scan box. */
   readonly onDragEnd: (pieceId: string, clientX: number, clientY: number) => void;
@@ -3026,7 +3086,18 @@ function PieceRenderer({
   // honour the HTML5 `draggable` attribute on SVG, so native DnD never starts.
   // We drag with pointer events instead (which also gives live feedback and is
   // automatable). A press that doesn't move past the threshold is a click.
-  const dragRef = useRef<{ clientX: number; clientY: number; moved: boolean } | null>(null);
+  const dragRef = useRef<{
+    clientX: number;
+    clientY: number;
+    moved: boolean;
+    /* Velocity tracking — initialised from the first pointermove, not from
+       pointerdown, so that tests can inject explicit timeStamps on move events
+       (React's synthetic pointerdown timestamp is not overrideable in jsdom). */
+    lastX: number;
+    lastY: number;
+    lastT: number;
+    hasFirstMove: boolean;
+  } | null>(null);
   // Set when a drag actually moved the piece, so the click that fires right
   // after pointer-up doesn't also select it.
   const suppressClickRef = useRef(false);
@@ -3037,7 +3108,15 @@ function PieceRenderer({
     // button starts a drag.
     if (armedType !== null || e.button > 0) return;
     e.stopPropagation(); // don't start a canvas pan
-    dragRef.current = { clientX: e.clientX, clientY: e.clientY, moved: false };
+    dragRef.current = {
+      clientX: e.clientX,
+      clientY: e.clientY,
+      moved: false,
+      lastX: e.clientX,
+      lastY: e.clientY,
+      lastT: 0,
+      hasFirstMove: false,
+    };
     if (typeof e.currentTarget.setPointerCapture === 'function') {
       try {
         e.currentTarget.setPointerCapture(e.pointerId);
@@ -3053,7 +3132,31 @@ function PieceRenderer({
     if (!start.moved && Math.hypot(e.clientX - start.clientX, e.clientY - start.clientY) > 4) {
       start.moved = true;
     }
-    if (start.moved) onDragMove(piece.id, e.clientX, e.clientY);
+    if (start.moved) {
+      if (!start.hasFirstMove) {
+        /* First move event: initialise velocity baseline from the move event's
+           own timeStamp (React's synthetic pointermove timestamp IS overrideable
+           in tests; pointerdown's is not, so we skip it). Speed = 0 for this
+           first sample — we need two points to compute velocity. */
+        start.lastX = e.clientX;
+        start.lastY = e.clientY;
+        start.lastT = e.timeStamp;
+        start.hasFirstMove = true;
+        onDragMove(piece.id, e.clientX, e.clientY, 0);
+        return;
+      }
+      /* Compute instantaneous speed from consecutive pointermove timeStamps
+         (never Date.now) so velocity is deterministic in tests. When two events
+         share the same timestamp (coalesced / jsdom), dt = 0 → speed = 0, which
+         means the velocity gate is not triggered — a genuine yank has dt > 0. */
+      const dt = e.timeStamp - start.lastT;
+      const dist = Math.hypot(e.clientX - start.lastX, e.clientY - start.lastY);
+      const speedPxPerMs = dt > 0 ? dist / dt : 0;
+      start.lastX = e.clientX;
+      start.lastY = e.clientY;
+      start.lastT = e.timeStamp;
+      onDragMove(piece.id, e.clientX, e.clientY, speedPxPerMs);
+    }
   }
 
   function handlePointerUp(e: React.PointerEvent<SVGGElement>) {
