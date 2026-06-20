@@ -19,7 +19,7 @@ import {
   jointKey,
 } from '@trainframe/simulator/track/flex.js';
 import { SNAP_DISTANCE, compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
-import { buildJoints } from '@trainframe/simulator/track/loops.js';
+import { buildJoints, findLoops } from '@trainframe/simulator/track/loops.js';
 import { detectSameLayerOverlaps, pierSuppressed } from '@trainframe/simulator/track/overlap.js';
 import {
   CRANE_GANTRY_X_MM,
@@ -56,6 +56,7 @@ import {
   carriageCratePath,
   craneCratePath,
   craneTrolley,
+  getCentreLinePathAt,
   getEndpoints,
   getEndpointsAt,
   getPieceShape,
@@ -76,10 +77,11 @@ import {
   computePlacement,
   nearestConnectablePoint,
 } from '@trainframe/simulator/track/placement.js';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useBroker } from '../broker/broker-context.js';
 import type { ToyHardware } from '../sim/toy-hardware.js';
 import { useToyHardware } from '../sim/use-toy-hardware.js';
+import { ClosureWave } from './ClosureWave.js';
 import { ConnectionStatus } from './ConnectionStatus.js';
 import { ScanBox } from './ScanBox.js';
 import { Settings } from './Settings.js';
@@ -1150,6 +1152,13 @@ interface ToyTableProps {
 export function ToyTable({ initialUrl }: ToyTableProps) {
   const { client } = useBroker();
   const [pieces, setPieces] = useState<ReadonlyArray<TrackPiece>>([]);
+  /* Closure wave: when a drop closes a new loop, the rail centreline points for
+     that loop are stored here so <ClosureWave> can animate the glow pulse. Null
+     when no wave is active. Cleared by the wave itself via onDone. */
+  const [closureWavePoints, setClosureWavePoints] = useState<ReadonlyArray<{
+    readonly x: number;
+    readonly y: number;
+  }> | null>(null);
   /* Flex state for the track: a map from joint key to JointFlex deviation.
    * Empty by default (rest pose). Set programmatically (no drag interaction
    * yet — Task 7). When non-empty, applyFlex bends the rendered and compiled
@@ -1498,6 +1507,14 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     });
   }, []);
 
+  /* When a drop commits a loop closure, compute the newly-closed loop's rail
+     centreline and mount the ClosureWave for one run. Uses the REST-pose pieces
+     state (not effective) so applyFlex can re-derive the closed positions. */
+  const handleClosureCommit = useCallback((closureFlex: FlexState) => {
+    const pts = newLoopCenterline(piecesRef.current, closureFlex);
+    if (pts !== null) setClosureWavePoints(pts);
+  }, []);
+
   const rotateSelected = useCallback(() => {
     if (selectedId === null) return;
     setPieces((prev) =>
@@ -1842,6 +1859,16 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
             onScanPiece={requestScan}
             onPieceAction={handlePiecePointerAction}
             onDragFlex={setFlex}
+            onClosureCommit={handleClosureCommit}
+            waveOverlay={
+              closureWavePoints !== null && closureWavePoints.length >= 2 ? (
+                <ClosureWave
+                  pathPoints={closureWavePoints}
+                  durationMs={1000}
+                  onDone={() => setClosureWavePoints(null)}
+                />
+              ) : null
+            }
             onDragDetach={detachPiece}
           />
           <div className="tf-toytable__scanzone">
@@ -2408,6 +2435,14 @@ interface TableProps {
   /* Slow drag of a chained piece: apply the solved flex state so the chain
      bends live. The parent (ToyTable) owns flex state and calls setFlex. */
   readonly onDragFlex: (flex: FlexState) => void;
+  /* Called ONLY when a successful loop closure is committed on drop, with the
+     flex state that closes the loop. Gives ToyTable a chance to mount the
+     ClosureWave overlay without having to distinguish closure commits from
+     ordinary drag-flex updates. */
+  readonly onClosureCommit: (closureFlex: FlexState) => void;
+  /* Pre-composed overlay element to render inside the canvas SVG. ToyTable
+     computes this from closureWavePoints so Table stays free of the ternary. */
+  readonly waveOverlay: ReactNode;
   /* Fast drag ("yank"): detach the piece from its chain by removing it from
      the rest-pose pieces array. It then follows the cursor as a free placement. */
   readonly onDragDetach: (pieceId: string) => void;
@@ -2546,6 +2581,69 @@ function detectLoopClosure(
   return result.feasible ? result : null;
 }
 
+/* Samples per half-path when building a loop's rail centreline for the wave. */
+const WAVE_SAMPLES_PER_HALF = 8;
+
+/* Sample one CentreLinePath half at regular intervals and append to `out`.
+   `reverse` walks from the far endpoint back to centre (ep → centre). */
+function sampleHalf(
+  piece: TrackPiece,
+  pose: { x: number; y: number; rotationDeg: number },
+  endpointIdx: number,
+  reverse: boolean,
+  out: Array<{ x: number; y: number }>,
+): void {
+  const half = getCentreLinePathAt(piece, pose, endpointIdx);
+  if (half === undefined) return;
+  const n = WAVE_SAMPLES_PER_HALF;
+  const start = reverse ? n : 0;
+  const step = reverse ? -1 : 1;
+  for (let i = start; reverse ? i >= 0 : i <= n; i += step) {
+    const p = half.at((i / n) * half.length);
+    out.push({ x: p.x, y: p.y });
+  }
+}
+
+/**
+ * Compute the ordered rail-centreline world points for a loop that appears
+ * after applying `closureFlex` to `restPieces` but was not present before.
+ *
+ * Returns the points for the FIRST newly-closed loop found (in practice
+ * exactly one loop closes per drop), or null when no new loop is detected.
+ *
+ * Pure: no I/O, no side effects.
+ */
+export function newLoopCenterline(
+  restPieces: ReadonlyArray<TrackPiece>,
+  closureFlex: FlexState,
+): ReadonlyArray<{ readonly x: number; readonly y: number }> | null {
+  const beforeSets = findLoops(restPieces).map((l) => new Set(l.pieceIds));
+  const afterEffective = applyFlex(restPieces, closureFlex);
+  const afterPieces = asTrackPieces(afterEffective);
+  const newLoop = findLoops(afterPieces).find((loop) => {
+    const set = new Set(loop.pieceIds);
+    return !beforeSets.some((bs) => bs.size === set.size && [...set].every((id) => bs.has(id)));
+  });
+  if (newLoop === undefined) return null;
+
+  const poseMap = new Map<string, { x: number; y: number; rotationDeg: number }>();
+  for (const ep of afterEffective) {
+    poseMap.set(ep.id, { x: ep.position.x, y: ep.position.y, rotationDeg: ep.rotationDeg });
+  }
+
+  const points: Array<{ x: number; y: number }> = [];
+  for (const pieceId of newLoop.pieceIds) {
+    const piece = afterPieces.find((p) => p.id === pieceId);
+    const pose = poseMap.get(pieceId);
+    if (piece === undefined || pose === undefined) continue;
+    /* Traverse: ep0 → centre (reverse), then centre → ep1 (forward). */
+    sampleHalf(piece, pose, 0, true, points);
+    sampleHalf(piece, pose, 1, false, points);
+  }
+
+  return points.length >= 2 ? points : null;
+}
+
 function Table({
   pieces,
   liveIds,
@@ -2562,6 +2660,8 @@ function Table({
   onScanPiece,
   onPieceAction,
   onDragFlex,
+  onClosureCommit,
+  waveOverlay,
   onDragDetach,
 }: TableProps) {
   const svgRef = useRef<SVGSVGElement>(null);
@@ -2926,6 +3026,7 @@ function Table({
     setClosureAvailableId(null);
     if (closure?.feasible === true) {
       onDragFlex(closure.flex);
+      onClosureCommit(closure.flex);
       return;
     }
 
@@ -3132,6 +3233,9 @@ function Table({
             data-testid="snap-highlight"
           />
         )}
+        {/* Closure wave: one-shot glow pulse along the newly-closed loop's
+            centreline. Mounted by ToyTable on closure commit; cleared on done. */}
+        {waveOverlay}
       </svg>
     </>
   );

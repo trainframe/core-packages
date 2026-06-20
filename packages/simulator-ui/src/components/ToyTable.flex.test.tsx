@@ -36,7 +36,7 @@ vi.mock('@trainframe/simulator/track/flex-solver.js', async (importOriginal) => 
 });
 
 import { solveClose } from '@trainframe/simulator/track/flex-solver.js';
-import { ToyTable } from './ToyTable.js';
+import { ToyTable, newLoopCenterline } from './ToyTable.js';
 
 /* ---------------------------------------------------------------------------
  * Helpers
