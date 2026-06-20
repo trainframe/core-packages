@@ -581,28 +581,52 @@ function bezierHalfPath(
 }
 
 /**
+ * A continuous piece pose — unlike the quantized `RotationDeg` union stored on
+ * `TrackPiece`, the rotation here can be any real number. Used by the flexed
+ * geometry variants so they can compute endpoints and centre-line paths from an
+ * effective pose without mutating the piece record.
+ */
+export interface PiecePose {
+  readonly x: number;
+  readonly y: number;
+  readonly rotationDeg: number;
+}
+
+/**
+ * Wrap a piece-local `CentreLinePath` so its samples come out in world space,
+ * using an explicit `pose` instead of the quantized stored fields. Applies the
+ * same mirror→rotate→translate the renderer (and `getEndpoints`) use. `flip`
+ * mirrors across the local x-axis (y and heading negate) first.
+ */
+export function worldHalfPathAt(
+  piece: TrackPiece,
+  pose: PiecePose,
+  local: CentreLinePath,
+): CentreLinePath {
+  const flip = piece.flipped === true;
+  return {
+    length: local.length,
+    at(d: number): RailPose {
+      const p = local.at(d);
+      const ly = flip ? -p.y : p.y;
+      const heading = flip ? -p.headingDeg : p.headingDeg;
+      const world = transformPoint(p.x, ly, pose.rotationDeg, pose.x, pose.y);
+      return { x: world.x, y: world.y, headingDeg: normaliseAngle(heading + pose.rotationDeg) };
+    },
+  };
+}
+
+/**
  * Wrap a piece-local `CentreLinePath` so its samples come out in world space,
  * applying the same mirror→rotate→translate the renderer (and `getEndpoints`)
  * use. `flip` mirrors across the local x-axis (y and heading negate) first.
  */
 export function worldHalfPath(piece: TrackPiece, local: CentreLinePath): CentreLinePath {
-  const flip = piece.flipped === true;
-  return {
-    length: local.length,
-    at(distFromStart: number): RailPose {
-      const pose = local.at(distFromStart);
-      const ly = flip ? -pose.y : pose.y;
-      const heading = flip ? -pose.headingDeg : pose.headingDeg;
-      const world = transformPoint(
-        pose.x,
-        ly,
-        piece.rotationDeg,
-        piece.position.x,
-        piece.position.y,
-      );
-      return { x: world.x, y: world.y, headingDeg: normaliseAngle(heading + piece.rotationDeg) };
-    },
-  };
+  return worldHalfPathAt(
+    piece,
+    { x: piece.position.x, y: piece.position.y, rotationDeg: piece.rotationDeg },
+    local,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1935,30 +1959,64 @@ export function pieceMarkerKind(type: TrackPieceType): TrackMarkerKind {
 // ---------------------------------------------------------------------------
 
 /**
+ * World-space endpoints for a placed piece using an explicit continuous `pose`,
+ * in the same order as the local endpoint definitions (junction: [trunk,
+ * through, branch]; crossing: [east, north, west, south]; all others: [entry,
+ * exit]). Unlike `getEndpoints`, the rotation in `pose` can be any real number
+ * — not limited to the quantized `RotationDeg` lattice — which lets flexed
+ * pieces compute geometry from their effective pose.
+ */
+export function getEndpointsAt(piece: TrackPiece, pose: PiecePose): ReadonlyArray<TrackEndpoint> {
+  const locals = PIECES[piece.type].endpoints(piece.radiusMm, piece.lengthMm);
+  const flip = piece.flipped === true;
+  const baseLayer = layerOf(piece);
+  return locals.map(({ lx, ly, localAngle, layerDelta }) => {
+    /* Mirror across the local x-axis first (y and angle negate), then rotate +
+     * translate — matching the SVG `scale(1,-1)` the renderer applies. */
+    const ly2 = flip ? -ly : ly;
+    const localAngle2 = flip ? -localAngle : localAngle;
+    const world = transformPoint(lx, ly2, pose.rotationDeg, pose.x, pose.y);
+    return {
+      x: world.x,
+      y: world.y,
+      outgoingAngleDeg: normaliseAngle(localAngle2 + pose.rotationDeg),
+      /* A ramp's exit endpoint carries a +1 layerDelta; every other endpoint
+       * sits on the piece's own layer. This is the only place a single piece
+       * spans two layers. */
+      layer: baseLayer + (layerDelta ?? 0),
+    };
+  });
+}
+
+/**
  * World-space endpoints for a placed piece, in the same order as the local
  * endpoint definitions (junction: [trunk, through, branch]; crossing: [east,
  * north, west, south]; all others: [entry, exit]).
  */
 export function getEndpoints(piece: TrackPiece): ReadonlyArray<TrackEndpoint> {
-  const locals = PIECES[piece.type].endpoints(piece.radiusMm, piece.lengthMm);
-  const flip = piece.flipped === true;
-  const baseLayer = layerOf(piece);
-  return locals.map(({ lx, ly, localAngle, layerDelta }) => {
-    // Mirror across the local x-axis first (y and angle negate), then rotate +
-    // translate — matching the SVG `scale(1,-1)` the renderer applies.
-    const ly2 = flip ? -ly : ly;
-    const localAngle2 = flip ? -localAngle : localAngle;
-    const world = transformPoint(lx, ly2, piece.rotationDeg, piece.position.x, piece.position.y);
-    return {
-      x: world.x,
-      y: world.y,
-      outgoingAngleDeg: normaliseAngle(localAngle2 + piece.rotationDeg),
-      // A ramp's exit endpoint carries a +1 layerDelta; every other endpoint
-      // sits on the piece's own layer. This is the only place a single piece
-      // spans two layers.
-      layer: baseLayer + (layerDelta ?? 0),
-    };
+  return getEndpointsAt(piece, {
+    x: piece.position.x,
+    y: piece.position.y,
+    rotationDeg: piece.rotationDeg,
   });
+}
+
+/**
+ * World-space centre-line half-path for a placed `piece` using an explicit
+ * continuous `pose`, from its centre (marker) out to endpoint `endpointIndex`
+ * — the rail a train RIDES. Returns `undefined` for an out-of-range index
+ * (device pieces have none). Sampling at `length` reproduces
+ * `getEndpointsAt(piece, pose)[endpointIndex]`'s position and
+ * `outgoingAngleDeg`.
+ */
+export function getCentreLinePathAt(
+  piece: TrackPiece,
+  pose: PiecePose,
+  endpointIndex: number,
+): CentreLinePath | undefined {
+  const local = PIECES[piece.type].centreLine(endpointIndex, piece.radiusMm, piece.lengthMm);
+  if (local === undefined) return undefined;
+  return worldHalfPathAt(piece, pose, local);
 }
 
 /**
@@ -1972,9 +2030,11 @@ export function getCentreLinePath(
   piece: TrackPiece,
   endpointIndex: number,
 ): CentreLinePath | undefined {
-  const local = PIECES[piece.type].centreLine(endpointIndex, piece.radiusMm, piece.lengthMm);
-  if (local === undefined) return undefined;
-  return worldHalfPath(piece, local);
+  return getCentreLinePathAt(
+    piece,
+    { x: piece.position.x, y: piece.position.y, rotationDeg: piece.rotationDeg },
+    endpointIndex,
+  );
 }
 
 /**

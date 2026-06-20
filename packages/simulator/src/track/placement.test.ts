@@ -251,3 +251,23 @@ describe('computePlacement — layer gating', () => {
     expect(noUpper.connected).toBe(false);
   });
 });
+
+describe('30 mm straight snapping', () => {
+  it('treats both ends of a 30 mm straight as open snap targets', () => {
+    /* A lone 30 mm straight at the origin, lying along x (ends at -15 and +15). */
+    const existing: TrackPiece = {
+      id: 'S30',
+      type: 'straight',
+      position: { x: 0, y: 0 },
+      rotationDeg: 0,
+      tagged: false,
+      lengthMm: 30,
+    };
+    /* Dropping a new straight near the +15 end must snap (connect) to it. */
+    const placement = computePlacement(15, 0, 'straight', [existing], false, 0);
+    expect(placement.connected).toBe(true);
+    /* And near the -15 end must also snap. */
+    const placement2 = computePlacement(-15, 0, 'straight', [existing], false, 0);
+    expect(placement2.connected).toBe(true);
+  });
+});

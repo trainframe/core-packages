@@ -50,7 +50,9 @@ export interface Placement {
   readonly connected: boolean;
 }
 
-interface WorldEndpoint {
+/* Minimal geometry a world-space endpoint must carry. Sufficient for distance
+ * and layer tests (e.g. bestEndpointPair) that do not need piece identity. */
+interface WorldPoint {
   readonly x: number;
   readonly y: number;
   readonly outgoingAngleDeg: number;
@@ -58,6 +60,15 @@ interface WorldEndpoint {
    * gate on layer equality so a piece on one deck never connects to a joint on
    * another beneath it. */
   readonly layer: number;
+}
+
+/* Full world-space endpoint: geometry plus the owning piece's ID. Required by
+ * isCoincidentWithAnother, which must skip a piece's own sibling endpoints. */
+interface WorldEndpoint extends WorldPoint {
+  /** ID of the piece that owns this endpoint. Used to avoid treating a piece's
+   * own sibling endpoints as blocking occupancy — otherwise a piece shorter than
+   * SNAP_DISTANCE marks its own ends as closed. */
+  readonly pieceId: string;
 }
 
 function distance(ax: number, ay: number, bx: number, by: number): number {
@@ -78,7 +89,13 @@ function allEndpoints(pieces: ReadonlyArray<TrackPiece>): WorldEndpoint[] {
   const all: WorldEndpoint[] = [];
   for (const piece of pieces) {
     for (const ep of getEndpoints(piece)) {
-      all.push({ x: ep.x, y: ep.y, outgoingAngleDeg: ep.outgoingAngleDeg, layer: ep.layer });
+      all.push({
+        x: ep.x,
+        y: ep.y,
+        outgoingAngleDeg: ep.outgoingAngleDeg,
+        layer: ep.layer,
+        pieceId: piece.id,
+      });
     }
   }
   return all;
@@ -88,10 +105,14 @@ function allEndpoints(pieces: ReadonlyArray<TrackPiece>): WorldEndpoint[] {
  * some other endpoint. The layer-equality test is a precondition of the
  * distance test so two stacked endpoints (0 mm apart in plan, different layers)
  * are NOT treated as coincident — a bridge deck endpoint above a ground joint
- * stays open. */
+ * stays open. A piece's own sibling endpoint is always skipped — otherwise a
+ * piece shorter than SNAP_DISTANCE marks its own ends as closed. */
 function isCoincidentWithAnother(ep: WorldEndpoint, all: ReadonlyArray<WorldEndpoint>): boolean {
   for (const other of all) {
     if (other === ep) continue;
+    /* A piece's own sibling endpoint can never "occupy" it — otherwise a piece
+     * shorter than SNAP_DISTANCE (the 30 mm straight) marks its own ends closed. */
+    if (other.pieceId === ep.pieceId) continue;
     if (other.layer !== ep.layer) continue;
     if (distance(ep.x, ep.y, other.x, other.y) <= SNAP_DISTANCE) return true;
   }
@@ -289,7 +310,7 @@ export function computePlacement(
  * current cursor pose; `openEnds` are the neighbours' open endpoints.
  */
 function bestEndpointPair(
-  pieceEndpoints: ReadonlyArray<WorldEndpoint>,
+  pieceEndpoints: ReadonlyArray<WorldPoint>,
   openEnds: ReadonlyArray<WorldEndpoint>,
 ): { readonly pieceEndpointIndex: number; readonly anchor: WorldEndpoint } | undefined {
   let best: { pieceEndpointIndex: number; anchor: WorldEndpoint } | undefined;

@@ -19,7 +19,9 @@ import {
   craneCratePath,
   craneTrolley,
   getCentreLinePath,
+  getCentreLinePathAt,
   getEndpoints,
+  getEndpointsAt,
   getPieceShape,
   getRailLines,
   isDevicePiece,
@@ -982,5 +984,103 @@ describe('the Experiments toybox tray', () => {
       expect(TRACK_PIECE_TYPES).toContain(type);
       expect(isDevicePiece(type)).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getEndpointsAt / getCentreLinePathAt — pose-parameterized geometry
+// ---------------------------------------------------------------------------
+
+describe('getEndpointsAt', () => {
+  const piece: TrackPiece = {
+    id: 'S',
+    type: 'straight',
+    position: { x: 0, y: 0 },
+    rotationDeg: 0,
+    tagged: true,
+    lengthMm: 200,
+  };
+
+  it('matches getEndpoints when pose equals the stored pose', () => {
+    const at = getEndpointsAt(piece, { x: 0, y: 0, rotationDeg: 0 });
+    expect(at).toEqual(getEndpoints(piece));
+  });
+
+  it('applies a continuous (non-45°) rotation', () => {
+    const at = getEndpointsAt(piece, { x: 0, y: 0, rotationDeg: 2 });
+    /* +2° rotates the +100 end slightly +y. */
+    const plusEnd = at.find((e) => e.x > 0);
+    expect(plusEnd?.y).toBeGreaterThan(0);
+    expect(plusEnd?.outgoingAngleDeg).toBeCloseTo(2, 5);
+  });
+
+  it('applies a translation offset', () => {
+    const at = getEndpointsAt(piece, { x: 50, y: 20, rotationDeg: 0 });
+    const plusEnd = at.find((e) => e.x > 0);
+    expect(approx(must(plusEnd).x, 150)).toBe(true);
+    expect(approx(must(plusEnd).y, 20)).toBe(true);
+  });
+
+  it('delegates correctly for a flipped curve', () => {
+    const curved: TrackPiece = {
+      id: 'C',
+      type: 'curve',
+      position: { x: 0, y: 0 },
+      rotationDeg: 0,
+      tagged: false,
+      flipped: true,
+    };
+    const at = getEndpointsAt(curved, { x: 0, y: 0, rotationDeg: 0 });
+    expect(at).toEqual(getEndpoints(curved));
+  });
+});
+
+describe('getCentreLinePathAt', () => {
+  const piece: TrackPiece = {
+    id: 'S',
+    type: 'straight',
+    position: { x: 0, y: 0 },
+    rotationDeg: 0,
+    tagged: true,
+    lengthMm: 200,
+  };
+
+  it('matches getCentreLinePath when pose equals the stored pose', () => {
+    const stored = getCentreLinePath(piece, 0);
+    const at = getCentreLinePathAt(piece, { x: 0, y: 0, rotationDeg: 0 }, 0);
+    expect(stored).toBeDefined();
+    expect(at).toBeDefined();
+    /* Same length and same sampled points. */
+    expect(must(at).length).toBeCloseTo(must(stored).length, 5);
+    const midStored = must(stored).at(must(stored).length / 2);
+    const midAt = must(at).at(must(at).length / 2);
+    expect(approx(midAt.x, midStored.x)).toBe(true);
+    expect(approx(midAt.y, midStored.y)).toBe(true);
+    expect(approx(midAt.headingDeg, midStored.headingDeg)).toBe(true);
+  });
+
+  it('applies a continuous rotation — end-pose matches getEndpointsAt', () => {
+    const pose = { x: 0, y: 0, rotationDeg: 7 };
+    const eps = getEndpointsAt(piece, pose);
+    const path = getCentreLinePathAt(piece, pose, 1);
+    const end = must(path).at(must(path).length);
+    const ep = must(eps[1]);
+    expect(approx(end.x, ep.x)).toBe(true);
+    expect(approx(end.y, ep.y)).toBe(true);
+  });
+
+  it('returns undefined for an out-of-range endpoint index', () => {
+    expect(getCentreLinePathAt(piece, { x: 0, y: 0, rotationDeg: 0 }, 5)).toBeUndefined();
+  });
+
+  it('returns undefined for a device piece', () => {
+    const train: TrackPiece = {
+      id: 'T',
+      type: 'train',
+      position: { x: 0, y: 0 },
+      rotationDeg: 0,
+      tagged: false,
+    };
+    expect(getCentreLinePathAt(train, { x: 0, y: 0, rotationDeg: 0 }, 0)).toBeUndefined();
   });
 });
