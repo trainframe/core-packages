@@ -142,6 +142,35 @@ describe('UnknownTags', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('forgets pending unknown tags on a blank-slate reset (resetNonce bump)', () => {
+    const client = new InMemoryBrokerSubscriber();
+    client.connect('ws://test');
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true }));
+    const { rerender } = render(
+      <BrokerProvider client={client}>
+        <UnknownTags adminApiUrl={ADMIN_URL} resetNonce={0} />
+      </BrokerProvider>,
+    );
+    act(() => deliver(client, 'railway/state/layout/simple-loop', LAYOUT));
+    act(() =>
+      deliverEvent(client, 'railway/events/anomaly/server', {
+        severity: 'info',
+        description: 'Unknown tag observed: TAG-9 (not in the tag registry)',
+      }),
+    );
+    expect(screen.getByTestId('unknown-tag-TAG-9')).toBeInTheDocument();
+
+    /* Blank slate bumps resetNonce. The tag was never bound, so no retained
+       `railway/state/tags/TAG-9` tombstone exists — this signal is the only
+       thing that clears the affordance. */
+    rerender(
+      <BrokerProvider client={client}>
+        <UnknownTags adminApiUrl={ADMIN_URL} resetNonce={1} />
+      </BrokerProvider>,
+    );
+    expect(screen.queryByTestId('unknown-tag-TAG-9')).toBeNull();
+  });
+
   it('surfaces a server error on failed submission', async () => {
     const { client, fetchMock } = setup();
     fetchMock.mockResolvedValueOnce({

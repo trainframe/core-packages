@@ -24,6 +24,9 @@ export function App({ client }: AppProps = {}) {
   const resolvedClient = useMemo(() => client ?? new MqttBrokerSubscriber(), [client]);
   const [initialUrl] = useState(loadBrokerUrl);
   const [adminApiUrl] = useState(loadAdminApiUrl);
+  /* Bumped on blank-slate so views holding local-only state (the pending
+     unknown-tags list, which the broker can't tombstone) forget it too. */
+  const [resetNonce, setResetNonce] = useState(0);
 
   useEffect(() => {
     resolvedClient.connect(initialUrl);
@@ -41,9 +44,9 @@ export function App({ client }: AppProps = {}) {
         <ScheduleAssigner />
         <LearnTrackPanel />
         <DevicesPanel adminApiUrl={adminApiUrl} />
-        <MaintenancePanel adminApiUrl={adminApiUrl} />
+        <MaintenancePanel adminApiUrl={adminApiUrl} onReset={() => setResetNonce((n) => n + 1)} />
         <LayoutCanvas />
-        <UnknownTags adminApiUrl={adminApiUrl} />
+        <UnknownTags adminApiUrl={adminApiUrl} resetNonce={resetNonce} />
         <EventLog />
       </main>
     </BrokerProvider>

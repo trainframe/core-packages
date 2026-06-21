@@ -76,6 +76,7 @@ import { physicsMarkerSensor } from '@trainframe/simulator/sim/marker-sensor.js'
 import { physicsMotorActuator } from '@trainframe/simulator/sim/motor-actuator.js';
 import { physicsSwitchActuator } from '@trainframe/simulator/sim/switch-actuator.js';
 import { computeTrainTrails } from '@trainframe/simulator/track/coupling.js';
+import { pieceIdFromMarkerId } from '@trainframe/simulator/track/edge-path.js';
 import { compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
 import {
   TRAIN_LENGTH_MM,
@@ -971,12 +972,26 @@ export class ToyHardware {
 
   /** The marker points the marker sensors read — every logical marker at its world
    *  position, from the current layout. */
+  /**
+   * Marker points the train's reader can detect. A piece carries a marker ONLY
+   * once the operator has SCANNED it (it is in `lastLive`): scanning is the act
+   * that installs the RFID the reader sees — and that publishes the marker's
+   * `tag_assignment` to the server. The rails exist for every piece (the train
+   * drives the full geometry), but it emits `tag_observed` only over scanned
+   * markers, so the core never sees an unscanned piece. Mirrors the visual
+   * marker dot, which the toybox also gates on the scanned set.
+   */
   private markerPoints(): Array<{ id: string; x: number; y: number }> {
-    return this.layout.markers.map((m) => ({
-      id: m.id,
-      x: m.position?.x_mm ?? 0,
-      y: m.position?.y_mm ?? 0,
-    }));
+    return this.layout.markers
+      .filter((m) => {
+        const pieceId = pieceIdFromMarkerId(m.id);
+        return pieceId !== undefined && this.lastLive.has(pieceId);
+      })
+      .map((m) => ({
+        id: m.id,
+        x: m.position?.x_mm ?? 0,
+        y: m.position?.y_mm ?? 0,
+      }));
   }
 
   /** The rail seat (segment + distance + facing) nearest a world point, oriented so the

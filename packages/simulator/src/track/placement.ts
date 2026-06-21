@@ -12,6 +12,15 @@
  * This module is pure geometry: `(click, type, existing pieces) → placement`.
  * No React, no DOM, no I/O — so it can be unit-tested directly and reused by
  * both the click-to-place and (future) drag-to-place paths.
+ *
+ * REST-DOMAIN CONTRACT. Placement operates on REST geometry (`TrackPiece[]`),
+ * never flex-resolved `EffectivePiece[]`. It computes a new piece's REST pose by
+ * snapping to a neighbour's REST endpoint; the flex layer's forward kinematics
+ * (`applyFlex`) then positions that piece at the actual (possibly flexed) joint.
+ * Snapping against effective geometry would double-count the neighbour's flex
+ * via FK and leave a gap at the joint (see flex-attach.test.ts). The branded
+ * `EffectivePiece` type is deliberately NOT assignable to `TrackPiece`, so
+ * passing effective geometry here is a compile error rather than a silent bug.
  */
 
 import { SNAP_DISTANCE } from './layout-from-pieces.js';
@@ -44,7 +53,9 @@ export const DEVICE_SNAP_CAPTURE_MM = 120;
 export interface Placement {
   readonly x: number;
   readonly y: number;
-  readonly rotationDeg: RotationDeg;
+  /** Degrees. Grid (45°) for a new/snapped piece; may be continuous when a
+   *  moved piece carries a baked off-grid rotation. */
+  readonly rotationDeg: number;
   /** True when the piece snapped + oriented onto a neighbour's open endpoint;
    * false when it was dropped free at the click point. */
   readonly connected: boolean;
@@ -219,7 +230,7 @@ function nearestMarkerCentre(
 function placeDevicePiece(
   x: number,
   y: number,
-  rotationDeg: RotationDeg,
+  rotationDeg: number,
   pieces: ReadonlyArray<TrackPiece>,
   activeLayer: number,
 ): Placement {

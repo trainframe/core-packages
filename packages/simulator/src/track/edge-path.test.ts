@@ -22,7 +22,7 @@ function piece(
   type: TrackPiece['type'],
   x: number,
   y: number,
-  rotationDeg: RotationDeg = 0,
+  rotationDeg = 0,
   flipped = false,
 ): TrackPiece {
   return { id, type, position: { x, y }, rotationDeg, tagged: false, flipped };

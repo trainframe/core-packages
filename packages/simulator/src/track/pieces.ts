@@ -134,14 +134,25 @@ export type TrackMarkerKind = 'block_boundary' | 'station_stop' | 'junction' | '
  */
 export const TRAIN_LENGTH_MM = 60;
 
-/** Rotation is constrained to multiples of 45° in the range [0, 315]. */
+/**
+ * Grid rotations: multiples of 45° in [0, 315]. New pieces, rotate/flip, and
+ * snap-to-grid produce these. `TrackPiece.rotationDeg` is a continuous `number`
+ * (not this union) because a baked loop closure stores off-grid angles — see the
+ * flex-rewrite spec (single coordinate frame; no rest/effective split).
+ */
 export type RotationDeg = 0 | 45 | 90 | 135 | 180 | 225 | 270 | 315;
 
 export interface TrackPiece {
   readonly id: string;
   readonly type: TrackPieceType;
   readonly position: { readonly x: number; readonly y: number };
-  readonly rotationDeg: RotationDeg;
+  /**
+   * Rotation in degrees. Usually a grid {@link RotationDeg} multiple of 45°, but
+   * may be a continuous off-grid angle once a loop closure has been BAKED into
+   * the piece (the closing bend is solved and written here; no separate flex
+   * state is kept). All geometry treats it as a plain number.
+   */
+  readonly rotationDeg: number;
   /** When true, the piece carries an RFID tag (renders a badge icon). */
   readonly tagged: boolean;
   /**
@@ -208,6 +219,37 @@ export interface TrackPiece {
 /** The single place the ground-layer default lives. Absent ⇒ layer 0. */
 export function layerOf(piece: TrackPiece): number {
   return piece.layer ?? 0;
+}
+
+/**
+ * Effective (flex-resolved) geometry is now just a `TrackPiece` — there is ONE
+ * coordinate frame. `TrackPiece.rotationDeg` is already continuous, and loop
+ * closures are BAKED into the stored pose rather than held as separate flex
+ * state, so there is no rest-vs-effective distinction to brand.
+ *
+ * This alias and the identity adapters below are transitional: they let the
+ * (many) existing call sites keep compiling while the two-frame machinery is
+ * removed. New code should use `TrackPiece` directly.
+ *
+ * @deprecated use `TrackPiece`.
+ */
+export type EffectivePiece = TrackPiece;
+
+/** @deprecated identity — effective geometry is just `TrackPiece` now. */
+export function asEffectivePieces(
+  pieces: ReadonlyArray<TrackPiece>,
+): ReadonlyArray<EffectivePiece> {
+  return pieces;
+}
+
+/** @deprecated identity — effective geometry is just `TrackPiece` now. */
+export function asTrackPieces(eps: ReadonlyArray<EffectivePiece>): ReadonlyArray<TrackPiece> {
+  return eps;
+}
+
+/** @deprecated identity — effective geometry is just `TrackPiece` now. */
+export function asTrackPiece(ep: EffectivePiece): TrackPiece {
+  return ep;
 }
 
 export interface TrackEndpoint {

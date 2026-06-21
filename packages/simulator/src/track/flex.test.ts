@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { FLEX_BUDGET_DEG, type FlexState, clampFlex, effectivePoses, jointKey } from './flex.js';
+import {
+  FLEX_BUDGET_DEG,
+  type FlexState,
+  applyFlex,
+  clampFlex,
+  effectivePoses,
+  jointKey,
+} from './flex.js';
 import { buildJoints } from './loops.js';
 import type { TrackPiece } from './pieces.js';
 
@@ -129,5 +136,36 @@ describe('effectivePoses', () => {
     const [p0] = chain;
     const poses = effectivePoses(chain, new Map() as FlexState, p0.id);
     expect(poses.size).toBe(3);
+  });
+});
+
+describe('applyFlex — renders under the solver anchor (D4 unification)', () => {
+  it('reconstructs the dragged piece under the given anchor, matching effectivePoses', () => {
+    const chain = buildOpenChainOfThree();
+    const joints = buildJoints(chain);
+    const j0 = joints[0]; /* p0–p1 */
+    if (j0 === undefined) throw new Error('expected a joint');
+    const flex: FlexState = new Map([[jointKey(j0), { joint: j0, deg: 5, dx: 0, dy: 0 }]]);
+
+    /* The solver anchors a drag of p0 at the far end p2. The live render MUST
+       reconstruct p0 under that same anchor, or it lands somewhere else. */
+    const solverPose = effectivePoses(chain, flex, 'p2').get('p0');
+    const rendered = applyFlex(chain, flex, 'p2').find((p) => p.id === 'p0');
+    if (solverPose === undefined || rendered === undefined) throw new Error('missing pose');
+
+    expect(rendered.position.x).toBeCloseTo(solverPose.x, 6);
+    expect(rendered.position.y).toBeCloseTo(solverPose.y, 6);
+    expect(rendered.rotationDeg).toBeCloseTo(solverPose.rotationDeg, 6);
+
+    /* The DEFAULT anchor (first piece = p0) pins p0 at rest — a materially
+       different absolute pose. That divergence is the offset/jump the anchor
+       unification removes. */
+    const defaultRendered = applyFlex(chain, flex).find((p) => p.id === 'p0');
+    if (defaultRendered === undefined) throw new Error('missing pose');
+    const offset = Math.hypot(
+      defaultRendered.position.x - rendered.position.x,
+      defaultRendered.position.y - rendered.position.y,
+    );
+    expect(offset).toBeGreaterThan(1);
   });
 });

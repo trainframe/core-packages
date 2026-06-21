@@ -9,6 +9,8 @@ interface UnknownTagsProps {
    * visualiser at the server they're managing; the Settings UI persists it.
    */
   readonly adminApiUrl: string;
+  /** Bumped on blank-slate so the pending unknown-tag list is forgotten too. */
+  readonly resetNonce?: number;
 }
 
 /**
@@ -19,8 +21,8 @@ interface UnknownTagsProps {
  *
  * No-op when there are no pending unknown tags - keeps the page calm.
  */
-export function UnknownTags({ adminApiUrl }: UnknownTagsProps) {
-  const tags = useUnknownTags();
+export function UnknownTags({ adminApiUrl, resetNonce }: UnknownTagsProps) {
+  const tags = useUnknownTags(resetNonce);
   const layout = useLayoutState();
   if (tags.length === 0) return null;
 

@@ -128,7 +128,7 @@ function piecesFromEffectivePoses(
     return {
       ...p,
       position: { x: pose.x, y: pose.y },
-      rotationDeg: pose.rotationDeg as RotationDeg,
+      rotationDeg: pose.rotationDeg,
     };
   });
 }

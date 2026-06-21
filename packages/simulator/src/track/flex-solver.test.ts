@@ -26,7 +26,7 @@ function piece(
   type: TrackPiece['type'],
   x: number,
   y: number,
-  rot: RotationDeg,
+  rot: number,
 ): TrackPiece {
   return { id, type, position: { x, y }, rotationDeg: rot, tagged: false };
 }

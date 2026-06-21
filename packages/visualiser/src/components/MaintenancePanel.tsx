@@ -9,7 +9,15 @@ import './MaintenancePanel.css';
  * up orphaned (zero-edge) markers; Blank slate forgets the entire railway and
  * is gated on a typed phrase.
  */
-export function MaintenancePanel({ adminApiUrl }: { readonly adminApiUrl: string }) {
+export function MaintenancePanel({
+  adminApiUrl,
+  onReset,
+}: {
+  readonly adminApiUrl: string;
+  /** Called after a successful blank slate so the app can forget local-only
+   *  state (e.g. the pending unknown-tags list) the broker can't tombstone. */
+  readonly onReset?: () => void;
+}) {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -41,6 +49,7 @@ export function MaintenancePanel({ adminApiUrl }: { readonly adminApiUrl: string
           variant="danger"
           onConfirm={run(async () => {
             const { topics_cleared } = await resetState(adminApiUrl);
+            onReset?.();
             return `Blank slate done — cleared ${topics_cleared} retained topic(s).`;
           })}
         />

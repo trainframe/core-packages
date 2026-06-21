@@ -307,12 +307,21 @@ describe('ToyTable — palette and placement', () => {
     expect(filterScanFlowAssignments(client)).toHaveLength(0);
   });
 
-  it('renders a subtle marker indicator at the centre of each track piece, including junctions', async () => {
+  it('shows a marker indicator only once a track piece is SCANNED, including junctions', async () => {
     renderToyTable();
     const straightId = await placeArmedPiece('straight');
     const junctionId = await placeArmedPiece('junction');
 
-    // A marker dot exists for the straight AND the junction.
+    // No marker until scanned — a piece has no marker the core can see (nor a
+    // dot) until the operator scans it onto the bus. The rails exist regardless.
+    expect(screen.queryByTestId(`marker-${straightId}`)).toBeNull();
+    expect(screen.queryByTestId(`marker-${junctionId}`)).toBeNull();
+
+    const scanBox = screen.getByTestId('scan-box');
+    dropPieceOnScanBox(scanBox, straightId);
+    dropPieceOnScanBox(scanBox, junctionId);
+
+    // A marker dot exists for the straight AND the junction once scanned.
     expect(screen.getByTestId(`marker-${straightId}`)).toBeTruthy();
     expect(screen.getByTestId(`marker-${junctionId}`)).toBeTruthy();
 
@@ -325,6 +334,8 @@ describe('ToyTable — palette and placement', () => {
     renderToyTable();
     const straightId = await placeArmedPiece('straight');
     const trainId = await placeArmedPiece('train');
+    // The marker dot appears only once the track piece is scanned.
+    dropPieceOnScanBox(screen.getByTestId('scan-box'), straightId);
 
     // Within the rendered SVG, the marker dot for a track piece must appear
     // earlier in document order than the train piece, so the train (later =
@@ -1315,7 +1326,7 @@ describe('ToyTable — velocity gate (flex / detach)', () => {
     localStorage.clear();
   });
 
-  it('slow drag of a chained piece bends the chain (flex applied, rotation changes)', () => {
+  it('slow drag bends the chain live but REVERTS on release when no loop closed', () => {
     /*
      * Two straights snapped end-to-end:
      *   A at (450, 300) — placed at client (900, 600), rotation 0°
@@ -1386,8 +1397,11 @@ describe('ToyTable — velocity gate (flex / detach)', () => {
         FLEX_BUDGET_DEG + 1e-3,
       ); /* within ±FLEX_BUDGET_DEG */
 
-      /* Release the pointer — flex must PERSIST (design: hold whatever flex the
-         chain was given; no snap-back on pointer-up). */
+      /* Release the pointer WITHOUT a loop closure. Flex is TRANSIENT: the bend
+         was only a live preview, so it reverts to the rest shape (the piece then
+         repositions to where it was released). Persisting the bend would leave
+         stray flex, making later pieces snap to flexed neighbours' rest/phantom
+         endpoints — the bug this guards against. */
       act(() => {
         bEl.dispatchEvent(
           new MouseEvent('pointerup', {
@@ -1406,8 +1420,8 @@ describe('ToyTable — velocity gate (flex / detach)', () => {
         rotMatchAfter !== null && rotMatchAfter[1] !== undefined
           ? Number.parseFloat(rotMatchAfter[1])
           : 0;
-      /* Flex is persistent — the bent rotation is still non-zero after pointer-up. */
-      expect(Math.abs(rotDegAfter)).toBeGreaterThan(0);
+      /* No persistent bend: the flexed rotation reverted on release. */
+      expect(Math.abs(rotDegAfter)).toBeLessThan(1e-6);
     } finally {
       restore();
     }

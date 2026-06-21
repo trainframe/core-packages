@@ -16,6 +16,7 @@
  */
 import { type ClosureResult, solveClose } from '@trainframe/simulator/track/flex-solver.js';
 import type { FlexState } from '@trainframe/simulator/track/flex.js';
+import { applyFlex } from '@trainframe/simulator/track/flex.js';
 import { buildJoints, findLoops } from '@trainframe/simulator/track/loops.js';
 import {
   type RotationDeg,
@@ -25,7 +26,6 @@ import {
 } from '@trainframe/simulator/track/pieces.js';
 import { computePlacement } from '@trainframe/simulator/track/placement.js';
 import { describe, expect, it } from 'vitest';
-import { applyFlex } from './ToyTable.js';
 
 /* ---------------------------------------------------------------------------
  * Layout builder helpers

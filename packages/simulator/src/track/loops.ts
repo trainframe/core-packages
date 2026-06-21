@@ -310,3 +310,49 @@ export function findLoops(pieces: ReadonlyArray<TrackPiece>): ReadonlyArray<Loop
   }
   return findCycles(cycleNodes, prunedAdj);
 }
+
+/**
+ * Connected-component partition of `pieces` over the joint graph. Returns one
+ * piece-id set per component (a maximal set of pieces transitively joined).
+ *
+ * Used by the flex producer to anchor forward kinematics per component, and by
+ * any consumer that must reason about a single physically-connected assembly.
+ *
+ * Pure: no I/O, no mutation of inputs.
+ */
+export function connectedComponents(
+  pieces: ReadonlyArray<TrackPiece>,
+): ReadonlyArray<ReadonlySet<string>> {
+  const joints = buildJoints(pieces);
+  /* Union-find map: id → root id. */
+  const parent = new Map<string, string>();
+  for (const p of pieces) parent.set(p.id, p.id);
+
+  function find(id: string): string {
+    const p = parent.get(id) ?? id;
+    if (p === id) return id;
+    const root = find(p);
+    parent.set(id, root);
+    return root;
+  }
+
+  function union(a: string, b: string): void {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  }
+
+  for (const j of joints) {
+    union(j.a.pieceId, j.b.pieceId);
+  }
+
+  /* Group by root. */
+  const groups = new Map<string, Set<string>>();
+  for (const p of pieces) {
+    const root = find(p.id);
+    const g = groups.get(root);
+    if (g === undefined) groups.set(root, new Set([p.id]));
+    else g.add(p.id);
+  }
+  return [...groups.values()];
+}

@@ -12,10 +12,10 @@
  * with SVG transforms and pieces.ts.
  */
 
-import { buildJoints } from './loops.js';
+import { buildJoints, connectedComponents } from './loops.js';
 import type { JointId } from './loops.js';
-import { getEndpointsAt } from './pieces.js';
-import type { PiecePose, TrackPiece } from './pieces.js';
+import { asEffectivePieces, getEndpointsAt } from './pieces.js';
+import type { EffectivePiece, PiecePose, TrackPiece } from './pieces.js';
 
 export type { PiecePose } from './pieces.js';
 export type { JointId } from './loops.js';
@@ -331,4 +331,81 @@ export function effectivePoses(
   });
 
   return walkTree(anchorPieceId, pieceById, adj, flex, restPoseOf);
+}
+
+/**
+ * Apply `flex` to `pieces`, returning effective-pose pieces whose `position`
+ * and `rotationDeg` reflect any joint deviations in `flex`. With an empty
+ * `FlexState` the result is structurally identical to the input (every piece
+ * returns its rest pose), so rendering/placing through `applyFlex` is a no-op
+ * when nothing is flexed.
+ *
+ * One anchor is chosen per connected component. By default it is the first
+ * piece in iteration order; pass `anchorOverride` to pin a specific piece (the
+ * component CONTAINING it is rooted there, others keep the default). The anchor
+ * stays at its rest pose; all other pieces in the component are walked outward
+ * from it via {@link effectivePoses}. Forward kinematics is relative, so the
+ * component's *shape* is anchor-independent — but the *absolute* placement is
+ * not, so a live drag must render under the SAME anchor the solver used, else
+ * the dragged piece renders rigidly offset from the cursor and appears to jump
+ * on release. The toybox threads the solver's anchor through here for that
+ * reason; a stale/foreign override simply falls back to the default per
+ * component.
+ *
+ * This is THE producer of effective (branded) geometry — every spatial consumer
+ * (placement, snapping, closure, compile, render) reads its output, never a raw
+ * rest-pose array. The brand (see {@link EffectivePiece}) makes that structural.
+ *
+ * Pure: no I/O, no mutation of inputs.
+ */
+export function applyFlex(
+  pieces: ReadonlyArray<TrackPiece>,
+  flex: FlexState,
+  anchorOverride?: string,
+): ReadonlyArray<EffectivePiece> {
+  if (pieces.length === 0) return asEffectivePieces([]);
+
+  /* Fast path: empty flex means every piece returns its rest pose unchanged. */
+  if (flex.size === 0) {
+    return asEffectivePieces(pieces.map((p) => ({ ...p, rotationDeg: p.rotationDeg })));
+  }
+
+  /* Check which joints the flex map actually references. */
+  const joints = buildJoints(pieces);
+  const activeJoints = joints.filter((j) => flex.has(jointKey(j)));
+  if (activeJoints.length === 0) {
+    return asEffectivePieces(pieces.map((p) => ({ ...p, rotationDeg: p.rotationDeg })));
+  }
+
+  /* Per-component forward kinematics. */
+  const components = connectedComponents(pieces);
+  const pieceById = new Map<string, TrackPiece>();
+  for (const p of pieces) pieceById.set(p.id, p);
+
+  /* Build a pose map covering all components. */
+  const poses = new Map<string, { x: number; y: number; rotationDeg: number }>();
+  for (const component of components) {
+    /* Root the drag's component at the solver's anchor when it falls in this
+       component; otherwise the first piece (stable: insertion order). */
+    const anchorId =
+      anchorOverride !== undefined && component.has(anchorOverride)
+        ? anchorOverride
+        : [...component][0];
+    if (anchorId === undefined) continue;
+    const componentPieces = [...component]
+      .map((id) => pieceById.get(id))
+      .filter((p): p is TrackPiece => p !== undefined);
+    const effectiveMap = effectivePoses(componentPieces, flex, anchorId);
+    for (const [id, pose] of effectiveMap) {
+      poses.set(id, pose);
+    }
+  }
+
+  return asEffectivePieces(
+    pieces.map((p) => {
+      const pose = poses.get(p.id);
+      if (pose === undefined) return { ...p, rotationDeg: p.rotationDeg };
+      return { ...p, position: { x: pose.x, y: pose.y }, rotationDeg: pose.rotationDeg };
+    }),
+  );
 }

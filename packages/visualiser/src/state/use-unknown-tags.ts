@@ -19,9 +19,24 @@ export type UnknownTags = ReadonlyArray<UnknownTag>;
 
 const UNKNOWN_TAG_PATTERN = /^Unknown tag observed:\s*([^\s)]+)/;
 
-export function useUnknownTags(): UnknownTags {
+/**
+ * @param resetNonce bump this to forget all pending unknown tags — used when the
+ *   operator blank-slates the railway. Unknown tags are derived from a transient
+ *   anomaly stream and were never bound, so no retained `railway/state/tags/<id>`
+ *   tombstone exists to drop them; the reset signal is the only way to clear them.
+ */
+export function useUnknownTags(resetNonce = 0): UnknownTags {
   const { client } = useBroker();
   const [tags, setTags] = useState<Map<string, UnknownTag>>(() => new Map());
+
+  // Forget pending unknown tags on a blank-slate reset. React's "adjust state
+  // during render" pattern: when the nonce changes, clear synchronously — no
+  // effect (the list isn't broker-derived, so nothing tombstones it).
+  const [seenNonce, setSeenNonce] = useState(resetNonce);
+  if (seenNonce !== resetNonce) {
+    setSeenNonce(resetNonce);
+    if (tags.size > 0) setTags(new Map());
+  }
 
   useEffect(() => {
     // Tags resolved through tag_assignment land as retained state on

@@ -205,6 +205,47 @@ describe('ToyHardware — power is inert-in-place (never a disconnect)', () => {
   });
 });
 
+describe('ToyHardware — a piece has a marker only once SCANNED', () => {
+  it('a train driving over an UNSCANNED piece emits no tag_observed for it', () => {
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId, maxTickMs: 1000 });
+    try {
+      // s1 (100,100) ── s2 (300,100) joined end-to-end; train sits west of s1 and
+      // drives east, physically crossing BOTH piece centres (the markers).
+      const s1 = piece('straight', 100, 100);
+      const s2 = piece('straight', 300, 100);
+      const train = piece('train', 40, 100);
+      const pieces = [s1, s2, train];
+      hardware.syncLayout(pieces);
+      // Scan the train + s1 ONLY. s2 is placed (its rails exist, the train runs
+      // over them) but UNSCANNED — so it carries no marker the core can see.
+      hardware.syncLive(pieces, new Set([train.id, s1.id]));
+      const deviceId = `T-${train.id}`;
+      driveExploration(client, deviceId);
+      for (let i = 0; i < 150; i++) hardware.tick(100);
+
+      const observedTags = client.published
+        .filter((m) => m.topic === `railway/events/tag_observed/${deviceId}`)
+        .map(
+          (m) =>
+            (JSON.parse(new TextDecoder().decode(m.payload)) as { payload: { tag_id: string } })
+              .payload.tag_id,
+        );
+
+      // It physically drove past s2 (proving the rails are there and it crossed
+      // the unscanned piece's centre)...
+      expect(locoPose(hardware, deviceId)?.x ?? 0).toBeGreaterThan(300);
+      // ...emitted a tag for the SCANNED piece it crossed...
+      expect(observedTags).toContain(`M-${s1.id}`);
+      // ...but NEVER for the unscanned one. The core cannot see it.
+      expect(observedTags).not.toContain(`M-${s2.id}`);
+    } finally {
+      hardware.dispose();
+    }
+  });
+});
+
 describe('ToyHardware — placement is inert; only the scan flow commissions', () => {
   it('placing track pieces (no scan) emits nothing on the bus', () => {
     const client = new InMemoryBrokerClient();

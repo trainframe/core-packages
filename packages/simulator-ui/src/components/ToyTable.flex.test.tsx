@@ -14,6 +14,7 @@ import { act, render, screen } from '@testing-library/react';
 import { InMemoryBrokerClient } from '@trainframe/simulator/broker/in-memory-client.js';
 import { hasFlexAnchor } from '@trainframe/simulator/track/flex-solver.js';
 import { type FlexState, clampFlex, jointKey } from '@trainframe/simulator/track/flex.js';
+import { applyFlex } from '@trainframe/simulator/track/flex.js';
 import { buildJoints, findLoops } from '@trainframe/simulator/track/loops.js';
 import type { JointId, Loop } from '@trainframe/simulator/track/loops.js';
 import { getEndpoints } from '@trainframe/simulator/track/pieces.js';
@@ -21,7 +22,6 @@ import type { TrackPiece } from '@trainframe/simulator/track/pieces.js';
 import { computePlacement } from '@trainframe/simulator/track/placement.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
-import { applyFlex } from './ToyTable.js';
 
 /* ---------------------------------------------------------------------------
  * Module-level mock for solveClose. Hoisted by Vitest so ToyTable.tsx's static

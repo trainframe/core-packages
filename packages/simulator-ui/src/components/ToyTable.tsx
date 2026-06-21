@@ -12,7 +12,12 @@ import {
   solveClose,
   solveFollow,
 } from '@trainframe/simulator/track/flex-solver.js';
-import { type FlexState, effectivePoses, jointKey } from '@trainframe/simulator/track/flex.js';
+import {
+  type FlexState,
+  applyFlex,
+  effectivePoses,
+  jointKey,
+} from '@trainframe/simulator/track/flex.js';
 import { SNAP_DISTANCE, compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
 import { type JointId, buildJoints, findLoops } from '@trainframe/simulator/track/loops.js';
 import { detectSameLayerOverlaps, pierSuppressed } from '@trainframe/simulator/track/overlap.js';
@@ -25,6 +30,7 @@ import {
   type CarriageColorId,
   type CentreLinePath,
   type DevicePieceType,
+  type EffectivePiece,
   LIFT_BRIDGE_FORESHORTEN,
   LIFT_BRIDGE_PIVOT,
   LIFT_BRIDGE_SPAN_HALF_MM,
@@ -49,6 +55,8 @@ import {
   type TrackPieceType,
   VISION_LED,
   VISION_SENSOR_RANGE_MM,
+  asTrackPiece,
+  asTrackPieces,
   carriageCratePath,
   craneCratePath,
   craneTrolley,
@@ -85,153 +93,6 @@ import { Feature, Groove, PieceBody, WOOD_FILL, WoodDefs } from './piece-art.js'
 
 // Canvas scale: 1 mm = SCALE px. Matches the old TrackBuilder so coordinates
 // translate one-for-one across the refactor.
-// ---------------------------------------------------------------------------
-// EffectivePiece — rest-pose TrackPiece widened to continuous rotation
-// ---------------------------------------------------------------------------
-
-/**
- * A track piece whose position and rotation have been resolved through the
- * flex model. Unlike `TrackPiece`, `rotationDeg` is a continuous `number`
- * (not the quantised `RotationDeg` union) because flex can bend a joint by a
- * fractional degree. All other fields are structurally identical to `TrackPiece`.
- *
- * Used only within ToyTable's render and compile paths; the rest of the system
- * continues to work with rest-pose `TrackPiece` values.
- */
-export type EffectivePiece = Omit<TrackPiece, 'rotationDeg'> & { readonly rotationDeg: number };
-
-/**
- * Lift `EffectivePiece[]` to `TrackPiece[]` at the boundary where an external
- * function requires the quantised union type.
- *
- * Sound because `EffectivePiece` differs from `TrackPiece` only in the
- * declared type of `rotationDeg` (`number` vs `RotationDeg`). With empty flex
- * the values ARE quantised `RotationDeg` members; with non-zero flex they are
- * small deviations (≤ ±FLEX_BUDGET_DEG = 2°) that all geometry functions —
- * `getEndpoints`, `collectEndpoints`, `compileLayout`, `compileNetwork` — pass
- * straight through to trigonometric functions, which accept any `number`.
- * No coercion or rounding occurs; the only unsound part is the TypeScript
- * annotation.
- */
-function asTrackPieces(eps: ReadonlyArray<EffectivePiece>): ReadonlyArray<TrackPiece> {
-  return eps as ReadonlyArray<TrackPiece>;
-}
-
-/**
- * Single-piece variant of `asTrackPieces`. Same soundness argument.
- * Extracts the adapter to one place so no call site uses a raw `as`.
- */
-function asTrackPiece(ep: EffectivePiece): TrackPiece {
-  return ep as unknown as TrackPiece;
-}
-
-/**
- * Compute a connected-component partition of the given pieces using the
- * joint graph. Returns an array of piece-id sets, one per component.
- */
-function connectedComponents(
-  pieces: ReadonlyArray<TrackPiece>,
-): ReadonlyArray<ReadonlySet<string>> {
-  const joints = buildJoints(pieces);
-  /* Union-find map: id → root id. */
-  const parent = new Map<string, string>();
-  for (const p of pieces) parent.set(p.id, p.id);
-
-  function find(id: string): string {
-    const p = parent.get(id) ?? id;
-    if (p === id) return id;
-    const root = find(p);
-    parent.set(id, root);
-    return root;
-  }
-
-  function union(a: string, b: string): void {
-    const ra = find(a);
-    const rb = find(b);
-    if (ra !== rb) parent.set(ra, rb);
-  }
-
-  for (const j of joints) {
-    union(j.a.pieceId, j.b.pieceId);
-  }
-
-  /* Group by root. */
-  const groups = new Map<string, Set<string>>();
-  for (const p of pieces) {
-    const root = find(p.id);
-    const g = groups.get(root);
-    if (g === undefined) groups.set(root, new Set([p.id]));
-    else g.add(p.id);
-  }
-  return [...groups.values()];
-}
-
-/**
- * Apply `flex` to `pieces`, returning effective-pose pieces whose `position`
- * and `rotationDeg` reflect any joint deviations in `flex`. With an empty
- * `FlexState` the result is structurally identical to the input (every piece
- * returns its rest pose), so rendering through `applyFlex` is a no-op today.
- *
- * One anchor is chosen per connected component (the first piece in iteration
- * order). The anchor stays at its rest pose; all other pieces in the component
- * are walked outward from it via `effectivePoses`.
- *
- * Pure: no I/O, no mutation of inputs.
- */
-export function applyFlex(
-  pieces: ReadonlyArray<TrackPiece>,
-  flex: FlexState,
-): ReadonlyArray<EffectivePiece> {
-  if (pieces.length === 0) return [];
-
-  /* Fast path: empty flex means every piece returns its rest pose unchanged. */
-  if (flex.size === 0) {
-    return pieces.map((p) => ({
-      ...p,
-      rotationDeg: p.rotationDeg,
-    }));
-  }
-
-  /* Check which joints the flex map actually references. */
-  const joints = buildJoints(pieces);
-  const activeJoints = joints.filter((j) => flex.has(jointKey(j)));
-  if (activeJoints.length === 0) {
-    return pieces.map((p) => ({
-      ...p,
-      rotationDeg: p.rotationDeg,
-    }));
-  }
-
-  /* Per-component forward kinematics. */
-  const components = connectedComponents(pieces);
-  const pieceById = new Map<string, TrackPiece>();
-  for (const p of pieces) pieceById.set(p.id, p);
-
-  /* Build a pose map covering all components. */
-  const poses = new Map<string, { x: number; y: number; rotationDeg: number }>();
-  for (const component of components) {
-    /* Pick the first piece as anchor (stable: Map iteration order = insertion order). */
-    const anchorId = [...component][0];
-    if (anchorId === undefined) continue;
-    const componentPieces = [...component]
-      .map((id) => pieceById.get(id))
-      .filter((p): p is TrackPiece => p !== undefined);
-    const effectiveMap = effectivePoses(componentPieces, flex, anchorId);
-    for (const [id, pose] of effectiveMap) {
-      poses.set(id, pose);
-    }
-  }
-
-  return pieces.map((p) => {
-    const pose = poses.get(p.id);
-    if (pose === undefined) return { ...p, rotationDeg: p.rotationDeg };
-    return {
-      ...p,
-      position: { x: pose.x, y: pose.y },
-      rotationDeg: pose.rotationDeg,
-    };
-  });
-}
 
 const SCALE = 2;
 const CANVAS_W_MM = 900;
@@ -567,9 +428,11 @@ function nextPieceId(prefix: string): string {
   return `${prefix}-${pieceCounter}`;
 }
 
-function nextRotation(r: RotationDeg): RotationDeg {
-  const next = (r + 45) % 360;
-  return next as RotationDeg;
+/* Advance to the next 45° grid orientation. Snaps a baked off-grid rotation
+   (from a committed loop closure) onto the grid first, so Rotate always lands
+   the piece on a clean 45° multiple. */
+function nextRotation(r: number): RotationDeg {
+  return ((((Math.round(r / 45) * 45 + 45) % 360) + 360) % 360) as RotationDeg;
 }
 
 /** Device id for a piece's *own* device announcement. Only meaningful for
@@ -1150,6 +1013,37 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
    * yet — Task 7). When non-empty, applyFlex bends the rendered and compiled
    * layout without touching the rest-pose pieces. */
   const [flex, setFlex] = useState<FlexState>(new Map());
+  /** FK anchor the current flex was solved against. The live drag render MUST
+   *  reconstruct under the same anchor the solver used, else the dragged piece
+   *  renders rigidly offset from the cursor and appears to jump on release.
+   *  Persisted with the flex so the committed shape matches the dragged one. */
+  const [flexAnchorId, setFlexAnchorId] = useState<string | null>(null);
+  /** Apply flex + the persisted solver anchor, in one place. Clears the anchor
+   *  when the flex empties so a later component re-roots cleanly. */
+  const applyFlexState = useCallback((next: FlexState, anchorId: string | null) => {
+    setFlex(next);
+    setFlexAnchorId(next.size === 0 ? null : anchorId);
+  }, []);
+  /* Mirrors + a per-drag snapshot so flex can be made TRANSIENT: a drag bends the
+     chain live, but on release it persists ONLY if it closed a loop — otherwise we
+     revert to the pre-drag shape. Without this, every reposition leaves a stray
+     bend, and later pieces snap to the flexed neighbours' REST (phantom) endpoints
+     instead of where they are drawn. */
+  const flexRef = useRef(flex);
+  flexRef.current = flex;
+  const flexAnchorRef = useRef(flexAnchorId);
+  flexAnchorRef.current = flexAnchorId;
+  const flexSnapshotRef = useRef<{ flex: FlexState; anchor: string | null }>({
+    flex: new Map(),
+    anchor: null,
+  });
+  const handleDragBegin = useCallback(() => {
+    flexSnapshotRef.current = { flex: flexRef.current, anchor: flexAnchorRef.current };
+  }, []);
+  const handleRevertFlex = useCallback(() => {
+    const snap = flexSnapshotRef.current;
+    applyFlexState(snap.flex, snap.anchor);
+  }, [applyFlexState]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /** Which piece type the operator has "armed" from the toybox, if any. */
   const [armedType, setArmedType] = useState<TrackPieceType | null>(null);
@@ -1221,7 +1115,10 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
    * Memoised on pieces + flex so the reference is stable across re-renders that
    * only bump tickCount — if pieces/flex haven't changed, the array reference is
    * identical and useToyHardware's reconciliation useEffect does not re-fire. */
-  const effectivePieces = useMemo(() => applyFlex(pieces, flex), [pieces, flex]);
+  const effectivePieces = useMemo(
+    () => applyFlex(pieces, flex, flexAnchorId ?? undefined),
+    [pieces, flex, flexAnchorId],
+  );
 
   /* Stable TrackPiece view of effectivePieces — same memo guard. */
   const hardwarePieces = useMemo(() => asTrackPieces(effectivePieces), [effectivePieces]);
@@ -1410,7 +1307,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   }, []);
 
   const placePiece = useCallback(
-    (xMm: number, yMm: number, type?: TrackPieceType, rotation?: RotationDeg) => {
+    (xMm: number, yMm: number, type?: TrackPieceType, rotation?: number) => {
       const pieceType = type ?? armedType;
       if (pieceType === null) {
         setSelectedId(null);
@@ -1453,6 +1350,10 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   // surprise-rotate it back to 0°.
   const movePiece = useCallback((pieceId: string, xMm: number, yMm: number) => {
     setPieces((prev) => {
+      /* Placement is a REST-domain operation: snap the moved piece to a
+         neighbour's REST endpoint so applyFlex's forward kinematics then
+         positions it correctly at the (possibly flexed) joint. Snapping against
+         effective geometry here double-counts the neighbour's flex via FK. */
       const moving = prev.find((p) => p.id === pieceId);
       if (moving === undefined) return prev;
       const others = prev.filter((p) => p.id !== pieceId);
@@ -1497,10 +1398,22 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   /* When a drop commits a loop closure, find the cycle containing the dragged
      piece in the committed effective geometry and mount the ClosureWave for one
      run. Uses the REST-pose pieces (applyFlex re-derives closed positions). */
-  const handleClosureCommit = useCallback((closureFlex: FlexState, draggedPieceId: string) => {
-    const pts = newLoopCenterline(piecesRef.current, closureFlex, draggedPieceId);
-    if (pts !== null) setClosureWavePoints(pts);
-  }, []);
+  const handleClosureCommit = useCallback(
+    (closureFlex: FlexState, draggedPieceId: string) => {
+      /* BAKE the solved closure into the stored poses: compose the rest pieces
+         with the closing flex into continuous effective poses and persist THOSE
+         as the pieces' own pose. No flex is kept — the closed loop now lives in
+         the single coordinate frame, so later edits/attachments can't desync
+         against a phantom rest frame (this is the whole point of the rewrite). */
+      const anchorId = selectAnchor(piecesRef.current, draggedPieceId);
+      const pts = newLoopCenterline(piecesRef.current, closureFlex, draggedPieceId);
+      const baked = applyFlex(piecesRef.current, closureFlex, anchorId);
+      setPieces([...baked]);
+      applyFlexState(new Map(), null);
+      if (pts !== null) setClosureWavePoints(pts);
+    },
+    [applyFlexState],
+  );
 
   const rotateSelected = useCallback(() => {
     if (selectedId === null) return;
@@ -1533,6 +1446,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
         );
       }
       const flipped = !(target.flipped === true);
+      /* Re-snap in the REST domain (FK repositions at flexed joints). */
       const others = prev.filter((p) => p.id !== selectedId);
       const entry = getEndpoints(target)[0];
       const placement =
@@ -1832,6 +1746,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
         <div className="tf-toytable__stage">
           <Table
             pieces={effectivePieces}
+            restPieces={pieces}
             liveIds={liveIds}
             poweredOffIds={poweredOffIds}
             selectedId={selectedId}
@@ -1843,9 +1758,12 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
             hardware={hardware}
             onCanvasClick={placePiece}
             onMovePiece={movePiece}
+            onSelectPiece={setSelectedId}
             onScanPiece={requestScan}
             onPieceAction={handlePiecePointerAction}
-            onDragFlex={setFlex}
+            onDragFlex={applyFlexState}
+            onDragBegin={handleDragBegin}
+            onRevertFlex={handleRevertFlex}
             onClosureCommit={handleClosureCommit}
             waveOverlay={
               closureWavePoints !== null && closureWavePoints.length >= 2 ? (
@@ -2382,7 +2300,16 @@ function ActionBar({
 // ---------------------------------------------------------------------------
 
 interface TableProps {
+  /** Effective (flex-resolved) geometry — for render, hit-test, and closure. */
   readonly pieces: ReadonlyArray<EffectivePiece>;
+  /**
+   * REST geometry — for placement/snap. Placement is a rest-domain operation:
+   * a new/moved piece snaps to a neighbour's REST endpoint so applyFlex's
+   * forward kinematics then positions it at the (possibly flexed) joint.
+   * Snapping against `pieces` (effective) would double-count the neighbour's
+   * flex via FK, leaving a gap at the joint.
+   */
+  readonly restPieces: ReadonlyArray<TrackPiece>;
   readonly liveIds: ReadonlySet<string>;
   /** Subset of live train ids powered OFF in place (rendered dark / inert). */
   readonly poweredOffIds: ReadonlySet<string>;
@@ -2412,16 +2339,24 @@ interface TableProps {
     xMm: number,
     yMm: number,
     type?: TrackPieceType,
-    rotation?: RotationDeg,
+    rotation?: number,
   ) => void;
   /** Reposition an already-placed piece (pointer-dragged across the canvas). */
   readonly onMovePiece: (pieceId: string, xMm: number, yMm: number) => void;
+  /** Select a piece at the very start of a drag, so keyboard actions (R/Flip)
+   *  target the piece in hand, not whatever was selected before the grab. */
+  readonly onSelectPiece: (pieceId: string) => void;
   /** Begin scanning a piece (pointer-dragged onto the scan box). */
   readonly onScanPiece: (pieceId: string) => void;
   readonly onPieceAction: (pieceId: string, action: 'select' | PowerToggleAction) => void;
   /* Slow drag of a chained piece: apply the solved flex state so the chain
-     bends live. The parent (ToyTable) owns flex state and calls setFlex. */
-  readonly onDragFlex: (flex: FlexState) => void;
+     bends live, carrying the FK anchor the solver used so the render reconstructs
+     under the same root (no offset/jump). The parent owns flex + anchor state. */
+  readonly onDragFlex: (flex: FlexState, anchorId: string) => void;
+  /* Drag started — snapshot the flex so a non-closing drag can revert to it. */
+  readonly onDragBegin: () => void;
+  /* Drag released without closing a loop — discard the transient bend. */
+  readonly onRevertFlex: () => void;
   /* Called ONLY when a successful loop closure is committed on drop, with the
      flex state that closes the loop and the id of the dragged piece that just
      joined the cycle. Gives ToyTable a chance to mount the ClosureWave overlay
@@ -2643,6 +2578,7 @@ export function newLoopCenterline(
 
 function Table({
   pieces,
+  restPieces,
   liveIds,
   poweredOffIds,
   selectedId,
@@ -2654,9 +2590,12 @@ function Table({
   experimentVisuals,
   onCanvasClick,
   onMovePiece,
+  onSelectPiece,
   onScanPiece,
   onPieceAction,
   onDragFlex,
+  onDragBegin,
+  onRevertFlex,
   onClosureCommit,
   waveOverlay,
   onDragDetach,
@@ -2670,7 +2609,7 @@ function Table({
     id: string;
     x: number;
     y: number;
-    rotationDeg: RotationDeg;
+    rotationDeg: number;
   } | null>(null);
 
   /* The piece yanked free during the current drag (a fast pull off its chain).
@@ -2870,14 +2809,7 @@ function Table({
     // Armed: snap + orient the new piece to continue from a nearby open
     // endpoint so curved loops can be built by clicking, not pixel-nudging.
     // Gated to the active layer so an upper-deck piece ignores ground joints.
-    const placement = computePlacement(
-      xMm,
-      yMm,
-      armedType,
-      asTrackPieces(pieces),
-      false,
-      activeLayer,
-    );
+    const placement = computePlacement(xMm, yMm, armedType, restPieces, false, activeLayer);
     onCanvasClick(placement.x, placement.y, armedType, placement.rotationDeg);
   }
 
@@ -2908,7 +2840,7 @@ function Table({
     // readable mid-drag, so highlight the nearest open endpoint (the join a
     // track piece would orient onto); harmless for device drags.
     const { x: xMm, y: yMm } = clientToMm(getRect(), e.clientX, e.clientY, viewport);
-    setSnapHighlight(nearestConnectablePoint(xMm, yMm, asTrackPieces(pieces)));
+    setSnapHighlight(nearestConnectablePoint(xMm, yMm, restPieces));
   }
 
   function handleDragLeave() {
@@ -2927,14 +2859,7 @@ function Table({
     // piece in connects it instead of dropping it loose.
     const pieceType = e.dataTransfer.getData(TOYBOX_DRAG_MIME) as TrackPieceType | '';
     if (pieceType === '') return;
-    const placement = computePlacement(
-      xMm,
-      yMm,
-      pieceType,
-      asTrackPieces(pieces),
-      false,
-      activeLayer,
-    );
+    const placement = computePlacement(xMm, yMm, pieceType, restPieces, false, activeLayer);
     onCanvasClick(placement.x, placement.y, pieceType, placement.rotationDeg);
   }
 
@@ -2945,7 +2870,12 @@ function Table({
   /* Called from PieceRenderer.handlePointerDown at the very start of each new
      piece drag — before any move events arrive. Clears stale per-drag state that
      a missed pointer-up from the previous drag might have left behind. */
-  function handlePieceDragStart(_pieceId: string) {
+  function handlePieceDragStart(pieceId: string) {
+    /* Grabbing a piece selects it, so R/Flip act on the piece in hand rather
+       than a previously-selected one. */
+    onSelectPiece(pieceId);
+    /* Snapshot flex so a drag that bends but does NOT close a loop can revert. */
+    onDragBegin();
     lastDragFlexRef.current = null;
     detachedDragRef.current = null;
   }
@@ -2996,14 +2926,15 @@ function Table({
       }
 
       /* The piece is in a chain — bend it live (a slow pull past the budget just
-         holds at max flex, the solver clamps each δ to ±budget). Keep the visual
-         at its current rest position (the chain bends, the piece does not jump). */
+         holds at max flex, the solver clamps each δ to ±budget). Render under the
+         SAME anchor the solver used so the dragged piece tracks the cursor rather
+         than rendering rigidly offset (and jumping on release). */
+      const anchorId = selectAnchor(trackPieces, pieceId);
       lastDragFlexRef.current = flex;
-      onDragFlex(flex);
+      onDragFlex(flex, anchorId);
 
       /* Closure detection: check whether the dragged piece's free endpoint is
          near an open endpoint on another piece and a loop closure is solvable. */
-      const anchorId = selectAnchor(trackPieces, pieceId);
       const closureResult = detectLoopClosure(trackPieces, pieceId, flex, anchorId);
       if (closureResult !== null) {
         closureFlexRef.current = closureResult;
@@ -3028,8 +2959,11 @@ function Table({
   function followCursorFree(pieceId: string, moving: EffectivePiece, x: number, y: number) {
     closureFlexRef.current = null;
     setClosureAvailableId(null);
-    const others = asTrackPieces(pieces.filter((p) => p.id !== pieceId));
-    const placement = computeMovePlacement(asTrackPiece(moving), x, y, others);
+    /* Placement is rest-domain (FK repositions at flexed joints): snap the moved
+       piece against REST neighbours. */
+    const restMoving = restPieces.find((p) => p.id === pieceId) ?? asTrackPiece(moving);
+    const others = restPieces.filter((p) => p.id !== pieceId);
+    const placement = computeMovePlacement(restMoving, x, y, others);
     setPieceDragPreview({
       id: pieceId,
       x: placement.x,
@@ -3041,6 +2975,10 @@ function Table({
   function handlePieceDragEnd(pieceId: string, clientX: number, clientY: number) {
     setPieceDragPreview(null);
 
+    /* Was this a live flex-drag (a slow bend), as opposed to a free move or a
+       fast-yank detach? Captured before we clear the seed. */
+    const wasFlexing = lastDragFlexRef.current !== null;
+
     /* End of drag: clear the warm-start seed and the detached marker so the next
        drag starts fresh. A piece yanked free this drag is repositioned (and
        re-snapped) by the onMovePiece path below, exactly like a free piece. */
@@ -3048,15 +2986,23 @@ function Table({
     detachedDragRef.current = null;
 
     /* Closure commit: if a feasible closure was found on the last move event,
-       commit it now so the loop closes and persists. Clear closure state. */
+       commit it now so the loop closes and persists. Render under the solver's
+       anchor so the committed shape matches what was dragged. */
     const closure = closureFlexRef.current;
     closureFlexRef.current = null;
     setClosureAvailableId(null);
     if (closure?.feasible === true) {
-      onDragFlex(closure.flex);
+      /* Bake the closure into the stored poses (parent handler); do NOT set
+         persistent flex — the transient drag bend is replaced by baked poses. */
       onClosureCommit(closure.flex, pieceId);
       return;
     }
+
+    /* A slow flex-drag that did NOT close a loop: the bend was transient. Revert
+       to the pre-drag shape so no stray flex lingers (stray flex makes later
+       pieces snap to flexed neighbours' REST/phantom endpoints). The piece then
+       repositions to where it was released, like any move. */
+    if (wasFlexing) onRevertFlex();
 
     // Released over the scan box → scan it (same confirm flow as an HTML5 drop).
     const target =
@@ -3237,12 +3183,18 @@ function Table({
               )}
               <g data-layer={layer} style={filter ? { filter } : undefined}>
                 {trackPieces.map(renderPiece)}
-                {/* Marker dots: one per track piece, at the piece CENTRE (where the
-                  layout marker M-{id} sits), painted over the track but under the
-                  devices below. Junctions get one too. Subtle + non-interactive. */}
-                {trackPieces.map((p) => (
-                  <MarkerDot key={`marker-${p.id}`} piece={p} selected={p.id === selectedId} />
-                ))}
+                {/* Marker dots: one per SCANNED track piece, at the piece CENTRE
+                  (where the layout marker M-{id} sits), painted over the track but
+                  under the devices below. A piece has a marker only once scanned —
+                  scanning installs the RFID and binds its tag on the bus — so an
+                  unscanned piece shows no dot and the core can't see it (it still
+                  carries rails the train drives over). Junctions get one too.
+                  Subtle + non-interactive. */}
+                {trackPieces
+                  .filter((p) => liveIds.has(p.id))
+                  .map((p) => (
+                    <MarkerDot key={`marker-${p.id}`} piece={p} selected={p.id === selectedId} />
+                  ))}
                 {devicePieces.map(renderPiece)}
               </g>
             </g>
