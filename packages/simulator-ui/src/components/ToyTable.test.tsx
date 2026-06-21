@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { PROTOCOL_VERSION } from '@trainframe/protocol';
 import { InMemoryBrokerClient } from '@trainframe/simulator/broker/in-memory-client.js';
+import { FLEX_BUDGET_DEG } from '@trainframe/simulator/track/flex.js';
 import type { TrackPiece } from '@trainframe/simulator/track/pieces.js';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
@@ -1150,7 +1151,12 @@ function placeStraightAt(canvas: Element, clientX: number, clientY: number): str
 
 /** Pointer-drag a placed piece element from its current spot to a client point.
  *  Dispatches MouseEvents typed as pointer events so jsdom carries clientX/Y
- *  through to React's handlers (fireEvent.pointer* drops the coordinates). */
+ *  through to React's handlers (fireEvent.pointer* drops the coordinates).
+ *
+ *  All events are dispatched inside a single act() so React flushes once. jsdom
+ *  does not advance performance.now() between synchronous event dispatches, so
+ *  consecutive events share the same timeStamp — the velocity gate treats that
+ *  as speed=0 (safe/slow) and does not trigger a detach. */
 function pointerDragPiece(piece: Element, from: [number, number], to: [number, number]): void {
   const ev = (type: string, x: number, y: number, button = 0) =>
     new MouseEvent(type, { bubbles: true, cancelable: true, button, clientX: x, clientY: y });
@@ -1275,6 +1281,188 @@ describe('ToyTable — flip (mirror)', () => {
     // F flips it back to the original incline.
     fireEvent.keyDown(window, { key: 'f' });
     expect(piece.getAttribute('transform')).toMatch(/rotate\(0\)/);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * Velocity gate: live flex on slow drag; detach on fast yank
+ *
+ * Timestamps are fed explicitly into MouseEvent via Object.defineProperty so
+ * the speed calculation in handlePointerMove is deterministic and test-local.
+ * The velocity gate threshold is DRAG_FLEX_MAX_SPEED = 1.5 px/ms (not
+ * exported, but the tests drive speed directly through explicit timestamps).
+ * --------------------------------------------------------------------------- */
+
+/** Create a pointer event with an explicit timeStamp override. */
+function timedPointerEvent(
+  type: string,
+  clientX: number,
+  clientY: number,
+  timeStampMs: number,
+  button = 0,
+): MouseEvent {
+  const e = new MouseEvent(type, { bubbles: true, cancelable: true, button, clientX, clientY });
+  Object.defineProperty(e, 'timeStamp', {
+    value: timeStampMs,
+    writable: false,
+    configurable: true,
+  });
+  return e;
+}
+
+describe('ToyTable — velocity gate (flex / detach)', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('slow drag of a chained piece bends the chain (flex applied, rotation changes)', () => {
+    /*
+     * Two straights snapped end-to-end:
+     *   A at (450, 300) — placed at client (900, 600), rotation 0°
+     *   B at (650, 300) — placed at client (1300, 600), snaps onto A's east end
+     *
+     * A slow drag of B upward (speed = 0 because jsdom shares timestamps) calls
+     * solveFollow, which distributes angular flex across the A–B joint. The
+     * anchor A keeps its rest rotation; B acquires a non-zero effective rotation
+     * that Table reports through the rendered transform.
+     */
+    const restore = mockCanvasRect();
+    try {
+      renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+
+      /* Place anchor A at centre (450mm, 300mm). Its east endpoint is at 550mm. */
+      placeStraightAt(canvas, 900, 600);
+
+      /* Place B by clicking near A's east endpoint at (550mm, 300mm) → client
+         (1100px, 600px). computePlacement snaps B's west end onto A's east end,
+         landing B's centre at (650mm, 300mm). */
+      const bId = placeStraightAt(canvas, 1100, 600);
+      const bEl = canvas.querySelector(`[data-piece-id="${bId}"]`) as SVGGElement;
+
+      /* Confirm B starts at rotation 0. */
+      expect(bEl.getAttribute('transform')).toMatch(/rotate\(0\)/);
+
+      /* Slow drag: drag B's element upward. jsdom does not advance
+         performance.now() between synchronous dispatches, so all events share
+         the same timeStamp — the velocity gate reads speed = 0, which is below
+         the threshold (1.5 px/ms), so solveFollow is called and flex is applied. */
+      /* B is at (650mm, 300mm) → client (1300px, 600px). Drag it upward.
+         The first pointermove initialises the velocity baseline (speed=0).
+         Both events are in one act() so their timeStamps are equal in jsdom
+         (performance.now() doesn't advance between synchronous dispatches). */
+      act(() => {
+        bEl.dispatchEvent(
+          new MouseEvent('pointerdown', {
+            bubbles: true,
+            cancelable: true,
+            clientX: 1300,
+            clientY: 600,
+          }),
+        );
+        /* First (and only) move: hasFirstMove=false → initialises baseline,
+           reports speed=0 → handlePieceDragMove takes the slow path → solveFollow
+           bends the A–B joint, giving B a non-zero effective rotation. */
+        bEl.dispatchEvent(
+          new MouseEvent('pointermove', {
+            bubbles: true,
+            cancelable: true,
+            clientX: 1300,
+            clientY: 540,
+          }),
+        );
+      });
+
+      /* After a slow drag, flex is applied: B's effective rotation is non-zero.
+         The transform shows the flexed rotation (a small angle, within ±FLEX_BUDGET_DEG). */
+      const transformDuringDrag = bEl.getAttribute('transform') ?? '';
+      const rotMatchDuring = /rotate\(([-\d.]+)\)/.exec(transformDuringDrag);
+      const rotDegDuring =
+        rotMatchDuring !== null && rotMatchDuring[1] !== undefined
+          ? Number.parseFloat(rotMatchDuring[1])
+          : 0;
+      expect(Math.abs(rotDegDuring)).toBeGreaterThan(0);
+      expect(Math.abs(rotDegDuring)).toBeLessThanOrEqual(
+        FLEX_BUDGET_DEG + 1e-3,
+      ); /* within ±FLEX_BUDGET_DEG */
+
+      /* Release the pointer — flex must PERSIST (design: hold whatever flex the
+         chain was given; no snap-back on pointer-up). */
+      act(() => {
+        bEl.dispatchEvent(
+          new MouseEvent('pointerup', {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+            clientX: 1300,
+            clientY: 540,
+          }),
+        );
+      });
+
+      const transformAfterRelease = bEl.getAttribute('transform') ?? '';
+      const rotMatchAfter = /rotate\(([-\d.]+)\)/.exec(transformAfterRelease);
+      const rotDegAfter =
+        rotMatchAfter !== null && rotMatchAfter[1] !== undefined
+          ? Number.parseFloat(rotMatchAfter[1])
+          : 0;
+      /* Flex is persistent — the bent rotation is still non-zero after pointer-up. */
+      expect(Math.abs(rotDegAfter)).toBeGreaterThan(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it('fast drag (yank) frees the piece into the hand without it vanishing', () => {
+    /*
+     * Two snapped straights. A fast drag of B (speed > 1.5 px/ms, produced by a
+     * large client-delta over a small timeStamp gap) yanks B free of its chain.
+     *
+     * Issue 1: the freed piece must NOT vanish — it comes free into the hand and
+     * follows the cursor, then re-places on drop. So both pieces remain on the
+     * canvas (count stays 2) and B's rendered transform moves to track the
+     * pointer.
+     *
+     * Timestamps are injected via Object.defineProperty so speed is deterministic:
+     *   dist = sqrt(95² + 102²) ≈ 140 px, dt = 10 ms → speed ≈ 14 px/ms >> 1.5.
+     */
+    const restore = mockCanvasRect();
+    try {
+      renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+
+      /* A at centre; B snapped onto A's east end (click near 550mm → 1100px). */
+      placeStraightAt(canvas, 900, 600);
+      const bId = placeStraightAt(canvas, 1100, 600);
+      const bEl = canvas.querySelector(`[data-piece-id="${bId}"]`) as SVGGElement;
+
+      expect(canvas.querySelectorAll('[data-piece-id]').length).toBe(2);
+      const transformBefore = bEl.getAttribute('transform');
+
+      /* B is at (650mm, 300mm) → client (1300px, 600px). */
+      act(() => {
+        bEl.dispatchEvent(timedPointerEvent('pointerdown', 1300, 600, 0));
+        /* First move: initialises velocity baseline (speed=0). */
+        bEl.dispatchEvent(timedPointerEvent('pointermove', 1305, 598, 100));
+        /* Second move: dist ≈ sqrt(95²+102²) ≈ 140 px over 10 ms → 14 px/ms,
+           well above the 1.5 px/ms gate → yank fires. */
+        bEl.dispatchEvent(timedPointerEvent('pointermove', 1400, 500, 110));
+      });
+
+      /* B did NOT vanish: both pieces remain and B follows the cursor. */
+      expect(canvas.querySelectorAll('[data-piece-id]').length).toBe(2);
+      const bAfter = canvas.querySelector(`[data-piece-id="${bId}"]`);
+      expect(bAfter).not.toBeNull();
+      expect(bAfter?.getAttribute('transform')).not.toBe(transformBefore);
+
+      /* Releasing re-places it; still present, still two pieces. */
+      act(() => {
+        bEl.dispatchEvent(timedPointerEvent('pointerup', 1400, 500, 110));
+      });
+      expect(canvas.querySelectorAll('[data-piece-id]').length).toBe(2);
+    } finally {
+      restore();
+    }
   });
 });
 

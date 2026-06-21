@@ -6,7 +6,15 @@ import type { BodyPose } from '@trainframe/simulator/physics/observation.js';
 import { nearestStartEdge } from '@trainframe/simulator/sim/nearest-edge.js';
 import { type WorldPosition, computeTrainTrails } from '@trainframe/simulator/track/coupling.js';
 import { composeEdgePath, pieceIdFromMarkerId } from '@trainframe/simulator/track/edge-path.js';
+import {
+  type ClosureResult,
+  selectAnchor,
+  solveClose,
+  solveFollow,
+} from '@trainframe/simulator/track/flex-solver.js';
+import { type FlexState, effectivePoses, jointKey } from '@trainframe/simulator/track/flex.js';
 import { SNAP_DISTANCE, compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
+import { type JointId, buildJoints, findLoops } from '@trainframe/simulator/track/loops.js';
 import { detectSameLayerOverlaps, pierSuppressed } from '@trainframe/simulator/track/overlap.js';
 import {
   CRANE_GANTRY_X_MM,
@@ -15,6 +23,7 @@ import {
   CRANE_STACK_SLOTS,
   CRANE_TROLLEY_REST_Y_MM,
   type CarriageColorId,
+  type CentreLinePath,
   type DevicePieceType,
   LIFT_BRIDGE_FORESHORTEN,
   LIFT_BRIDGE_PIVOT,
@@ -35,6 +44,7 @@ import {
   TRAIN_LENGTH_MM,
   TURNTABLE_POSITIONS,
   TURNTABLE_POSITION_ANGLE_DEG,
+  type TrackEndpoint,
   type TrackPiece,
   type TrackPieceType,
   VISION_LED,
@@ -42,7 +52,9 @@ import {
   carriageCratePath,
   craneCratePath,
   craneTrolley,
+  getCentreLinePathAt,
   getEndpoints,
+  getEndpointsAt,
   getPieceShape,
   isDevicePiece,
   isWireDevice,
@@ -56,14 +68,16 @@ import {
   turntableDeck,
 } from '@trainframe/simulator/track/pieces.js';
 import {
+  CONNECT_CAPTURE_MM,
   computeMovePlacement,
   computePlacement,
   nearestConnectablePoint,
 } from '@trainframe/simulator/track/placement.js';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useBroker } from '../broker/broker-context.js';
 import type { ToyHardware } from '../sim/toy-hardware.js';
 import { useToyHardware } from '../sim/use-toy-hardware.js';
+import { ClosureWave } from './ClosureWave.js';
 import { ConnectionStatus } from './ConnectionStatus.js';
 import { ScanBox } from './ScanBox.js';
 import { Settings } from './Settings.js';
@@ -71,6 +85,154 @@ import { Feature, Groove, PieceBody, WOOD_FILL, WoodDefs } from './piece-art.js'
 
 // Canvas scale: 1 mm = SCALE px. Matches the old TrackBuilder so coordinates
 // translate one-for-one across the refactor.
+// ---------------------------------------------------------------------------
+// EffectivePiece — rest-pose TrackPiece widened to continuous rotation
+// ---------------------------------------------------------------------------
+
+/**
+ * A track piece whose position and rotation have been resolved through the
+ * flex model. Unlike `TrackPiece`, `rotationDeg` is a continuous `number`
+ * (not the quantised `RotationDeg` union) because flex can bend a joint by a
+ * fractional degree. All other fields are structurally identical to `TrackPiece`.
+ *
+ * Used only within ToyTable's render and compile paths; the rest of the system
+ * continues to work with rest-pose `TrackPiece` values.
+ */
+export type EffectivePiece = Omit<TrackPiece, 'rotationDeg'> & { readonly rotationDeg: number };
+
+/**
+ * Lift `EffectivePiece[]` to `TrackPiece[]` at the boundary where an external
+ * function requires the quantised union type.
+ *
+ * Sound because `EffectivePiece` differs from `TrackPiece` only in the
+ * declared type of `rotationDeg` (`number` vs `RotationDeg`). With empty flex
+ * the values ARE quantised `RotationDeg` members; with non-zero flex they are
+ * small deviations (≤ ±FLEX_BUDGET_DEG = 2°) that all geometry functions —
+ * `getEndpoints`, `collectEndpoints`, `compileLayout`, `compileNetwork` — pass
+ * straight through to trigonometric functions, which accept any `number`.
+ * No coercion or rounding occurs; the only unsound part is the TypeScript
+ * annotation.
+ */
+function asTrackPieces(eps: ReadonlyArray<EffectivePiece>): ReadonlyArray<TrackPiece> {
+  return eps as ReadonlyArray<TrackPiece>;
+}
+
+/**
+ * Single-piece variant of `asTrackPieces`. Same soundness argument.
+ * Extracts the adapter to one place so no call site uses a raw `as`.
+ */
+function asTrackPiece(ep: EffectivePiece): TrackPiece {
+  return ep as unknown as TrackPiece;
+}
+
+/**
+ * Compute a connected-component partition of the given pieces using the
+ * joint graph. Returns an array of piece-id sets, one per component.
+ */
+function connectedComponents(
+  pieces: ReadonlyArray<TrackPiece>,
+): ReadonlyArray<ReadonlySet<string>> {
+  const joints = buildJoints(pieces);
+  /* Union-find map: id → root id. */
+  const parent = new Map<string, string>();
+  for (const p of pieces) parent.set(p.id, p.id);
+
+  function find(id: string): string {
+    const p = parent.get(id) ?? id;
+    if (p === id) return id;
+    const root = find(p);
+    parent.set(id, root);
+    return root;
+  }
+
+  function union(a: string, b: string): void {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  }
+
+  for (const j of joints) {
+    union(j.a.pieceId, j.b.pieceId);
+  }
+
+  /* Group by root. */
+  const groups = new Map<string, Set<string>>();
+  for (const p of pieces) {
+    const root = find(p.id);
+    const g = groups.get(root);
+    if (g === undefined) groups.set(root, new Set([p.id]));
+    else g.add(p.id);
+  }
+  return [...groups.values()];
+}
+
+/**
+ * Apply `flex` to `pieces`, returning effective-pose pieces whose `position`
+ * and `rotationDeg` reflect any joint deviations in `flex`. With an empty
+ * `FlexState` the result is structurally identical to the input (every piece
+ * returns its rest pose), so rendering through `applyFlex` is a no-op today.
+ *
+ * One anchor is chosen per connected component (the first piece in iteration
+ * order). The anchor stays at its rest pose; all other pieces in the component
+ * are walked outward from it via `effectivePoses`.
+ *
+ * Pure: no I/O, no mutation of inputs.
+ */
+export function applyFlex(
+  pieces: ReadonlyArray<TrackPiece>,
+  flex: FlexState,
+): ReadonlyArray<EffectivePiece> {
+  if (pieces.length === 0) return [];
+
+  /* Fast path: empty flex means every piece returns its rest pose unchanged. */
+  if (flex.size === 0) {
+    return pieces.map((p) => ({
+      ...p,
+      rotationDeg: p.rotationDeg,
+    }));
+  }
+
+  /* Check which joints the flex map actually references. */
+  const joints = buildJoints(pieces);
+  const activeJoints = joints.filter((j) => flex.has(jointKey(j)));
+  if (activeJoints.length === 0) {
+    return pieces.map((p) => ({
+      ...p,
+      rotationDeg: p.rotationDeg,
+    }));
+  }
+
+  /* Per-component forward kinematics. */
+  const components = connectedComponents(pieces);
+  const pieceById = new Map<string, TrackPiece>();
+  for (const p of pieces) pieceById.set(p.id, p);
+
+  /* Build a pose map covering all components. */
+  const poses = new Map<string, { x: number; y: number; rotationDeg: number }>();
+  for (const component of components) {
+    /* Pick the first piece as anchor (stable: Map iteration order = insertion order). */
+    const anchorId = [...component][0];
+    if (anchorId === undefined) continue;
+    const componentPieces = [...component]
+      .map((id) => pieceById.get(id))
+      .filter((p): p is TrackPiece => p !== undefined);
+    const effectiveMap = effectivePoses(componentPieces, flex, anchorId);
+    for (const [id, pose] of effectiveMap) {
+      poses.set(id, pose);
+    }
+  }
+
+  return pieces.map((p) => {
+    const pose = poses.get(p.id);
+    if (pose === undefined) return { ...p, rotationDeg: p.rotationDeg };
+    return {
+      ...p,
+      position: { x: pose.x, y: pose.y },
+      rotationDeg: pose.rotationDeg,
+    };
+  });
+}
+
 const SCALE = 2;
 const CANVAS_W_MM = 900;
 const CANVAS_H_MM = 600;
@@ -81,6 +243,15 @@ const MAX_ZOOM = 10;
 
 /** MIME type for pieces being dragged from the toybox onto the canvas. */
 const TOYBOX_DRAG_MIME = 'application/x-trainframe-toybox-type';
+
+/*
+ * Pointer-drag velocity threshold for the flex/detach gate.
+ * Drags slower than this (px/ms) bend the chain live via solveFollow.
+ * Drags faster than this yank the piece free — it detaches from its neighbours.
+ * 1.5 px/ms ≈ 90 px/frame at 60 fps, which maps to ~45 mm/s at SCALE=2.
+ * Feels like a deliberate pull vs. a quick flick.
+ */
+const DRAG_FLEX_MAX_SPEED = 1.5; /* px/ms */
 
 /**
  * The garage device id used by the toy-table when announcing tag bindings.
@@ -853,6 +1024,9 @@ interface TrainframeSimHandle {
    * escape hatch for the live-driving playbook + screenshot harnesses to read
    * the world's body population (loco/carriage/spare poses) from the page. */
   readonly bodies: () => readonly BodyPose[] | null;
+  /** Set the flex state programmatically (for tests and orchestrator scripts).
+   * Bends the rendered and compiled layout without touching rest-pose pieces. */
+  readonly setFlex: (flex: FlexState) => void;
 }
 
 declare global {
@@ -964,6 +1138,18 @@ interface ToyTableProps {
 export function ToyTable({ initialUrl }: ToyTableProps) {
   const { client } = useBroker();
   const [pieces, setPieces] = useState<ReadonlyArray<TrackPiece>>([]);
+  /* Closure wave: when a drop closes a new loop, the rail centreline points for
+     that loop are stored here so <ClosureWave> can animate the glow pulse. Null
+     when no wave is active. Cleared by the wave itself via onDone. */
+  const [closureWavePoints, setClosureWavePoints] = useState<ReadonlyArray<{
+    readonly x: number;
+    readonly y: number;
+  }> | null>(null);
+  /* Flex state for the track: a map from joint key to JointFlex deviation.
+   * Empty by default (rest pose). Set programmatically (no drag interaction
+   * yet — Task 7). When non-empty, applyFlex bends the rendered and compiled
+   * layout without touching the rest-pose pieces. */
+  const [flex, setFlex] = useState<FlexState>(new Map());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /** Which piece type the operator has "armed" from the toybox, if any. */
   const [armedType, setArmedType] = useState<TrackPieceType | null>(null);
@@ -1031,6 +1217,15 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
    * the tick loop re-renders when a part moves while no train is. */
   const experimentSigRef = useRef('');
 
+  /* Effective pieces: rest-pose pieces bent through the current flex state.
+   * Memoised on pieces + flex so the reference is stable across re-renders that
+   * only bump tickCount — if pieces/flex haven't changed, the array reference is
+   * identical and useToyHardware's reconciliation useEffect does not re-fire. */
+  const effectivePieces = useMemo(() => applyFlex(pieces, flex), [pieces, flex]);
+
+  /* Stable TrackPiece view of effectivePieces — same memo guard. */
+  const hardwarePieces = useMemo(() => asTrackPieces(effectivePieces), [effectivePieces]);
+
   // Stand up an in-browser physics simulation wired to the broker. It hosts
   // the virtual trains and gates the operator scans onto the bus, and reacts
   // to clearance commands the real server publishes. Layout is *private* to
@@ -1038,7 +1233,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   // are; the server still infers the public layout from `tag_assignment`
   // events ToyTable emits on scan.
   const { hardwareRef } = useToyHardware({
-    pieces,
+    pieces: hardwarePieces,
     liveIds,
     poweredOffIds,
     client,
@@ -1075,6 +1270,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       resume: () => {},
       step: () => {},
       bodies: () => hardwareRef.current?.bodies() ?? null,
+      setFlex,
     };
     window.trainframeSim = handle;
     return () => {
@@ -1277,6 +1473,33 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       );
     });
     setSelectedId(pieceId);
+  }, []);
+
+  /* Free a piece from its chain on a fast-drag yank. The piece STAYS in the
+     rest-pose array (so it keeps rendering and Table can follow the cursor with
+     its drag-preview, then reposition it on drop) — it must never vanish. We
+     only drop the joints that belong to the yanked piece so the remainder of
+     the chain keeps its current flex and holds its bent shape. Table tracks the
+     "detached this drag" id and routes subsequent moves down the free path. */
+  const detachPiece = useCallback((pieceId: string) => {
+    setFlex((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Map(prev);
+      for (const [key, entry] of next) {
+        if (entry.joint.a.pieceId === pieceId || entry.joint.b.pieceId === pieceId) {
+          next.delete(key);
+        }
+      }
+      return next.size === prev.size ? prev : next;
+    });
+  }, []);
+
+  /* When a drop commits a loop closure, find the cycle containing the dragged
+     piece in the committed effective geometry and mount the ClosureWave for one
+     run. Uses the REST-pose pieces (applyFlex re-derives closed positions). */
+  const handleClosureCommit = useCallback((closureFlex: FlexState, draggedPieceId: string) => {
+    const pts = newLoopCenterline(piecesRef.current, closureFlex, draggedPieceId);
+    if (pts !== null) setClosureWavePoints(pts);
   }, []);
 
   const rotateSelected = useCallback(() => {
@@ -1608,7 +1831,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
           corner — drag a placed piece onto it to put it on the bus. */}
         <div className="tf-toytable__stage">
           <Table
-            pieces={pieces}
+            pieces={effectivePieces}
             liveIds={liveIds}
             poweredOffIds={poweredOffIds}
             selectedId={selectedId}
@@ -1622,6 +1845,18 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
             onMovePiece={movePiece}
             onScanPiece={requestScan}
             onPieceAction={handlePiecePointerAction}
+            onDragFlex={setFlex}
+            onClosureCommit={handleClosureCommit}
+            waveOverlay={
+              closureWavePoints !== null && closureWavePoints.length >= 2 ? (
+                <ClosureWave
+                  pathPoints={closureWavePoints}
+                  durationMs={1000}
+                  onDone={() => setClosureWavePoints(null)}
+                />
+              ) : null
+            }
+            onDragDetach={detachPiece}
           />
           <div className="tf-toytable__scanzone">
             <ScanBox
@@ -2147,7 +2382,7 @@ function ActionBar({
 // ---------------------------------------------------------------------------
 
 interface TableProps {
-  readonly pieces: ReadonlyArray<TrackPiece>;
+  readonly pieces: ReadonlyArray<EffectivePiece>;
   readonly liveIds: ReadonlySet<string>;
   /** Subset of live train ids powered OFF in place (rendered dark / inert). */
   readonly poweredOffIds: ReadonlySet<string>;
@@ -2184,6 +2419,226 @@ interface TableProps {
   /** Begin scanning a piece (pointer-dragged onto the scan box). */
   readonly onScanPiece: (pieceId: string) => void;
   readonly onPieceAction: (pieceId: string, action: 'select' | PowerToggleAction) => void;
+  /* Slow drag of a chained piece: apply the solved flex state so the chain
+     bends live. The parent (ToyTable) owns flex state and calls setFlex. */
+  readonly onDragFlex: (flex: FlexState) => void;
+  /* Called ONLY when a successful loop closure is committed on drop, with the
+     flex state that closes the loop and the id of the dragged piece that just
+     joined the cycle. Gives ToyTable a chance to mount the ClosureWave overlay
+     without having to distinguish closure commits from ordinary drag-flex updates. */
+  readonly onClosureCommit: (closureFlex: FlexState, draggedPieceId: string) => void;
+  /* Pre-composed overlay element to render inside the canvas SVG. ToyTable
+     computes this from closureWavePoints so Table stays free of the ternary. */
+  readonly waveOverlay: ReactNode;
+  /* Fast drag ("yank"): detach the piece from its chain by removing it from
+     the rest-pose pieces array. It then follows the cursor as a free placement. */
+  readonly onDragDetach: (pieceId: string) => void;
+}
+
+/* Endpoint reference carrying the owning piece ID (for coincidence checks). */
+interface TaggedEndpoint {
+  readonly x: number;
+  readonly y: number;
+  readonly outgoingAngleDeg: number;
+  readonly layer: number;
+  readonly pieceId: string;
+}
+
+/*
+ * Open endpoints on pieces other than `excludePieceId`. "Open" = not coincident
+ * (within SNAP_DISTANCE) with any endpoint from a DIFFERENT piece in the list.
+ * Coincident endpoints are already joined; only open ones are closure targets.
+ */
+function openEndpointsOf(
+  trackPieces: ReadonlyArray<TrackPiece>,
+  excludePieceId: string,
+): ReadonlyArray<TaggedEndpoint> {
+  const others = trackPieces.filter((p) => p.id !== excludePieceId);
+  const all: TaggedEndpoint[] = others.flatMap((p) =>
+    getEndpoints(p).map((ep) => ({ ...ep, pieceId: p.id })),
+  );
+  return all.filter(
+    (candidate) =>
+      !all.some(
+        (other) =>
+          other !== candidate &&
+          other.pieceId !== candidate.pieceId &&
+          Math.hypot(other.x - candidate.x, other.y - candidate.y) <= SNAP_DISTANCE,
+      ),
+  );
+}
+
+/*
+ * Free endpoint of the dragged piece = the endpoint farthest from the anchor.
+ * Returns `{ ep, idx }` or null when the piece has no endpoints.
+ */
+function freeEndpointOf(
+  piece: TrackPiece,
+  pose: { x: number; y: number; rotationDeg: number },
+  anchorPos: { x: number; y: number },
+): { ep: TrackEndpoint; idx: number } | null {
+  const eps = getEndpointsAt(piece, pose);
+  let best: TrackEndpoint | undefined;
+  let bestIdx = 0;
+  let bestDist = -1;
+  for (let i = 0; i < eps.length; i++) {
+    const ep = eps[i];
+    if (ep === undefined) continue;
+    const d = Math.hypot(ep.x - anchorPos.x, ep.y - anchorPos.y);
+    if (d > bestDist) {
+      bestDist = d;
+      best = ep;
+      bestIdx = i;
+    }
+  }
+  return best !== undefined ? { ep: best, idx: bestIdx } : null;
+}
+
+/**
+ * Try to close a loop: find the dragged piece's free endpoint in its current
+ * effective pose, check if any open endpoint on another piece is within
+ * CONNECT_CAPTURE_MM, and if so run solveClose. Returns the feasible result or
+ * null. Pure — no React state, no refs.
+ */
+function detectLoopClosure(
+  trackPieces: ReadonlyArray<TrackPiece>,
+  pieceId: string,
+  flex: FlexState,
+  anchorId: string,
+): ClosureResult | null {
+  const poses = effectivePoses(trackPieces, flex, anchorId);
+  const draggedPiece = trackPieces.find((p) => p.id === pieceId);
+  const anchorPose = poses.get(anchorId);
+  const draggedPose = poses.get(pieceId);
+  if (draggedPiece === undefined || anchorPose === undefined || draggedPose === undefined) {
+    return null;
+  }
+
+  const free = freeEndpointOf(draggedPiece, draggedPose, anchorPose);
+  if (free === null) return null;
+
+  const open = openEndpointsOf(trackPieces, pieceId);
+  let closureTarget: TaggedEndpoint | undefined;
+  let closureTargetDist = CONNECT_CAPTURE_MM;
+  for (const candidate of open) {
+    const d = Math.hypot(candidate.x - free.ep.x, candidate.y - free.ep.y);
+    if (d < closureTargetDist) {
+      closureTargetDist = d;
+      closureTarget = candidate;
+    }
+  }
+  if (closureTarget === undefined) return null;
+
+  const result = solveClose(trackPieces, pieceId, free.idx, closureTarget);
+  return result.feasible ? result : null;
+}
+
+/* Samples per half-path when building a loop's rail centreline for the wave. */
+const WAVE_SAMPLES_PER_HALF = 8;
+
+/* Returns the {entry, exit} endpoint indices for `pieceId` at position `i` in the loop. */
+function entryExitEps(
+  pieceId: string,
+  i: number,
+  joints: ReadonlyArray<JointId>,
+  n: number,
+): { entry: number; exit: number } | undefined {
+  const exitJoint = joints[i];
+  const entryJoint = joints[(i - 1 + n) % n];
+  if (exitJoint === undefined || entryJoint === undefined) return undefined;
+  const exit = exitJoint.a.pieceId === pieceId ? exitJoint.a.endpointIdx : exitJoint.b.endpointIdx;
+  const entry =
+    entryJoint.b.pieceId === pieceId ? entryJoint.b.endpointIdx : entryJoint.a.endpointIdx;
+  return { entry, exit };
+}
+
+/* Sample a CentreLinePath from the far endpoint inward (skipping outermost to deduplicate joints). */
+function sampleEntryHalf(
+  path: CentreLinePath,
+  halfCount: number,
+  out: Array<{ x: number; y: number }>,
+): void {
+  for (let s = halfCount - 1; s >= 0; s--) {
+    const p = path.at((s / halfCount) * path.length);
+    out.push({ x: p.x, y: p.y });
+  }
+}
+
+/* Sample a CentreLinePath outward from the centre (skipping centre to deduplicate within piece). */
+function sampleExitHalf(
+  path: CentreLinePath,
+  halfCount: number,
+  out: Array<{ x: number; y: number }>,
+): void {
+  for (let s = 1; s <= halfCount; s++) {
+    const p = path.at((s / halfCount) * path.length);
+    out.push({ x: p.x, y: p.y });
+  }
+}
+
+/* Append the contiguous centreline points for one piece in the loop traversal. */
+function sampleLoopPiece(
+  piece: TrackPiece,
+  pose: { x: number; y: number; rotationDeg: number },
+  entryEp: number,
+  exitEp: number,
+  out: Array<{ x: number; y: number }>,
+): void {
+  const entryPath = getCentreLinePathAt(piece, pose, entryEp);
+  if (entryPath !== undefined) sampleEntryHalf(entryPath, WAVE_SAMPLES_PER_HALF, out);
+  const exitPath = getCentreLinePathAt(piece, pose, exitEp);
+  if (exitPath !== undefined) sampleExitHalf(exitPath, WAVE_SAMPLES_PER_HALF, out);
+}
+
+/**
+ * Compute the ordered rail-centreline world points for a loop that appears
+ * after applying `closureFlex` to `restPieces` but was not present before.
+ *
+ * Returns the points for the FIRST newly-closed loop found (in practice
+ * exactly one loop closes per drop), or null when no new loop is detected.
+ *
+ * The traversal uses the loop's joints to determine which endpoint of each
+ * piece is the entry and which is the exit, so consecutive half-paths always
+ * share their meeting endpoint and the polyline is continuous (no jumps at
+ * joints). Duplicate vertices at joints are dropped (i < n on the entry half).
+ *
+ * Pure: no I/O, no side effects.
+ */
+export function newLoopCenterline(
+  restPieces: ReadonlyArray<TrackPiece>,
+  closureFlex: FlexState,
+  draggedPieceId: string,
+): ReadonlyArray<{ readonly x: number; readonly y: number }> | null {
+  const afterEffective = applyFlex(restPieces, closureFlex);
+  const afterPieces = asTrackPieces(afterEffective);
+  /* Find the cycle that contains the dragged piece in the committed effective
+     geometry. We do NOT diff against rest-pose topology — clustering already
+     decided connectivity there, so the before/after sets are identical for any
+     closure whose gap is within SNAP_DISTANCE_MM. Fire on commit, not on diff. */
+  const newLoop = findLoops(afterPieces).find((loop) => loop.pieceIds.includes(draggedPieceId));
+  if (newLoop === undefined) return null;
+
+  const poseMap = new Map<string, { x: number; y: number; rotationDeg: number }>();
+  for (const ep of afterEffective) {
+    poseMap.set(ep.id, { x: ep.position.x, y: ep.position.y, rotationDeg: ep.rotationDeg });
+  }
+
+  const { pieceIds, joints } = newLoop;
+  const n = pieceIds.length;
+  const points: Array<{ x: number; y: number }> = [];
+
+  for (let i = 0; i < n; i++) {
+    const pieceId = pieceIds[i];
+    if (pieceId === undefined) continue;
+    const piece = afterPieces.find((p) => p.id === pieceId);
+    const pose = poseMap.get(pieceId);
+    if (piece === undefined || pose === undefined) continue;
+    const eps = entryExitEps(pieceId, i, joints, n);
+    if (eps === undefined) continue;
+    sampleLoopPiece(piece, pose, eps.entry, eps.exit, points);
+  }
+
+  return points.length >= 2 ? points : null;
 }
 
 function Table({
@@ -2201,6 +2656,10 @@ function Table({
   onMovePiece,
   onScanPiece,
   onPieceAction,
+  onDragFlex,
+  onClosureCommit,
+  waveOverlay,
+  onDragDetach,
 }: TableProps) {
   const svgRef = useRef<SVGSVGElement>(null);
 
@@ -2213,6 +2672,17 @@ function Table({
     y: number;
     rotationDeg: RotationDeg;
   } | null>(null);
+
+  /* The piece yanked free during the current drag (a fast pull off its chain).
+     Once set, every later move this drag follows the cursor as a free piece —
+     the piece stays in `pieces` (it never vanishes) and re-snaps on drop. Reset
+     at the start and end of each drag. */
+  const detachedDragRef = useRef<string | null>(null);
+
+  /* The previous frame's solved flex, fed back into solveFollow as a warm-start
+     seed so the damped-least-squares iterate doesn't restart cold every frame
+     (which jittered the chain). Reset between drags. */
+  const lastDragFlexRef = useRef<FlexState | null>(null);
 
   // Build reverse map: carriageId → trainPieceId (for data-coupled-to attr)
   const carriageCoupledTo = new Map<string, string>();
@@ -2251,7 +2721,7 @@ function Table({
       for (const p of pieces) {
         xs.push(p.position.x);
         ys.push(p.position.y);
-        for (const e of getEndpoints(p)) {
+        for (const e of getEndpoints(asTrackPiece(p))) {
           xs.push(e.x);
           ys.push(e.y);
         }
@@ -2284,6 +2754,16 @@ function Table({
   /** The open endpoint a dragged toybox piece will snap onto, highlighted
    * during dragover. */
   const [snapHighlight, setSnapHighlight] = useState<SnapTarget | null>(null);
+
+  /* Closure flash: the piece ID whose free endpoint is currently within reach
+     of an open endpoint AND solveClose returned feasible. Null when no closure
+     is imminent. Stored as state so PieceRenderer re-renders the flash glyph. */
+  const [closureAvailableId, setClosureAvailableId] = useState<string | null>(null);
+  /* The solved flex that closes the loop — committed to onDragFlex on drop
+     when closureAvailableId is set. Stored in a ref so handlePieceDragEnd can
+     read the latest value without a stale closure, and without needing a
+     re-render cycle between the last move and the drop. */
+  const closureFlexRef = useRef<ClosureResult | null>(null);
 
   // Pan state stored in refs — no render needed while panning in progress.
   const isPanningRef = useRef(false);
@@ -2390,7 +2870,14 @@ function Table({
     // Armed: snap + orient the new piece to continue from a nearby open
     // endpoint so curved loops can be built by clicking, not pixel-nudging.
     // Gated to the active layer so an upper-deck piece ignores ground joints.
-    const placement = computePlacement(xMm, yMm, armedType, pieces, false, activeLayer);
+    const placement = computePlacement(
+      xMm,
+      yMm,
+      armedType,
+      asTrackPieces(pieces),
+      false,
+      activeLayer,
+    );
     onCanvasClick(placement.x, placement.y, armedType, placement.rotationDeg);
   }
 
@@ -2421,7 +2908,7 @@ function Table({
     // readable mid-drag, so highlight the nearest open endpoint (the join a
     // track piece would orient onto); harmless for device drags.
     const { x: xMm, y: yMm } = clientToMm(getRect(), e.clientX, e.clientY, viewport);
-    setSnapHighlight(nearestConnectablePoint(xMm, yMm, pieces));
+    setSnapHighlight(nearestConnectablePoint(xMm, yMm, asTrackPieces(pieces)));
   }
 
   function handleDragLeave() {
@@ -2440,7 +2927,14 @@ function Table({
     // piece in connects it instead of dropping it loose.
     const pieceType = e.dataTransfer.getData(TOYBOX_DRAG_MIME) as TrackPieceType | '';
     if (pieceType === '') return;
-    const placement = computePlacement(xMm, yMm, pieceType, pieces, false, activeLayer);
+    const placement = computePlacement(
+      xMm,
+      yMm,
+      pieceType,
+      asTrackPieces(pieces),
+      false,
+      activeLayer,
+    );
     onCanvasClick(placement.x, placement.y, pieceType, placement.rotationDeg);
   }
 
@@ -2448,18 +2942,94 @@ function Table({
   // Pointer-drag of a placed piece (move across canvas, or scan onto the bus)
   // ---------------------------------------------------------------------------
 
-  function handlePieceDragMove(pieceId: string, clientX: number, clientY: number) {
+  /* Called from PieceRenderer.handlePointerDown at the very start of each new
+     piece drag — before any move events arrive. Clears stale per-drag state that
+     a missed pointer-up from the previous drag might have left behind. */
+  function handlePieceDragStart(_pieceId: string) {
+    lastDragFlexRef.current = null;
+    detachedDragRef.current = null;
+  }
+
+  function handlePieceDragMove(
+    pieceId: string,
+    clientX: number,
+    clientY: number,
+    speedPxPerMs: number,
+  ) {
     const { x, y } = clientToMm(getRect(), clientX, clientY, viewport);
     const moving = pieces.find((p) => p.id === pieceId);
     if (moving === undefined) {
+      /* Piece is gone from the array — follow cursor freely (defensive). */
+      closureFlexRef.current = null;
+      setClosureAvailableId(null);
       setPieceDragPreview({ id: pieceId, x, y, rotationDeg: 0 });
       return;
     }
-    // Preview the *snapped* pose: bring the piece's end near a neighbour's open
-    // end and it visibly clicks into the joint, oriented to continue. Release
-    // commits exactly this (movePiece runs the same placement on the same mm).
-    const others = pieces.filter((p) => p.id !== pieceId);
-    const placement = computeMovePlacement(moving, x, y, others);
+
+    /* Already yanked free earlier this drag: the piece stays in `pieces` (so it
+       never vanishes) but follows the cursor as a free placement and re-snaps on
+       drop — never re-flex it. */
+    if (detachedDragRef.current === pieceId) {
+      followCursorFree(pieceId, moving, x, y);
+      return;
+    }
+
+    /* Check whether the piece is part of a flexable, anchored chain. solveFollow
+       returns empty for a free standalone piece AND for a non-anchored closed
+       loop (no junction, no open end) — in both cases we fall through to plain
+       move behaviour. The velocity gate (fast-yank detach) likewise only applies
+       to a genuinely-flexing chain. Warm-start from the prior frame's flex. */
+    const trackPieces = asTrackPieces(pieces);
+    const prior = lastDragFlexRef.current ?? undefined;
+    const flex = solveFollow(trackPieces, pieceId, { x, y }, prior);
+    if (flex.size > 0) {
+      if (speedPxPerMs >= DRAG_FLEX_MAX_SPEED) {
+        /* Fast drag: yank the piece free from its chain. onDragDetach drops the
+           yanked piece's joints (the remainder holds its bent shape) but keeps
+           the piece in `pieces`; we mark it detached so subsequent moves follow
+           the cursor as a free placement and it re-snaps on drop. */
+        lastDragFlexRef.current = null;
+        detachedDragRef.current = pieceId;
+        onDragDetach(pieceId);
+        followCursorFree(pieceId, moving, x, y);
+        return;
+      }
+
+      /* The piece is in a chain — bend it live (a slow pull past the budget just
+         holds at max flex, the solver clamps each δ to ±budget). Keep the visual
+         at its current rest position (the chain bends, the piece does not jump). */
+      lastDragFlexRef.current = flex;
+      onDragFlex(flex);
+
+      /* Closure detection: check whether the dragged piece's free endpoint is
+         near an open endpoint on another piece and a loop closure is solvable. */
+      const anchorId = selectAnchor(trackPieces, pieceId);
+      const closureResult = detectLoopClosure(trackPieces, pieceId, flex, anchorId);
+      if (closureResult !== null) {
+        closureFlexRef.current = closureResult;
+        setClosureAvailableId(pieceId);
+      } else {
+        closureFlexRef.current = null;
+        setClosureAvailableId(null);
+      }
+
+      return;
+    }
+
+    /* No flexable chain (free piece, or a non-anchored closed loop) — move it
+       plainly. The velocity gate does not apply: a free piece must never detach. */
+    lastDragFlexRef.current = null;
+    followCursorFree(pieceId, moving, x, y);
+  }
+
+  /* Preview a piece following the cursor as a free placement: snap-orient onto a
+     nearby open end when one is in reach, else track the cursor. Clears any stale
+     closure state. Shared by the free-piece path and the post-detach path. */
+  function followCursorFree(pieceId: string, moving: EffectivePiece, x: number, y: number) {
+    closureFlexRef.current = null;
+    setClosureAvailableId(null);
+    const others = asTrackPieces(pieces.filter((p) => p.id !== pieceId));
+    const placement = computeMovePlacement(asTrackPiece(moving), x, y, others);
     setPieceDragPreview({
       id: pieceId,
       x: placement.x,
@@ -2470,6 +3040,24 @@ function Table({
 
   function handlePieceDragEnd(pieceId: string, clientX: number, clientY: number) {
     setPieceDragPreview(null);
+
+    /* End of drag: clear the warm-start seed and the detached marker so the next
+       drag starts fresh. A piece yanked free this drag is repositioned (and
+       re-snapped) by the onMovePiece path below, exactly like a free piece. */
+    lastDragFlexRef.current = null;
+    detachedDragRef.current = null;
+
+    /* Closure commit: if a feasible closure was found on the last move event,
+       commit it now so the loop closes and persists. Clear closure state. */
+    const closure = closureFlexRef.current;
+    closureFlexRef.current = null;
+    setClosureAvailableId(null);
+    if (closure?.feasible === true) {
+      onDragFlex(closure.flex);
+      onClosureCommit(closure.flex, pieceId);
+      return;
+    }
+
     // Released over the scan box → scan it (same confirm flow as an HTML5 drop).
     const target =
       typeof document.elementFromPoint === 'function'
@@ -2494,7 +3082,7 @@ function Table({
   // of the ground loop under a bridge with opaque fills. A live train reads the
   // higher of its current edge's two layers so it draws ON TOP of the ground
   // loop it crosses mid-bridge, not under it.
-  const piecesById = new Map<string, TrackPiece>();
+  const piecesById = new Map<string, EffectivePiece>();
   for (const p of pieces) piecesById.set(p.id, p);
   /* TODO(B): a live train should draw on the higher of its current edge's two
      layers while crossing a bridge, so it sits ON TOP of the ground loop it
@@ -2505,11 +3093,20 @@ function Table({
      `effectiveLayer` seam stays wired (returning a null-edge source ⇒ static
      `layerOf`) so it lights up the moment the mapping lands. */
   const layerSource = hardware !== null ? bodyTrainLayerSource() : null;
-  const layerOfPiece = (p: TrackPiece): number =>
-    layerSource !== null
-      ? effectiveLayer(p, layerSource, carriageCoupledTo, piecesById)
-      : layerOf(p);
-  const byLayer = new Map<number, TrackPiece[]>();
+  /* effectiveLayer / layerOf accept TrackPiece; use asTrackPieces at the
+     boundary. With empty flex effective rotation equals rest rotation,
+     so layer values are unchanged. */
+  const trackPiecesById = new Map<string, TrackPiece>(
+    asTrackPieces([...piecesById.values()]).map((tp) => [tp.id, tp]),
+  );
+  const layerOfPiece = (p: EffectivePiece): number => {
+    const [tp] = asTrackPieces([p]);
+    if (tp === undefined) return 0;
+    return layerSource !== null
+      ? effectiveLayer(tp, layerSource, carriageCoupledTo, trackPiecesById)
+      : layerOf(tp);
+  };
+  const byLayer = new Map<number, EffectivePiece[]>();
   for (const p of pieces) {
     const layer = layerOfPiece(p);
     const bucket = byLayer.get(layer);
@@ -2522,7 +3119,7 @@ function Table({
   // footprint on the SAME layer with no shared endpoint is an authoring mistake
   // (a bridge crossing is the legitimate different-layer case, never flagged).
   // Offending pieces get a red error outline; the status bar surfaces a count.
-  const overlapIds = detectSameLayerOverlaps(pieces);
+  const overlapIds = detectSameLayerOverlaps(asTrackPieces(pieces));
 
   return (
     <>
@@ -2577,11 +3174,13 @@ function Table({
             pier is omitted where track runs directly beneath (a bridge crossing)
             so a column never lands on the rail it spans over. Drawn UNFILTERED,
             before the deck, so the deck body caps each column. */
+          const trackPiecesArr = asTrackPieces(pieces);
           const supportColumns =
             layer > 0
               ? trackPieces.flatMap((p) => {
-                  if (pierSuppressed(p, pieces)) return [];
-                  const column = supportColumn(p, layerStyle(layer).dy);
+                  const [tp] = asTrackPieces([p]);
+                  if (tp === undefined || pierSuppressed(tp, trackPiecesArr)) return [];
+                  const column = supportColumn(tp, layerStyle(layer).dy);
                   return column !== null ? [{ id: p.id, column }] : [];
                 })
               : [];
@@ -2590,7 +3189,7 @@ function Table({
             the one disambiguation a stacked 2D view needs. Quiet, and only while
             authoring; normal viewing shows every deck at full strength. */
           const dimmed = armedType !== null && layer !== activeLayer;
-          const renderPiece = (p: TrackPiece) => (
+          const renderPiece = (p: EffectivePiece) => (
             <PieceRenderer
               key={p.id}
               piece={p}
@@ -2603,7 +3202,9 @@ function Table({
               renderPosition={renderPositions.get(p.id)}
               experimentVisual={experimentVisuals.get(p.id)}
               cranePose={
-                p.type === 'railyard' && liveIds.has(p.id) ? yardCranePose(p, hardware) : null
+                p.type === 'railyard' && liveIds.has(p.id)
+                  ? yardCranePose(asTrackPiece(p), hardware)
+                  : null
               }
               onAction={(action) => onPieceAction(p.id, action)}
               dragOverride={
@@ -2615,8 +3216,10 @@ function Table({
                     }
                   : undefined
               }
+              onDragStart={handlePieceDragStart}
               onDragMove={handlePieceDragMove}
               onDragEnd={handlePieceDragEnd}
+              closureAvailable={closureAvailableId === p.id}
             />
           );
           return (
@@ -2659,6 +3262,9 @@ function Table({
             data-testid="snap-highlight"
           />
         )}
+        {/* Closure wave: one-shot glow pulse along the newly-closed loop's
+            centreline. Mounted by ToyTable on closure commit; cleared on done. */}
+        {waveOverlay}
       </svg>
     </>
   );
@@ -2676,7 +3282,7 @@ const MARKER_DOT_RADIUS = 3;
  * the selection blue. Drawn between the track band and the devices in its layer
  * group, so a train passing over it is never pierced.
  */
-function MarkerDot({ piece, selected }: { piece: TrackPiece; selected: boolean }) {
+function MarkerDot({ piece, selected }: { piece: EffectivePiece; selected: boolean }) {
   return (
     <circle
       cx={piece.position.x}
@@ -2722,7 +3328,7 @@ function SupportLeg({ column }: { column: SupportColumn }) {
 }
 
 interface PieceRendererProps {
-  readonly piece: TrackPiece;
+  readonly piece: EffectivePiece;
   readonly selected: boolean;
   /** On the bus / scanned (spawned in the sim). For a train this stays true
    * while powered off — power is not lifecycle. */
@@ -2761,11 +3367,27 @@ interface PieceRendererProps {
    * can't use HTML5 DnD, so repositioning is done with pointer events.
    */
   readonly dragOverride: { x: number; y: number; rotationDeg: number } | undefined;
-  /** Pointer moved while dragging this piece (client coords). */
-  readonly onDragMove: (pieceId: string, clientX: number, clientY: number) => void;
+  /* Pointer moved while dragging this piece (client coords + pointer speed in
+     px/ms, computed from the event's own timeStamp — never Date.now). */
+  /** Pointer pressed on this piece — drag may follow. Fires before the first
+   * onDragMove so the parent can reset any per-drag state that might be stale
+   * from a previous drag whose pointer-up was missed. */
+  readonly onDragStart: (pieceId: string) => void;
+  /* Pointer moved while dragging this piece (client coords + pointer speed in
+     px/ms, computed from the event's own timeStamp — never Date.now). */
+  readonly onDragMove: (
+    pieceId: string,
+    clientX: number,
+    clientY: number,
+    speedPxPerMs: number,
+  ) => void;
   /** Drag released (client coords) — reposition the piece, or scan it if let
    * go over the scan box. */
   readonly onDragEnd: (pieceId: string, clientX: number, clientY: number) => void;
+  /* True while this piece is being slow-dragged and its free endpoint is close
+     enough to an open endpoint that a loop closure is feasible — renders the
+     flash affordance so the operator sees that releasing will snap the loop shut. */
+  readonly closureAvailable: boolean;
 }
 
 /** The pointer cursor for a piece body: crosshair while a type is armed
@@ -2808,17 +3430,19 @@ function PieceRenderer({
   cranePose,
   onAction,
   dragOverride,
+  onDragStart,
   onDragMove,
   onDragEnd,
+  closureAvailable,
 }: PieceRendererProps) {
-  const shape = getPieceShape(piece);
+  const shape = getPieceShape(asTrackPiece(piece));
   const isDevice = isDevicePiece(piece.type);
   // Track pieces are filled with the beech-wood gradient + their functional
   // tint; device pieces (train/gate/carriage) get their own solid colour. A
   // carriage's colour is its intrinsic livery (so a wagon stays trackable as it
   // is shunted between trains), defaulting to the standard blue.
   const tint = PIECE_TINT[piece.type];
-  const bodyFill = pieceBodyFill(piece);
+  const bodyFill = pieceBodyFill(asTrackPiece(piece));
   // Wire devices (train / gate) can be powered off by clicking when live.
   // Carriages are wire-invisible — clicking a live carriage just selects it.
   const isWire = isWireDevice(piece.type);
@@ -2831,7 +3455,18 @@ function PieceRenderer({
   // honour the HTML5 `draggable` attribute on SVG, so native DnD never starts.
   // We drag with pointer events instead (which also gives live feedback and is
   // automatable). A press that doesn't move past the threshold is a click.
-  const dragRef = useRef<{ clientX: number; clientY: number; moved: boolean } | null>(null);
+  const dragRef = useRef<{
+    clientX: number;
+    clientY: number;
+    moved: boolean;
+    /* Velocity tracking — initialised from the first pointermove, not from
+       pointerdown, so that tests can inject explicit timeStamps on move events
+       (React's synthetic pointerdown timestamp is not overrideable in jsdom). */
+    lastX: number;
+    lastY: number;
+    lastT: number;
+    hasFirstMove: boolean;
+  } | null>(null);
   // Set when a drag actually moved the piece, so the click that fires right
   // after pointer-up doesn't also select it.
   const suppressClickRef = useRef(false);
@@ -2842,7 +3477,19 @@ function PieceRenderer({
     // button starts a drag.
     if (armedType !== null || e.button > 0) return;
     e.stopPropagation(); // don't start a canvas pan
-    dragRef.current = { clientX: e.clientX, clientY: e.clientY, moved: false };
+    /* Reset any stale per-drag state in the parent before this new drag begins.
+       A missed pointer-up from a prior drag would otherwise leave detachedDragRef
+       or lastDragFlexRef seeded with stale values. */
+    onDragStart(piece.id);
+    dragRef.current = {
+      clientX: e.clientX,
+      clientY: e.clientY,
+      moved: false,
+      lastX: e.clientX,
+      lastY: e.clientY,
+      lastT: 0,
+      hasFirstMove: false,
+    };
     if (typeof e.currentTarget.setPointerCapture === 'function') {
       try {
         e.currentTarget.setPointerCapture(e.pointerId);
@@ -2858,7 +3505,31 @@ function PieceRenderer({
     if (!start.moved && Math.hypot(e.clientX - start.clientX, e.clientY - start.clientY) > 4) {
       start.moved = true;
     }
-    if (start.moved) onDragMove(piece.id, e.clientX, e.clientY);
+    if (start.moved) {
+      if (!start.hasFirstMove) {
+        /* First move event: initialise velocity baseline from the move event's
+           own timeStamp (React's synthetic pointermove timestamp IS overrideable
+           in tests; pointerdown's is not, so we skip it). Speed = 0 for this
+           first sample — we need two points to compute velocity. */
+        start.lastX = e.clientX;
+        start.lastY = e.clientY;
+        start.lastT = e.timeStamp;
+        start.hasFirstMove = true;
+        onDragMove(piece.id, e.clientX, e.clientY, 0);
+        return;
+      }
+      /* Compute instantaneous speed from consecutive pointermove timeStamps
+         (never Date.now) so velocity is deterministic in tests. When two events
+         share the same timestamp (coalesced / jsdom), dt = 0 → speed = 0, which
+         means the velocity gate is not triggered — a genuine yank has dt > 0. */
+      const dt = e.timeStamp - start.lastT;
+      const dist = Math.hypot(e.clientX - start.lastX, e.clientY - start.lastY);
+      const speedPxPerMs = dt > 0 ? dist / dt : 0;
+      start.lastX = e.clientX;
+      start.lastY = e.clientY;
+      start.lastT = e.timeStamp;
+      onDragMove(piece.id, e.clientX, e.clientY, speedPxPerMs);
+    }
   }
 
   function handlePointerUp(e: React.PointerEvent<SVGGElement>) {
@@ -2946,6 +3617,7 @@ function PieceRenderer({
       data-powered={powered ? 'true' : 'false'}
       data-coupled-to={coupledToTrainId}
       data-invalid-overlap={invalidOverlap ? 'true' : undefined}
+      data-closure-available={closureAvailable ? 'true' : undefined}
       aria-label={ariaLabel}
     >
       <PieceBody shape={shape} bodyFill={bodyFill} tint={tint} isDevice={isDevice} dim={dim} />
@@ -3210,7 +3882,7 @@ function PowerDot({
   cy,
   onTogglePower,
 }: {
-  readonly piece: TrackPiece;
+  readonly piece: EffectivePiece;
   readonly live: boolean;
   readonly powered: boolean;
   readonly armed: boolean;
