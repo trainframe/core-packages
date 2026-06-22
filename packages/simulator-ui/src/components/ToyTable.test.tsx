@@ -4,7 +4,7 @@ import { PROTOCOL_VERSION } from '@trainframe/protocol';
 import { InMemoryBrokerClient } from '@trainframe/simulator/broker/in-memory-client.js';
 import { FLEX_BUDGET_DEG } from '@trainframe/simulator/track/flex.js';
 import type { TrackPiece } from '@trainframe/simulator/track/pieces.js';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
 import { SCANBOX_DATA_MIME } from './ScanBox.js';
 import { ToyTable, type TrainLayerSource, effectiveLayer } from './ToyTable.js';
@@ -1321,12 +1321,15 @@ function timedPointerEvent(
   return e;
 }
 
-describe('ToyTable — velocity gate (flex / detach)', () => {
+describe('ToyTable — drag gestures (move / flex)', () => {
   beforeEach(() => {
     localStorage.clear();
   });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
-  it('slow drag bends the chain live and BAKES the bend on release when no loop closed', () => {
+  it('slow (hold) flex drag bends the chain live and STAYS POSED on release (no loop closed)', () => {
     /*
      * Two straights snapped end-to-end:
      *   A at (450, 300) — placed at client (900, 600), rotation 0°
@@ -1362,6 +1365,9 @@ describe('ToyTable — velocity gate (flex / detach)', () => {
          The first pointermove initialises the velocity baseline (speed=0).
          Both events are in one act() so their timeStamps are equal in jsdom
          (performance.now() doesn't advance between synchronous dispatches). */
+      /* HOLD to enter FLEX mode (fake timers fire the ~250ms dwell), then drag B
+         upward to bend the A–B joint. */
+      vi.useFakeTimers();
       act(() => {
         bEl.dispatchEvent(
           new MouseEvent('pointerdown', {
@@ -1371,9 +1377,12 @@ describe('ToyTable — velocity gate (flex / detach)', () => {
             clientY: 600,
           }),
         );
-        /* First (and only) move: hasFirstMove=false → initialises baseline,
-           reports speed=0 → handlePieceDragMove takes the slow path → solveFollow
-           bends the A–B joint, giving B a non-zero effective rotation. */
+      });
+      act(() => {
+        vi.advanceTimersByTime(300);
+      });
+      act(() => {
+        /* In flex mode the move bends the A–B joint, giving B a non-zero rotation. */
         bEl.dispatchEvent(
           new MouseEvent('pointermove', {
             bubbles: true,
@@ -1398,10 +1407,10 @@ describe('ToyTable — velocity gate (flex / detach)', () => {
       ); /* within ±FLEX_BUDGET_DEG */
 
       /* Release the pointer WITHOUT a loop closure. The bend is BAKED into B's
-         stored pose: an open length keeps its flexed shape (single coordinate
-         frame — the transient flex map is written into the pieces' continuous
-         rotationDeg and then emptied, so later pieces still snap to real baked
-         endpoints, never phantom rest ones). */
+         stored pose so a flexed length is POSABLE (stays where it was bent, attached
+         or not). This is safe from cross-drag compounding because the solver's
+         budget clamp is sign-correct — every joint stays within ±FLEX_BUDGET_DEG of
+         the grid no matter how many flex/bake stints. */
       act(() => {
         bEl.dispatchEvent(
           new MouseEvent('pointerup', {
@@ -1413,6 +1422,7 @@ describe('ToyTable — velocity gate (flex / detach)', () => {
           }),
         );
       });
+      vi.useRealTimers();
 
       const transformAfterRelease = bEl.getAttribute('transform') ?? '';
       const rotMatchAfter = /rotate\(([-\d.]+)\)/.exec(transformAfterRelease);
@@ -1420,28 +1430,23 @@ describe('ToyTable — velocity gate (flex / detach)', () => {
         rotMatchAfter !== null && rotMatchAfter[1] !== undefined
           ? Number.parseFloat(rotMatchAfter[1])
           : 0;
-      /* The flexed rotation PERSISTS (baked), at essentially the same angle the
-         live drag showed — not reverted to 0, and still within budget. */
-      expect(Math.abs(rotDegAfter)).toBeGreaterThan(0);
-      expect(Math.abs(rotDegAfter)).toBeCloseTo(Math.abs(rotDegDuring), 3);
-      expect(Math.abs(rotDegAfter)).toBeLessThanOrEqual(FLEX_BUDGET_DEG + 1e-3);
+      /* Stayed POSED — the bend persisted (baked), at essentially the angle the
+         live drag showed, and within the flex budget. */
+      expect(Math.abs(rotDegAfter)).toBeGreaterThan(0.5);
+      expect(Math.abs(rotDegAfter)).toBeCloseTo(Math.abs(rotDegDuring), 1);
+      expect(Math.abs(rotDegAfter)).toBeLessThanOrEqual(FLEX_BUDGET_DEG + 0.5);
     } finally {
       restore();
     }
   });
 
-  it('fast drag (yank) frees the piece into the hand without it vanishing', () => {
+  it('an immediate drag (no hold) is MOVE MODE — the piece detaches and repositions', () => {
     /*
-     * Two snapped straights. A fast drag of B (speed > 1.5 px/ms, produced by a
-     * large client-delta over a small timeStamp gap) yanks B free of its chain.
-     *
-     * Issue 1: the freed piece must NOT vanish — it comes free into the hand and
-     * follows the cursor, then re-places on drop. So both pieces remain on the
-     * canvas (count stays 2) and B's rendered transform moves to track the
-     * pointer.
-     *
-     * Timestamps are injected via Object.defineProperty so speed is deterministic:
-     *   dist = sqrt(95² + 102²) ≈ 140 px, dt = 10 ms → speed ≈ 14 px/ms >> 1.5.
+     * Two snapped straights. An immediate click+drag (cursor leaves the deadzone
+     * before the flex dwell, no hold) is MOVE mode: B is picked up and follows the
+     * cursor, and on release it is repositioned where it was dropped (detached from
+     * A) — not flexed and not sprung back. (Flex requires a press-and-hold; covered
+     * in ToyTable.gesture-modes.test.tsx.)
      */
     const restore = mockCanvasRect();
     try {
@@ -1452,31 +1457,26 @@ describe('ToyTable — velocity gate (flex / detach)', () => {
       placeStraightAt(canvas, 900, 600);
       const bId = placeStraightAt(canvas, 1100, 600);
       const bEl = canvas.querySelector(`[data-piece-id="${bId}"]`) as SVGGElement;
-
       expect(canvas.querySelectorAll('[data-piece-id]').length).toBe(2);
-      const transformBefore = bEl.getAttribute('transform');
 
-      /* B is at (650mm, 300mm) → client (1300px, 600px). */
+      /* Immediate drag of B far into empty space → move mode → reposition there.
+         Client (1500px, 200px) → mm (750, 100) at the 2px/mm mock scale. */
       act(() => {
         bEl.dispatchEvent(timedPointerEvent('pointerdown', 1300, 600, 0));
-        /* First move: initialises velocity baseline (speed=0). */
-        bEl.dispatchEvent(timedPointerEvent('pointermove', 1305, 598, 100));
-        /* Second move: dist ≈ sqrt(95²+102²) ≈ 140 px over 10 ms → 14 px/ms,
-           well above the 1.5 px/ms gate → yank fires. */
-        bEl.dispatchEvent(timedPointerEvent('pointermove', 1400, 500, 110));
+        bEl.dispatchEvent(timedPointerEvent('pointermove', 1500, 200, 100));
       });
-
-      /* B did NOT vanish: both pieces remain and B follows the cursor. */
-      expect(canvas.querySelectorAll('[data-piece-id]').length).toBe(2);
-      const bAfter = canvas.querySelector(`[data-piece-id="${bId}"]`);
-      expect(bAfter).not.toBeNull();
-      expect(bAfter?.getAttribute('transform')).not.toBe(transformBefore);
-
-      /* Releasing re-places it; still present, still two pieces. */
       act(() => {
-        bEl.dispatchEvent(timedPointerEvent('pointerup', 1400, 500, 110));
+        bEl.dispatchEvent(timedPointerEvent('pointerup', 1500, 200, 110));
       });
+
+      /* Both pieces still present, and B was repositioned to the drop point (far
+         from its (650,300) rest) — it detached and moved, did not spring back. */
       expect(canvas.querySelectorAll('[data-piece-id]').length).toBe(2);
+      const t = canvas.querySelector(`[data-piece-id="${bId}"]`)?.getAttribute('transform') ?? '';
+      const m = /translate\(([-\d.]+),?\s*([-\d.]+)\)/.exec(t);
+      const bx = m ? Number.parseFloat(m[1] ?? '0') : 0;
+      const by = m ? Number.parseFloat(m[2] ?? '0') : 0;
+      expect(Math.hypot(bx - 750, by - 100)).toBeLessThan(80);
     } finally {
       restore();
     }

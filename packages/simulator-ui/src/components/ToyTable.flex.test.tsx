@@ -20,7 +20,7 @@ import type { JointId, Loop } from '@trainframe/simulator/track/loops.js';
 import { getEndpoints } from '@trainframe/simulator/track/pieces.js';
 import type { TrackPiece } from '@trainframe/simulator/track/pieces.js';
 import { computePlacement } from '@trainframe/simulator/track/placement.js';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BrokerProvider } from '../broker/broker-context.js';
 
 /* ---------------------------------------------------------------------------
@@ -143,9 +143,28 @@ function parseRotDeg(transform: string): number {
   return match !== null && match[1] !== undefined ? Number.parseFloat(match[1]) : 0;
 }
 
+/* Enter FLEX mode on `el`: press + hold still past the ~250ms flex dwell (fake
+   timers fire the hold without real waiting), then the caller dispatches the flex
+   pointermoves. The caller must vi.useRealTimers() after the drag. */
+function holdToFlex(el: Element, clientX: number, clientY: number): void {
+  vi.useFakeTimers();
+  act(() => {
+    el.dispatchEvent(timedPtr('pointerdown', clientX, clientY, 50));
+  });
+  act(() => {
+    vi.advanceTimersByTime(300);
+  });
+}
+
 /* ---------------------------------------------------------------------------
  * applyFlex — pure-function tests
  * --------------------------------------------------------------------------- */
+
+/* Defensive: a flex test that throws mid-drag must not leak fake timers into the
+   next test. holdToFlex enables fake timers; this guarantees they are restored. */
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('applyFlex', () => {
   it('with empty flex returns pieces with same positions and rotations', () => {
@@ -251,22 +270,19 @@ describe('applyFlex + findLoops', () => {
    *   C: rotated 180° and placed so its W=(300,0) and E=(100,0)≡A.E+B.E — but
    *   that would overlap.
    *
-   * Instead, test that buildJoints correctly identifies the TWO joints produced
-   * by two anti-parallel pieces (proving `clusterEndpoints` works for multi-edge
-   * graphs), and separately test that findLoops detects 3-node cycles.
+   * Instead, verify the AUTHORITATIVE joint rule: two straights stacked on top of
+   * each other (rot 0 and rot 180) have coincident endpoints, but at each shared
+   * point both rails point the SAME way (parallel, not anti-parallel) — so the
+   * rails do not seat and there is NO joint. Position alone is not connection.
+   * (Multi-joint clusters are covered by the junction/8-curve cases in
+   * loops.test.ts; findLoops 3-node detection is tested separately below.)
    *
-   * Anti-parallel setup:
-   *   p1 at (0,0) rot 0°:   ep0=(-100,0), ep1=(100,0)
-   *   p2 at (0, 0.3) rot 180°: ep0=(100,0.3), ep1=(-100,0.3)
-   *   Both endpoint pairs are <1mm apart → two joints → multi-edge.
-   *
-   * Note: findLoops does not detect 2-node multi-edge cycles (the spur-peel +
-   * DFS algorithm requires ≥3 distinct nodes to form a traceable ring). The
-   * `buildJoints` assertion below verifies the adjacency structure is correct;
-   * the 3-node findLoops test uses a proper 3-piece chain that closes.
+   * Stacked setup:
+   *   p1 at (0,0) rot 0°:    ep1=(100,0)   outgoing east (0°)
+   *   p2 at (0,0.3) rot 180°: ep0=(100,0.3) outgoing east (0°)  → parallel, no seat
    */
 
-  it('two anti-parallel pieces produce exactly two joints (one per endpoint pair)', () => {
+  it('two stacked straights do NOT joint — coincident ends are parallel, not seated', () => {
     const p1: TrackPiece = {
       id: 'p1',
       type: 'straight',
@@ -282,14 +298,8 @@ describe('applyFlex + findLoops', () => {
       tagged: false,
     };
 
-    /* Both endpoint pairs are within SNAP_DISTANCE → two joints. */
-    const joints = buildJoints([p1, p2]);
-    expect(joints).toHaveLength(2);
-    /* Every joint connects p1 to p2. */
-    for (const j of joints) {
-      const ids = [j.a.pieceId, j.b.pieceId].sort();
-      expect(ids).toEqual(['p1', 'p2']);
-    }
+    /* Ends coincide positionally but point the same way → no seat → no joint. */
+    expect(buildJoints([p1, p2])).toHaveLength(0);
   });
 
   it('applyFlex with empty flex returns identical positions (no mutation)', () => {
@@ -390,12 +400,12 @@ describe('ToyTable — closure flash + commit', () => {
       /* Tell solveClose to report feasible for this test. */
       vi.mocked(solveClose).mockReturnValue({ feasible: true, flex: new Map() });
 
-      /* Slow drag of B — same timeStamp on both events → speed = 0 → slow path. */
+      /* Hold to enter FLEX mode, then drag B slightly to flex toward closure. */
+      holdToFlex(bEl, 1300, 600);
       act(() => {
-        bEl.dispatchEvent(timedPtr('pointerdown', 1300, 600, 50));
-        /* Move slightly; same timestamp forces speed=0. */
-        bEl.dispatchEvent(timedPtr('pointermove', 1280, 600, 50));
+        bEl.dispatchEvent(timedPtr('pointermove', 1280, 600, 350));
       });
+      vi.useRealTimers();
 
       expect(bEl.getAttribute('data-closure-available')).toBe('true');
     } finally {
@@ -446,17 +456,18 @@ describe('ToyTable — closure flash + commit', () => {
 
       vi.mocked(solveClose).mockReturnValue({ feasible: true, flex: closureFlex });
 
-      /* Slow drag to activate closure. */
+      /* Hold to enter FLEX mode, then drag to activate closure. */
+      holdToFlex(bEl, 1300, 600);
       act(() => {
-        bEl.dispatchEvent(timedPtr('pointerdown', 1300, 600, 50));
-        bEl.dispatchEvent(timedPtr('pointermove', 1280, 600, 50));
+        bEl.dispatchEvent(timedPtr('pointermove', 1280, 600, 350));
       });
       expect(bEl.getAttribute('data-closure-available')).toBe('true');
 
       /* Drop: commits flex and clears flash. */
       act(() => {
-        bEl.dispatchEvent(timedPtr('pointerup', 1280, 600, 50));
+        bEl.dispatchEvent(timedPtr('pointerup', 1280, 600, 400));
       });
+      vi.useRealTimers();
 
       /* Flash is cleared after drop. */
       expect(bEl.getAttribute('data-closure-available')).toBeNull();
@@ -572,17 +583,18 @@ describe('ToyTable — ClosureWave mounts after loop-closing drop', () => {
       const bEl = canvas.querySelector(`[data-piece-id="${bId}"]`) as SVGGElement | null;
       if (bEl === null) throw new Error('piece B not found in DOM');
 
+      holdToFlex(bEl, 1300, 600);
       act(() => {
-        bEl.dispatchEvent(timedPtr('pointerdown', 1300, 600, 50));
-        bEl.dispatchEvent(timedPtr('pointermove', 1280, 600, 50));
+        bEl.dispatchEvent(timedPtr('pointermove', 1280, 600, 350));
       });
       expect(bEl.getAttribute('data-closure-available')).toBe('true');
 
       /* Drop: triggers onDragFlex + onClosureCommit → handleClosureCommit
          → newLoopCenterline → setClosureWavePoints → ClosureWave mounts. */
       act(() => {
-        bEl.dispatchEvent(timedPtr('pointerup', 1280, 600, 50));
+        bEl.dispatchEvent(timedPtr('pointerup', 1280, 600, 400));
       });
+      vi.useRealTimers();
 
       expect(screen.queryByTestId('closure-wave')).not.toBeNull();
     } finally {
@@ -594,12 +606,11 @@ describe('ToyTable — ClosureWave mounts after loop-closing drop', () => {
 /* ---------------------------------------------------------------------------
  * ToyTable component — drag UX (Issues 1, 3, 4)
  *
- * Issue 3: a SLOW drag far past the flex budget must NOT detach. The chain just
- *   holds at max flex (the solver clamps each δ to ±budget). Over-pull
- *   detachment was removed; only a fast yank detaches.
- *
- * Issue 1: a fast-yank detach must leave the piece PRESENT (it comes free into
- *   the hand and follows the cursor), never vanish.
+ * Authoritative connection: dragging a chain piece ALWAYS flexes it (the solver
+ * clamps each δ to ±budget); it holds at max flex when the cursor outruns its
+ * reach (rubber-bands) and NEVER auto-severs. There is no velocity/residual
+ * yank-detach — connection is purely geometric. Both a slow and a fast drag
+ * therefore keep every piece connected.
  * --------------------------------------------------------------------------- */
 
 describe('ToyTable — slow drag past budget holds, does not detach (Issue 3)', () => {
@@ -624,17 +635,15 @@ describe('ToyTable — slow drag past budget holds, does not detach (Issue 3)', 
       const bEl = canvas.querySelector(`[data-piece-id="${bId}"]`) as SVGGElement | null;
       if (bEl === null) throw new Error('piece B not in DOM');
 
-      /* Slow drag B far past what the joint budget can reach, pulling up-and-out
-         (a colinear pull straight down the chain's own axis has no rotational DOF
-         to bend, so we pull perpendicular). Same timestamp → speed = 0 → slow
-         path. Cursor is hundreds of mm out — the old code detached here; now the
-         single A–B joint just saturates at ±budget and the chain holds bent. */
+      /* HOLD to enter FLEX mode, then drag B far past what the joint budget can
+         reach, pulling perpendicular (a colinear pull has no rotational DOF). The
+         single A–B joint saturates at ±budget and the chain holds bent. */
+      holdToFlex(bEl, 1300, 600);
       act(() => {
-        bEl.dispatchEvent(timedPtr('pointerdown', 1300, 600, 50));
-        /* client (1400, 100) → mm (700, 50): up-and-right of B's rest — a
-           perpendicular pull saturating the single A–B joint at ±budget. */
-        bEl.dispatchEvent(timedPtr('pointermove', 1400, 100, 50));
+        /* client (1400, 100) → mm (700, 50): up-and-right of B's rest. */
+        bEl.dispatchEvent(timedPtr('pointermove', 1400, 100, 350));
       });
+      vi.useRealTimers();
 
       /* No detach: the piece count is unchanged and B is still present. */
       const countAfter = canvas.querySelectorAll('[data-piece-id]').length;
@@ -646,53 +655,6 @@ describe('ToyTable — slow drag past budget holds, does not detach (Issue 3)', 
       const rot = parseRotDeg(bEl.getAttribute('transform') ?? '');
       expect(Math.abs(rot)).toBeGreaterThan(0);
       expect(Math.abs(rot)).toBeLessThanOrEqual(5 + 1e-3); /* within FLEX_BUDGET_DEG */
-    } finally {
-      restore();
-    }
-  });
-});
-
-describe('ToyTable — fast yank frees the piece without vanishing (Issue 1)', () => {
-  beforeEach(() => {
-    localStorage.clear();
-    vi.mocked(solveClose).mockReturnValue({ feasible: false, flex: new Map() });
-  });
-
-  it('a fast yank detaches but the piece stays present and follows the cursor', () => {
-    const restore = mockCanvasRect();
-    try {
-      renderToyTableWithBroker();
-      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
-
-      placePieceAt(canvas, 'straight', 900, 600); /* A centre (450,300) */
-      const bId = placePieceAt(canvas, 'straight', 1100, 600); /* B snaps to A.E */
-
-      const countBefore = canvas.querySelectorAll('[data-piece-id]').length;
-      expect(countBefore).toBe(2);
-
-      const bEl = canvas.querySelector(`[data-piece-id="${bId}"]`) as SVGGElement | null;
-      if (bEl === null) throw new Error('piece B not in DOM');
-
-      const transformBefore = bEl.getAttribute('transform');
-
-      /* Fast yank: first move sets the velocity baseline (speed 0), the second
-         move at a later timestamp gives a large speed → above DRAG_FLEX_MAX_SPEED
-         → detach. */
-      act(() => {
-        bEl.dispatchEvent(timedPtr('pointerdown', 1300, 600, 50));
-        bEl.dispatchEvent(timedPtr('pointermove', 1310, 600, 50)); /* baseline */
-        bEl.dispatchEvent(timedPtr('pointermove', 1700, 600, 55)); /* fast → yank */
-      });
-
-      /* The piece did NOT vanish — count unchanged, B still present. */
-      const countAfter = canvas.querySelectorAll('[data-piece-id]').length;
-      expect(countAfter).toBe(countBefore);
-      const bAfter = canvas.querySelector(`[data-piece-id="${bId}"]`);
-      expect(bAfter).not.toBeNull();
-
-      /* It follows the cursor: its rendered transform moved (the drag preview
-         overrides its pose to track the pointer as a free piece). */
-      expect(bAfter?.getAttribute('transform')).not.toBe(transformBefore);
     } finally {
       restore();
     }

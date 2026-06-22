@@ -20,7 +20,12 @@ import {
   jointKey,
 } from '@trainframe/simulator/track/flex.js';
 import { SNAP_DISTANCE, compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
-import { type JointId, buildJoints, findLoops } from '@trainframe/simulator/track/loops.js';
+import {
+  type JointId,
+  buildJoints,
+  connectedComponents,
+  findLoops,
+} from '@trainframe/simulator/track/loops.js';
 import { detectSameLayerOverlaps, pierSuppressed } from '@trainframe/simulator/track/overlap.js';
 import {
   CRANE_GANTRY_X_MM,
@@ -103,27 +108,17 @@ const CANVAS_H_MM = 600;
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 10;
 
+/** The gesture mode a piece drag commits to at its start (never re-inferred). */
+type DragMode = 'move' | 'flex';
+
+/** Pointer must leave this radius (client px) to count as a drag rather than a
+ *  press, and — before the flex dwell elapses — that movement chooses MOVE mode. */
+const DRAG_DEADZONE_PX = 6;
+/** Press-and-hold dwell (ms, within the deadzone) that engages FLEX mode. */
+const FLEX_HOLD_MS = 250;
+
 /** MIME type for pieces being dragged from the toybox onto the canvas. */
 const TOYBOX_DRAG_MIME = 'application/x-trainframe-toybox-type';
-
-/*
- * Pointer-drag velocity threshold for the flex/detach gate.
- * Drags slower than this (px/ms) bend the chain live via solveFollow.
- * Drags faster than this yank the piece free — it detaches from its neighbours.
- * 1.5 px/ms ≈ 90 px/frame at 60 fps, which maps to ~45 mm/s at SCALE=2.
- * Feels like a deliberate pull vs. a quick flick.
- */
-const DRAG_FLEX_MAX_SPEED = 1.5; /* px/ms */
-
-/**
- * How far the cursor must be pulled BEYOND the chain's flex reach (mm) for a fast
- * stroke to count as a yank-detach rather than flexing. The flex budget reaches
- * only a few tens of mm, so a genuine yank leaves the dragged free endpoint well
- * behind the cursor; a flex/closing gesture keeps it tracking the cursor. Gating
- * the detach on this (as well as speed) stops a jerky closing drag from snapping
- * the held piece off its chain mid-close.
- */
-const DETACH_RESIDUAL_MM = 70;
 
 /**
  * The garage device id used by the toy-table when announcing tag bindings.
@@ -915,6 +910,17 @@ declare global {
     /** DEV-only: frame the whole live layout in the viewport (for demo capture).
      * Registered behind `import.meta.env.DEV`; absent in production builds. */
     __tfFitView?: (() => void) | undefined;
+    /** DEV-only seed hook: replace the table's pieces with an exact set (used by
+     * the connection regression test + the replay/fuzz video harness to stage a
+     * precise chain such as the logged 7-curve arc). Registered behind
+     * `import.meta.env.DEV`; absent in production builds. */
+    __tfLoadPieces?: ((pieces: ReadonlyArray<TrackPiece>) => void) | undefined;
+    /** DEV-only: the authoritative-connection metrics for the CURRENTLY RENDERED
+     * (effective) geometry — components, loop count, and the largest joint
+     * deviation from the 45° grid. The adversarial harness reads these per drag
+     * frame to compare rendered geometry against the geometric joint graph.
+     * Registered behind `import.meta.env.DEV`; absent in production. */
+    __tfConnectivity?: (() => { components: number; loops: number; maxDev: number }) | undefined;
   }
 }
 
@@ -1040,14 +1046,23 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   flexRef.current = flex;
   const flexAnchorRef = useRef(flexAnchorId);
   flexAnchorRef.current = flexAnchorId;
-  /* BAKE the live transient flex into the pieces' stored poses on release, then
-     clear it. Flex is single-frame and never persists as a map: a slow drag bends
-     the chain live, and on mouse-up the bent shape is written into the pieces
-     (continuous rotationDeg) and the flex map is emptied. An OPEN length therefore
-     keeps its flexed shape, and a closing drag bakes + joins + waves via
-     handleClosureCommit. Because committed state is always baked poses (one
-     coordinate frame, no flex map), later snaps/edits can't desync against a
-     phantom rest frame. */
+  /* Open chain released WITHOUT closing a loop: SPRING BACK to the stored
+     (on-grid) rest poses — just drop the transient flex map; the pieces were never
+     mutated during the drag, so clearing the flex re-renders them at rest.
+
+     We must NOT bake the bend into the rest poses here. Baking an unclosed open
+     chain drifts its rest frame off-grid, and because the next drag re-flexes from
+     that drifted baseline the per-joint deviation COMPOUNDS across releases (the
+     budget is measured from the 45° grid, but the baseline keeps moving) until a
+     joint's heading mismatch exceeds tolerance and the chain visibly SEVERS. An
+     open chain isn't held bent by anything, so springing back is also the honest,
+     authoritative behaviour. Only a committed CLOSURE bakes (handleClosureCommit) —
+     a closed loop is a stable cycle that holds its shape. */
+  /* Flex release on an OPEN chain: BAKE the flexed pose into the stored poses so the
+     track stays posed where it was bent (a flexed length is posable, attached or not).
+     Safe against cross-drag compounding because the solver's budget clamp is now
+     sign-correct — every joint stays within ±FLEX_BUDGET_DEG of the grid no matter
+     how many flex/bake stints, so a re-flexed chain never over-bends into a sever. */
   const handleFlexBake = useCallback(() => {
     const f = flexRef.current;
     if (f.size === 0) return;
@@ -1261,6 +1276,37 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     };
   }, [client, hardwareRef]);
 
+  // DEV-only: stage an exact set of pieces (no bus side effects). The connection
+  // regression test and the replay/fuzz video harness use this to put the logged
+  // 7-curve arc on the table verbatim, then drive a drag. Cleared on unmount.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    window.__tfLoadPieces = (next) => {
+      setPieces([...next]);
+      setSelectedId(null);
+    };
+    /* Authoritative-connection metrics for the rendered (effective) geometry, so
+       the adversarial harness can check rendered == geometric joint graph. */
+    window.__tfConnectivity = () => {
+      const eff = asTrackPieces(
+        applyFlex(piecesRef.current, flexRef.current, flexAnchorRef.current ?? undefined),
+      );
+      let maxDev = 0;
+      for (const j of buildJoints(eff)) {
+        const a = eff.find((p) => p.id === j.a.pieceId);
+        const b = eff.find((p) => p.id === j.b.pieceId);
+        if (a === undefined || b === undefined) continue;
+        const rel = b.rotationDeg - a.rotationDeg;
+        maxDev = Math.max(maxDev, Math.abs(rel - Math.round(rel / 45) * 45));
+      }
+      return { components: connectedComponents(eff).length, loops: findLoops(eff).length, maxDev };
+    };
+    return () => {
+      window.__tfLoadPieces = undefined;
+      window.__tfConnectivity = undefined;
+    };
+  }, []);
+
   // pagehide: publish `device_disconnected` for every wire-visible live
   // device before the WebSocket tears down. Playwright's `page.close()`
   // and real browser tab-close both fire `pagehide` synchronously before
@@ -1385,24 +1431,6 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       );
     });
     setSelectedId(pieceId);
-  }, []);
-
-  /* Free a piece from its chain on a fast-drag yank. The piece STAYS in the
-     rest-pose array (so it keeps rendering and Table can follow the cursor with
-     its drag-preview, then reposition it on drop) — it must never vanish. We
-     only drop the joints that belong to the yanked piece so the remainder of
-     the chain keeps its current flex and holds its bent shape. Table tracks the
-     "detached this drag" id and routes subsequent moves down the free path. */
-  const detachPiece = useCallback((_pieceId: string) => {
-    /* Yanking a piece off ABANDONS the in-progress flex: the remaining chain
-       returns to its stored (rest) poses while the yanked piece follows the
-       cursor as a free placement and re-snaps on drop. Clearing the whole
-       transient map (not just the dragged piece's joints) is what keeps the rest
-       of the chain on-grid — leaving stale entries renders the chain bent and
-       makes a later re-attached piece snap to an off-grid neighbour. Any
-       PREVIOUSLY-baked bend lives in the pieces' stored poses, not this map, so
-       it is untouched. */
-    setFlex((prev) => (prev.size === 0 ? prev : new Map()));
   }, []);
 
   /* When a drop commits a loop closure, find the cycle containing the dragged
@@ -1779,12 +1807,11 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
               closureWavePoints !== null && closureWavePoints.length >= 2 ? (
                 <ClosureWave
                   pathPoints={closureWavePoints}
-                  durationMs={2200}
+                  durationMs={1540}
                   onDone={() => setClosureWavePoints(null)}
                 />
               ) : null
             }
-            onDragDetach={detachPiece}
           />
           <div className="tf-toytable__scanzone">
             <ScanBox
@@ -2378,9 +2405,6 @@ interface TableProps {
   /* Pre-composed overlay element to render inside the canvas SVG. ToyTable
      computes this from closureWavePoints so Table stays free of the ternary. */
   readonly waveOverlay: ReactNode;
-  /* Fast drag ("yank"): detach the piece from its chain by removing it from
-     the rest-pose pieces array. It then follows the cursor as a free placement. */
-  readonly onDragDetach: (pieceId: string) => void;
 }
 
 /* Endpoint reference carrying the owning piece ID (for coincidence checks). */
@@ -2459,27 +2483,6 @@ function detectLoopClosure(
 
   const result = solveClose(trackPieces, pieceId, freeIdx, closureTarget);
   return result.feasible ? result : null;
-}
-
-/*
- * How far the dragged piece's free endpoint lands from the cursor after the given
- * flex is applied — i.e. how far the cursor is BEYOND what the chain's flex can
- * reach. Small while flexing/closing (the free end tracks the cursor), large on a
- * genuine yank (the cursor is pulled past the reach). Used to gate the fast-yank
- * detach so a jerky closing drag doesn't snap the held piece off its chain.
- */
-function flexReachResidual(
-  trackPieces: ReadonlyArray<TrackPiece>,
-  draggedPiece: TrackPiece,
-  flex: FlexState,
-  anchorId: string,
-  cursorXMm: number,
-  cursorYMm: number,
-): number {
-  const pose = effectivePoses(trackPieces, flex, anchorId).get(draggedPiece.id);
-  if (pose === undefined) return 0;
-  const free = getEndpointsAt(draggedPiece, pose)[freeEndpointIndex(trackPieces, draggedPiece.id)];
-  return free === undefined ? 0 : Math.hypot(free.x - cursorXMm, free.y - cursorYMm);
 }
 
 /* Samples per half-path when building a loop's rail centreline for the wave. */
@@ -2619,7 +2622,6 @@ function Table({
   onFlexBake,
   onClosureCommit,
   waveOverlay,
-  onDragDetach,
 }: TableProps) {
   const svgRef = useRef<SVGSVGElement>(null);
 
@@ -2633,11 +2635,9 @@ function Table({
     rotationDeg: number;
   } | null>(null);
 
-  /* The piece yanked free during the current drag (a fast pull off its chain).
-     Once set, every later move this drag follows the cursor as a free piece —
-     the piece stays in `pieces` (it never vanishes) and re-snaps on drop. Reset
-     at the start and end of each drag. */
-  const detachedDragRef = useRef<string | null>(null);
+  /* One-shot flex-mode ripple (announces "you are now flexing"). Extracted to a
+     hook so `Table` stays under the cognitive-complexity budget. */
+  const { flexRipple, handleFlexEnter, dismissFlexRipple } = useFlexRipple(pieces);
 
   /* The previous frame's solved flex, fed back into solveFollow as a warm-start
      seed so the damped-least-squares iterate doesn't restart cold every frame
@@ -2921,15 +2921,9 @@ function Table({
        than a previously-selected one. */
     onSelectPiece(pieceId);
     lastDragFlexRef.current = null;
-    detachedDragRef.current = null;
   }
 
-  function handlePieceDragMove(
-    pieceId: string,
-    clientX: number,
-    clientY: number,
-    speedPxPerMs: number,
-  ) {
+  function handlePieceDragMove(pieceId: string, clientX: number, clientY: number, mode: DragMode) {
     const { x, y } = clientToMm(getRect(), clientX, clientY, viewport);
     const moving = pieces.find((p) => p.id === pieceId);
     if (moving === undefined) {
@@ -2940,51 +2934,36 @@ function Table({
       return;
     }
 
-    /* Already yanked free earlier this drag: the piece stays in `pieces` (so it
-       never vanishes) but follows the cursor as a free placement and re-snaps on
-       drop — never re-flex it. */
-    if (detachedDragRef.current === pieceId) {
+    /* MOVE MODE (click + drag): pick the piece up and follow the cursor as a free
+       placement — it detaches from its chain (the rest stays at rest) and, on
+       release, snaps onto a nearby aligned open end or drops free. No flex. */
+    if (mode === 'move') {
+      lastDragFlexRef.current = null;
       followCursorFree(pieceId, moving, x, y);
       return;
     }
 
-    /* Check whether the piece is part of a flexable, anchored chain. solveFollow
-       returns empty for a free standalone piece AND for a non-anchored closed
-       loop (no junction, no open end) — in both cases we fall through to plain
-       move behaviour. The velocity gate (fast-yank detach) likewise only applies
-       to a genuinely-flexing chain. Warm-start from the prior frame's flex. */
-    const trackPieces = asTrackPieces(pieces);
+    /* FLEX MODE (click + hold, then drag). Solve against the REST poses — the single
+       geometric source. Feeding the
+       already-flexed `pieces` here compounds each frame's bend onto the previous
+       one (the clamp re-centres on the drifting grid), so the chain accumulates
+       far past ±FLEX_BUDGET_DEG and the held piece's joint over-bends until it
+       severs. The rest poses are constant through the drag; flex is transient and
+       baked once on release.
+
+       solveFollow returns empty for a free standalone piece AND for a non-anchored
+       closed loop (no junction, no open end) — both fall through to plain move.
+       A piece on a flexable chain ALWAYS bends to follow the cursor and holds at
+       max flex when the cursor outruns its reach (rubber-bands); flexing never
+       severs a joint. There is no velocity/residual yank-detach — connection is
+       purely geometric (the rails stay seated under flex). */
+    const trackPieces = asTrackPieces(restPieces);
     const prior = lastDragFlexRef.current ?? undefined;
     const flex = solveFollow(trackPieces, pieceId, { x, y }, prior);
     if (flex.size > 0) {
       /* Render under the SAME anchor the solver used so the dragged piece tracks
          the cursor rather than rendering rigidly offset (and jumping on release). */
       const anchorId = selectAnchor(trackPieces, pieceId);
-
-      /* A genuine yank pulls the cursor well past the chain's flex reach (the free
-         end can't follow — large residual); a flex/closing gesture keeps the free
-         end tracking the cursor (small residual) even when a stroke is momentarily
-         fast. Gating the detach on BOTH speed and residual stops a jerky closing
-         drag from accidentally snapping the held piece off its chain. */
-      const reachResidual = flexReachResidual(
-        trackPieces,
-        asTrackPiece(moving),
-        flex,
-        anchorId,
-        x,
-        y,
-      );
-      if (speedPxPerMs >= DRAG_FLEX_MAX_SPEED && reachResidual > DETACH_RESIDUAL_MM) {
-        /* Deliberate fast yank far past reach: free the piece from its chain.
-           onDragDetach drops its joints (the remainder holds its bent shape) but
-           keeps the piece in `pieces`; mark it detached so subsequent moves follow
-           the cursor as a free placement and it re-snaps on drop. */
-        lastDragFlexRef.current = null;
-        detachedDragRef.current = pieceId;
-        onDragDetach(pieceId);
-        followCursorFree(pieceId, moving, x, y);
-        return;
-      }
 
       /* The piece is in a chain — bend it live (a slow pull past the budget just
          holds at max flex, the solver clamps each δ to ±budget). */
@@ -3030,43 +3009,31 @@ function Table({
     });
   }
 
-  function handlePieceDragEnd(pieceId: string, clientX: number, clientY: number) {
+  function handlePieceDragEnd(pieceId: string, clientX: number, clientY: number, mode: DragMode) {
     setPieceDragPreview(null);
-
-    /* Was this a live flex-drag (a slow bend), as opposed to a free move or a
-       fast-yank detach? Captured before we clear the seed. */
     const wasFlexing = lastDragFlexRef.current !== null;
-
-    /* End of drag: clear the warm-start seed and the detached marker so the next
-       drag starts fresh. A piece yanked free this drag is repositioned (and
-       re-snapped) by the onMovePiece path below, exactly like a free piece. */
     lastDragFlexRef.current = null;
-    detachedDragRef.current = null;
 
-    /* Closure commit: if a feasible closure was found on the last move event,
-       commit it now so the loop closes and persists. Render under the solver's
-       anchor so the committed shape matches what was dragged. */
-    const closure = closureFlexRef.current;
+    /* FLEX MODE: commit a feasible closure (bake + wave), else spring back to the
+       on-grid rest (an open chain is never baked — that would drift off-grid and
+       compound across drags). */
+    if (mode === 'flex') {
+      const closure = closureFlexRef.current;
+      closureFlexRef.current = null;
+      setClosureAvailableId(null);
+      if (closure?.feasible === true) {
+        onClosureCommit(closure.flex, pieceId);
+      } else if (wasFlexing) {
+        onFlexBake(); // spring back (transient flex dropped)
+      }
+      return;
+    }
+
+    /* MOVE MODE: reposition the picked-up piece. Released over the scan box → scan
+       it; otherwise drop it where released — computeMovePlacement snaps it onto a
+       nearby aligned open end (ATTACH) or leaves it free (reposition / remove). */
     closureFlexRef.current = null;
     setClosureAvailableId(null);
-    if (closure?.feasible === true) {
-      /* Bake the closure into the stored poses (parent handler); do NOT set
-         persistent flex — the transient drag bend is replaced by baked poses. */
-      onClosureCommit(closure.flex, pieceId);
-      return;
-    }
-
-    /* A slow flex-drag that did NOT close a loop: BAKE the transient bend into
-       the pieces' stored poses so the open length keeps its flexed shape (single
-       frame — no persistent flex map, so later pieces still snap to real baked
-       endpoints, not phantom ones). Skip the move-piece path: the bake already
-       repositioned the chain to its released shape. */
-    if (wasFlexing) {
-      onFlexBake();
-      return;
-    }
-
-    // Released over the scan box → scan it (same confirm flow as an HTML5 drop).
     const target =
       typeof document.elementFromPoint === 'function'
         ? document.elementFromPoint(clientX, clientY)
@@ -3075,7 +3042,6 @@ function Table({
       onScanPiece(pieceId);
       return;
     }
-    // Otherwise reposition it where it was released.
     const { x, y } = clientToMm(getRect(), clientX, clientY, viewport);
     onMovePiece(pieceId, x, y);
   }
@@ -3159,6 +3125,8 @@ function Table({
         data-viewport-x={viewport.x}
         data-viewport-y={viewport.y}
       >
+        {/* Flex-mode ripple — painted FIRST so it emanates from UNDER the track. */}
+        <FlexRippleLayer ripple={flexRipple} onDone={dismissFlexRipple} />
         {/* One group per layer, lowest first, so higher decks paint last and a
           bridge reads as over/under. The drop-shadow height cue is attached to
           this UN-rotated group (never the per-piece rotated/flipped <g>, where a
@@ -3227,6 +3195,7 @@ function Table({
               onDragStart={handlePieceDragStart}
               onDragMove={handlePieceDragMove}
               onDragEnd={handlePieceDragEnd}
+              onFlexEnter={handleFlexEnter}
               closureAvailable={closureAvailableId === p.id}
             />
           );
@@ -3341,6 +3310,118 @@ function SupportLeg({ column }: { column: SupportColumn }) {
   );
 }
 
+/** State + handler for the one-shot flex-mode ripple. `handleFlexEnter(pieceId)`
+ *  fires it at the held piece's centre (re-keyed by a nonce so each hold replays);
+ *  `dismissFlexRipple` clears it when the animation finishes. Extracted from
+ *  `Table` to keep that component under the cognitive-complexity budget. */
+function useFlexRipple(pieces: ReadonlyArray<EffectivePiece>): {
+  flexRipple: { x: number; y: number; nonce: number } | null;
+  handleFlexEnter: (pieceId: string) => void;
+  dismissFlexRipple: () => void;
+} {
+  const [flexRipple, setFlexRipple] = useState<{ x: number; y: number; nonce: number } | null>(
+    null,
+  );
+  const nonceRef = useRef(0);
+  const handleFlexEnter = useCallback(
+    (pieceId: string) => {
+      const p = pieces.find((q) => q.id === pieceId);
+      if (p === undefined) return;
+      nonceRef.current += 1;
+      setFlexRipple({ x: p.position.x, y: p.position.y, nonce: nonceRef.current });
+    },
+    [pieces],
+  );
+  const dismissFlexRipple = useCallback(() => setFlexRipple(null), []);
+  return { flexRipple, handleFlexEnter, dismissFlexRipple };
+}
+
+/** Renders the active flex-mode ripple (or nothing). The null-check + remount key
+ *  live here so `Table`'s JSX stays branch-free (cognitive-complexity budget). */
+function FlexRippleLayer({
+  ripple,
+  onDone,
+}: {
+  ripple: { x: number; y: number; nonce: number } | null;
+  onDone: () => void;
+}) {
+  if (ripple === null) return null;
+  return <FlexModeRipple key={ripple.nonce} x={ripple.x} y={ripple.y} onDone={onDone} />;
+}
+
+/** Stable clock for the flex ripple — a module-level reference so the animation
+ *  effect's deps don't change every render (the bug that froze ClosureWave). */
+const flexRippleNow = () => performance.now();
+
+/** A one-shot blue ripple emanating from a held piece when FLEX mode engages
+ *  (press-and-hold) — the affordance that says "you are now flexing". Two expanding
+ *  rings fade as they grow. Animated with requestAnimationFrame (NOT SMIL, which a
+ *  headless video capture does not render — the closure wave uses RAF for the same
+ *  reason). `onDone` fires once the ripple completes. */
+function FlexModeRipple({
+  x,
+  y,
+  durationMs = 750,
+  onDone,
+  now = flexRippleNow,
+}: {
+  x: number;
+  y: number;
+  durationMs?: number;
+  onDone: () => void;
+  now?: () => number;
+}) {
+  const [t, setT] = useState(0);
+  const onDoneRef = useRef(onDone);
+  onDoneRef.current = onDone;
+  useEffect(() => {
+    let raf = 0;
+    let start: number | null = null;
+    const tick = () => {
+      if (start === null) start = now();
+      const frac = Math.min(1, (now() - start) / durationMs);
+      setT(frac);
+      if (frac < 1) raf = requestAnimationFrame(tick);
+      else onDoneRef.current();
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [durationMs, now]);
+  const r = 12 + t * 165;
+  const fade = 1 - t;
+  return (
+    <g
+      data-testid="flex-ripple"
+      data-front={t.toFixed(2)}
+      transform={`translate(${x} ${y})`}
+      pointerEvents="none"
+    >
+      <defs>
+        <filter id="flex-ripple-blur" x="-80%" y="-80%" width="260%" height="260%">
+          <feGaussianBlur stdDeviation="5" />
+        </filter>
+      </defs>
+      {/* Blurred, spread-out rings — softer than the crisp closure wave. */}
+      <g filter="url(#flex-ripple-blur)">
+        <circle
+          r={r}
+          fill="none"
+          stroke="#38bdf8"
+          strokeWidth={12 * fade + 2}
+          opacity={0.6 * fade}
+        />
+        <circle
+          r={r * 0.6}
+          fill="none"
+          stroke="#bae6fd"
+          strokeWidth={9 * fade + 2}
+          opacity={0.5 * fade}
+        />
+      </g>
+    </g>
+  );
+}
+
 interface PieceRendererProps {
   readonly piece: EffectivePiece;
   readonly selected: boolean;
@@ -3381,23 +3462,19 @@ interface PieceRendererProps {
    * can't use HTML5 DnD, so repositioning is done with pointer events.
    */
   readonly dragOverride: { x: number; y: number; rotationDeg: number } | undefined;
-  /* Pointer moved while dragging this piece (client coords + pointer speed in
-     px/ms, computed from the event's own timeStamp — never Date.now). */
   /** Pointer pressed on this piece — drag may follow. Fires before the first
    * onDragMove so the parent can reset any per-drag state that might be stale
    * from a previous drag whose pointer-up was missed. */
   readonly onDragStart: (pieceId: string) => void;
-  /* Pointer moved while dragging this piece (client coords + pointer speed in
-     px/ms, computed from the event's own timeStamp — never Date.now). */
-  readonly onDragMove: (
-    pieceId: string,
-    clientX: number,
-    clientY: number,
-    speedPxPerMs: number,
-  ) => void;
-  /** Drag released (client coords) — reposition the piece, or scan it if let
-   * go over the scan box. */
-  readonly onDragEnd: (pieceId: string, clientX: number, clientY: number) => void;
+  /* Pointer moved while dragging this piece (client coords). `mode` is the gesture
+     decided at the start: 'move' (detach + follow cursor) or 'flex' (bend the chain). */
+  readonly onDragMove: (pieceId: string, clientX: number, clientY: number, mode: DragMode) => void;
+  /** Drag released (client coords + the gesture mode) — reposition/snap the piece
+   * (move) or close/spring-back the flex (flex), or scan it over the scan box. */
+  readonly onDragEnd: (pieceId: string, clientX: number, clientY: number, mode: DragMode) => void;
+  /** The hold-dwell elapsed within the deadzone: FLEX MODE engaged — fire the
+   * blue flex-mode ripple from this piece. */
+  readonly onFlexEnter: (pieceId: string) => void;
   /* True while this piece is being slow-dragged and its free endpoint is close
      enough to an open endpoint that a loop closure is feasible — renders the
      flash affordance so the operator sees that releasing will snap the loop shut. */
@@ -3447,6 +3524,7 @@ function PieceRenderer({
   onDragStart,
   onDragMove,
   onDragEnd,
+  onFlexEnter,
   closureAvailable,
 }: PieceRendererProps) {
   const shape = getPieceShape(asTrackPiece(piece));
@@ -3467,19 +3545,15 @@ function PieceRenderer({
 
   // Pointer-drag state. Placed pieces are SVG <g> elements; Chrome does not
   // honour the HTML5 `draggable` attribute on SVG, so native DnD never starts.
-  // We drag with pointer events instead (which also gives live feedback and is
-  // automatable). A press that doesn't move past the threshold is a click.
+  // We drag with pointer events instead. The MODE is decided at the start of the
+  // gesture and never re-inferred: move past the deadzone first → MOVE; hold still
+  // inside the deadzone past FLEX_HOLD_MS → FLEX. A press that does neither (a
+  // quick tap) is a click.
   const dragRef = useRef<{
     clientX: number;
     clientY: number;
-    moved: boolean;
-    /* Velocity tracking — initialised from the first pointermove, not from
-       pointerdown, so that tests can inject explicit timeStamps on move events
-       (React's synthetic pointerdown timestamp is not overrideable in jsdom). */
-    lastX: number;
-    lastY: number;
-    lastT: number;
-    hasFirstMove: boolean;
+    mode: 'pending' | DragMode;
+    holdTimer: ReturnType<typeof setTimeout> | null;
   } | null>(null);
   // Set when a drag actually moved the piece, so the click that fires right
   // after pointer-up doesn't also select it.
@@ -3491,18 +3565,23 @@ function PieceRenderer({
     // button starts a drag.
     if (armedType !== null || e.button > 0) return;
     e.stopPropagation(); // don't start a canvas pan
-    /* Reset any stale per-drag state in the parent before this new drag begins.
-       A missed pointer-up from a prior drag would otherwise leave detachedDragRef
-       or lastDragFlexRef seeded with stale values. */
+    /* Reset any stale per-drag state in the parent before this new drag begins. */
     onDragStart(piece.id);
+    /* Hold-dwell timer: if the pointer is still inside the deadzone when it fires,
+       engage FLEX mode and emit the ripple. Cancelled the moment a move past the
+       deadzone chooses MOVE mode, or on release. */
+    const holdTimer = setTimeout(() => {
+      const d = dragRef.current;
+      if (d !== null && d.mode === 'pending') {
+        d.mode = 'flex';
+        onFlexEnter(piece.id);
+      }
+    }, FLEX_HOLD_MS);
     dragRef.current = {
       clientX: e.clientX,
       clientY: e.clientY,
-      moved: false,
-      lastX: e.clientX,
-      lastY: e.clientY,
-      lastT: 0,
-      hasFirstMove: false,
+      mode: 'pending',
+      holdTimer,
     };
     if (typeof e.currentTarget.setPointerCapture === 'function') {
       try {
@@ -3516,39 +3595,23 @@ function PieceRenderer({
   function handlePointerMove(e: React.PointerEvent<SVGGElement>) {
     const start = dragRef.current;
     if (start === null) return;
-    if (!start.moved && Math.hypot(e.clientX - start.clientX, e.clientY - start.clientY) > 4) {
-      start.moved = true;
-    }
-    if (start.moved) {
-      if (!start.hasFirstMove) {
-        /* First move event: initialise velocity baseline from the move event's
-           own timeStamp (React's synthetic pointermove timestamp IS overrideable
-           in tests; pointerdown's is not, so we skip it). Speed = 0 for this
-           first sample — we need two points to compute velocity. */
-        start.lastX = e.clientX;
-        start.lastY = e.clientY;
-        start.lastT = e.timeStamp;
-        start.hasFirstMove = true;
-        onDragMove(piece.id, e.clientX, e.clientY, 0);
-        return;
+    if (start.mode === 'pending') {
+      /* Movement past the deadzone BEFORE the hold dwell → MOVE mode. */
+      if (Math.hypot(e.clientX - start.clientX, e.clientY - start.clientY) > DRAG_DEADZONE_PX) {
+        if (start.holdTimer !== null) clearTimeout(start.holdTimer);
+        start.holdTimer = null;
+        start.mode = 'move';
+      } else {
+        return; // still pending — waiting for movement or the hold dwell
       }
-      /* Compute instantaneous speed from consecutive pointermove timeStamps
-         (never Date.now) so velocity is deterministic in tests. When two events
-         share the same timestamp (coalesced / jsdom), dt = 0 → speed = 0, which
-         means the velocity gate is not triggered — a genuine yank has dt > 0. */
-      const dt = e.timeStamp - start.lastT;
-      const dist = Math.hypot(e.clientX - start.lastX, e.clientY - start.lastY);
-      const speedPxPerMs = dt > 0 ? dist / dt : 0;
-      start.lastX = e.clientX;
-      start.lastY = e.clientY;
-      start.lastT = e.timeStamp;
-      onDragMove(piece.id, e.clientX, e.clientY, speedPxPerMs);
     }
+    onDragMove(piece.id, e.clientX, e.clientY, start.mode);
   }
 
   function handlePointerUp(e: React.PointerEvent<SVGGElement>) {
     const start = dragRef.current;
     if (start === null) return;
+    if (start.holdTimer !== null) clearTimeout(start.holdTimer);
     dragRef.current = null;
     if (typeof e.currentTarget.releasePointerCapture === 'function') {
       try {
@@ -3557,9 +3620,11 @@ function PieceRenderer({
         // jsdom may throw if the pointer was never captured.
       }
     }
-    if (start.moved) {
+    /* A committed gesture (move or flex) ends the drag; a still-pending press was a
+       click (select), handled by handleClick. */
+    if (start.mode !== 'pending') {
       suppressClickRef.current = true;
-      onDragEnd(piece.id, e.clientX, e.clientY);
+      onDragEnd(piece.id, e.clientX, e.clientY, start.mode);
     }
   }
 

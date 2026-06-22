@@ -148,6 +148,7 @@ describe('UN-MOCKED loop closure — flush variant drop + wave on mouse-up', () 
     localStorage.clear();
   });
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -226,13 +227,19 @@ describe('UN-MOCKED loop closure — flush variant drop + wave on mouse-up', () 
       if (lastEl === null) throw new Error('last curve gone');
       const lastPose = parsePose(lastEl);
 
-      /* Slow-drag the last curve so its free endpoint is driven onto the target.
-         Same timeStamp across events ⇒ velocity gate reads slow ⇒ the chain
-         flexes (no detach). detectLoopClosure runs the REAL solveClose. */
+      /* HOLD to enter FLEX mode, then drag the last curve's free endpoint onto the
+         target. detectLoopClosure runs the REAL solveClose. (Fake timers fire the
+         hold; the async build above already ran on real timers.) */
       const ev = (t: string, x: number, y: number, button = 0) =>
         new MouseEvent(t, { bubbles: true, cancelable: true, button, clientX: x, clientY: y });
+      vi.useFakeTimers();
       act(() => {
         lastEl.dispatchEvent(ev('pointerdown', lastPose.x * SCALE, lastPose.y * SCALE));
+      });
+      act(() => {
+        vi.advanceTimersByTime(300);
+      });
+      act(() => {
         lastEl.dispatchEvent(ev('pointermove', target.x * SCALE, target.y * SCALE));
       });
 
@@ -245,6 +252,7 @@ describe('UN-MOCKED loop closure — flush variant drop + wave on mouse-up', () 
       act(() => {
         lastEl.dispatchEvent(ev('pointerup', target.x * SCALE, target.y * SCALE));
       });
+      vi.useRealTimers();
       expect(screen.queryByTestId('closure-wave')).not.toBeNull();
     } finally {
       restore();
@@ -309,30 +317,37 @@ describe('UN-MOCKED loop closure — flush variant drop + wave on mouse-up', () 
       const sy = lastPose.y * SCALE;
       const tx = target.x * SCALE;
       const ty = target.y * SCALE;
-      /* A faithful jerky drag: a baseline, then a FAST stroke (which used to yank
-         the piece off), then the operator SETTLES slowly onto the target before
-         releasing. The fast stroke must not detach; the settle closes cleanly. */
+      /* HOLD to enter FLEX mode first, then a faithful jerky drag: a baseline, a
+         FAST stroke, then SETTLE onto the target. In flex mode the jerkiness is
+         irrelevant — flexing never severs — and the settle closes cleanly. */
+      vi.useFakeTimers();
       act(() => {
         lastEl.dispatchEvent(tev('pointerdown', sx, sy, 0));
-        lastEl.dispatchEvent(tev('pointermove', sx + 6, sy, 0)); // baseline (speed 0)
       });
       act(() => {
-        /* Fast stroke most of the way (distinct timestamp ⇒ high speed). */
-        lastEl.dispatchEvent(tev('pointermove', sx + (tx - sx) * 0.85, sy + (ty - sy) * 0.85, 12));
+        vi.advanceTimersByTime(300); // hold → flex mode
+      });
+      act(() => {
+        lastEl.dispatchEvent(tev('pointermove', sx + 6, sy, 350)); // baseline
+      });
+      act(() => {
+        /* Fast stroke most of the way. */
+        lastEl.dispatchEvent(tev('pointermove', sx + (tx - sx) * 0.85, sy + (ty - sy) * 0.85, 362));
       });
       /* Mid-drag, after the fast stroke, the piece must still be on its chain. */
       expect(canvas.querySelectorAll('[data-piece-id]')).toHaveLength(10);
       act(() => {
-        /* Settle slowly onto the target (same timestamp ⇒ speed 0). */
-        lastEl.dispatchEvent(tev('pointermove', tx, ty, 12));
+        /* Settle onto the target. */
+        lastEl.dispatchEvent(tev('pointermove', tx, ty, 374));
       });
 
       /* Not yanked off: the loop is still closeable (flash present); on release the
          wave mounts (the closure committed) and all 10 pieces remain. */
       expect(canvas.querySelector('[data-closure-available="true"]')).not.toBeNull();
       act(() => {
-        lastEl.dispatchEvent(tev('pointerup', tx, ty, 24));
+        lastEl.dispatchEvent(tev('pointerup', tx, ty, 386));
       });
+      vi.useRealTimers();
       expect(screen.queryByTestId('closure-wave')).not.toBeNull();
       expect(canvas.querySelectorAll('[data-piece-id]')).toHaveLength(10);
     } finally {
