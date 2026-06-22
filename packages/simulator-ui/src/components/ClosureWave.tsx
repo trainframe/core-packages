@@ -11,6 +11,13 @@
 
 import { useEffect, useRef, useState } from 'react';
 
+/* Stable default clock. MUST be a module-level constant, not an inline default
+   (`now = () => performance.now()`): an inline default is a fresh function on
+   every render, so the animation effect (deps include `now`) would re-run on
+   every frame and reset the start time — freezing the wave at its start point in
+   production while tests that pass an explicit clock still pass. */
+const defaultNow = (): number => performance.now();
+
 /* Accumulated arc-length distances from the first point (inclusive of 0). */
 function buildCumLengths(
   points: ReadonlyArray<{ readonly x: number; readonly y: number }>,
@@ -77,7 +84,7 @@ export interface ClosureWaveProps {
 export function ClosureWave({
   pathPoints,
   durationMs,
-  now = () => performance.now(),
+  now = defaultNow,
   onDone,
 }: ClosureWaveProps) {
   const cumLengths = useRef<number[]>(buildCumLengths(pathPoints));

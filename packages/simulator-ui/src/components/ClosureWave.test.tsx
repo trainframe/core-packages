@@ -109,6 +109,35 @@ describe('ClosureWave', () => {
     }
   });
 
+  it('progresses to completion with the DEFAULT clock (no now prop)', () => {
+    /*
+     * Regression: the default `now` must be a STABLE reference. If it is created
+     * fresh on every render (`now = () => performance.now()` as a default param),
+     * the animation effect (deps [durationMs, now]) re-runs on every setT,
+     * resetting the start time — so `t` never accumulates and the pulse sticks at
+     * the start point forever (the wave looks frozen in production, even though
+     * every test that passes an explicit stable clock still passes). Driving the
+     * REAL default path here (no `now` prop, performance.now mocked to advance)
+     * the wave must still reach the end and call onDone.
+     */
+    const raf = fakeRaf();
+    let t = 0;
+    const perfSpy = vi.spyOn(performance, 'now').mockImplementation(() => t);
+    try {
+      const onDone = vi.fn();
+      render(inSvg(<ClosureWave pathPoints={SIMPLE_PATH} durationMs={1000} onDone={onDone} />));
+      /* Advance well past the duration, flushing frames as a real clock would. */
+      for (let i = 0; i < 15 && onDone.mock.calls.length === 0; i++) {
+        t += 200;
+        act(() => raf.flush());
+      }
+      expect(onDone).toHaveBeenCalledTimes(1);
+    } finally {
+      perfSpy.mockRestore();
+      raf.restore();
+    }
+  });
+
   it('pulse cx advances along the path as the clock advances', () => {
     const raf = fakeRaf();
     try {

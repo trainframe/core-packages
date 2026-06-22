@@ -262,9 +262,10 @@ export function nearestConnectablePoint(
  *
  * If the click falls within `CONNECT_CAPTURE_MM` of an open endpoint, the new
  * piece's first endpoint is snapped exactly onto that endpoint and the piece is
- * rotated (to the nearest 45°) so its incoming rail is anti-parallel to the
- * neighbour's outgoing rail — i.e. the track continues smoothly. Otherwise the
- * piece is dropped, unrotated, at the click point.
+ * rotated so its incoming rail is anti-parallel to the neighbour's actual
+ * outgoing rail — continuously, not quantised to the grid, so it stays flush
+ * even on a baked off-grid (flexed) end. Otherwise the piece is dropped,
+ * unrotated, at the click point.
  *
  * Device pieces have no endpoints and are always placed free at the click.
  *

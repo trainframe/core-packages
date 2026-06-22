@@ -157,6 +157,8 @@ export interface OpenSimulatorUiOptions {
   readonly brokerUrl?: string;
   /** When set, record a video of this page into the given directory. */
   readonly recordVideoDir?: string;
+  /** Video resolution (defaults to 1280×800). Match the viewport you set. */
+  readonly recordVideoSize?: { readonly width: number; readonly height: number };
 }
 
 export async function openSimulatorUi(
@@ -164,9 +166,10 @@ export async function openSimulatorUi(
   opts: OpenSimulatorUiOptions = {},
 ): Promise<Page> {
   const brokerUrl = opts.brokerUrl ?? 'ws://127.0.0.1:9001';
+  const videoSize = opts.recordVideoSize ?? { width: 1280, height: 800 };
   const ctx = await browser.newContext(
     opts.recordVideoDir !== undefined
-      ? { recordVideo: { dir: opts.recordVideoDir, size: { width: 1280, height: 800 } } }
+      ? { recordVideo: { dir: opts.recordVideoDir, size: videoSize } }
       : {},
   );
   await ctx.addInitScript(
@@ -211,6 +214,12 @@ export interface PlacePieceOptions {
    * placed wagon carries this colour intrinsically.
    */
   readonly carriageColor?: 'red' | 'green' | 'amber' | 'blue' | 'purple';
+  /**
+   * For `type: 'straight'`, a LILLABO length variant (30/60/110/150) to pick
+   * before placing — same arm → pick → re-arm flow a real operator uses. Omit
+   * (or 200) for the default plank.
+   */
+  readonly straightLengthMm?: number;
   /** Number of 45° rotations (`R` key presses) to apply after placing. */
   readonly rotateSteps?: number;
   /** Whether to flip the piece (`F` key) after placing — left/right curves. */
@@ -229,13 +238,27 @@ export interface PlacePieceOptions {
  *    rather than predicted from a module-level counter, which is fragile).
  */
 export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): Promise<string> {
-  const { type, xMm = 450, yMm = 300, carriageColor } = opts;
+  const { type, xMm = 450, yMm = 300, carriageColor, straightLengthMm } = opts;
 
   // Arm the toybox button if not already armed.
   const toyboxBtn = sim.getByTestId(`toybox-${type}`);
   const pressed = await toyboxBtn.getAttribute('aria-pressed');
   if (pressed !== 'true') {
     await toyboxBtn.click();
+  }
+
+  // Pick a straight length variant from the fan that opens when the straight
+  // tool is armed, then re-arm to the chosen length (press → pick → press →
+  // place — picking resets the arm). Mirrors the carriage-livery flow below.
+  if (type === 'straight' && straightLengthMm !== undefined && straightLengthMm !== 200) {
+    await sim.getByTestId(`toybox-straight-length-${straightLengthMm}`).click();
+    await toyboxBtn.click();
+    await sim.waitForFunction(
+      (t: string) =>
+        document.querySelector(`[data-testid="toybox-${t}"]`)?.getAttribute('aria-pressed') ===
+        'true',
+      type,
+    );
   }
 
   // Wait for the arm to take effect: the button must report aria-pressed="true"
