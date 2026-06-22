@@ -598,7 +598,7 @@ export function solveFollow(
      behaviour instead of flexing the ring. */
   if (!hasFlexAnchor(pieces, draggedPieceId)) return empty;
 
-  const ctx = buildRelaxContext(pieces, draggedPieceId, freeHandleIdx(pieces, draggedPieceId));
+  const ctx = buildRelaxContext(pieces, draggedPieceId, freeEndpointIndex(pieces, draggedPieceId));
   if (ctx === undefined) return empty;
 
   /* Warm-start: seed the relaxation from the previous frame's solution so the
@@ -618,20 +618,54 @@ function seedFromFlex(joints: ReadonlyArray<JointId>, flex: FlexState): number[]
   return joints.map((j) => (j === undefined ? 0 : (flex.get(jointKey(j))?.deg ?? 0)));
 }
 
-/*
- * The endpoint index of the dragged piece's free handle: the endpoint farthest
- * from the anchor at rest. Mirrors the old `handleOf` selection so solveFollow
- * keeps targeting the cursor-side end. Falls back to index 0.
+/**
+ * The endpoint index of the dragged piece's free handle — the end the cursor
+ * drags and that a closure snaps onto.
+ *
+ * Definition: the dragged piece's OPEN endpoint — the one not coincident with a
+ * neighbour (not part of any joint). This is correct for BOTH an open chain (the
+ * dangling outer end) AND a near-closed loop. The earlier "farthest from the
+ * anchor by straight-line distance" heuristic is WRONG for a near-closed loop:
+ * there the closing free end is physically NEAR the anchor (that is what makes
+ * the loop near-closed), so straight-line distance picks the jointed end and the
+ * solver drives the chain the wrong way. When there is no single open endpoint
+ * (a middle piece jointed both sides), fall back to farthest-from-anchor.
  */
-function freeHandleIdx(pieces: ReadonlyArray<TrackPiece>, draggedPieceId: string): number {
+export function freeEndpointIndex(
+  pieces: ReadonlyArray<TrackPiece>,
+  draggedPieceId: string,
+): number {
   const draggedPiece = pieces.find((p) => p.id === draggedPieceId);
   if (draggedPiece === undefined) return 0;
+
+  /* Which of the dragged piece's endpoint indices are jointed to a neighbour. */
+  const jointed = new Set<number>();
+  for (const j of buildJoints(pieces)) {
+    if (j.a.pieceId === draggedPieceId) jointed.add(j.a.endpointIdx);
+    if (j.b.pieceId === draggedPieceId) jointed.add(j.b.endpointIdx);
+  }
+
   const anchorId = selectAnchor(pieces, draggedPieceId);
   const poses = effectivePoses(pieces, new Map<string, JointFlex>(), anchorId);
   const pose = poses.get(draggedPieceId);
   const anchorPose = poses.get(anchorId);
   if (pose === undefined || anchorPose === undefined) return 0;
   const eps = getEndpointsAt(draggedPiece, pose);
+
+  /* Exactly one open (unjointed) endpoint → that is the free handle. */
+  const open = eps.map((_, i) => i).filter((i) => eps[i] !== undefined && !jointed.has(i));
+  if (open.length === 1) return open[0] ?? 0;
+
+  /* Ambiguous (a middle piece jointed both sides, or two open ends): fall back to
+     the endpoint farthest from the anchor, reproducing the old open-chain rule. */
+  return farthestEndpointIdx(eps, anchorPose);
+}
+
+/* Index of the endpoint farthest (straight-line) from `anchorPose`. */
+function farthestEndpointIdx(
+  eps: ReadonlyArray<{ x: number; y: number } | undefined>,
+  anchorPose: { x: number; y: number },
+): number {
   let bestIdx = 0;
   let bestDist = -1;
   for (let i = 0; i < eps.length; i++) {

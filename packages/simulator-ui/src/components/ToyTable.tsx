@@ -8,6 +8,7 @@ import { type WorldPosition, computeTrainTrails } from '@trainframe/simulator/tr
 import { composeEdgePath, pieceIdFromMarkerId } from '@trainframe/simulator/track/edge-path.js';
 import {
   type ClosureResult,
+  freeEndpointIndex,
   selectAnchor,
   solveClose,
   solveFollow,
@@ -2406,32 +2407,6 @@ function openEndpointsOf(
   );
 }
 
-/*
- * Free endpoint of the dragged piece = the endpoint farthest from the anchor.
- * Returns `{ ep, idx }` or null when the piece has no endpoints.
- */
-function freeEndpointOf(
-  piece: TrackPiece,
-  pose: { x: number; y: number; rotationDeg: number },
-  anchorPos: { x: number; y: number },
-): { ep: TrackEndpoint; idx: number } | null {
-  const eps = getEndpointsAt(piece, pose);
-  let best: TrackEndpoint | undefined;
-  let bestIdx = 0;
-  let bestDist = -1;
-  for (let i = 0; i < eps.length; i++) {
-    const ep = eps[i];
-    if (ep === undefined) continue;
-    const d = Math.hypot(ep.x - anchorPos.x, ep.y - anchorPos.y);
-    if (d > bestDist) {
-      bestDist = d;
-      best = ep;
-      bestIdx = i;
-    }
-  }
-  return best !== undefined ? { ep: best, idx: bestIdx } : null;
-}
-
 /**
  * Try to close a loop: find the dragged piece's free endpoint in its current
  * effective pose, check if any open endpoint on another piece is within
@@ -2452,14 +2427,20 @@ function detectLoopClosure(
     return null;
   }
 
-  const free = freeEndpointOf(draggedPiece, draggedPose, anchorPose);
-  if (free === null) return null;
+  /* The dragged piece's OPEN endpoint (the one a closure snaps onto) — its
+     pose under the current flex. Uses the same open-endpoint rule the solver
+     uses so the closure target and the followed handle agree (the old
+     farthest-from-anchor rule mispicked for a near-closed loop, where the free
+     end is physically near the anchor). */
+  const freeIdx = freeEndpointIndex(trackPieces, pieceId);
+  const freeEp = getEndpointsAt(draggedPiece, draggedPose)[freeIdx];
+  if (freeEp === undefined) return null;
 
   const open = openEndpointsOf(trackPieces, pieceId);
   let closureTarget: TaggedEndpoint | undefined;
   let closureTargetDist = CONNECT_CAPTURE_MM;
   for (const candidate of open) {
-    const d = Math.hypot(candidate.x - free.ep.x, candidate.y - free.ep.y);
+    const d = Math.hypot(candidate.x - freeEp.x, candidate.y - freeEp.y);
     if (d < closureTargetDist) {
       closureTargetDist = d;
       closureTarget = candidate;
@@ -2467,7 +2448,7 @@ function detectLoopClosure(
   }
   if (closureTarget === undefined) return null;
 
-  const result = solveClose(trackPieces, pieceId, free.idx, closureTarget);
+  const result = solveClose(trackPieces, pieceId, freeIdx, closureTarget);
   return result.feasible ? result : null;
 }
 
@@ -2878,7 +2859,20 @@ function Table({
     // piece in connects it instead of dropping it loose.
     const pieceType = e.dataTransfer.getData(TOYBOX_DRAG_MIME) as TrackPieceType | '';
     if (pieceType === '') return;
-    const placement = computePlacement(xMm, yMm, pieceType, restPieces, false, activeLayer);
+    // Thread the armed straight length so a dragged-in LILLABO variant snaps flush
+    // (same as the click path); placePiece stamps the same length on the piece, so
+    // without this the drop computes a 200mm snap but stores a shorter piece → it
+    // lands off the joint.
+    const lengthMm = pieceType === 'straight' ? armedStraightLength : undefined;
+    const placement = computePlacement(
+      xMm,
+      yMm,
+      pieceType,
+      restPieces,
+      false,
+      activeLayer,
+      lengthMm,
+    );
     onCanvasClick(placement.x, placement.y, pieceType, placement.rotationDeg);
   }
 
