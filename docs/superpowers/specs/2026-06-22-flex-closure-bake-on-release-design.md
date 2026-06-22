@@ -183,6 +183,13 @@ revert). This spec changes:
 6. **Un-mock the closure path in tests**: a real `solveClose` + real
    `newLoopCenterline`/bake integration test. *(Done: `flex-closure-bake.test.ts`
    bakes a real solve; the UI wave test drives an un-mocked solver.)*
+8. **Fix the frozen wave animation** (`ClosureWave.tsx`): the default clock
+   `now = () => performance.now()` was an inline default — a fresh function each
+   render — so the RAF effect (deps `[durationMs, now]`) re-ran on every `setT`
+   and reset the start time, freezing the pulse at the loop's start. Every unit
+   test passed because they inject a stable clock; only the recorded live demo
+   exposed it. Hoisted the default to a module-level constant; regression drives
+   the DEFAULT-clock path to completion. *(Done.)*
 
 Pure geometry stays in `packages/simulator/src/track/{flex,flex-solver,loops,
 placement,pieces}.ts`; interaction + wave in `ToyTable`; the physics canvas is a
