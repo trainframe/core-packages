@@ -261,6 +261,14 @@ interface RelaxContext {
   readonly freeEndpointIdx: number;
   /* The chain joints, anchor→dragged order; the δ vector aligns with this. */
   readonly joints: ReadonlyArray<JointId>;
+  /* Per-joint FK sign aligned with `joints`: +1 when applying a positive δ
+     INCREASES the joint's (b.rot − a.rot) grid deviation (the spanning-tree child
+     is the joint's `b` piece), −1 when it decreases it (child is `a`). The budget
+     clamp must use this so it bounds the EFFECTIVE deviation the bake produces —
+     otherwise, for joints the tree traverses `a`-first, the clamp constrains the
+     wrong sign and repeated flex/bake stints compound past budget until the joint
+     over-bends and the chain severs. */
+  readonly signs: ReadonlyArray<number>;
 }
 
 /* Normalise an angle to (-180, 180] degrees. */
@@ -296,10 +304,15 @@ function jointGridDeviation(pieces: ReadonlyArray<TrackPiece>, joint: JointId): 
   return normaliseDeg(rel - Math.round(rel / 45) * 45);
 }
 
-/* Clamp `d` so that `cur + d` stays within ±FLEX_BUDGET_DEG (an ABSOLUTE budget
-   measured from the joint's grid rest, `cur` being its current deviation). */
-function clampToBudget(d: number, cur: number): number {
-  return Math.max(-FLEX_BUDGET_DEG - cur, Math.min(FLEX_BUDGET_DEG - cur, d));
+/* Clamp δ so the EFFECTIVE joint deviation `cur + sign·d` stays within
+   ±FLEX_BUDGET_DEG (an ABSOLUTE budget from the joint's grid rest). `sign` is the
+   FK direction (+1 if a positive δ raises the (b−a) deviation, −1 if it lowers it);
+   using it keeps the clamp correct no matter which way the spanning tree traverses
+   the joint, so repeated flex/bake stints cannot accumulate past budget. */
+function clampToBudget(d: number, cur: number, sign: number): number {
+  const eff = cur + sign * d;
+  const clampedEff = Math.max(-FLEX_BUDGET_DEG, Math.min(FLEX_BUDGET_DEG, eff));
+  return sign * (clampedEff - cur); // δ that lands the effective deviation in budget
 }
 
 /* Build a FlexState from a δ vector aligned with `ctx.joints`. */
@@ -425,11 +438,16 @@ function solveLinearSystem(a: number[][], b: ReadonlyArray<number>): number[] {
   return x;
 }
 
-/* Clamp every component of a δ vector so each joint's TOTAL deviation from grid
-   (`cur[i] + δ[i]`) stays within ±FLEX_BUDGET_DEG. `cur` is the per-joint baked
-   deviation (zero for a fresh on-grid chain). */
-function clampDeltas(deltas: ReadonlyArray<number>, cur: ReadonlyArray<number>): number[] {
-  return deltas.map((d, i) => clampToBudget(d, cur[i] ?? 0));
+/* Clamp every component of a δ vector so each joint's EFFECTIVE deviation from
+   grid (`cur[i] + signs[i]·δ[i]`) stays within ±FLEX_BUDGET_DEG. `cur` is the
+   per-joint baked deviation (zero for a fresh on-grid chain); `signs` the FK
+   direction per joint. */
+function clampDeltas(
+  deltas: ReadonlyArray<number>,
+  cur: ReadonlyArray<number>,
+  signs: ReadonlyArray<number>,
+): number[] {
+  return deltas.map((d, i) => clampToBudget(d, cur[i] ?? 0, signs[i] ?? 1));
 }
 
 /*
@@ -506,6 +524,7 @@ function clampedStep(
   lambda: number,
   deltas: ReadonlyArray<number>,
   cur: ReadonlyArray<number>,
+  signs: ReadonlyArray<number>,
 ): number[] {
   const n = deltas.length;
   const locked: boolean[] = new Array(n).fill(false);
@@ -513,21 +532,23 @@ function clampedStep(
   for (let pass = 0; pass <= n; pass++) {
     const stepRad = dlsStep(jacobian, error, lambda, locked);
     trial = deltas.map((d, i) =>
-      locked[i] === true ? clampToBudget(d, cur[i] ?? 0) : d + (180 * (stepRad[i] ?? 0)) / Math.PI,
+      locked[i] === true
+        ? clampToBudget(d, cur[i] ?? 0, signs[i] ?? 1)
+        : d + (180 * (stepRad[i] ?? 0)) / Math.PI,
     );
     let newlyLocked = false;
     for (let i = 0; i < n; i++) {
       if (locked[i] === true) continue;
-      /* Lock when the joint's TOTAL deviation (baked + trial) leaves budget. */
-      const total = (trial[i] ?? 0) + (cur[i] ?? 0);
-      if (total > FLEX_BUDGET_DEG || total < -FLEX_BUDGET_DEG) {
+      /* Lock when the joint's EFFECTIVE deviation (baked + sign·trial) leaves budget. */
+      const eff = (cur[i] ?? 0) + (signs[i] ?? 1) * (trial[i] ?? 0);
+      if (eff > FLEX_BUDGET_DEG || eff < -FLEX_BUDGET_DEG) {
         locked[i] = true;
         newlyLocked = true;
       }
     }
     if (!newlyLocked) break;
   }
-  return clampDeltas(trial, cur);
+  return clampDeltas(trial, cur, signs);
 }
 
 /* Squared length of an error vector. */
@@ -547,9 +568,10 @@ function relaxDls(ctx: RelaxContext, target: PoseTarget, seed?: ReadonlyArray<nu
   /* Each joint's baked-in deviation from grid — the budget is measured from
      here, so re-flexing a baked chain cannot accumulate past ±FLEX_BUDGET_DEG. */
   const cur = ctx.joints.map((j) => jointGridDeviation(ctx.pieces, j));
+  const signs = ctx.signs;
   let deltas: number[] =
     seed !== undefined && seed.length === ctx.joints.length
-      ? clampDeltas(seed, cur)
+      ? clampDeltas(seed, cur, signs)
       : new Array(ctx.joints.length).fill(0);
   let lambda = 1.0;
 
@@ -561,7 +583,7 @@ function relaxDls(ctx: RelaxContext, target: PoseTarget, seed?: ReadonlyArray<nu
     if (currentNormSq < ERR_TOL * ERR_TOL) break;
 
     const jacobian = computeJacobian(ctx, deltas, error, target);
-    const trial = clampedStep(jacobian, error, lambda, deltas, cur);
+    const trial = clampedStep(jacobian, error, lambda, deltas, cur, signs);
 
     const trialFree = freePoseFor(ctx, trial);
     if (trialFree === undefined) break;
@@ -575,7 +597,7 @@ function relaxDls(ctx: RelaxContext, target: PoseTarget, seed?: ReadonlyArray<nu
       lambda = Math.min(lambda * 4, 1e6);
     }
   }
-  return clampDeltas(deltas, cur);
+  return clampDeltas(deltas, cur, signs);
 }
 
 /* ---------------------------------------------------------------------------
@@ -599,7 +621,18 @@ function buildRelaxContext(
   const draggedPiece = pieces.find((p) => p.id === draggedPieceId);
   if (draggedPiece === undefined) return undefined;
 
-  return { pieces, draggedPiece, anchorId, freeEndpointIdx, joints: path.joints };
+  /* The FK roots at the anchor and walks outward, so for each joint the CHILD is
+     the piece farther from the anchor (greater BFS distance). A positive δ raises
+     the child's rotation, increasing (child.rot − parent.rot); express that in the
+     joint's canonical (b − a) terms as a per-joint sign for the budget clamp. */
+  const dist = bfsDistances(anchorId, adj);
+  const signs = path.joints.map((j) => {
+    const da = dist.get(j.a.pieceId) ?? 0;
+    const db = dist.get(j.b.pieceId) ?? 0;
+    return db >= da ? 1 : -1; // child is `b` ⇒ +1, child is `a` ⇒ −1
+  });
+
+  return { pieces, draggedPiece, anchorId, freeEndpointIdx, joints: path.joints, signs };
 }
 
 /* ---------------------------------------------------------------------------

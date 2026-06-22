@@ -21,7 +21,35 @@
  */
 
 import { clusterEndpoints, collectEndpoints } from './layout-from-pieces.js';
-import type { TrackPiece } from './pieces.js';
+import { type TrackEndpoint, type TrackPiece, getEndpoints } from './pieces.js';
+
+/**
+ * Heading tolerance for a joint (degrees). Two endpoints clustered within
+ * SNAP_DISTANCE_MM only seat into a real joint when their outgoing headings are
+ * anti-parallel within this tolerance — otherwise they merely cross at a kink and
+ * the rails do not mate. Must be ≥ the flex budget (`FLEX_BUDGET_DEG = 5` in
+ * flex.ts) so that a maximally-flexed or freshly-baked seam still reads as
+ * connected; kept well below 45° so a grid-misaligned near-touch is rejected.
+ * Declared here (not imported from flex.ts) to avoid a circular import — flex.ts
+ * depends on this module.
+ */
+export const JOINT_HEADING_TOL_DEG = 7;
+
+/* Normalise to (-180, 180]. */
+function normaliseDeg(deg: number): number {
+  let d = deg % 360;
+  if (d > 180) d -= 360;
+  if (d <= -180) d += 360;
+  return d;
+}
+
+/* Whether two endpoint headings seat anti-parallel within JOINT_HEADING_TOL_DEG —
+   the rails mate (one's outgoing direction opposes the other's). */
+function headingsSeat(a: TrackEndpoint, b: TrackEndpoint): boolean {
+  return (
+    Math.abs(normaliseDeg(a.outgoingAngleDeg + 180 - b.outgoingAngleDeg)) <= JOINT_HEADING_TOL_DEG
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -94,10 +122,32 @@ function membersOfCluster(
   return members;
 }
 
-/* Emit deduplicated joints for one cluster into `joints` and `seenKeys`. */
+/* Emit deduplicated joints for one cluster into `joints` and `seenKeys`. A pair
+   only joints when its endpoints both seat within SNAP_DISTANCE_MM (already true
+   by clustering) AND their headings are anti-parallel within tolerance — a
+   grid-misaligned near-touch crosses at a kink and is NOT a connection. */
+/* The JointId for a candidate member pair, or undefined when they don't seat
+   (same piece, missing geometry, or headings not anti-parallel within tolerance). */
+function seatedJoint(
+  ma: ClusterMember,
+  mb: ClusterMember,
+  pieces: ReadonlyArray<TrackPiece>,
+  worldEps: ReadonlyArray<ReadonlyArray<TrackEndpoint>>,
+): JointId | undefined {
+  if (ma.pieceIdx === mb.pieceIdx) return undefined;
+  const pieceA = pieces[ma.pieceIdx];
+  const pieceB = pieces[mb.pieceIdx];
+  if (pieceA === undefined || pieceB === undefined) return undefined;
+  const epA = worldEps[ma.pieceIdx]?.[ma.endpointIdx];
+  const epB = worldEps[mb.pieceIdx]?.[mb.endpointIdx];
+  if (epA === undefined || epB === undefined || !headingsSeat(epA, epB)) return undefined;
+  return makeJointId(pieceA.id, ma.endpointIdx, pieceB.id, mb.endpointIdx);
+}
+
 function emitClusterJoints(
   members: ReadonlyArray<ClusterMember>,
   pieces: ReadonlyArray<TrackPiece>,
+  worldEps: ReadonlyArray<ReadonlyArray<TrackEndpoint>>,
   joints: JointId[],
   seenKeys: Set<string>,
 ): void {
@@ -105,11 +155,9 @@ function emitClusterJoints(
     for (let j = i + 1; j < members.length; j++) {
       const ma = members[i];
       const mb = members[j];
-      if (ma === undefined || mb === undefined || ma.pieceIdx === mb.pieceIdx) continue;
-      const pieceA = pieces[ma.pieceIdx];
-      const pieceB = pieces[mb.pieceIdx];
-      if (pieceA === undefined || pieceB === undefined) continue;
-      const jid = makeJointId(pieceA.id, ma.endpointIdx, pieceB.id, mb.endpointIdx);
+      if (ma === undefined || mb === undefined) continue;
+      const jid = seatedJoint(ma, mb, pieces, worldEps);
+      if (jid === undefined) continue;
       const key = jointKey(jid);
       if (seenKeys.has(key)) continue;
       seenKeys.add(key);
@@ -132,11 +180,14 @@ function emitClusterJoints(
 export function buildJoints(pieces: ReadonlyArray<TrackPiece>): ReadonlyArray<JointId> {
   const allEndpoints = collectEndpoints(pieces);
   const clusters = clusterEndpoints(allEndpoints);
+  /* World endpoints per piece (same geometry collectEndpoints clustered on), so
+     the heading check reads the rendered headings, not rest-local ones. */
+  const worldEps = pieces.map((p) => getEndpoints(p));
   const seenKeys = new Set<string>();
   const joints: JointId[] = [];
   for (const cluster of clusters) {
     const members = membersOfCluster(cluster, allEndpoints);
-    emitClusterJoints(members, pieces, joints, seenKeys);
+    emitClusterJoints(members, pieces, worldEps, joints, seenKeys);
   }
   return joints;
 }

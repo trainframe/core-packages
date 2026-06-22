@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { findLoops } from './loops.js';
+import { buildJoints, findLoops } from './loops.js';
 import { type RotationDeg, type TrackPiece, getEndpoints } from './pieces.js';
 import { computePlacement } from './placement.js';
 
@@ -118,5 +118,56 @@ describe('findLoops', () => {
 
   it('returns no loops for an open chain', () => {
     expect(findLoops(buildOpenChainOfThree())).toEqual([]);
+  });
+});
+
+describe('buildJoints — connection requires heading AND proximity (authoritative)', () => {
+  it('joints two straights whose ends seat flush and anti-parallel', () => {
+    const a = piece('A', 'straight', 300, 300, 0);
+    const aExit = getEndpoints(a)[1];
+    if (aExit === undefined) throw new Error('no exit');
+    /* Seat B onto A's exit the way the editor would (anti-parallel). */
+    const p = computePlacement(aExit.x, aExit.y, 'straight', [a]);
+    const b = piece('B', 'straight', p.x, p.y, p.rotationDeg);
+    expect(buildJoints([a, b])).toHaveLength(1);
+  });
+
+  it('does NOT joint two ends that touch but are 45° misaligned (a kink, not a seat)', () => {
+    const a = piece('A', 'straight', 300, 300, 0);
+    const aExit = getEndpoints(a)[1];
+    if (aExit === undefined) throw new Error('no exit');
+
+    /* Position a 45°-rotated straight so its entry endpoint lands exactly on A's
+       exit — coincident in position, but its heading is 45° off anti-parallel. */
+    const probe = piece('B', 'straight', 0, 0, 45);
+    const probeEntry = getEndpoints(probe)[0];
+    if (probeEntry === undefined) throw new Error('no entry');
+    const b = piece('B', 'straight', aExit.x - probeEntry.x, aExit.y - probeEntry.y, 45);
+
+    const bEntry = getEndpoints(b)[0];
+    if (bEntry === undefined) throw new Error('no b entry');
+    /* Sanity: the ends really do coincide (within snap) yet are ~45° misaligned. */
+    const gap = Math.hypot(bEntry.x - aExit.x, bEntry.y - aExit.y);
+    expect(gap).toBeLessThan(1);
+    const mismatch = Math.abs(
+      ((((aExit.outgoingAngleDeg + 180 - bEntry.outgoingAngleDeg) % 360) + 540) % 360) - 180,
+    );
+    expect(mismatch).toBeGreaterThan(40);
+
+    /* Authoritative rule: a 45° kink is NOT a connection. */
+    expect(buildJoints([a, b])).toHaveLength(0);
+  });
+
+  it('still joints a maximally-flexed seam (heading within the flex give)', () => {
+    /* Two straights seated flush, then the second rotated by ~5° (the flex
+       budget) about the shared point — still a real seat, must stay jointed. */
+    const a = piece('A', 'straight', 300, 300, 0);
+    const aExit = getEndpoints(a)[1];
+    if (aExit === undefined) throw new Error('no exit');
+    const probe = piece('B', 'straight', 0, 0, 5);
+    const probeEntry = getEndpoints(probe)[0];
+    if (probeEntry === undefined) throw new Error('no entry');
+    const b = piece('B', 'straight', aExit.x - probeEntry.x, aExit.y - probeEntry.y, 5);
+    expect(buildJoints([a, b])).toHaveLength(1);
   });
 });
