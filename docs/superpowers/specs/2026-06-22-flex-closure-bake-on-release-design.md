@@ -166,7 +166,16 @@ revert). This spec changes:
 3. **Length-aware placement** (`placement.ts` `computePlacement`): thread the
    candidate's `lengthMm` so a LILLABO straight variant snaps flush — otherwise
    the uneven oval can't be laid flush at all. *(Done; flush-placement test
-   added. UI click/drop call sites must pass the armed straight length.)*
+   added. BOTH UI call sites — click AND drop — pass the armed straight length;
+   the drop site was a second-pass review finding, now fixed + tested.)*
+7. **Free-endpoint selection by OPEN endpoint** (`flex-solver.ts`
+   `freeEndpointIndex`, used by `solveFollow` and `detectLoopClosure`): the
+   handle the cursor drags / a closure snaps onto is the dragged piece's OPEN
+   (unjointed) endpoint, not "farthest from the anchor by straight-line
+   distance." The old rule mispicked for a near-closed loop — there the closing
+   free end is physically NEAR the anchor — so a real closing drag drove the
+   chain the wrong way and never flashed/closed. Exposed by the un-mocked wave
+   test; fixed and regression-guarded. *(Done.)*
 4. **Harden `selectAnchor`** (`flex-solver.ts`): pick the farthest junction (then
    farthest open end). *(Done; discriminating two-junction test added.)*
 5. **Validate the solver reach** (`flex-solver.ts` constants): per "Closure solve
