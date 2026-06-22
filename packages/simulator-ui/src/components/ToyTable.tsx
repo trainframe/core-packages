@@ -116,6 +116,26 @@ type DragMode = 'move' | 'flex';
 const DRAG_DEADZONE_PX = 6;
 /** Press-and-hold dwell (ms, within the deadzone) that engages FLEX mode. */
 const FLEX_HOLD_MS = 250;
+/** How many committed track edits the undo stack retains. Bounded so a long
+ *  building session can't grow memory without limit; older edits fall off. */
+const UNDO_LIMIT = 100;
+
+/** True when a key event targets a text-entry surface (input, textarea, or any
+ *  contenteditable). Track-edit hotkeys MUST ignore these so typing — including
+ *  the browser's own Cmd/Ctrl+Z text-undo — is never hijacked. */
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLTextAreaElement ||
+    (target instanceof HTMLElement && target.isContentEditable)
+  );
+}
+
+/** True for the Undo chord — Cmd (mac) or Ctrl, plus Z, WITHOUT Shift (Shift+Z
+ *  is the conventional redo and is left alone). */
+function isUndoChord(e: KeyboardEvent): boolean {
+  return (e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z');
+}
 
 /** MIME type for pieces being dragged from the toybox onto the canvas. */
 const TOYBOX_DRAG_MIME = 'application/x-trainframe-toybox-type';
@@ -921,6 +941,10 @@ declare global {
      * frame to compare rendered geometry against the geometric joint graph.
      * Registered behind `import.meta.env.DEV`; absent in production. */
     __tfConnectivity?: (() => { components: number; loops: number; maxDev: number }) | undefined;
+    /** DEV-only: current depth of the track-edit undo stack. The adversarial
+     * harness reads it to confirm an edit pushed an entry and an undo popped it.
+     * Registered behind `import.meta.env.DEV`; absent in production. */
+    __tfUndoDepth?: (() => number) | undefined;
   }
 }
 
@@ -1018,6 +1042,11 @@ interface ToyTableProps {
 export function ToyTable({ initialUrl }: ToyTableProps) {
   const { client } = useBroker();
   const [pieces, setPieces] = useState<ReadonlyArray<TrackPiece>>([]);
+  /* Ref mirror of the committed pieces, kept current every render so any handler
+     (and the undo snapshot) can read the latest committed state without a stale
+     closure. */
+  const piecesRef = useRef(pieces);
+  piecesRef.current = pieces;
   /* Closure wave: when a drop closes a new loop, the rail centreline points for
      that loop are stored here so <ClosureWave> can animate the glow pulse. Null
      when no wave is active. Cleared by the wave itself via onDone. */
@@ -1041,6 +1070,42 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     setFlex(next);
     setFlexAnchorId(next.size === 0 ? null : anchorId);
   }, []);
+
+  /*
+   * Track-edit UNDO. Every committed edit (place, move/reposition, attach,
+   * detach, delete, rotate, flip, flex-pose bake, closure) snapshots the CURRENT
+   * committed pieces onto a bounded stack BEFORE mutating them, via `pushUndo`.
+   * `undo` pops the last snapshot and restores it verbatim — the exact prior
+   * piece set + poses — so an accidental click-hold flex or move that makes the
+   * track jump is recoverable. The pieces arrays are immutable (every edit builds
+   * a new array), so a stored snapshot is a faithful frozen state; restoring it
+   * cannot resurrect a forked one. Loading a fresh layout (demo / external load)
+   * is NOT an undoable edit — it clears the stack so undo can't cross into a
+   * different layout. Bounded to the most recent `UNDO_LIMIT` edits.
+   */
+  const undoStackRef = useRef<ReadonlyArray<ReadonlyArray<TrackPiece>>>([]);
+  const [undoCount, setUndoCount] = useState(0);
+  const pushUndo = useCallback(() => {
+    const next = [...undoStackRef.current, piecesRef.current];
+    undoStackRef.current = next.length > UNDO_LIMIT ? next.slice(next.length - UNDO_LIMIT) : next;
+    setUndoCount(undoStackRef.current.length);
+  }, []);
+  const clearUndo = useCallback(() => {
+    undoStackRef.current = [];
+    setUndoCount(0);
+  }, []);
+  const undo = useCallback(() => {
+    const stack = undoStackRef.current;
+    const restored = stack[stack.length - 1];
+    if (restored === undefined) return; // empty stack: a safe no-op
+    undoStackRef.current = stack.slice(0, -1);
+    setUndoCount(undoStackRef.current.length);
+    /* Drop any transient flex first so the restored committed poses render
+       cleanly (an undo issued mid-flex must not leave a phantom bend), then
+       restore the exact prior committed state. */
+    applyFlexState(new Map(), null);
+    setPieces(restored);
+  }, [applyFlexState]);
   /* Mirrors so a release handler can read the live flex without re-subscribing. */
   const flexRef = useRef(flex);
   flexRef.current = flex;
@@ -1067,9 +1132,10 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     const f = flexRef.current;
     if (f.size === 0) return;
     const anchorId = flexAnchorRef.current ?? undefined;
+    pushUndo();
     setPieces((prev) => [...applyFlex(prev, f, anchorId)]);
     applyFlexState(new Map(), null);
-  }, [applyFlexState]);
+  }, [applyFlexState, pushUndo]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /** Which piece type the operator has "armed" from the toybox, if any. */
   const [armedType, setArmedType] = useState<TrackPieceType | null>(null);
@@ -1102,9 +1168,6 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
    * Absent ⇒ the fresh-crane default. Grows on a lift, shrinks on a place —
    * the crates themselves are cosmetic, never on the wire. */
   const [craneStacks, setCraneStacks] = useState<ReadonlyMap<string, number>>(() => new Map());
-  /** Pieces the operator has placed into the scan box. Keyed by piece id. */
-  const piecesRef = useRef(pieces);
-  piecesRef.current = pieces;
   /** Ref kept in sync with `liveIds` so the pagehide handler can read the
    * latest set without capturing a stale closure. */
   const liveIdsRef = useRef(liveIds);
@@ -1214,6 +1277,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     if (!import.meta.env.DEV) return;
     window.__tfLoadBridgeDemo = () => {
       const demo = buildBridgeDemo();
+      clearUndo();
       setPieces(demo.pieces);
       setLiveIds(new Set(demo.liveIds));
       // Commission every piece on the bus exactly as the scan-box would, so an
@@ -1229,7 +1293,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     return () => {
       window.__tfLoadBridgeDemo = undefined;
     };
-  }, [client]);
+  }, [client, clearUndo]);
 
   // DEV-only: stage the multi-train railyard railyard demo — a main loop with the
   // yard hung off it as a junction branch, trains each with a coloured rake, and
@@ -1248,6 +1312,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     if (!import.meta.env.DEV) return;
     window.__tfLoadRailyardDemo = () => {
       const demo = buildRailyardDemo();
+      clearUndo();
       setPieces(demo.pieces);
       setLiveIds(new Set(demo.liveIds));
       let garage = garageRegisteredRef.current;
@@ -1274,7 +1339,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     return () => {
       window.__tfLoadRailyardDemo = undefined;
     };
-  }, [client, hardwareRef]);
+  }, [client, hardwareRef, clearUndo]);
 
   // DEV-only: stage an exact set of pieces (no bus side effects). The connection
   // regression test and the replay/fuzz video harness use this to put the logged
@@ -1282,9 +1347,13 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   useEffect(() => {
     if (!import.meta.env.DEV) return;
     window.__tfLoadPieces = (next) => {
+      clearUndo();
       setPieces([...next]);
       setSelectedId(null);
     };
+    /* Undo-stack depth, for the adversarial harness to confirm an edit pushed an
+       entry and an undo popped it (the operation engaged, not vacuous). */
+    window.__tfUndoDepth = () => undoStackRef.current.length;
     /* Authoritative-connection metrics for the rendered (effective) geometry, so
        the adversarial harness can check rendered == geometric joint graph. */
     window.__tfConnectivity = () => {
@@ -1304,8 +1373,9 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     return () => {
       window.__tfLoadPieces = undefined;
       window.__tfConnectivity = undefined;
+      window.__tfUndoDepth = undefined;
     };
-  }, []);
+  }, [clearUndo]);
 
   // pagehide: publish `device_disconnected` for every wire-visible live
   // device before the WebSocket tears down. Playwright's `page.close()`
@@ -1393,45 +1463,50 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
           straightLength: armedStraightLength,
         }),
       };
+      pushUndo();
       setPieces((prev) => [...prev, piece]);
       setSelectedId(piece.id);
       // Stay armed so the operator can drop multiple of the same type without
       // re-clicking the toybox.
     },
-    [armedType, activeLayer, armedCarriageColor, armedTrainColor, armedStraightLength],
+    [armedType, activeLayer, armedCarriageColor, armedTrainColor, armedStraightLength, pushUndo],
   );
 
   // Reposition an already-placed piece (dragged across the canvas). Snaps +
   // orients onto a neighbour's open end when one is in reach; otherwise drops
   // it where released, keeping its current rotation so a free move doesn't
   // surprise-rotate it back to 0°.
-  const movePiece = useCallback((pieceId: string, xMm: number, yMm: number) => {
-    setPieces((prev) => {
-      /* Placement is a REST-domain operation: snap the moved piece to a
+  const movePiece = useCallback(
+    (pieceId: string, xMm: number, yMm: number) => {
+      pushUndo();
+      setPieces((prev) => {
+        /* Placement is a REST-domain operation: snap the moved piece to a
          neighbour's REST endpoint so applyFlex's forward kinematics then
          positions it correctly at the (possibly flexed) joint. Snapping against
          effective geometry here double-counts the neighbour's flex via FK. */
-      const moving = prev.find((p) => p.id === pieceId);
-      if (moving === undefined) return prev;
-      const others = prev.filter((p) => p.id !== pieceId);
-      const placement = computeMovePlacement(moving, xMm, yMm, others);
-      // A moved train re-orients to its (new) spawn edge so it stays pop-free.
-      const orient =
-        moving.type === 'train'
-          ? spawnOrientationDeg({ x: placement.x, y: placement.y }, others)
-          : undefined;
-      return prev.map((p) =>
-        p.id === pieceId
-          ? {
-              ...p,
-              position: { x: placement.x, y: placement.y },
-              rotationDeg: orient ?? placement.rotationDeg,
-            }
-          : p,
-      );
-    });
-    setSelectedId(pieceId);
-  }, []);
+        const moving = prev.find((p) => p.id === pieceId);
+        if (moving === undefined) return prev;
+        const others = prev.filter((p) => p.id !== pieceId);
+        const placement = computeMovePlacement(moving, xMm, yMm, others);
+        // A moved train re-orients to its (new) spawn edge so it stays pop-free.
+        const orient =
+          moving.type === 'train'
+            ? spawnOrientationDeg({ x: placement.x, y: placement.y }, others)
+            : undefined;
+        return prev.map((p) =>
+          p.id === pieceId
+            ? {
+                ...p,
+                position: { x: placement.x, y: placement.y },
+                rotationDeg: orient ?? placement.rotationDeg,
+              }
+            : p,
+        );
+      });
+      setSelectedId(pieceId);
+    },
+    [pushUndo],
+  );
 
   /* When a drop commits a loop closure, find the cycle containing the dragged
      piece in the committed effective geometry and mount the ClosureWave for one
@@ -1446,27 +1521,30 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       const anchorId = selectAnchor(piecesRef.current, draggedPieceId);
       const pts = newLoopCenterline(piecesRef.current, closureFlex, draggedPieceId, anchorId);
       const baked = applyFlex(piecesRef.current, closureFlex, anchorId);
+      pushUndo();
       setPieces([...baked]);
       applyFlexState(new Map(), null);
       if (pts !== null) setClosureWavePoints(pts);
     },
-    [applyFlexState],
+    [applyFlexState, pushUndo],
   );
 
   const rotateSelected = useCallback(() => {
     if (selectedId === null) return;
+    pushUndo();
     setPieces((prev) =>
       prev.map((p) =>
         p.id === selectedId ? { ...p, rotationDeg: nextRotation(p.rotationDeg) } : p,
       ),
     );
-  }, [selectedId]);
+  }, [selectedId, pushUndo]);
 
   // Flip (mirror) the selected piece — a right-hand curve becomes left-hand. If
   // the piece is connected to a neighbour, re-snap it onto that joint so it
   // stays joined, just bending the other way; a free piece mirrors in place.
   const flipSelected = useCallback(() => {
     if (selectedId === null) return;
+    pushUndo();
     setPieces((prev) => {
       const target = prev.find((p) => p.id === selectedId);
       if (target === undefined) return prev;
@@ -1504,10 +1582,11 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
         return { ...p, flipped };
       });
     });
-  }, [selectedId]);
+  }, [selectedId, pushUndo]);
 
   const deleteSelected = useCallback(() => {
     if (selectedId === null) return;
+    pushUndo();
     setPieces((prev) => prev.filter((p) => p.id !== selectedId));
     setLiveIds((prev) => {
       if (!prev.has(selectedId)) return prev;
@@ -1524,7 +1603,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       return next;
     });
     setSelectedId(null);
-  }, [selectedId]);
+  }, [selectedId, pushUndo]);
 
   // Keyboard: R rotates, F flips, Delete/Backspace deletes, Escape clears.
   useEffect(() => {
@@ -1538,7 +1617,14 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       Escape: () => setSelectedId(null),
     };
     function onKeyDown(e: KeyboardEvent) {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (isTextEntryTarget(e.target)) return;
+      /* Undo (Cmd/Ctrl+Z) works regardless of selection — an accidental flex/move
+         that jumped the track is recoverable even with nothing selected. */
+      if (isUndoChord(e)) {
+        e.preventDefault();
+        undo();
+        return;
+      }
       if (selectedId === null) return;
       const handler = handlers[e.key];
       if (handler === undefined) return;
@@ -1547,7 +1633,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [selectedId, rotateSelected, flipSelected, deleteSelected]);
+  }, [selectedId, rotateSelected, flipSelected, deleteSelected, undo]);
 
   // Describe a piece for the ScanBox's confirmation panel. Called on drop;
   // no broker events are fired here — only on Bind.
@@ -1753,6 +1839,8 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
           selectedPiece={selectedPiece}
           selectedLive={selectedPiece !== null && liveIds.has(selectedPiece.id)}
           selectedPoweredOff={selectedPiece !== null && poweredOffIds.has(selectedPiece.id)}
+          onUndo={undo}
+          canUndo={undoCount > 0}
           onRotate={rotateSelected}
           onFlip={flipSelected}
           onDelete={deleteSelected}
@@ -2105,6 +2193,10 @@ interface ActionBarProps {
   readonly selectedLive: boolean;
   /** Whether the selected (live) train is powered OFF in place. */
   readonly selectedPoweredOff: boolean;
+  /** Revert the last committed track edit. */
+  readonly onUndo: () => void;
+  /** Whether there is any edit to undo (the button is disabled otherwise). */
+  readonly canUndo: boolean;
   readonly onRotate: () => void;
   readonly onFlip: () => void;
   readonly onDelete: () => void;
@@ -2247,6 +2339,8 @@ function ActionBar({
   selectedPiece,
   selectedLive,
   selectedPoweredOff,
+  onUndo,
+  canUndo,
   onRotate,
   onFlip,
   onDelete,
@@ -2270,6 +2364,15 @@ function ActionBar({
   const canTogglePower = selectedPiece !== null && selectedLive && selectedPiece.type === 'train';
   return (
     <div className="tf-toytable__actions">
+      <button
+        type="button"
+        onClick={onUndo}
+        disabled={!canUndo}
+        data-testid="undo-button"
+        title="Undo the last track edit (⌘/Ctrl+Z)"
+      >
+        Undo (⌘Z)
+      </button>
       <button type="button" onClick={onRotate} disabled={selectedPiece === null}>
         Rotate (R)
       </button>

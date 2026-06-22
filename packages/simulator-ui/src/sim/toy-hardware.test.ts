@@ -965,7 +965,14 @@ function seedTagsAsScanFlow(
   id: () => string,
   nowIso: () => string,
 ): void {
-  emitEvent(bus, 'device_registered', 'GARAGE', { capabilities: ['core.assigns_tags'] }, id, nowIso);
+  emitEvent(
+    bus,
+    'device_registered',
+    'GARAGE',
+    { capabilities: ['core.assigns_tags'] },
+    id,
+    nowIso,
+  );
   for (const m of layout.markers) {
     emitEvent(
       bus,
@@ -981,10 +988,7 @@ function seedTagsAsScanFlow(
 /** The operator's single Learn-track gesture, published exactly as `LearnTrackPanel`
  *  does: an empty payload on `railway/operator/learn_track_start`. */
 function pressLearnTrack(bus: InMemoryBrokerClient): void {
-  bus.publish(
-    'railway/operator/learn_track_start',
-    new TextEncoder().encode(JSON.stringify({})),
-  );
+  bus.publish('railway/operator/learn_track_start', new TextEncoder().encode(JSON.stringify({})));
 }
 
 /** Distinct marker ids the given train traversed, harvested from the scheduler's
@@ -1041,7 +1045,12 @@ describe('ToyHardware — Learn track over the broker (the live operator path)',
       edges: [],
       junctions: full.junctions ?? [],
     };
-    const server = new Server({ layout: discoveryLayout, client: serverFacade(bus), newId: id, now });
+    const server = new Server({
+      layout: discoveryLayout,
+      client: serverFacade(bus),
+      newId: id,
+      now,
+    });
     server.start();
     seedTagsAsScanFlow(bus, discoveryLayout, id, nowIso);
 
