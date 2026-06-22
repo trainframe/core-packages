@@ -40,9 +40,22 @@ and discarded. Baking applies whether or not the drag closed a loop:
   the joint graph closes the cycle, and a one-shot **wave** runs.
 
 Because committed state is always single-frame baked poses (never a flex map),
-the bug classes above are structurally impossible: snap targets, the drawn
-track, compile, and render all read the same stored poses; there is no map to go
-stale on an edit.
+the *stale-map* bug classes above are structurally impossible: snap targets, the
+drawn track, compile, and render all read the same stored poses; there is no map
+to go stale on an edit.
+
+**One bug the single frame does NOT fix for free (caught by adversarial review).**
+Baking an open chain leaves its open end at an *off-grid* `rotationDeg` (the
+flex angle). The placement snap (`snapToAnchor`) historically rounded a new
+piece's rotation to the nearest 45°, so attaching to a baked off-grid end left
+the rail kinked by the flex angle even though the position coincided — the
+"can't attach to a flexed line / snaps to an invisible point" defect, just
+relocated from the flex map into the stored pose. The fix is mandatory and
+specific: **`snapToAnchor` must align the new piece CONTINUOUSLY anti-parallel
+to the anchor's actual `outgoingAngleDeg`, never quantised to the grid** (a
+no-op for on-grid neighbours; the difference only shows on baked ends). Guarded
+by an explicit attach-after-bake regression (`flex-attach.test.ts`): gap < ε AND
+heading kink < ε with an empty flex map.
 
 ## The anchor (why a slow drag deforms instead of sliding)
 
@@ -56,13 +69,15 @@ still while you flex one end. Selection, in order:
 2. Otherwise the **far open end** — the piece at maximum joint-distance from the
    dragged piece (BFS over the joint graph).
 
-**Robustness requirement (a known failure):** `selectAnchor` must return a piece
-that yields a *long* anchor→dragged chain so the bend distributes across many
-joints. On a malformed/short component it returns an adjacent piece, giving a
-degenerate 1-joint chain and almost no reach. The implementation must guarantee
-the anchor is the farthest reachable piece (or a junction), and tests must cover
-a multi-joint chain explicitly (assert the chain length and that ≥N joints carry
-non-zero δ on a closing solve).
+**Robustness requirement (hardened).** `selectAnchor` must return a piece that
+yields a *long* anchor→dragged chain so the bend distributes across many joints.
+The original code returned the *first* junction in iteration order regardless of
+its distance — an adjacent junction gives a degenerate 1-joint chain. Hardened:
+among junctions it now picks the **farthest** one (max BFS distance), falling
+back to the farthest open end when there is no junction. Covered by a
+discriminating test (two junctions, the near one ordered first in the array,
+assert the far one is chosen) plus the ≥3-non-zero-δ distribution assertion in
+the closure test.
 
 A **free / non-anchored** component (a closed loop with no junction, nothing else
 placed) has no fixed reference, so a drag there translates rigidly — no flex.
@@ -100,20 +115,31 @@ rest), the **uneven stadium oval** disproves it:
   and 0.00° heading error** (the loop still sweeps exactly 360°, so the closing
   joint stays anti-parallel; only the position is off). This is the most common
   real near-miss — people build slightly-uneven ovals constantly.
-- Sides 150/110 → **40 mm** gap; 200/150 → **50 mm** gap. Both sit in the flex
-  band: above auto-snap (`SNAP_DISTANCE_MM = 30`), below capture
-  (`CONNECT_CAPTURE_MM = 60`).
-- `solveClose` closes both to **post-gap 0.00 mm** within the existing
+- **The gap depends on construction, not just the nominal side lengths** (a point
+  the adversarial review made and the test now pins). The closing gap is a
+  property of *where the closing piece's free end actually sits*, which the
+  accumulated curve geometry and the exact build order affect. The same nominal
+  "200/150 stadium" can land either auto-snapped-shut at rest (residual ≤ 30 mm →
+  placement closes it, `findLoops = 1`, nothing for the solver to do) or in-band,
+  depending on how it was laid. So the figures below are **the verified gap of
+  the specific build in the test**, not a guarantee derived from side lengths.
+- The `closure-bakes-cycle` test layout — sides **150 / 110 built piece-by-piece
+  through `computePlacement`** — lands a **~40 mm** gap that sits in the flex band:
+  above auto-snap (`SNAP_DISTANCE_MM = 30`), below capture
+  (`CONNECT_CAPTURE_MM = 60`), and genuinely open at rest. The test asserts these
+  preconditions *before* solving (gap in (30, 60), `findLoops = 0`) so it cannot
+  silently pass on an auto-snapped loop.
+- `solveClose` closes it to **post-gap 0.00 mm** within the existing
   `FLEX_BUDGET_DEG = 5` budget (max |δ| ≈ 3.25°), distributing the bend across
-  **all 9 joints** (not piling onto one). `selectAnchor` returns the far piece
-  (9 joints from the dragged end), not an adjacent one.
+  ≥3 joints (≥1 non-zero δ asserted). `selectAnchor` returns the far piece, not
+  an adjacent one.
 
 So the band is genuinely reachable and **no constant change is needed**:
 `FLEX_BUDGET_DEG = 5`, `FLEX_GIVE_MM = 2` stand. The acceptance bar — "a
-hand-buildable near-closed loop flexes shut" — is met by the uneven stadium oval,
-which becomes the `closure-bakes-cycle` test layout. (Gaps below 30 mm auto-snap
-at rest and never reach the solver; gaps above ~64 mm exceed reach and are
-correctly reported infeasible.)
+hand-buildable near-closed loop flexes shut" — is met and pinned by the test,
+which asserts the rest gap is in-band and the loop genuinely open *before* it
+solves. (Gaps below 30 mm auto-snap at rest and never reach the solver; gaps
+above ~64 mm exceed reach and are correctly reported infeasible.)
 
 ## The wave
 
@@ -131,13 +157,23 @@ revert). This spec changes:
 
 1. **Bake non-closure flex too** (`ToyTable` drag-end): replace the "revert on
    non-closure release" branch with "bake the transient bent poses into the
-   pieces." Same bake path the closure uses, minus the join + wave.
-2. **Harden `selectAnchor`** (`flex-solver.ts`): guarantee the farthest-reachable
-   anchor (or junction); add the multi-joint-distribution invariant + test.
-3. **Validate / tune the solver reach** (`flex-solver.ts` constants): per task 1
-   above.
-4. **Un-mock the closure path in tests**: a real `solveClose` + real
-   `newLoopCenterline` integration test (currently mocked).
+   pieces." Same bake path the closure uses, minus the join + wave. *(Done:
+   `handleFlexBake`.)*
+2. **Continuous snap to baked off-grid ends** (`placement.ts` `snapToAnchor`):
+   align a new piece anti-parallel to the anchor's actual heading instead of
+   rounding to the 45° grid — required so attaching to a baked flexed end does
+   not kink. *(Done; attach-after-bake regression added.)*
+3. **Length-aware placement** (`placement.ts` `computePlacement`): thread the
+   candidate's `lengthMm` so a LILLABO straight variant snaps flush — otherwise
+   the uneven oval can't be laid flush at all. *(Done; flush-placement test
+   added. UI click/drop call sites must pass the armed straight length.)*
+4. **Harden `selectAnchor`** (`flex-solver.ts`): pick the farthest junction (then
+   farthest open end). *(Done; discriminating two-junction test added.)*
+5. **Validate the solver reach** (`flex-solver.ts` constants): per "Closure solve
+   & reach" above — no change needed; the uneven oval lands in band. *(Done.)*
+6. **Un-mock the closure path in tests**: a real `solveClose` + real
+   `newLoopCenterline`/bake integration test. *(Done: `flex-closure-bake.test.ts`
+   bakes a real solve; the UI wave test drives an un-mocked solver.)*
 
 Pure geometry stays in `packages/simulator/src/track/{flex,flex-solver,loops,
 placement,pieces}.ts`; interaction + wave in `ToyTable`; the physics canvas is a

@@ -187,6 +187,31 @@ describe('selectAnchor', () => {
     /* Dragging S4 (far east end): anchor should be S0 */
     expect(selectAnchor(chain, 'S4')).toBe('S0');
   });
+
+  it('picks the FARTHEST junction, not an adjacent one (hardening)', () => {
+    /*
+     * A junction's trunk/through endpoints (±100, angles 180/0) are collinear like
+     * a straight, so junctions sit inline in a straight chain with the branch
+     * dangling. Two junctions: J0 at the far end, J3 near the dragged piece. The
+     * pieces are ordered so the NEAR junction (J3) appears FIRST in iteration —
+     * a naive "first junction in iteration order" would pick it and give a
+     * degenerate 2-joint chain. The hardened selector must instead pick the
+     * FARTHEST junction (J0, 5 joints away) so the bend distributes widely.
+     */
+    const at = (id: string, type: TrackPiece['type'], x: number): TrackPiece =>
+      piece(id, type, x, 0, 0);
+    /* Geometry order along x: J0,1,2,J3,4,5 — but array order puts J3 before J0. */
+    const chain: TrackPiece[] = [
+      at('J3', 'junction', 600),
+      at('P4', 'straight', 800),
+      at('P5', 'straight', 1000),
+      at('J0', 'junction', 0),
+      at('P1', 'straight', 200),
+      at('P2', 'straight', 400),
+    ];
+    /* Dragging P5 (far east): J0 is 5 joints away, J3 is 2 joints away. */
+    expect(selectAnchor(chain, 'P5')).toBe('J0');
+  });
 });
 
 /* ---------------------------------------------------------------------------

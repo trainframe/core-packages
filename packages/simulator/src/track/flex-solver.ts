@@ -213,12 +213,21 @@ export function selectAnchor(pieces: ReadonlyArray<TrackPiece>, draggedPieceId: 
   /* BFS distances from the dragged piece to find all connected members. */
   const distances = bfsDistances(draggedPieceId, adj);
 
-  /* Prefer any junction piece that is not the dragged piece. */
+  /* Prefer the FARTHEST junction in the component (not the first in iteration
+     order): a junction adjacent to the dragged piece gives a degenerate 1-joint
+     chain with almost no flex reach, whereas the farthest junction maximises the
+     number of joints the bend distributes across. */
+  let junctionId: string | undefined;
+  let junctionDist = -1;
   for (const p of pieces) {
-    if (p.type === 'junction' && p.id !== draggedPieceId && distances.has(p.id)) {
-      return p.id;
+    if (p.type !== 'junction' || p.id === draggedPieceId) continue;
+    const d = distances.get(p.id);
+    if (d !== undefined && d > junctionDist) {
+      junctionDist = d;
+      junctionId = p.id;
     }
   }
+  if (junctionId !== undefined) return junctionId;
 
   /* Fall back to the piece with maximum BFS distance. */
   let farthestId = draggedPieceId;

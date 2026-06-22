@@ -1751,6 +1751,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
             poweredOffIds={poweredOffIds}
             selectedId={selectedId}
             armedType={armedType}
+            armedStraightLength={armedStraightLength}
             activeLayer={activeLayer}
             trainTrails={trainTrails}
             renderPositions={renderPositions}
@@ -2314,6 +2315,9 @@ interface TableProps {
   readonly poweredOffIds: ReadonlySet<string>;
   readonly selectedId: string | null;
   readonly armedType: TrackPieceType | null;
+  /** The armed straight length (mm), threaded into the click-place snap so a
+   *  LILLABO variant lands flush onto a neighbour instead of as a 200mm plank. */
+  readonly armedStraightLength: number;
   /** The deck new pieces land on / snapping is gated to (0 = ground). */
   readonly activeLayer: number;
   /** The live hardware, used to read each live train's current edge so it draws
@@ -2543,6 +2547,10 @@ export function newLoopCenterline(
   closureFlex: FlexState,
   draggedPieceId: string,
 ): ReadonlyArray<{ readonly x: number; readonly y: number }> | null {
+  /* No anchor override: for a clean closure the FK shape is anchor-independent
+     (the whole cycle is rigid once closed), so the wave centreline matches the
+     baked geometry handleClosureCommit committed (which DID pass the solver's
+     anchor) up to an overall placement that a closed loop fixes. */
   const afterEffective = applyFlex(restPieces, closureFlex);
   const afterPieces = asTrackPieces(afterEffective);
   /* Find the cycle that contains the dragged piece in the committed effective
@@ -2582,6 +2590,7 @@ function Table({
   poweredOffIds,
   selectedId,
   armedType,
+  armedStraightLength,
   activeLayer,
   hardware,
   trainTrails,
@@ -2807,7 +2816,19 @@ function Table({
     // Armed: snap + orient the new piece to continue from a nearby open
     // endpoint so curved loops can be built by clicking, not pixel-nudging.
     // Gated to the active layer so an upper-deck piece ignores ground joints.
-    const placement = computePlacement(xMm, yMm, armedType, restPieces, false, activeLayer);
+    // Pass the armed straight length so a LILLABO variant snaps flush (its own
+    // half-length, not 200mm, sets where its centre sits) — without it an uneven
+    // oval can't be laid flush, and that's exactly the loop flex-closure needs.
+    const lengthMm = armedType === 'straight' ? armedStraightLength : undefined;
+    const placement = computePlacement(
+      xMm,
+      yMm,
+      armedType,
+      restPieces,
+      false,
+      activeLayer,
+      lengthMm,
+    );
     onCanvasClick(placement.x, placement.y, armedType, placement.rotationDeg);
   }
 
