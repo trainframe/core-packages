@@ -271,3 +271,49 @@ describe('30 mm straight snapping', () => {
     expect(placement2.connected).toBe(true);
   });
 });
+
+describe('length-variant straight snaps FLUSH', () => {
+  it('a 110 mm straight snapped onto a neighbour meets it with no gap', () => {
+    /* A default 200 mm straight at the origin: its east endpoint is at (100,0). */
+    const anchor: TrackPiece = {
+      id: 'A',
+      type: 'straight',
+      position: { x: 0, y: 0 },
+      rotationDeg: 0,
+      tagged: false,
+    };
+    const anchorEast = getEndpoints(anchor)[1];
+    if (anchorEast === undefined) throw new Error('no east endpoint');
+
+    /* Place a 110 mm straight by clicking on the anchor's east end. Because the
+       candidate's own half-length (55 mm, not 100 mm) sets where its centre must
+       sit for its entry to land on the anchor, computePlacement MUST receive the
+       length — otherwise it positions a 200 mm centre and the 110 mm piece's
+       entry lands ~45 mm short of the joint. */
+    const placement = computePlacement(
+      anchorEast.x,
+      anchorEast.y,
+      'straight',
+      [anchor],
+      false,
+      0,
+      110,
+    );
+    expect(placement.connected).toBe(true);
+
+    const placed: TrackPiece = {
+      id: 'B',
+      type: 'straight',
+      position: { x: placement.x, y: placement.y },
+      rotationDeg: placement.rotationDeg,
+      tagged: false,
+      lengthMm: 110,
+    };
+    const placedWest = getEndpoints(placed)[0];
+    if (placedWest === undefined) throw new Error('no west endpoint');
+
+    /* The 110 mm piece's entry coincides with the anchor's east end. */
+    const gap = Math.hypot(placedWest.x - anchorEast.x, placedWest.y - anchorEast.y);
+    expect(gap).toBeLessThan(0.001);
+  });
+});

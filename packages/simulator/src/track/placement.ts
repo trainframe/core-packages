@@ -277,6 +277,7 @@ export function computePlacement(
   pieces: ReadonlyArray<TrackPiece>,
   flipped = false,
   activeLayer = 0,
+  lengthMm?: number,
 ): Placement {
   // Local endpoints of the candidate: a piece at the origin, unrotated (but
   // mirrored if flipped), gives its endpoints in piece-local coordinates with
@@ -292,6 +293,10 @@ export function computePlacement(
     tagged: false,
     flipped,
     ...(activeLayer !== 0 ? { layer: activeLayer } : {}),
+    /* A length-variant straight's own half-length sets where its centre must sit
+       for its entry to land on the anchor; without it the candidate snaps as a
+       200 mm plank and a shorter variant lands short of the joint. */
+    ...(lengthMm !== undefined ? { lengthMm } : {}),
   };
   const localEndpoints = getEndpoints(candidate);
   const entry = localEndpoints[0];
