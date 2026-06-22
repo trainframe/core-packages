@@ -225,16 +225,24 @@ extracts its own frames and must fail to refute (i) genuine flex (not a rigid
 translate) and (ii) a wave animating across the closing loop on the mouse-up.
 
 *(Done.)* `packages/ui-tests/tests/flex-closure-wave-demo.spec.ts` builds the
-uneven stadium oval through real mouse events, slow-drags the open end shut, and
-records the run to `packages/ui-tests/videos/`. An adversarial frame reviewer,
-handed only the raw video, **could not refute either claim**: it confirmed the
-flex by overlaying the rail outline (zero displacement at the anchored end,
-growing toward the dragged end — deformation, not a uniform translate) and
-confirmed the wave by tracking the gold pulse's centroid through a full clockwise
-lap (top→left→bottom→right). The wave traversal was slowed to 2.2 s so the pulse
-is appreciable across a large loop. *(An earlier recording was refuted on the
-wave — the 1 s traversal moved the pulse ~108 px/frame at 25 fps, too sparse to
-read as animation; slowing it resolved that, and the second review confirmed.)*
+uneven stadium oval through real mouse events and drives the full closure JOURNEY,
+recorded to `packages/ui-tests/videos/`: (1) drag the open-end curve OFF the ring
+and onto a SEPARATE straight sitting apart in the middle — the ring is plainly
+open (a visible gap) and the curve is joined to a separate piece; (2) bring it
+back so the ~40 mm gap is restored; (3) slow-flex the open end shut. An
+adversarial frame reviewer, handed only the raw video, **could not refute any of
+the four claims**: the visible gap, the join to a separate piece, the re-closure,
+and the wave — confirmed BLUE/CYAN by pixel sampling (blue>green>red, not yellow),
+spreading from the closure seam around both sides of the loop and fading.
+
+**Wave visual (redesigned).** `ClosureWave` no longer rides a single travelling
+dot. On closure the seam lights up and a blue glow EMANATES around the loop in
+both directions — two wave fronts (bright leading edge + a fading filled trail)
+diverging along the rail centreline until they meet at the far side, then the
+whole ring fades. It is driven by the same RAF/clock (stable default-`now`),
+duration 2.2 s. *(An earlier yellow single-pulse design was rejected by review as
+"a dot, not a gradient flowing around the loop"; the blue spreading wave replaces
+it.)*
 
 ## Non-goals
 
