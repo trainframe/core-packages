@@ -94,7 +94,11 @@ async function zoomToFit(sim: Pg, points: ReadonlyArray<[number, number]>): Prom
       },
       points as [number, number][],
     );
-    const tooBig = fracs.some(([fx, fy]) => fx < 0.05 || fx > 0.95 || fy < 0.05 || fy > 0.95);
+    const tooBig = fracs.some((f) => {
+      const fx = f[0] ?? 0.5;
+      const fy = f[1] ?? 0.5;
+      return fx < 0.05 || fx > 0.95 || fy < 0.05 || fy > 0.95;
+    });
     if (!tooBig) return;
     await sim.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await sim.mouse.wheel(0, 50);
