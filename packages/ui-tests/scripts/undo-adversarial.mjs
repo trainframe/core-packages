@@ -71,8 +71,7 @@ const pose = (page, id) =>
       deg: ro ? Number.parseFloat(ro[1]) : 0,
     };
   }, id);
-const count = (page) =>
-  page.evaluate(() => document.querySelectorAll('[data-piece-id]').length);
+const count = (page) => page.evaluate(() => document.querySelectorAll('[data-piece-id]').length);
 async function mmToClient(page, xMm, yMm) {
   return page.evaluate(
     ([x, y]) => {
@@ -132,7 +131,10 @@ async function expectOneEntryThenUndo(page, label, doOp, undoVia) {
   }
   await page.waitForTimeout(60);
   const d2 = await depth(page);
-  if (d2 !== d0) refute(`${label}: undo (${undoVia}) did not pop the entry (depth ${d1}→${d0} expected, got ${d2})`);
+  if (d2 !== d0)
+    refute(
+      `${label}: undo (${undoVia}) did not pop the entry (depth ${d1}→${d0} expected, got ${d2})`,
+    );
   return d0;
 }
 
@@ -170,7 +172,9 @@ await loadPieces(page, TWO_STRAIGHT_CHAIN);
   );
   const after = await pose(page, 'B');
   if (Math.hypot(after.x - before.x, after.y - before.y) > 1)
-    refute(`move→undo did not restore B's pose (${JSON.stringify(before)} vs ${JSON.stringify(after)})`);
+    refute(
+      `move→undo did not restore B's pose (${JSON.stringify(before)} vs ${JSON.stringify(after)})`,
+    );
 }
 
 // FLEX bake — hold, drag, release; undo via button; prove pose restored.
@@ -223,8 +227,11 @@ await loadPieces(page, A_AND_FREE_C);
   );
   const after = await pose(page, 'C');
   if (Math.hypot(after.x - before.x, after.y - before.y) > 1)
-    refute(`carry→undo did not restore C's pose (${JSON.stringify(before)} vs ${JSON.stringify(after)})`);
-  if ((await connectivity(page)).components !== 2) refute('carry→undo did not leave A and C separate');
+    refute(
+      `carry→undo did not restore C's pose (${JSON.stringify(before)} vs ${JSON.stringify(after)})`,
+    );
+  if ((await connectivity(page)).components !== 2)
+    refute('carry→undo did not leave A and C separate');
 }
 
 /* ── ATTACK 2: an undo must NOT fork — a new edit after an undo replaces the
@@ -245,7 +252,9 @@ await loadPieces(page, TWO_STRAIGHT_CHAIN);
   await page.waitForTimeout(60);
   const back = await pose(page, 'B');
   if (Math.hypot(back.x - afterEdit1.x, back.y - afterEdit1.y) > 1)
-    refute(`fork: undo landed on ${JSON.stringify(back)}, not the surviving edit-1 ${JSON.stringify(afterEdit1)}`);
+    refute(
+      `fork: undo landed on ${JSON.stringify(back)}, not the surviving edit-1 ${JSON.stringify(afterEdit1)}`,
+    );
 }
 
 /* ── ATTACK 3: the Cmd/Ctrl+Z hotkey must NOT undo track while a text field is
