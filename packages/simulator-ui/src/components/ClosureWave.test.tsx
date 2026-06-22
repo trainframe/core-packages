@@ -11,7 +11,8 @@
 
 import { act, render, screen } from '@testing-library/react';
 import type { FlexState } from '@trainframe/simulator/track/flex.js';
-import type { TrackPiece } from '@trainframe/simulator/track/pieces.js';
+import { type TrackPiece, getEndpoints } from '@trainframe/simulator/track/pieces.js';
+import { computePlacement } from '@trainframe/simulator/track/placement.js';
 import type React from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import { ClosureWave } from './ClosureWave.js';
@@ -278,49 +279,143 @@ describe('ClosureWave', () => {
  * which is covered end-to-end by the ToyTable integration tests.
  * --------------------------------------------------------------------------- */
 
-/* 4-piece rectangle of 200mm straights, all endpoints coincident in rest pose:
- *   A at (100,   0) rot   0°: ep0=(  0,   0), ep1=(200,   0)
- *   B at (200, 100) rot  90°: ep0=(200,   0), ep1=(200, 200)
- *   C at (100, 200) rot 180°: ep0=(200, 200), ep1=(  0, 200)
- *   D at (  0, 100) rot 270°: ep0=(  0, 200), ep1=(  0,   0)
- */
 const EMPTY_FLEX: FlexState = new Map();
 
-function rect(): { a: TrackPiece; b: TrackPiece; c: TrackPiece; d: TrackPiece } {
-  const base = { tagged: false };
-  return {
-    a: { ...base, id: 'A', type: 'straight', position: { x: 100, y: 0 }, rotationDeg: 0 },
-    b: { ...base, id: 'B', type: 'straight', position: { x: 200, y: 100 }, rotationDeg: 90 },
-    c: { ...base, id: 'C', type: 'straight', position: { x: 100, y: 200 }, rotationDeg: 180 },
-    d: { ...base, id: 'D', type: 'straight', position: { x: 0, y: 100 }, rotationDeg: 270 },
-  };
+/* A real closed loop: 8 curves snapped end-to-end (each seats anti-parallel onto
+   the previous), exactly as the editor builds one. Unlike the old straight
+   "rectangle", every corner is a true seat, so it is a genuine cycle under the
+   authoritative heading+proximity joint rule. */
+function closedCircle(): TrackPiece[] {
+  const pieces: TrackPiece[] = [];
+  const first = computePlacement(450, 300, 'curve', pieces);
+  pieces.push({
+    id: 'c0',
+    type: 'curve',
+    position: { x: first.x, y: first.y },
+    rotationDeg: first.rotationDeg,
+    tagged: false,
+  });
+  for (let i = 1; i < 8; i++) {
+    const prev = pieces[i - 1];
+    if (prev === undefined) throw new Error('unreachable');
+    const exit = getEndpoints(prev)[1];
+    if (exit === undefined) throw new Error('unreachable');
+    const p = computePlacement(exit.x, exit.y, 'curve', pieces);
+    pieces.push({
+      id: `c${i}`,
+      type: 'curve',
+      position: { x: p.x, y: p.y },
+      rotationDeg: p.rotationDeg,
+      tagged: false,
+    });
+  }
+  return pieces;
+}
+
+/* Two curves seated end-to-end — an OPEN chain (no cycle). */
+function openChain(): TrackPiece[] {
+  const pieces: TrackPiece[] = [];
+  const first = computePlacement(450, 300, 'curve', pieces);
+  pieces.push({
+    id: 'o0',
+    type: 'curve',
+    position: { x: first.x, y: first.y },
+    rotationDeg: first.rotationDeg,
+    tagged: false,
+  });
+  const exit = getEndpoints(pieces[0] as TrackPiece)[1];
+  if (exit === undefined) throw new Error('unreachable');
+  const p = computePlacement(exit.x, exit.y, 'curve', pieces);
+  pieces.push({
+    id: 'o1',
+    type: 'curve',
+    position: { x: p.x, y: p.y },
+    rotationDeg: p.rotationDeg,
+    tagged: false,
+  });
+  return pieces;
 }
 
 describe('newLoopCenterline', () => {
   it('returns null for an open 2-piece chain', () => {
-    const { a, b } = rect();
-    /* No cycle contains 'A' in a 2-piece open chain. */
-    expect(newLoopCenterline([a, b], EMPTY_FLEX, 'A')).toBeNull();
+    const chain = openChain();
+    /* No cycle contains the dragged piece in an open chain. */
+    expect(newLoopCenterline(chain, EMPTY_FLEX, 'o0')).toBeNull();
   });
 
   it('returns null when no cycle contains the dragged piece', () => {
-    /* All four pieces form a closed rectangle, but we ask for a piece id that
-       does not exist in the layout — guard branch must return null cleanly. */
-    const { a, b, c, d } = rect();
-    expect(newLoopCenterline([a, b, c, d], EMPTY_FLEX, 'GHOST')).toBeNull();
+    /* A genuine closed loop, but we ask for a piece id not in the layout — the
+       guard branch must return null cleanly. */
+    expect(newLoopCenterline(closedCircle(), EMPTY_FLEX, 'GHOST')).toBeNull();
   });
 
-  it('fires for a loop already present in rest pose when draggedPieceId is part of it', () => {
-    /* This is the key regression case: the old isNewLoop diff would suppress the
-       wave because findLoops(rest) already returns the loop. The new trigger fires
-       on the closure commit — if the dragged piece is inside a cycle in the
-       effective geometry, return the centreline regardless of rest-pose topology. */
-    const { a, b, c, d } = rect();
-    /* All four pieces are coincident at rest (closed rectangle, EMPTY_FLEX).
-       Dragging piece 'D' onto the already-clustered endpoint still commits a
-       closure — the wave must fire. */
-    const pts = newLoopCenterline([a, b, c, d], EMPTY_FLEX, 'D');
+  it('fires when a drag completes a true 8-curve loop (wave fires) — criterion 4 positive', () => {
+    /* The trigger fires on the closure commit: if the dragged piece is inside a
+       cycle in the effective geometry, return the centreline. A genuine 8-curve
+       ring is a real cycle → the wave fires. */
+    const pts = newLoopCenterline(closedCircle(), EMPTY_FLEX, 'c0');
     expect(pts).not.toBeNull();
     expect(pts?.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('NEVER fires for the un-closeable 7-curve arc — criterion 4 negative', () => {
+    /* The exact logged 7-curve arc: 315° of turning, 45° short of a loop. Its two
+       open ends are ~153mm apart and 45° misaligned — no cycle exists, so dragging
+       its open end can never complete one. The wave must never fire. */
+    const arc: TrackPiece[] = [
+      {
+        id: 'curve-1',
+        type: 'curve',
+        position: { x: 372.8785357737105, y: 121.9178972545757 },
+        rotationDeg: 0,
+        tagged: false,
+      },
+      {
+        id: 'curve-3',
+        type: 'curve',
+        position: { x: 481.1177558029499, y: 230.15711728381513 },
+        rotationDeg: 45,
+        tagged: false,
+      },
+      {
+        id: 'curve-4',
+        type: 'curve',
+        position: { x: 481.11775580294983, y: 383.23049022985106 },
+        rotationDeg: 90,
+        tagged: false,
+      },
+      {
+        id: 'curve-5',
+        type: 'curve',
+        position: { x: 372.8785357737104, y: 491.46971025909045 },
+        rotationDeg: 135,
+        tagged: false,
+      },
+      {
+        id: 'curve-6',
+        type: 'curve',
+        position: { x: 219.8051628276746, y: 121.9178972545757 },
+        rotationDeg: 315,
+        tagged: false,
+      },
+      {
+        id: 'curve-7',
+        type: 'curve',
+        position: { x: 111.56594279843522, y: 230.15711728381513 },
+        rotationDeg: 270,
+        tagged: false,
+      },
+      {
+        id: 'curve-8',
+        type: 'curve',
+        position: { x: 111.56594279843522, y: 383.23049022985106 },
+        rotationDeg: 225,
+        tagged: false,
+      },
+    ];
+    /* No cycle through the dragged open end (curve-8) → null → no wave. */
+    expect(newLoopCenterline(arc, EMPTY_FLEX, 'curve-8')).toBeNull();
+    /* And not through any other member either. */
+    expect(newLoopCenterline(arc, EMPTY_FLEX, 'curve-5')).toBeNull();
   });
 });

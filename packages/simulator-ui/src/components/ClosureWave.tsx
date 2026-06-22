@@ -25,8 +25,9 @@ const defaultNow = (): number => performance.now();
    fades the whole ring out. */
 const SPREAD_FRACTION = 0.75;
 /* Arc-length (as a fraction of the half-perimeter) over which the bright leading
-   edge fades back into the dimmer filled trail. */
-const HEAD_FRACTION = 0.28;
+   edge fades back into the dimmer filled trail. Wider → a softer, more spread-out
+   glow rather than a tight bright band. */
+const HEAD_FRACTION = 0.42;
 /* Opacity of the filled trail the fronts leave behind (the leading edge is 1). */
 const TRAIL_OPACITY = 0.32;
 
@@ -158,8 +159,8 @@ export function ClosureWave({
       pointerEvents="none"
     >
       <defs>
-        <filter id="closure-wave-glow" x="-60%" y="-60%" width="220%" height="220%">
-          <feGaussianBlur stdDeviation="3.5" result="blur" />
+        <filter id="closure-wave-glow" x="-80%" y="-80%" width="260%" height="260%">
+          <feGaussianBlur stdDeviation="6.5" result="blur" />
           <feMerge>
             <feMergeNode in="blur" />
             <feMergeNode in="SourceGraphic" />
@@ -176,8 +177,8 @@ export function ClosureWave({
             x2={s.x2}
             y2={s.y2}
             stroke="#38bdf8"
-            strokeWidth={9}
-            strokeOpacity={s.o * 0.45}
+            strokeWidth={15}
+            strokeOpacity={s.o * 0.4}
             strokeLinecap="round"
           />
         ))}
