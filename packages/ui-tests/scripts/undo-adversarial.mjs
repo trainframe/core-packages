@@ -33,6 +33,17 @@ const A_AND_FREE_C = [
   { id: 'A', type: 'straight', position: { x: 300, y: 300 }, rotationDeg: 0, tagged: false },
   { id: 'C', type: 'straight', position: { x: 650, y: 120 }, rotationDeg: 0, tagged: false },
 ];
+/* A straight chain kept within the visible canvas: flexing the free end (P3 at
+   x=750) arcs the whole run — three joints compound into an unmistakable curve,
+   so a flex reads as a BEND on camera, distinct from a whole-piece move. */
+const LONG_CHAIN = Array.from({ length: 4 }, (_, i) => ({
+  id: `P${i}`,
+  type: 'straight',
+  position: { x: 150 + i * 200, y: 300 },
+  rotationDeg: 0,
+  tagged: false,
+}));
+const CHAIN_END = [750, 300]; // P3's centre
 
 const refutations = [];
 const refute = (msg) => {
@@ -258,18 +269,35 @@ await loadPieces(page, TWO_STRAIGHT_CHAIN);
 
 /* ── VIDEO (criterion 6): accidental flex undone via Cmd+Z; accidental move
    undone via the button — paced for a frame-by-frame review. ─────────────────── */
-await loadPieces(page, TWO_STRAIGHT_CHAIN);
-await page.waitForTimeout(400);
-// Accidental click-hold flex that makes the track jump.
-await dragMm(page, [500, 300], [500, 365], { holdMs: 360 });
-await page.waitForTimeout(700); // hold the jumped state on camera
-await page.keyboard.press('Meta+z'); // SNAP BACK via hotkey
-await page.waitForTimeout(700);
-// Accidental move-drag, recovered via the BUTTON.
-await dragMm(page, [500, 300], [760, 150]);
-await page.waitForTimeout(700);
-await page.locator('[data-testid="undo-button"]').click(); // SNAP BACK via button
-await page.waitForTimeout(800);
+async function settleDepth(page) {
+  await page.waitForTimeout(120);
+  return depth(page);
+}
+
+// Fresh slate for the recording (the long attack run leaves the page's gesture
+// state machine in an indeterminate spot; a reload gives the demo a clean start).
+await page.reload({ waitUntil: 'domcontentloaded' });
+await page.waitForSelector('[data-testid="toy-table-canvas"]');
+
+// (1) FLEX recovery via Cmd+Z — flexing the free end arcs the whole run (a
+//     visible BEND across three joints, distinct from a whole-piece move).
+await loadPieces(page, LONG_CHAIN);
+await page.waitForTimeout(900); // straight chain, on camera
+await dragMm(page, CHAIN_END, [750, 366], { holdMs: 360 }); // hold→bend the run down
+if ((await settleDepth(page)) < 1) refute('video: flex did not register an undo entry');
+await page.waitForTimeout(1100); // hold the BENT chain on camera
+await page.keyboard.press('Meta+z'); // SNAP BACK to straight via the HOTKEY
+await page.waitForTimeout(1100); // straight again, on camera
+
+// (2) MOVE recovery via the Undo BUTTON — a whole piece flung away, on a fresh
+//     chain so the displacement is obvious and distinct from the bend above.
+await loadPieces(page, LONG_CHAIN);
+await page.waitForTimeout(900); // straight chain, on camera
+await dragMm(page, CHAIN_END, [600, 120]); // fling the free end up-left
+if ((await settleDepth(page)) < 1) refute('video: move did not register an undo entry');
+await page.waitForTimeout(1100); // displaced piece on camera
+await page.locator('[data-testid="undo-button"]').click(); // SNAP BACK via the BUTTON
+await page.waitForTimeout(1100); // restored, on camera
 
 await page.close();
 await ctx.close();
