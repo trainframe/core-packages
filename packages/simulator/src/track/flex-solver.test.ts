@@ -6,7 +6,7 @@ import {
   solveClose,
   solveFollow,
 } from './flex-solver.js';
-import { FLEX_BUDGET_DEG, effectivePoses, jointKey } from './flex.js';
+import { FLEX_BUDGET_DEG, applyFlex, effectivePoses, jointKey } from './flex.js';
 import { buildJoints, findLoops } from './loops.js';
 import {
   type RotationDeg,
@@ -678,5 +678,75 @@ describe('solveClose', () => {
     expect(
       antiParallelHeadingError(closedFree.outgoingAngleDeg, target.outgoingAngleDeg),
     ).toBeLessThan(1.0);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * ABSOLUTE budget — no multi-stint accumulation
+ * --------------------------------------------------------------------------- */
+
+/* A joint's bend away from its grid rest (deg): the relative rotation of its two
+ * pieces minus the nearest 45° multiple. Mirrors the solver's internal measure. */
+function jointDeviation(
+  pieces: ReadonlyArray<TrackPiece>,
+  j: ReturnType<typeof buildJoints>[number],
+): number {
+  const a = pieces.find((p) => p.id === j.a.pieceId);
+  const b = pieces.find((p) => p.id === j.b.pieceId);
+  if (a === undefined || b === undefined) return 0;
+  const rel = b.rotationDeg - a.rotationDeg;
+  return ((((rel - Math.round(rel / 45) * 45) % 360) + 540) % 360) - 180;
+}
+
+function maxJointDeviation(pieces: ReadonlyArray<TrackPiece>): number {
+  return Math.max(0, ...buildJoints(pieces).map((j) => Math.abs(jointDeviation(pieces, j))));
+}
+
+/* Distance the dragged piece's free endpoint has travelled from `origin`. */
+function draggedFreeReach(
+  pieces: ReadonlyArray<TrackPiece>,
+  id: string,
+  origin: { x: number; y: number },
+): number {
+  const d = pieces.find((p) => p.id === id);
+  const free = d ? getEndpoints(d)[1] : undefined;
+  return free === undefined ? 0 : Math.hypot(free.x - origin.x, free.y - origin.y);
+}
+
+describe('flex budget is ABSOLUTE — baking + re-flexing does not accumulate', () => {
+  it('repeated flex/bake "stints" never push a joint past ±FLEX_BUDGET_DEG', () => {
+    /*
+     * The bake-on-release model stores each drag's bend into the pieces' poses.
+     * Without an absolute budget, re-flexing from the baked pose would add MORE
+     * deviation each stint (the operator's "drag, release, drag again" hack),
+     * blowing through the per-joint limit. The solver clamps each joint's TOTAL
+     * deviation from its grid rest, so no number of stints exceeds the budget —
+     * and a second stint toward the same target buys essentially no extra reach.
+     */
+    const chain = buildOpenCurveChain(6);
+    const draggedId = 'C5';
+    const anchorId = selectAnchor(chain, draggedId);
+    const dragged = chain.find((p) => p.id === draggedId);
+    if (dragged === undefined) throw new Error('unreachable');
+
+    /* A target well past the chain's reach, so every stint pins to max budget. */
+    const free0 = getEndpoints(dragged)[1];
+    if (free0 === undefined) throw new Error('unreachable');
+    const target = { x: free0.x - 250, y: free0.y - 250 };
+
+    let pieces: ReadonlyArray<TrackPiece> = chain;
+    const reaches: number[] = [];
+    for (let stint = 1; stint <= 5; stint++) {
+      const flex = solveFollow(pieces, draggedId, target);
+      pieces = applyFlex(pieces, flex, anchorId);
+      /* INVARIANT: after every bake, no joint exceeds the budget. */
+      expect(maxJointDeviation(pieces)).toBeLessThanOrEqual(FLEX_BUDGET_DEG + 1e-6);
+      reaches.push(draggedFreeReach(pieces, draggedId, free0));
+    }
+
+    /* No accumulation (the hack is dead): every stint's reach is within a hair of
+       the first — extra "drag, release, drag again" stints buy no extra freedom. */
+    const first = reaches[0] ?? 0;
+    for (const r of reaches) expect(Math.abs(r - first)).toBeLessThan(1.0);
   });
 });

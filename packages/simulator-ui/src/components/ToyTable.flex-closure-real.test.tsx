@@ -250,4 +250,93 @@ describe('UN-MOCKED loop closure — flush variant drop + wave on mouse-up', () 
       restore();
     }
   });
+
+  it('a JERKY closing drag (a fast stroke mid-close) still closes — piece not yanked off', async () => {
+    /*
+     * Regression for the "closure breaks the held piece" report: a real operator's
+     * drag is not perfectly smooth. A fast stroke used to trip the velocity gate
+     * and YANK the dragged curve off its chain mid-close, so the loop never closed
+     * and the operator was left holding a detached piece. The detach now also
+     * requires the cursor to be pulled well BEYOND the flex reach (a genuine yank);
+     * a fast stroke that still lands the free end on the closure target keeps the
+     * piece in the chain and the loop closes.
+     */
+    const restore = mockCanvasRect();
+    try {
+      const user = userEvent.setup();
+      renderToyTable();
+      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
+      const place = async (type: TrackPiece['type'], lengthMm?: number): Promise<TrackPiece> => {
+        const [cx, cy] = nextDropClient(canvas, 300);
+        if (type === 'straight') await pickLength(user, lengthMm ?? 200);
+        dropAt(canvas, type, cx, cy);
+        return pieceFromEl(lastPieceEl(canvas), type);
+      };
+      const first = await place('straight', 150);
+      await place('curve');
+      await place('curve');
+      await place('curve');
+      await place('curve');
+      await place('straight', 110);
+      await place('curve');
+      await place('curve');
+      await place('curve');
+      const lastCurve = await place('curve');
+      expect(canvas.querySelectorAll('[data-piece-id]')).toHaveLength(11 - 1);
+
+      const target = getEndpoints(first)[0];
+      if (target === undefined) throw new Error('no target');
+      const lastEl = canvas.querySelector(`[data-piece-id="${lastCurve.id}"]`);
+      if (lastEl === null) throw new Error('last curve gone');
+      const lastPose = parsePose(lastEl);
+
+      /* Timed events: a baseline move then a FAST jump straight to the closure
+         target (distinct timestamps ⇒ the velocity gate reads a high speed). The
+         cursor still lands on the target, so the free end tracks it (small reach
+         residual) — the detach must NOT fire. */
+      const tev = (t: string, x: number, y: number, ts: number) => {
+        const e = new MouseEvent(t, {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+          clientX: x,
+          clientY: y,
+        });
+        Object.defineProperty(e, 'timeStamp', { value: ts, configurable: true });
+        return e;
+      };
+      const sx = lastPose.x * SCALE;
+      const sy = lastPose.y * SCALE;
+      const tx = target.x * SCALE;
+      const ty = target.y * SCALE;
+      /* A faithful jerky drag: a baseline, then a FAST stroke (which used to yank
+         the piece off), then the operator SETTLES slowly onto the target before
+         releasing. The fast stroke must not detach; the settle closes cleanly. */
+      act(() => {
+        lastEl.dispatchEvent(tev('pointerdown', sx, sy, 0));
+        lastEl.dispatchEvent(tev('pointermove', sx + 6, sy, 0)); // baseline (speed 0)
+      });
+      act(() => {
+        /* Fast stroke most of the way (distinct timestamp ⇒ high speed). */
+        lastEl.dispatchEvent(tev('pointermove', sx + (tx - sx) * 0.85, sy + (ty - sy) * 0.85, 12));
+      });
+      /* Mid-drag, after the fast stroke, the piece must still be on its chain. */
+      expect(canvas.querySelectorAll('[data-piece-id]')).toHaveLength(10);
+      act(() => {
+        /* Settle slowly onto the target (same timestamp ⇒ speed 0). */
+        lastEl.dispatchEvent(tev('pointermove', tx, ty, 12));
+      });
+
+      /* Not yanked off: the loop is still closeable (flash present); on release the
+         wave mounts (the closure committed) and all 10 pieces remain. */
+      expect(canvas.querySelector('[data-closure-available="true"]')).not.toBeNull();
+      act(() => {
+        lastEl.dispatchEvent(tev('pointerup', tx, ty, 24));
+      });
+      expect(screen.queryByTestId('closure-wave')).not.toBeNull();
+      expect(canvas.querySelectorAll('[data-piece-id]')).toHaveLength(10);
+    } finally {
+      restore();
+    }
+  });
 });

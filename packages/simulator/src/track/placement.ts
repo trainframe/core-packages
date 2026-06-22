@@ -395,5 +395,17 @@ export function computeMovePlacement(
   if (best === undefined) return free;
   const localEp = localEndpoints[best.pieceEndpointIndex];
   if (localEp === undefined) return free;
-  return snapToAnchor(localEp, best.anchor);
+  const snapped = snapToAnchor(localEp, best.anchor);
+  /* Anti-parallel snapping always extends the piece AWAY from the joint, so when
+     a FAR endpoint grazes capture the whole piece is flung to the OTHER side of
+     the joint — it "teleports to the end of the track", far from the cursor. The
+     piece is centre-tracked on the cursor during a move, so reject a snap that
+     jumps its centre too far. The allowance is the piece's own half-extent (the
+     centre legitimately lands up to one half-extent away when an end is brought to
+     a joint) plus a capture radius; a fling crosses the joint and exceeds that. */
+  const halfExtent = Math.max(...localEndpoints.map((e) => Math.hypot(e.x, e.y)));
+  if (distance(snapped.x, snapped.y, cursorXMm, cursorYMm) > halfExtent + CONNECT_CAPTURE_MM) {
+    return free;
+  }
+  return snapped;
 }

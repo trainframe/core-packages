@@ -116,6 +116,16 @@ const TOYBOX_DRAG_MIME = 'application/x-trainframe-toybox-type';
 const DRAG_FLEX_MAX_SPEED = 1.5; /* px/ms */
 
 /**
+ * How far the cursor must be pulled BEYOND the chain's flex reach (mm) for a fast
+ * stroke to count as a yank-detach rather than flexing. The flex budget reaches
+ * only a few tens of mm, so a genuine yank leaves the dragged free endpoint well
+ * behind the cursor; a flex/closing gesture keeps it tracking the cursor. Gating
+ * the detach on this (as well as speed) stops a jerky closing drag from snapping
+ * the held piece off its chain mid-close.
+ */
+const DETACH_RESIDUAL_MM = 70;
+
+/**
  * The garage device id used by the toy-table when announcing tag bindings.
  * Real hardware uses the same id — per ADR-013 the sim must be
  * indistinguishable from physical kit on the wire.
@@ -1383,17 +1393,16 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
      only drop the joints that belong to the yanked piece so the remainder of
      the chain keeps its current flex and holds its bent shape. Table tracks the
      "detached this drag" id and routes subsequent moves down the free path. */
-  const detachPiece = useCallback((pieceId: string) => {
-    setFlex((prev) => {
-      if (prev.size === 0) return prev;
-      const next = new Map(prev);
-      for (const [key, entry] of next) {
-        if (entry.joint.a.pieceId === pieceId || entry.joint.b.pieceId === pieceId) {
-          next.delete(key);
-        }
-      }
-      return next.size === prev.size ? prev : next;
-    });
+  const detachPiece = useCallback((_pieceId: string) => {
+    /* Yanking a piece off ABANDONS the in-progress flex: the remaining chain
+       returns to its stored (rest) poses while the yanked piece follows the
+       cursor as a free placement and re-snaps on drop. Clearing the whole
+       transient map (not just the dragged piece's joints) is what keeps the rest
+       of the chain on-grid — leaving stale entries renders the chain bent and
+       makes a later re-attached piece snap to an off-grid neighbour. Any
+       PREVIOUSLY-baked bend lives in the pieces' stored poses, not this map, so
+       it is untouched. */
+    setFlex((prev) => (prev.size === 0 ? prev : new Map()));
   }, []);
 
   /* When a drop commits a loop closure, find the cycle containing the dragged
@@ -1407,7 +1416,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
          the single coordinate frame, so later edits/attachments can't desync
          against a phantom rest frame (this is the whole point of the rewrite). */
       const anchorId = selectAnchor(piecesRef.current, draggedPieceId);
-      const pts = newLoopCenterline(piecesRef.current, closureFlex, draggedPieceId);
+      const pts = newLoopCenterline(piecesRef.current, closureFlex, draggedPieceId, anchorId);
       const baked = applyFlex(piecesRef.current, closureFlex, anchorId);
       setPieces([...baked]);
       applyFlexState(new Map(), null);
@@ -2452,6 +2461,27 @@ function detectLoopClosure(
   return result.feasible ? result : null;
 }
 
+/*
+ * How far the dragged piece's free endpoint lands from the cursor after the given
+ * flex is applied — i.e. how far the cursor is BEYOND what the chain's flex can
+ * reach. Small while flexing/closing (the free end tracks the cursor), large on a
+ * genuine yank (the cursor is pulled past the reach). Used to gate the fast-yank
+ * detach so a jerky closing drag doesn't snap the held piece off its chain.
+ */
+function flexReachResidual(
+  trackPieces: ReadonlyArray<TrackPiece>,
+  draggedPiece: TrackPiece,
+  flex: FlexState,
+  anchorId: string,
+  cursorXMm: number,
+  cursorYMm: number,
+): number {
+  const pose = effectivePoses(trackPieces, flex, anchorId).get(draggedPiece.id);
+  if (pose === undefined) return 0;
+  const free = getEndpointsAt(draggedPiece, pose)[freeEndpointIndex(trackPieces, draggedPiece.id)];
+  return free === undefined ? 0 : Math.hypot(free.x - cursorXMm, free.y - cursorYMm);
+}
+
 /* Samples per half-path when building a loop's rail centreline for the wave. */
 const WAVE_SAMPLES_PER_HALF = 8;
 
@@ -2527,12 +2557,15 @@ export function newLoopCenterline(
   restPieces: ReadonlyArray<TrackPiece>,
   closureFlex: FlexState,
   draggedPieceId: string,
+  anchorId?: string,
 ): ReadonlyArray<{ readonly x: number; readonly y: number }> | null {
-  /* No anchor override: for a clean closure the FK shape is anchor-independent
-     (the whole cycle is rigid once closed), so the wave centreline matches the
-     baked geometry handleClosureCommit committed (which DID pass the solver's
-     anchor) up to an overall placement that a closed loop fixes. */
-  const afterEffective = applyFlex(restPieces, closureFlex);
+  /* Bake under the SAME anchor `handleClosureCommit` commits with, so the wave
+     centreline is computed over EXACTLY the closed geometry that gets stored.
+     With a mismatched (default) anchor the forward kinematics can leave the
+     closing joint a hair beyond SNAP_DISTANCE for some solved flexes, so
+     `findLoops` misses the cycle and the wave silently never fires (seen on
+     jerky closing drags). Passing the anchor keeps them in lock-step. */
+  const afterEffective = applyFlex(restPieces, closureFlex, anchorId);
   const afterPieces = asTrackPieces(afterEffective);
   /* Find the cycle that contains the dragged piece in the committed effective
      geometry. We do NOT diff against rest-pose topology — clustering already
@@ -2924,10 +2957,27 @@ function Table({
     const prior = lastDragFlexRef.current ?? undefined;
     const flex = solveFollow(trackPieces, pieceId, { x, y }, prior);
     if (flex.size > 0) {
-      if (speedPxPerMs >= DRAG_FLEX_MAX_SPEED) {
-        /* Fast drag: yank the piece free from its chain. onDragDetach drops the
-           yanked piece's joints (the remainder holds its bent shape) but keeps
-           the piece in `pieces`; we mark it detached so subsequent moves follow
+      /* Render under the SAME anchor the solver used so the dragged piece tracks
+         the cursor rather than rendering rigidly offset (and jumping on release). */
+      const anchorId = selectAnchor(trackPieces, pieceId);
+
+      /* A genuine yank pulls the cursor well past the chain's flex reach (the free
+         end can't follow — large residual); a flex/closing gesture keeps the free
+         end tracking the cursor (small residual) even when a stroke is momentarily
+         fast. Gating the detach on BOTH speed and residual stops a jerky closing
+         drag from accidentally snapping the held piece off its chain. */
+      const reachResidual = flexReachResidual(
+        trackPieces,
+        asTrackPiece(moving),
+        flex,
+        anchorId,
+        x,
+        y,
+      );
+      if (speedPxPerMs >= DRAG_FLEX_MAX_SPEED && reachResidual > DETACH_RESIDUAL_MM) {
+        /* Deliberate fast yank far past reach: free the piece from its chain.
+           onDragDetach drops its joints (the remainder holds its bent shape) but
+           keeps the piece in `pieces`; mark it detached so subsequent moves follow
            the cursor as a free placement and it re-snaps on drop. */
         lastDragFlexRef.current = null;
         detachedDragRef.current = pieceId;
@@ -2937,10 +2987,7 @@ function Table({
       }
 
       /* The piece is in a chain — bend it live (a slow pull past the budget just
-         holds at max flex, the solver clamps each δ to ±budget). Render under the
-         SAME anchor the solver used so the dragged piece tracks the cursor rather
-         than rendering rigidly offset (and jumping on release). */
-      const anchorId = selectAnchor(trackPieces, pieceId);
+         holds at max flex, the solver clamps each δ to ±budget). */
       lastDragFlexRef.current = flex;
       onDragFlex(flex, anchorId);
 

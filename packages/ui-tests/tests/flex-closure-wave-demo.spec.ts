@@ -228,15 +228,21 @@ test.describe
          the separate straight, where it snaps on. The ring is now plainly open —
          a whole curve's worth of gap between the two ends — and the carried curve
          is joined to a separate piece. */
+      /* A long chain can FLEX a long way, so a pull merely toward the separate
+         piece would bend the ring rather than detach. Pull the curve clearly
+         BEYOND any flex reach first (a fast stroke far across the canvas) — that
+         is an unambiguous yank, dropping it off the ring (the whole transient bend
+         is abandoned, so the rest of the ring stays exactly on-grid) — THEN carry
+         it to the separate straight, where it snaps on. */
       const c9a = await readTransform(sim, lastCurve);
       const grabA = await mmToPx(sim, c9a.x, c9a.y);
       const sepPx = await mmToPx(sim, sepEnd.x, sepEnd.y);
       await sim.mouse.move(grabA.x, grabA.y);
       await sim.mouse.down();
-      await sim.mouse.move(grabA.x + 5, grabA.y, { steps: 1 }); // baseline (speed 0)
+      await sim.mouse.move(grabA.x + 6, grabA.y, { steps: 1 }); // baseline (speed 0)
       await sim.waitForTimeout(20);
-      await sim.mouse.move(grabA.x + 60, grabA.y - 40, { steps: 1 }); // fast → yank/detach
-      await sim.mouse.move(sepPx.x, sepPx.y, { steps: 8 }); // carry to the separate straight
+      await sim.mouse.move(grabA.x + 240, grabA.y + 380, { steps: 1 }); // FAST far → detach
+      await sim.mouse.move(sepPx.x, sepPx.y, { steps: 6 }); // carry to the separate straight
       await sim.mouse.up();
       await sim.waitForTimeout(900); // hold: gap open, curve on the separate piece
 
@@ -246,17 +252,17 @@ test.describe
       const backPx = await mmToPx(sim, c9Home.x, c9Home.y);
       await sim.mouse.move(grabB.x, grabB.y);
       await sim.mouse.down();
-      await sim.mouse.move(grabB.x + 5, grabB.y, { steps: 1 });
+      await sim.mouse.move(grabB.x + 6, grabB.y, { steps: 1 });
       await sim.waitForTimeout(20);
-      await sim.mouse.move(grabB.x + 60, grabB.y + 30, { steps: 1 }); // yank off the separate piece
-      await sim.mouse.move(backPx.x, backPx.y, { steps: 8 }); // carry back to the ring
+      await sim.mouse.move(grabB.x + 240, grabB.y - 360, { steps: 1 }); // FAST far → yank off sep
+      await sim.mouse.move(backPx.x, backPx.y, { steps: 6 }); // carry home → re-snap onto the ring
       await sim.mouse.up();
       await sim.waitForTimeout(700); // hold: near-closed oval restored
 
       /* ── Beat 3: FLEX the open end onto the first piece → close → wave ──
          The curve is back at its rest pose, so the ~40 mm closing gap is restored
-         (verified: dropping it at its home centre re-snaps its entry to the 9th
-         piece, leaving the free end one flex-budget from the first piece). */
+         (dropping it at its home centre re-snaps its entry to the 9th piece,
+         leaving the free end one flex-budget from the first piece). */
       const lastFree = await endpointOf(sim, lastCurve, 'curve', 1);
       const grab = await mmToPx(sim, lastFree.x, lastFree.y);
       const target = await mmToPx(sim, firstEntry.x, firstEntry.y);

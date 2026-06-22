@@ -105,6 +105,40 @@ describe('computeMovePlacement — snaps on endpoint proximity, not centre', () 
     expect(p).toMatchObject({ x: 200, y: 100, rotationDeg: 90 });
   });
 
+  it('does NOT fling the piece across a joint when only its FAR end grazes capture', () => {
+    /*
+     * Teleport regression. A straight dragged to (420,220): its EAST end (520,220)
+     * is ~50 mm from the anchor's east open end (550,300→ here 550,180), within
+     * capture — but snapping that far end would fling the whole piece to the OTHER
+     * side of the joint (centre ~650,180), ~230 mm from the cursor. That reads as
+     * the piece "teleporting to the end of some track". The move must instead keep
+     * the piece under the cursor (drop free), snapping only once the cursor is
+     * dragged near where the piece will actually land.
+     */
+    const anchor = piece('a1', 'straight', 450, 180, 0); // east open end at (550,180)
+    const moving = piece('m1', 'straight', 0, 0, 0);
+    const cursorX = 420;
+    const cursorY = 220;
+    const p = computeMovePlacement(moving, cursorX, cursorY, [anchor]);
+    /* It must not jump far from the cursor. */
+    expect(Math.hypot(p.x - cursorX, p.y - cursorY)).toBeLessThan(CONNECT_CAPTURE_MM);
+  });
+
+  it('still snaps when the cursor IS near where the piece lands (no fling)', () => {
+    /* The sensible case: drag the piece to roughly where it should extend the
+       chain (cursor near the landing spot) — it snaps flush. */
+    const anchor = piece('a1', 'straight', 450, 180, 0); // east open end at (550,180)
+    const moving = piece('m1', 'straight', 0, 0, 0);
+    /* Cursor at (650,180): the piece centred here has its west end on the joint
+       and lands centred at ~650 — right under the cursor. */
+    const p = computeMovePlacement(moving, 650, 180, [anchor]);
+    expect(p.connected).toBe(true);
+    const placed = piece('m1', 'straight', p.x, p.y, p.rotationDeg);
+    const [entry] = getEndpoints(placed);
+    if (entry === undefined) throw new Error('unreachable');
+    expect(dist(entry, { x: 550, y: 180 })).toBeLessThan(0.5);
+  });
+
   it('snaps a moved device piece (train) onto the nearest track marker', () => {
     const anchor = piece('a1', 'straight', 450, 300, 0); // marker/centre at (450, 300)
     const train = piece('t1', 'train', 0, 0, 0);

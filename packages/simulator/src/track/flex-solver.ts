@@ -276,6 +276,32 @@ function toRad(deg: number): number {
   return (deg * Math.PI) / 180;
 }
 
+/*
+ * A joint's CURRENT bend away from its grid rest (degrees), read from the live
+ * piece rotations. At grid rest two jointed pieces sit on the 45° grid, so their
+ * relative rotation is a multiple of 45°; any baked-in flex shows up as a small
+ * deviation from the nearest multiple. Because the per-joint budget is ≤ 5°
+ * (well under 22.5°), rounding to the nearest 45° always recovers the grid rest.
+ *
+ * This is what lets the budget be ABSOLUTE: a slow drag bakes its bend into the
+ * stored poses, so re-flexing a baked joint starts from a non-zero deviation;
+ * clamping `deviation + δ` (not just δ) keeps the total within budget no matter
+ * how many drag/release "stints" the operator does.
+ */
+function jointGridDeviation(pieces: ReadonlyArray<TrackPiece>, joint: JointId): number {
+  const a = pieces.find((p) => p.id === joint.a.pieceId);
+  const b = pieces.find((p) => p.id === joint.b.pieceId);
+  if (a === undefined || b === undefined) return 0;
+  const rel = b.rotationDeg - a.rotationDeg;
+  return normaliseDeg(rel - Math.round(rel / 45) * 45);
+}
+
+/* Clamp `d` so that `cur + d` stays within ±FLEX_BUDGET_DEG (an ABSOLUTE budget
+   measured from the joint's grid rest, `cur` being its current deviation). */
+function clampToBudget(d: number, cur: number): number {
+  return Math.max(-FLEX_BUDGET_DEG - cur, Math.min(FLEX_BUDGET_DEG - cur, d));
+}
+
 /* Build a FlexState from a δ vector aligned with `ctx.joints`. */
 function flexFromDeltas(joints: ReadonlyArray<JointId>, deltas: ReadonlyArray<number>): FlexState {
   const map = new Map<string, JointFlex>();
@@ -399,9 +425,11 @@ function solveLinearSystem(a: number[][], b: ReadonlyArray<number>): number[] {
   return x;
 }
 
-/* Clamp every component of a δ vector to ±FLEX_BUDGET_DEG. */
-function clampDeltas(deltas: ReadonlyArray<number>): number[] {
-  return deltas.map((d) => Math.max(-FLEX_BUDGET_DEG, Math.min(FLEX_BUDGET_DEG, d)));
+/* Clamp every component of a δ vector so each joint's TOTAL deviation from grid
+   (`cur[i] + δ[i]`) stays within ±FLEX_BUDGET_DEG. `cur` is the per-joint baked
+   deviation (zero for a fresh on-grid chain). */
+function clampDeltas(deltas: ReadonlyArray<number>, cur: ReadonlyArray<number>): number[] {
+  return deltas.map((d, i) => clampToBudget(d, cur[i] ?? 0));
 }
 
 /*
@@ -477,6 +505,7 @@ function clampedStep(
   error: ReadonlyArray<number>,
   lambda: number,
   deltas: ReadonlyArray<number>,
+  cur: ReadonlyArray<number>,
 ): number[] {
   const n = deltas.length;
   const locked: boolean[] = new Array(n).fill(false);
@@ -484,22 +513,21 @@ function clampedStep(
   for (let pass = 0; pass <= n; pass++) {
     const stepRad = dlsStep(jacobian, error, lambda, locked);
     trial = deltas.map((d, i) =>
-      locked[i] === true
-        ? Math.max(-FLEX_BUDGET_DEG, Math.min(FLEX_BUDGET_DEG, d))
-        : d + (180 * (stepRad[i] ?? 0)) / Math.PI,
+      locked[i] === true ? clampToBudget(d, cur[i] ?? 0) : d + (180 * (stepRad[i] ?? 0)) / Math.PI,
     );
     let newlyLocked = false;
     for (let i = 0; i < n; i++) {
       if (locked[i] === true) continue;
-      const v = trial[i] ?? 0;
-      if (v > FLEX_BUDGET_DEG || v < -FLEX_BUDGET_DEG) {
+      /* Lock when the joint's TOTAL deviation (baked + trial) leaves budget. */
+      const total = (trial[i] ?? 0) + (cur[i] ?? 0);
+      if (total > FLEX_BUDGET_DEG || total < -FLEX_BUDGET_DEG) {
         locked[i] = true;
         newlyLocked = true;
       }
     }
     if (!newlyLocked) break;
   }
-  return clampDeltas(trial);
+  return clampDeltas(trial, cur);
 }
 
 /* Squared length of an error vector. */
@@ -516,9 +544,12 @@ function errorNormSq(e: ReadonlyArray<number>): number {
  * undamped CCD diverges. Returns the final δ vector (always clamped). Pure.
  */
 function relaxDls(ctx: RelaxContext, target: PoseTarget, seed?: ReadonlyArray<number>): number[] {
+  /* Each joint's baked-in deviation from grid — the budget is measured from
+     here, so re-flexing a baked chain cannot accumulate past ±FLEX_BUDGET_DEG. */
+  const cur = ctx.joints.map((j) => jointGridDeviation(ctx.pieces, j));
   let deltas: number[] =
     seed !== undefined && seed.length === ctx.joints.length
-      ? clampDeltas(seed)
+      ? clampDeltas(seed, cur)
       : new Array(ctx.joints.length).fill(0);
   let lambda = 1.0;
 
@@ -530,7 +561,7 @@ function relaxDls(ctx: RelaxContext, target: PoseTarget, seed?: ReadonlyArray<nu
     if (currentNormSq < ERR_TOL * ERR_TOL) break;
 
     const jacobian = computeJacobian(ctx, deltas, error, target);
-    const trial = clampedStep(jacobian, error, lambda, deltas);
+    const trial = clampedStep(jacobian, error, lambda, deltas, cur);
 
     const trialFree = freePoseFor(ctx, trial);
     if (trialFree === undefined) break;
@@ -544,7 +575,7 @@ function relaxDls(ctx: RelaxContext, target: PoseTarget, seed?: ReadonlyArray<nu
       lambda = Math.min(lambda * 4, 1e6);
     }
   }
-  return clampDeltas(deltas);
+  return clampDeltas(deltas, cur);
 }
 
 /* ---------------------------------------------------------------------------
