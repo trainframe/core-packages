@@ -7,21 +7,14 @@ import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 /**
  * Toybox flex / chain-drag journey.
  *
- * The flex system lets an operator slowly drag a chained piece to bend the
- * chain live. A fast drag (yank) detaches the piece.
+ * The flex system lets an operator drag a chained piece to bend the chain live.
+ * Connection is authoritative/geometric: a chain piece ALWAYS flexes and holds at
+ * max flex (rubber-bands) when the cursor outruns its reach. There is no velocity
+ * yank-detach — a fast drag flexes exactly like a slow one and never severs a
+ * joint (covered deterministically by ToyTable.flex.test.tsx).
  *
- * Two cases are exercised:
- *
- * 1. **Slow-drag flex bending**: an open 3-straight chain (s0 → s1 → s2).
- *    Dragging the tail piece slowly (speed < DRAG_FLEX_MAX_SPEED = 1.5 px/ms)
- *    bends the chain and on release repositions it. The piece's rendered
- *    transform changes, proving flex is live in the browser.
- *
- * 2. **Fast yank frees the piece (no vanish)**: dragging a chained piece quickly
- *    (speed > DRAG_FLEX_MAX_SPEED) yanks it free of the chain — but the piece
- *    comes free INTO THE HAND and follows the cursor, then re-places on drop. It
- *    must never vanish: the piece count stays 2 and the freed piece's transform
- *    moves to track the pointer.
+ * One case is exercised here: a slow drag of a chained tail bends the chain and
+ * the rendered transform changes, proving flex is live in the browser.
  *
  * Closure flash (`data-closure-available="true"`) and the wave
  * (`data-testid="closure-wave"`) are proven by unit tests in
@@ -184,14 +177,14 @@ test.describe
       const before = await readTransform(sim, s2);
       const { clientX: cx, clientY: cy } = await mmToClientPx(sim, before.x, before.y);
 
-      /* Slow drag: press, then move 60 px in 6 px steps with 50 ms between each.
-       Speed per step ≈ 6 px / 50 ms = 0.12 px/ms — well under
-       DRAG_FLEX_MAX_SPEED (1.5 px/ms). Every move takes the slow path:
-       solveFollow → onDragFlex. On drag-end movePiece repositions s2. */
+      /* Drag the tail PERPENDICULAR to the chain (downward): a colinear pull has
+       no rotational DOF to bend, so we pull across-axis to genuinely flex the
+       joint. solveFollow bends the chain within budget; on release the bend is
+       baked, so the tail's transform changes (rotation + position). */
       await sim.mouse.move(cx, cy);
       await sim.mouse.down();
       for (let step = 1; step <= 10; step++) {
-        await sim.mouse.move(cx + step * 6, cy);
+        await sim.mouse.move(cx, cy + step * 6);
         await sim.waitForTimeout(50);
       }
       await sim.mouse.up();
@@ -210,86 +203,9 @@ test.describe
       await expect(sim.locator('[data-piece-id]')).toHaveCount(3);
     });
 
-    /* -------------------------------------------------------------------------
-     * Case 2: fast drag (yank) frees the piece into the hand (it never vanishes)
-     *
-     * Place two curves snapped end-to-end to form a 2-piece chain.  Drag the
-     * second curve quickly (a single large move in one step, giving high px/ms)
-     * → the speed exceeds DRAG_FLEX_MAX_SPEED (1.5 px/ms) and the piece is yanked
-     * free of the chain. It must NOT disappear: it comes free into the hand,
-     * follows the cursor, and re-places on release. Piece count stays 2 and the
-     * freed curve's rendered transform moves.
-     * -------------------------------------------------------------------------*/
-    test('a fast drag (yank) on a chained piece frees it into the hand without vanishing', async ({
-      browser,
-    }) => {
-      test.setTimeout(60_000);
-      const sim = await openSimulatorUi(browser, { brokerUrl: harness.brokerWsUrl });
-      await sim.setViewportSize({ width: 1280, height: 800 });
-      await zoomOut(sim, 3);
-
-      /* Two curves snapped together. */
-      const c0 = await placePieceOnToyTable(sim, { type: 'curve', xMm: 450, yMm: 300 });
-      const c0Exit = await openExitOf(sim, c0, 'curve', null);
-      const c1 = await placePieceOnToyTable(sim, {
-        type: 'curve',
-        xMm: c0Exit.x,
-        yMm: c0Exit.y,
-      });
-      await expect(sim.locator('[data-piece-id]')).toHaveCount(2);
-
-      /* Disarm the armed Curve type so pointer-down on the piece starts a drag
-       instead of placing a new piece. */
-      await sim.getByRole('button', { name: 'Curve', exact: true }).click();
-      await expect(sim.getByRole('button', { name: 'Curve', exact: true })).toHaveAttribute(
-        'aria-pressed',
-        'false',
-      );
-
-      /* Grab the second curve via mmToClientPx. */
-      const t = await readTransform(sim, c1);
-      const { clientX: gx, clientY: gy } = await mmToClientPx(sim, t.x, t.y);
-
-      /* Drive the yank via Playwright's CDP mouse input (trusted events, pointer
-       capture respected by Chrome).
-         move to centre → down → move-1 (+5 px, 1 step): crosses the 4 px
-           `moved` threshold; first pointermove sets the velocity baseline at
-           speed = 0 (two points needed to compute velocity).
-         wait 20 ms: guarantees distinct timeStamps on CDP-injected events.
-           Without this gap both moves can land in the same compositor frame
-           (16 ms) giving dt = 0 → speed = 0, which leaves the gate closed.
-         move-2 (+500 px, 1 step): ≈ 500 px / 20 ms = 25 px/ms — well above
-           DRAG_FLEX_MAX_SPEED (1.5 px/ms) → yank fires, piece detaches.
-         up: drag released. */
-      const beforeYank = await readTransform(sim, c1);
-
-      await sim.mouse.move(gx, gy);
-      await sim.mouse.down();
-      /* move-1: cross 4 px threshold, speed = 0 (velocity baseline). */
-      await sim.mouse.move(gx + 5, gy, { steps: 1 });
-      await sim.waitForTimeout(20);
-      /* move-2: large jump → speed >> threshold → yank (piece comes free). */
-      await sim.mouse.move(gx + 500, gy - 200, { steps: 1 });
-
-      /* While still held, the freed piece follows the cursor — its transform
-       has moved well away from its rest pose, and it has NOT vanished. */
-      await expect
-        .poll(
-          async () => {
-            const t = await readTransform(sim, c1).catch(() => null);
-            if (t === null) return -1;
-            return Math.hypot(t.x - beforeYank.x, t.y - beforeYank.y);
-          },
-          {
-            timeout: 5_000,
-            message: 'freed piece should follow the cursor (transform moves), not vanish',
-          },
-        )
-        .toBeGreaterThan(20);
-
-      await sim.mouse.up();
-
-      /* The freed piece never vanished: both pieces remain after release. */
-      await expect(sim.locator('[data-piece-id]')).toHaveCount(2);
-    });
+    /* The old "fast yank frees the piece" case was removed with the velocity
+     * yank-detach heuristic. Connection is now authoritative/geometric: a fast
+     * drag flexes exactly like a slow one and never severs a joint. That claim is
+     * covered deterministically by the jsdom component test ("a fast drag flexes
+     * too, never severs") and end-to-end by flex-closure-wave-demo.spec.ts. */
   });
