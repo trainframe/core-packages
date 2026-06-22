@@ -1770,7 +1770,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
               closureWavePoints !== null && closureWavePoints.length >= 2 ? (
                 <ClosureWave
                   pathPoints={closureWavePoints}
-                  durationMs={1000}
+                  durationMs={2200}
                   onDone={() => setClosureWavePoints(null)}
                 />
               ) : null
