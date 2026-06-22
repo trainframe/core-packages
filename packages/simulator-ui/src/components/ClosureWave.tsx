@@ -1,83 +1,79 @@
 /**
- * ClosureWave — one-shot glow pulse that travels a polyline once and disappears.
+ * ClosureWave — a blue energy wave that EMANATES from the closure seam and
+ * spreads around the whole closed loop, then fades.
  *
- * Used by ToyTable to celebrate a newly-closed loop: on drop the wave rides the
- * ring's rail centreline from its start point all the way around, then calls
- * `onDone` and unmounts itself.
+ * On a loop closing, the seam (where the two ends just met) lights up and a blue
+ * glow flows outward in BOTH directions around the rail centreline — two wave
+ * fronts diverging around the ring, a bright leading edge with a gradient tail,
+ * the loop filling with blue as the fronts race to meet at the far side, then
+ * the whole ring fades out. It rides the loop's actual centreline, so it traces
+ * the track around the closed area rather than sitting as a dot anywhere.
  *
  * Animation uses requestAnimationFrame with an injectable `now` source so tests
  * can advance time deterministically without touching real timers.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 /* Stable default clock. MUST be a module-level constant, not an inline default
    (`now = () => performance.now()`): an inline default is a fresh function on
    every render, so the animation effect (deps include `now`) would re-run on
-   every frame and reset the start time — freezing the wave at its start point in
-   production while tests that pass an explicit clock still pass. */
+   every frame and reset the start time — freezing the wave at the start. */
 const defaultNow = (): number => performance.now();
 
-/* Accumulated arc-length distances from the first point (inclusive of 0). */
-function buildCumLengths(
-  points: ReadonlyArray<{ readonly x: number; readonly y: number }>,
-): number[] {
+/* Fraction of the run spent spreading the fronts around the loop; the remainder
+   fades the whole ring out. */
+const SPREAD_FRACTION = 0.75;
+/* Arc-length (as a fraction of the half-perimeter) over which the bright leading
+   edge fades back into the dimmer filled trail. */
+const HEAD_FRACTION = 0.28;
+/* Opacity of the filled trail the fronts leave behind (the leading edge is 1). */
+const TRAIL_OPACITY = 0.32;
+
+interface Pt {
+  readonly x: number;
+  readonly y: number;
+}
+
+/* Resample a (closed) polyline to `n` roughly evenly-spaced points and report the
+   perimeter. The input from newLoopCenterline traces the loop once; we append the
+   first point so the seam segment is included. */
+function resampleLoop(points: ReadonlyArray<Pt>, n: number): { pts: Pt[]; perimeter: number } {
+  const loop = points.length >= 2 ? [...points, points[0] as Pt] : [...points];
   const cum: number[] = [0];
-  for (let i = 1; i < points.length; i++) {
-    const prev = points[i - 1];
-    const curr = points[i];
-    if (prev === undefined || curr === undefined) continue;
-    const d = Math.hypot(curr.x - prev.x, curr.y - prev.y);
-    cum.push((cum[cum.length - 1] ?? 0) + d);
+  for (let i = 1; i < loop.length; i++) {
+    const a = loop[i - 1] as Pt;
+    const b = loop[i] as Pt;
+    cum.push((cum[i - 1] as number) + Math.hypot(b.x - a.x, b.y - a.y));
   }
-  return cum;
-}
-
-/* Interpolate world position at arc-length `dist` along the polyline. */
-function sampleAt(
-  points: ReadonlyArray<{ readonly x: number; readonly y: number }>,
-  cumLengths: number[],
-  dist: number,
-): { x: number; y: number } | null {
-  const total = cumLengths[cumLengths.length - 1] ?? 0;
-  if (points.length === 0 || total === 0) return null;
-  const clamped = Math.max(0, Math.min(dist, total));
-  return findSegmentAt(points, cumLengths, clamped);
-}
-
-/* Find the interpolated world point at arc-length `clamped` along the polyline. */
-function findSegmentAt(
-  points: ReadonlyArray<{ readonly x: number; readonly y: number }>,
-  cumLengths: number[],
-  clamped: number,
-): { x: number; y: number } | null {
-  for (let i = 1; i < cumLengths.length; i++) {
-    const segEnd = cumLengths[i];
-    const segStart = cumLengths[i - 1];
-    if (segEnd === undefined || segStart === undefined) continue;
-    if (clamped > segEnd) continue;
-    const a = points[i - 1];
-    const b = points[i];
-    if (a === undefined || b === undefined) return null;
-    const span = segEnd - segStart;
-    const t = span > 0 ? (clamped - segStart) / span : 0;
-    return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+  const perimeter = cum[cum.length - 1] ?? 0;
+  if (perimeter === 0) return { pts: [...points], perimeter: 0 };
+  const out: Pt[] = [];
+  for (let k = 0; k <= n; k++) {
+    const target = (k / n) * perimeter;
+    let seg = 1;
+    while (seg < cum.length && (cum[seg] as number) < target) seg++;
+    const s0 = cum[seg - 1] as number;
+    const s1 = cum[seg] as number;
+    const a = loop[seg - 1] as Pt;
+    const b = loop[seg] as Pt;
+    const f = s1 > s0 ? (target - s0) / (s1 - s0) : 0;
+    out.push({ x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f });
   }
-  /* Past the end — return last point. */
-  return points[points.length - 1] ?? null;
+  return { pts: out, perimeter };
 }
 
 export interface ClosureWaveProps {
   /** World-space (mm) polyline vertices forming the loop centreline. */
-  readonly pathPoints: ReadonlyArray<{ readonly x: number; readonly y: number }>;
-  /** How long the full traversal takes, milliseconds. */
+  readonly pathPoints: ReadonlyArray<Pt>;
+  /** How long the full wave (spread + fade) takes, milliseconds. */
   readonly durationMs: number;
   /**
    * Clock source for the animation loop. Defaults to `performance.now`.
    * Override in tests to drive the clock deterministically.
    */
   readonly now?: () => number;
-  /** Called once when the wave completes its traversal. */
+  /** Called once when the wave completes. */
   readonly onDone: () => void;
 }
 
@@ -87,38 +83,25 @@ export function ClosureWave({
   now = defaultNow,
   onDone,
 }: ClosureWaveProps) {
-  const cumLengths = useRef<number[]>(buildCumLengths(pathPoints));
-  const totalLength = cumLengths.current[cumLengths.current.length - 1] ?? 0;
+  const { pts, perimeter } = useMemo(() => resampleLoop(pathPoints, 96), [pathPoints]);
 
-  /* t ∈ [0, 1]: progress through the traversal. */
+  /* t ∈ [0, 1]: progress through spread (0..SPREAD_FRACTION) then fade (..1). */
   const [t, setT] = useState(0);
   const [done, setDone] = useState(false);
 
-  /* Keep a stable ref to onDone so the RAF closure doesn't capture a stale callback. */
   const onDoneRef = useRef(onDone);
   onDoneRef.current = onDone;
-
   const startRef = useRef<number | null>(null);
 
   useEffect(() => {
-    /* Recompute cumulative lengths if pathPoints changes (shouldn't happen in
-       normal use but guards against stale data in tests). */
-    cumLengths.current = buildCumLengths(pathPoints);
-  }, [pathPoints]);
-
-  useEffect(() => {
-    /* Reset the start time whenever the clock source or duration changes so the
-       animation always begins from t=0 with the current clock. */
     startRef.current = null;
     let rafId: number | null = null;
     let finished = false;
-
     function tick() {
       if (finished) return;
       const current = now();
       if (startRef.current === null) startRef.current = current;
-      const elapsed = current - startRef.current;
-      const progress = Math.min(elapsed / durationMs, 1);
+      const progress = Math.min((current - startRef.current) / durationMs, 1);
       setT(progress);
       if (progress >= 1) {
         finished = true;
@@ -128,7 +111,6 @@ export function ClosureWave({
       }
       rafId = requestAnimationFrame(tick);
     }
-
     rafId = requestAnimationFrame(tick);
     return () => {
       finished = true;
@@ -136,46 +118,83 @@ export function ClosureWave({
     };
   }, [durationMs, now]);
 
-  if (done || pathPoints.length < 2) return null;
+  if (done || pts.length < 2 || perimeter === 0) return null;
 
-  const pos = sampleAt(pathPoints, cumLengths.current, t * totalLength);
-  if (pos === null) return null;
+  /* spreadT advances the two wave fronts from the seam to the far side; fade
+     dims the whole ring once they have met. */
+  const spreadT = Math.min(t / SPREAD_FRACTION, 1);
+  const fade =
+    t <= SPREAD_FRACTION ? 1 : Math.max(0, 1 - (t - SPREAD_FRACTION) / (1 - SPREAD_FRACTION));
+  const half = perimeter / 2;
+  const front = spreadT * half; // arc-distance each front has reached from the seam
+  const headLen = HEAD_FRACTION * half;
 
-  /* Build polyline points string from world-space coords. The SVG viewBox is
-     already in mm so no scaling is needed here — ToyTable's <svg> handles the
-     mm→px scale via its viewBox/dimensions. */
-  const polylinePoints = pathPoints.map((p) => `${p.x},${p.y}`).join(' ');
+  /* Per-segment opacity: a segment at arc-distance d from the seam (measured the
+     short way round, so it is symmetric in both directions) is lit once a front
+     has reached it (d ≤ front). The leading edge (front − d small) is brightest;
+     behind it the trail settles to TRAIL_OPACITY. Multiply by the global fade. */
+  const segs: Array<{ i: number; x1: number; y1: number; x2: number; y2: number; o: number }> = [];
+  const n = pts.length - 1;
+  for (let i = 0; i < n; i++) {
+    const a = pts[i] as Pt;
+    const b = pts[i + 1] as Pt;
+    const midArc = ((i + 0.5) / n) * perimeter;
+    const d = Math.min(midArc, perimeter - midArc); // short way from the seam
+    if (d > front) continue;
+    const behind = front - d;
+    const head = Math.max(0, 1 - behind / headLen); // 1 at the front, 0 by headLen
+    const o = (TRAIL_OPACITY + (1 - TRAIL_OPACITY) * head) * fade;
+    if (o <= 0.01) continue;
+    /* `i` is the segment's stable position in the ring — a sound React key (the
+       array is filtered to lit segments, so its array index is not stable). */
+    segs.push({ i, x1: a.x, y1: a.y, x2: b.x, y2: b.y, o });
+  }
 
   return (
-    <g data-testid="closure-wave" pointerEvents="none">
-      {/* Dim trail along the whole ring. */}
-      <polyline
-        points={polylinePoints}
-        fill="none"
-        stroke="#ffe066"
-        strokeWidth={4}
-        strokeOpacity={0.25}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      {/* Bright leading pulse. */}
-      <circle
-        cx={pos.x}
-        cy={pos.y}
-        r={6}
-        fill="#ffe066"
-        fillOpacity={0.9}
-        filter="url(#closure-wave-glow)"
-      />
+    <g
+      data-testid="closure-wave"
+      data-front={spreadT.toFixed(3)}
+      data-lit={segs.length}
+      pointerEvents="none"
+    >
       <defs>
-        <filter id="closure-wave-glow" x="-150%" y="-150%" width="400%" height="400%">
-          <feGaussianBlur stdDeviation="4" result="blur" />
+        <filter id="closure-wave-glow" x="-60%" y="-60%" width="220%" height="220%">
+          <feGaussianBlur stdDeviation="3.5" result="blur" />
           <feMerge>
             <feMergeNode in="blur" />
             <feMergeNode in="SourceGraphic" />
           </feMerge>
         </filter>
       </defs>
+      {/* Soft wide under-glow + crisp bright core, both blue, riding the rail. */}
+      <g filter="url(#closure-wave-glow)">
+        {segs.map((s) => (
+          <line
+            key={`glow-${s.i}`}
+            x1={s.x1}
+            y1={s.y1}
+            x2={s.x2}
+            y2={s.y2}
+            stroke="#38bdf8"
+            strokeWidth={9}
+            strokeOpacity={s.o * 0.45}
+            strokeLinecap="round"
+          />
+        ))}
+        {segs.map((s) => (
+          <line
+            key={`core-${s.i}`}
+            x1={s.x1}
+            y1={s.y1}
+            x2={s.x2}
+            y2={s.y2}
+            stroke="#bae6fd"
+            strokeWidth={3}
+            strokeOpacity={s.o}
+            strokeLinecap="round"
+          />
+        ))}
+      </g>
     </g>
   );
 }

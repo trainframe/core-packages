@@ -7,15 +7,18 @@ import { openSimulatorUi, placePieceOnToyTable } from '../src/playwright-helpers
 import { type UiHarness, startUiHarness } from '../src/test-harness.js';
 
 /**
- * END-TO-END loop closure, driven entirely by real mouse events, recorded to
- * video (the goal's clause 3 demo).
+ * END-TO-END loop-closure JOURNEY, driven entirely by real mouse events,
+ * recorded to video (the demo artefact).
  *
- * This overturns the limitation the older toybox-flex-closure.spec.ts documented
- * ("end-to-end closure is not driveable through mouse events alone"). With the
- * LILLABO straight variants, an UNEVEN STADIUM OVAL (sides 150/110) lays a ~40 mm
- * closing gap that sits in the flex band (above auto-snap 30 mm, below capture
- * 60 mm). A slow drag of the open end bends the chain live and, on mouse-up, the
- * loop closes and the wave animates across it.
+ * Built from an UNEVEN STADIUM OVAL (LILLABO sides 150/110) whose ~40 mm closing
+ * gap sits in the flex band (above auto-snap 30 mm, below capture 60 mm). The
+ * journey, in three beats:
+ *   1. drag the open-end curve OFF the ring and onto a SEPARATE straight sitting
+ *      apart in the middle — the ring is now plainly open (a visible gap) and the
+ *      curve is joined to a separate piece;
+ *   2. bring the curve back onto the ring's open end (the ~40 mm gap restored);
+ *   3. slow-flex the open end onto the first piece — the loop closes and the blue
+ *      wave spreads around it.
  *
  * The recorded video is the artefact handed to the adversarial frame reviewer.
  */
@@ -116,7 +119,7 @@ test.describe
       await harness.shutdown();
     });
 
-    test('a slow drag flexes an uneven oval shut and the wave runs across it', async ({
+    test('open a gap to a separate piece, bring it back, flex the loop shut → blue wave', async ({
       browser,
     }) => {
       test.setTimeout(180_000);
@@ -186,6 +189,10 @@ test.describe
         yMm: exit.y,
       });
       await expect(sim.locator('[data-piece-id]')).toHaveCount(10);
+      /* The last curve's REST centre — dropping it back here re-snaps its entry
+         onto the 9th piece (its nearest open end) and restores the original ~40 mm
+         closing gap, the flex-able near-closure the wave needs. */
+      const c9Home = await readTransform(sim, lastCurve);
 
       /* Safety: if the centred oval still clips an edge, gently zoom out until the
        whole loop is on-screen (usually a no-op given the centred seed). */
@@ -196,55 +203,81 @@ test.describe
         [725, seedY + ovalH],
       ]);
 
+      /* A SEPARATE straight, free-standing in the middle of the oval — the piece
+         the open end will be dragged out to before the loop is closed. */
+      const sep = await placePieceOnToyTable(sim, {
+        type: 'straight',
+        xMm: seedX,
+        yMm: seedY + 200,
+      });
+      const sepEnd = await endpointOf(sim, sep, 'straight', 0);
+      await expect(sim.locator('[data-piece-id]')).toHaveCount(11);
+
+      /* Disarm whatever toybox tile is armed (placing the separate straight left
+         STRAIGHT armed) so a pointer-down on a piece starts a drag, not a
+         placement. */
+      const armedTile = sim.locator('[data-testid^="toybox-"][aria-pressed="true"]').first();
+      if ((await armedTile.count()) > 0) await armedTile.click();
+      await expect(sim.locator('[data-testid^="toybox-"][aria-pressed="true"]')).toHaveCount(0);
+      /* Hold on the rest layout — the near-closed oval with its open end, and the
+         separate straight sitting apart in the middle. */
+      await sim.waitForTimeout(700);
+
+      /* ── Beat 1: open a VISIBLE GAP and connect to the separate piece ──
+         Yank the last curve off the ring (a fast pull detaches it) and carry it to
+         the separate straight, where it snaps on. The ring is now plainly open —
+         a whole curve's worth of gap between the two ends — and the carried curve
+         is joined to a separate piece. */
+      const c9a = await readTransform(sim, lastCurve);
+      const grabA = await mmToPx(sim, c9a.x, c9a.y);
+      const sepPx = await mmToPx(sim, sepEnd.x, sepEnd.y);
+      await sim.mouse.move(grabA.x, grabA.y);
+      await sim.mouse.down();
+      await sim.mouse.move(grabA.x + 5, grabA.y, { steps: 1 }); // baseline (speed 0)
+      await sim.waitForTimeout(20);
+      await sim.mouse.move(grabA.x + 60, grabA.y - 40, { steps: 1 }); // fast → yank/detach
+      await sim.mouse.move(sepPx.x, sepPx.y, { steps: 8 }); // carry to the separate straight
+      await sim.mouse.up();
+      await sim.waitForTimeout(900); // hold: gap open, curve on the separate piece
+
+      /* ── Beat 2: bring the curve BACK onto the ring's open end ── */
+      const c9b = await readTransform(sim, lastCurve);
+      const grabB = await mmToPx(sim, c9b.x, c9b.y);
+      const backPx = await mmToPx(sim, c9Home.x, c9Home.y);
+      await sim.mouse.move(grabB.x, grabB.y);
+      await sim.mouse.down();
+      await sim.mouse.move(grabB.x + 5, grabB.y, { steps: 1 });
+      await sim.waitForTimeout(20);
+      await sim.mouse.move(grabB.x + 60, grabB.y + 30, { steps: 1 }); // yank off the separate piece
+      await sim.mouse.move(backPx.x, backPx.y, { steps: 8 }); // carry back to the ring
+      await sim.mouse.up();
+      await sim.waitForTimeout(700); // hold: near-closed oval restored
+
+      /* ── Beat 3: FLEX the open end onto the first piece → close → wave ──
+         The curve is back at its rest pose, so the ~40 mm closing gap is restored
+         (verified: dropping it at its home centre re-snaps its entry to the 9th
+         piece, leaving the free end one flex-budget from the first piece). */
       const lastFree = await endpointOf(sim, lastCurve, 'curve', 1);
-
-      /* Disarm so a pointer-down on a piece starts a drag, not a placement. */
-      await sim.getByRole('button', { name: 'Curve', exact: true }).click();
-      /* Hold on the REST-OPEN oval so the recording has a clear "before" the bend —
-       the gap at the top is visible and the chain is at its rest shape. */
-      await sim.waitForTimeout(600);
-
-      /* Grab the last curve's free END and slow-drag it toward the first piece's
-       entry. Each step is a few px over 70 ms — far under DRAG_FLEX_MAX_SPEED
-       (1.5 px/ms) — so every move flexes. We step gently and RELEASE as soon as
-       the solver flags the loop closeable (after a few visible steps of bending),
-       rather than dragging all the way onto the target and overshooting the
-       closeable window. */
       const grab = await mmToPx(sim, lastFree.x, lastFree.y);
       const target = await mmToPx(sim, firstEntry.x, firstEntry.y);
-      /* Pull the free end most of the way to the target (not all the way — the rest
-       geometry keeps the joint open so it never auto-snaps, but stopping short of
-       coincidence keeps the closure SOLVE the thing that shuts the loop). The
-       whole left side of the oval visibly bends as the gap closes — flex, not a
-       rigid translate, because the anchor (the top straight) stays put. */
       await sim.mouse.move(grab.x, grab.y);
       await sim.mouse.down();
-      /* Pull to ~45% of the gap: enough that the left side of the oval visibly
-       bends (flex), but inside the window where the closing SOLVE stays feasible
-       (a position-only follow that over-pulls rotates the free end's heading off
-       anti-parallel, which the closure solve then can't satisfy within budget). */
       const STEPS = 14;
-      const FRAC = 0.35;
+      const FRAC = 0.35; // inside the window where the closing solve stays feasible
       for (let s = 1; s <= STEPS; s++) {
         const x = grab.x + ((target.x - grab.x) * FRAC * s) / STEPS;
         const y = grab.y + ((target.y - grab.y) * FRAC * s) / STEPS;
         await sim.mouse.move(x, y);
         await sim.waitForTimeout(90);
       }
-
       /* The real solver reports the loop closeable — the dragged piece flashes. */
       await expect(sim.locator('[data-closure-available="true"]')).toHaveCount(1);
+      await sim.waitForTimeout(400); // hold the flexed-shut shape
 
-      /* Hold at the bent shape so the recording captures the flex clearly. */
-      await sim.waitForTimeout(400);
-
-      /* Release: the loop closes and the one-shot wave mounts and animates
-         (~2.2s — see ToyTable's ClosureWave durationMs). */
+      /* Release: the loop closes and the blue wave spreads around it (~2.2s). */
       await sim.mouse.up();
       await expect(sim.getByTestId('closure-wave')).toBeVisible();
-      /* Hold past the full wave duration so the recording captures the entire
-         traversal with margin (the pulse must be seen at many positions). */
-      await sim.waitForTimeout(3000);
+      await sim.waitForTimeout(3000); // capture the full wave traversal
 
       /* Save + report the video path for the adversarial frame review. */
       const video = sim.video();

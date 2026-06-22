@@ -138,7 +138,7 @@ describe('ClosureWave', () => {
     }
   });
 
-  it('pulse cx advances along the path as the clock advances', () => {
+  it('the wave SPREADS around the loop as the clock advances (front + lit grow)', () => {
     const raf = fakeRaf();
     try {
       const clock = makeControllableClock(0);
@@ -155,21 +155,32 @@ describe('ClosureWave', () => {
         ),
       );
 
-      /* First tick: start recorded, progress = 0 → pulse at x=0. */
+      const front = () =>
+        Number.parseFloat(screen.getByTestId('closure-wave').getAttribute('data-front') ?? '0');
+      const lit = () =>
+        Number.parseInt(screen.getByTestId('closure-wave').getAttribute('data-lit') ?? '0', 10);
+
+      /* Early in the spread: the fronts have only just left the seam. */
       act(() => raf.flush());
-      const circleBefore = screen.getByTestId('closure-wave').querySelector('circle');
-      const cxBefore = Number.parseFloat(circleBefore?.getAttribute('cx') ?? '0');
+      const frontEarly = front();
+      const litEarly = lit();
 
-      /* Advance clock to 50 % (500 ms). */
-      clock.advance(500);
+      /* Half-way: the fronts have advanced and more of the ring is lit. */
+      clock.advance(350);
       act(() => raf.flush());
+      const frontMid = front();
+      const litMid = lit();
 
-      const circleAfter = screen.getByTestId('closure-wave').querySelector('circle');
-      const cxAfter = Number.parseFloat(circleAfter?.getAttribute('cx') ?? '0');
+      expect(frontMid).toBeGreaterThan(frontEarly);
+      expect(litMid).toBeGreaterThan(litEarly);
 
-      /* At 50 % the pulse should be near x = 100 (midpoint of 200mm path). */
-      expect(cxAfter).toBeGreaterThan(cxBefore);
-      expect(cxAfter).toBeCloseTo(100, 0);
+      /* The blue glow rides the rail — segments are <line>s, not a single dot. */
+      const lines = screen.getByTestId('closure-wave').querySelectorAll('line');
+      expect(lines.length).toBeGreaterThan(0);
+      /* And it is blue, not a yellow pulse. */
+      const stroke = lines[0]?.getAttribute('stroke') ?? '';
+      expect(stroke.toLowerCase()).not.toBe('#ffe066');
+      expect(/#(38bdf8|bae6fd)/i.test(stroke)).toBe(true);
     } finally {
       raf.restore();
     }
