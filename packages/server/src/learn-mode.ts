@@ -174,9 +174,19 @@ export class LearnMode {
       return;
     }
 
-    // If the train has already been seen at some marker (its `last_marker_id`
-    // is set on the scheduler), we can start driving immediately. Otherwise
-    // sit in waiting_for_train until the operator places + scans the train.
+    /*
+     * A registered train is driven straight away. If it has already been seen at
+     * a marker (its `last_marker_id` is set), `reviewProgress` records that start
+     * marker and issues the open exploration clearance. If it has NOT yet been
+     * seen — a freshly-scanned loco sitting mid-piece, not pixel-perfect on a
+     * marker, so its sensor has fired nothing — we must STILL drive it: cold-start
+     * discovery is a chicken-and-egg (you cannot observe the first marker without
+     * moving, and cannot move without clearance), so LearnMode breaks the tie by
+     * issuing `begin_exploration` to make the loco roll until it crosses its first
+     * marker. Waiting passively here was the deadlock that stopped a scanned train
+     * from ever taking Learn track. `waiting_for_train` is reserved for when NO
+     * train is registered at all (handled above).
+     */
     const seen = this.ports.trainLastMarker(trainId);
     this.session = {
       trainId,
@@ -185,11 +195,12 @@ export class LearnMode {
       visitedEdges: new Set(),
       visitedMarkers: new Set(),
       exploring: false,
-      status: seen !== undefined ? 'driving' : 'waiting_for_train',
+      status: 'driving',
     };
     if (seen !== undefined) {
       this.reviewProgress();
     } else {
+      this.ensureExploring();
       this.publishCurrentState();
     }
   }

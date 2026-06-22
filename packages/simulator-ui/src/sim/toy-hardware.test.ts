@@ -912,3 +912,186 @@ function seedIdentityTags(
     } as unknown as CoreEvent);
   }
 }
+
+/** A thin promise-facade BrokerClient over the synchronous in-memory bus, exactly
+ *  the shape the `Server` expects (the `physics-env.ts` pattern). */
+function serverFacade(bus: InMemoryBrokerClient): {
+  connect: () => Promise<void>;
+  disconnect: () => Promise<void>;
+  subscribe: InMemoryBrokerClient['subscribe'];
+  publish: InMemoryBrokerClient['publish'];
+} {
+  return {
+    connect: async (): Promise<void> => {},
+    disconnect: async (): Promise<void> => {},
+    subscribe: (t, h) => bus.subscribe(t, h),
+    publish: (...a) => bus.publish(...a),
+  };
+}
+
+/** Publish a wire event envelope on `railway/events/<type>/<device>` — the family
+ *  the `Server` actually subscribes to (it ignores `railway/discovery/register`). */
+function emitEvent(
+  bus: InMemoryBrokerClient,
+  eventType: string,
+  deviceId: string,
+  payload: unknown,
+  id: () => string,
+  nowIso: () => string,
+): void {
+  const env = {
+    event_id: id(),
+    device_id: deviceId,
+    timestamp_device: nowIso(),
+    event_type: eventType,
+    protocol_version: PROTOCOL_VERSION,
+    payload,
+  };
+  bus.publish(
+    `railway/events/${eventType}/${deviceId}`,
+    new TextEncoder().encode(JSON.stringify(env)),
+  );
+}
+
+/**
+ * Seed tag identities the way the live `ToyTable.scanPiece` flow does: register a
+ * GARAGE on the EVENTS topic (the server subscribes to `railway/events/+/+`, NOT
+ * the discovery topic `mqttPlatform.register` uses), then bind one marker tag per
+ * layout marker so the train's `tag_observed` resolves to `marker_traversed`.
+ */
+function seedTagsAsScanFlow(
+  bus: InMemoryBrokerClient,
+  layout: Layout,
+  id: () => string,
+  nowIso: () => string,
+): void {
+  emitEvent(bus, 'device_registered', 'GARAGE', { capabilities: ['core.assigns_tags'] }, id, nowIso);
+  for (const m of layout.markers) {
+    emitEvent(
+      bus,
+      'tag_assignment',
+      'GARAGE',
+      { tag_id: m.id, assigned_kind: 'marker', target_id: m.id },
+      id,
+      nowIso,
+    );
+  }
+}
+
+/** The operator's single Learn-track gesture, published exactly as `LearnTrackPanel`
+ *  does: an empty payload on `railway/operator/learn_track_start`. */
+function pressLearnTrack(bus: InMemoryBrokerClient): void {
+  bus.publish(
+    'railway/operator/learn_track_start',
+    new TextEncoder().encode(JSON.stringify({})),
+  );
+}
+
+/** Distinct marker ids the given train traversed, harvested from the scheduler's
+ *  `marker_traversed` events (published under the `server` device, carrying the
+ *  `train_id` + `marker_id` in the payload). */
+function markersTraversed(bus: InMemoryBrokerClient, trainId: string): Set<string> {
+  const out = new Set<string>();
+  for (const m of bus.published) {
+    if (!m.topic.startsWith('railway/events/marker_traversed/')) continue;
+    try {
+      const env = JSON.parse(new TextDecoder().decode(m.payload)) as {
+        payload?: { marker_id?: string; train_id?: string };
+      };
+      if (env.payload?.train_id === trainId && typeof env.payload.marker_id === 'string') {
+        out.add(env.payload.marker_id);
+      }
+    } catch {
+      /* ignore malformed */
+    }
+  }
+  return out;
+}
+
+describe('ToyHardware — Learn track over the broker (the live operator path)', () => {
+  it('a scanned, stationary train takes Learn track and EXPLORES from a cold start', () => {
+    const bus = new InMemoryBrokerClient();
+    bus.connect('inmem://');
+    let clockMs = 0;
+    let seq = 0;
+    const id = (): string => {
+      seq += 1;
+      return `learn-${seq}`;
+    };
+    const now = (): number => clockMs;
+    const nowIso = (): string => new Date(clockMs).toISOString();
+
+    /* The operator's table: a closed loop, and a train SCANNED mid-straight — NOT
+     *  sitting on a marker. Markers sit at piece CENTRES (~200mm apart); the long top
+     *  run carries them at y=1200, x=…724, 924,…. (824,1200) is the midpoint between
+     *  two of them — ~100mm from either, well outside the 36mm sensor capture. This is
+     *  how an operator actually places a loco: somewhere on the rail, not pixel-perfect
+     *  on a marker. A stationary loco here fires NO tag, which is the cold-start the
+     *  fix must drive through. */
+    const loop = loopWithYardPieces();
+    const train = piece('train', 824, 1200, 180);
+    const pieces = [...loop, train];
+
+    /* The server starts in COLD-START discovery: it knows the markers but ZERO edges —
+     *  exactly what Learn track exists to break (ADR-014/015). */
+    const full = compileLayout(pieces, 'toy-table');
+    const discoveryLayout: Layout = {
+      name: full.name,
+      markers: full.markers,
+      edges: [],
+      junctions: full.junctions ?? [],
+    };
+    const server = new Server({ layout: discoveryLayout, client: serverFacade(bus), newId: id, now });
+    server.start();
+    seedTagsAsScanFlow(bus, discoveryLayout, id, nowIso);
+
+    const hardware = new ToyHardware({ client: bus, newId: id, maxTickMs: 1000 });
+    const tick = (): void => {
+      clockMs += 100;
+      hardware.tick(100);
+    };
+    const trainId = `T-${train.id}`;
+    try {
+      hardware.syncLayout(pieces);
+      hardware.syncLive(pieces, new Set(pieces.map((p) => p.id)));
+
+      /* The train is commissioned and registered, but it just SITS there — with no
+       *  route and no clearance a loco does not move. Let the world settle. */
+      for (let i = 0; i < 5; i++) tick();
+      expect(server.getScheduler().getTrainIds()).toContain(trainId);
+      /* Off-marker: the loco has NOT been seen at any marker — the cold-start case. */
+      expect(server.getScheduler().getTrainState(trainId)?.last_marker_id).toBeUndefined();
+      expect(server.getLayoutState().toLayout().edges).toHaveLength(0);
+
+      /* THE OPERATOR PRESSES "Learn track". */
+      pressLearnTrack(bus);
+
+      /* Pump time. The loco should drive itself around and the server should learn the
+       *  graph from the traversals it provokes. */
+      const body = (): { x: number; y: number } | undefined =>
+        hardware.bodies().find((b) => b.id === trainId);
+      const start = body() ?? { x: 0, y: 0 };
+      let maxDist = 0;
+      for (let i = 0; i < 4000; i++) {
+        tick();
+        const b = body();
+        if (b !== undefined) maxDist = Math.max(maxDist, Math.hypot(b.x - start.x, b.y - start.y));
+      }
+
+      /* It actually explored: it moved off its start, traversed ≥2 markers, and the
+       *  layout GREW from the edgeless cold start. */
+      expect(maxDist, 'the train moved off its start point').toBeGreaterThan(150);
+      expect(
+        markersTraversed(bus, trainId).size,
+        'the train traversed ≥2 markers',
+      ).toBeGreaterThanOrEqual(2);
+      expect(
+        server.getLayoutState().toLayout().edges.length,
+        'the cold-start layout grew (edges discovered)',
+      ).toBeGreaterThanOrEqual(2);
+    } finally {
+      hardware.dispose();
+      server.stop();
+    }
+  }, 60_000);
+});

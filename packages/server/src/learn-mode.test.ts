@@ -156,7 +156,7 @@ describe('LearnMode — learn_track_start with no registered train', () => {
 });
 
 describe('LearnMode — drives a registered train', () => {
-  it('once the train reports its first marker, issues an open exploration clearance (not a per-edge route)', () => {
+  it('drives a registered-but-not-yet-seen train immediately so it can find its first marker', () => {
     const { client } = makeServer(SIMPLE_LOOP);
     publishWireEvent(client, 'device_registered', 'T1', {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
@@ -173,13 +173,21 @@ describe('LearnMode — drives a registered train', () => {
     }
     publishOperatorCommand(client, 'learn_track_start', {});
 
-    // T1 has been registered but hasn't yet scanned a marker — LearnMode
-    // sits in waiting_for_train with T1 latched as the target.
-    expect(latestLearnState(client)?.state).toBe('waiting_for_train');
+    /*
+     * T1 is registered but has not yet scanned a marker — a loco scanned mid-piece,
+     * not pixel-perfect on a tag. Cold-start discovery is chicken-and-egg: it cannot
+     * observe a marker without moving and cannot move without clearance. LearnMode
+     * breaks the tie by driving it RIGHT AWAY (one open exploration clearance), rather
+     * than sitting in waiting_for_train for a tag a stationary loco can never produce.
+     * That passive wait was the regression that stopped a scanned train taking Learn
+     * track.
+     */
+    expect(latestLearnState(client)?.state).toBe('driving');
     expect(latestLearnState(client)?.train_id).toBe('T1');
+    expect(commandsFor(client, 'T1', 'begin_exploration')).toHaveLength(1);
 
-    // The train scans M1: LearnMode transitions to driving and grants one
-    // open-ended exploration clearance. The train drives itself from there.
+    // The train rolls and scans M1: LearnMode records the start marker. The
+    // exploration clearance is NOT re-issued (it is idempotent per session).
     publishWireEvent(client, 'tag_observed', 'T1', { tag_id: 'M1' });
 
     expect(commandsFor(client, 'T1', 'begin_exploration')).toHaveLength(1);
@@ -351,12 +359,12 @@ describe('LearnMode — learn_track_stop returns to idle', () => {
 
   it('does not emit a spurious revoke when stopping before any train drove', () => {
     const { client } = makeServer(SIMPLE_LOOP);
-    publishWireEvent(client, 'device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
-    });
-    // Start then immediately stop: the session never left waiting_for_train,
-    // so no exploration was granted and none should be revoked.
+    // No train registered: learn_track_start can only sit in waiting_for_train
+    // (there is nothing to drive), so no exploration is granted and stopping must
+    // revoke nothing. (A registered train, by contrast, is driven immediately — see
+    // 'drives a registered-but-not-yet-seen train immediately'.)
     publishOperatorCommand(client, 'learn_track_start', {});
+    expect(latestLearnState(client)?.state).toBe('waiting_for_train');
     publishOperatorCommand(client, 'learn_track_stop', {});
     expect(commandsFor(client, 'T1', 'revoke_clearance')).toHaveLength(0);
   });
