@@ -224,6 +224,18 @@ wave animates across it. The raw video is handed to an adversarial agent that
 extracts its own frames and must fail to refute (i) genuine flex (not a rigid
 translate) and (ii) a wave animating across the closing loop on the mouse-up.
 
+*(Done.)* `packages/ui-tests/tests/flex-closure-wave-demo.spec.ts` builds the
+uneven stadium oval through real mouse events, slow-drags the open end shut, and
+records the run to `packages/ui-tests/videos/`. An adversarial frame reviewer,
+handed only the raw video, **could not refute either claim**: it confirmed the
+flex by overlaying the rail outline (zero displacement at the anchored end,
+growing toward the dragged end — deformation, not a uniform translate) and
+confirmed the wave by tracking the gold pulse's centroid through a full clockwise
+lap (top→left→bottom→right). The wave traversal was slowed to 2.2 s so the pulse
+is appreciable across a large loop. *(An earlier recording was refuted on the
+wave — the 1 s traversal moved the pulse ~108 px/frame at 25 fps, too sparse to
+read as animation; slowing it resolved that, and the second review confirmed.)*
+
 ## Non-goals
 
 - No real mass / soft-body physics — the anchor is the deformation reference.
