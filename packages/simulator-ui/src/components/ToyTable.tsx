@@ -1024,25 +1024,25 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     setFlex(next);
     setFlexAnchorId(next.size === 0 ? null : anchorId);
   }, []);
-  /* Mirrors + a per-drag snapshot so flex can be made TRANSIENT: a drag bends the
-     chain live, but on release it persists ONLY if it closed a loop — otherwise we
-     revert to the pre-drag shape. Without this, every reposition leaves a stray
-     bend, and later pieces snap to the flexed neighbours' REST (phantom) endpoints
-     instead of where they are drawn. */
+  /* Mirrors so a release handler can read the live flex without re-subscribing. */
   const flexRef = useRef(flex);
   flexRef.current = flex;
   const flexAnchorRef = useRef(flexAnchorId);
   flexAnchorRef.current = flexAnchorId;
-  const flexSnapshotRef = useRef<{ flex: FlexState; anchor: string | null }>({
-    flex: new Map(),
-    anchor: null,
-  });
-  const handleDragBegin = useCallback(() => {
-    flexSnapshotRef.current = { flex: flexRef.current, anchor: flexAnchorRef.current };
-  }, []);
-  const handleRevertFlex = useCallback(() => {
-    const snap = flexSnapshotRef.current;
-    applyFlexState(snap.flex, snap.anchor);
+  /* BAKE the live transient flex into the pieces' stored poses on release, then
+     clear it. Flex is single-frame and never persists as a map: a slow drag bends
+     the chain live, and on mouse-up the bent shape is written into the pieces
+     (continuous rotationDeg) and the flex map is emptied. An OPEN length therefore
+     keeps its flexed shape, and a closing drag bakes + joins + waves via
+     handleClosureCommit. Because committed state is always baked poses (one
+     coordinate frame, no flex map), later snaps/edits can't desync against a
+     phantom rest frame. */
+  const handleFlexBake = useCallback(() => {
+    const f = flexRef.current;
+    if (f.size === 0) return;
+    const anchorId = flexAnchorRef.current ?? undefined;
+    setPieces((prev) => [...applyFlex(prev, f, anchorId)]);
+    applyFlexState(new Map(), null);
   }, [applyFlexState]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   /** Which piece type the operator has "armed" from the toybox, if any. */
@@ -1762,8 +1762,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
             onScanPiece={requestScan}
             onPieceAction={handlePiecePointerAction}
             onDragFlex={applyFlexState}
-            onDragBegin={handleDragBegin}
-            onRevertFlex={handleRevertFlex}
+            onFlexBake={handleFlexBake}
             onClosureCommit={handleClosureCommit}
             waveOverlay={
               closureWavePoints !== null && closureWavePoints.length >= 2 ? (
@@ -2353,10 +2352,10 @@ interface TableProps {
      bends live, carrying the FK anchor the solver used so the render reconstructs
      under the same root (no offset/jump). The parent owns flex + anchor state. */
   readonly onDragFlex: (flex: FlexState, anchorId: string) => void;
-  /* Drag started — snapshot the flex so a non-closing drag can revert to it. */
-  readonly onDragBegin: () => void;
-  /* Drag released without closing a loop — discard the transient bend. */
-  readonly onRevertFlex: () => void;
+  /* Drag released without closing a loop — BAKE the transient bend into the
+     pieces' stored poses so an open length keeps its flexed shape (single frame,
+     no persistent flex map). */
+  readonly onFlexBake: () => void;
   /* Called ONLY when a successful loop closure is committed on drop, with the
      flex state that closes the loop and the id of the dragged piece that just
      joined the cycle. Gives ToyTable a chance to mount the ClosureWave overlay
@@ -2594,8 +2593,7 @@ function Table({
   onScanPiece,
   onPieceAction,
   onDragFlex,
-  onDragBegin,
-  onRevertFlex,
+  onFlexBake,
   onClosureCommit,
   waveOverlay,
   onDragDetach,
@@ -2874,8 +2872,6 @@ function Table({
     /* Grabbing a piece selects it, so R/Flip act on the piece in hand rather
        than a previously-selected one. */
     onSelectPiece(pieceId);
-    /* Snapshot flex so a drag that bends but does NOT close a loop can revert. */
-    onDragBegin();
     lastDragFlexRef.current = null;
     detachedDragRef.current = null;
   }
@@ -2998,11 +2994,15 @@ function Table({
       return;
     }
 
-    /* A slow flex-drag that did NOT close a loop: the bend was transient. Revert
-       to the pre-drag shape so no stray flex lingers (stray flex makes later
-       pieces snap to flexed neighbours' REST/phantom endpoints). The piece then
-       repositions to where it was released, like any move. */
-    if (wasFlexing) onRevertFlex();
+    /* A slow flex-drag that did NOT close a loop: BAKE the transient bend into
+       the pieces' stored poses so the open length keeps its flexed shape (single
+       frame — no persistent flex map, so later pieces still snap to real baked
+       endpoints, not phantom ones). Skip the move-piece path: the bake already
+       repositioned the chain to its released shape. */
+    if (wasFlexing) {
+      onFlexBake();
+      return;
+    }
 
     // Released over the scan box → scan it (same confirm flow as an HTML5 drop).
     const target =

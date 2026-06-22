@@ -1326,7 +1326,7 @@ describe('ToyTable — velocity gate (flex / detach)', () => {
     localStorage.clear();
   });
 
-  it('slow drag bends the chain live but REVERTS on release when no loop closed', () => {
+  it('slow drag bends the chain live and BAKES the bend on release when no loop closed', () => {
     /*
      * Two straights snapped end-to-end:
      *   A at (450, 300) — placed at client (900, 600), rotation 0°
@@ -1397,11 +1397,11 @@ describe('ToyTable — velocity gate (flex / detach)', () => {
         FLEX_BUDGET_DEG + 1e-3,
       ); /* within ±FLEX_BUDGET_DEG */
 
-      /* Release the pointer WITHOUT a loop closure. Flex is TRANSIENT: the bend
-         was only a live preview, so it reverts to the rest shape (the piece then
-         repositions to where it was released). Persisting the bend would leave
-         stray flex, making later pieces snap to flexed neighbours' rest/phantom
-         endpoints — the bug this guards against. */
+      /* Release the pointer WITHOUT a loop closure. The bend is BAKED into B's
+         stored pose: an open length keeps its flexed shape (single coordinate
+         frame — the transient flex map is written into the pieces' continuous
+         rotationDeg and then emptied, so later pieces still snap to real baked
+         endpoints, never phantom rest ones). */
       act(() => {
         bEl.dispatchEvent(
           new MouseEvent('pointerup', {
@@ -1420,8 +1420,11 @@ describe('ToyTable — velocity gate (flex / detach)', () => {
         rotMatchAfter !== null && rotMatchAfter[1] !== undefined
           ? Number.parseFloat(rotMatchAfter[1])
           : 0;
-      /* No persistent bend: the flexed rotation reverted on release. */
-      expect(Math.abs(rotDegAfter)).toBeLessThan(1e-6);
+      /* The flexed rotation PERSISTS (baked), at essentially the same angle the
+         live drag showed — not reverted to 0, and still within budget. */
+      expect(Math.abs(rotDegAfter)).toBeGreaterThan(0);
+      expect(Math.abs(rotDegAfter)).toBeCloseTo(Math.abs(rotDegDuring), 3);
+      expect(Math.abs(rotDegAfter)).toBeLessThanOrEqual(FLEX_BUDGET_DEG + 1e-3);
     } finally {
       restore();
     }
