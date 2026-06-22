@@ -90,11 +90,6 @@ function normaliseAngle(deg: number): number {
   return ((deg % 360) + 360) % 360;
 }
 
-/** Round to the nearest 45° and return it as a `RotationDeg`. */
-function toRotationDeg(deg: number): RotationDeg {
-  return ((Math.round(normaliseAngle(deg) / 45) * 45) % 360) as RotationDeg;
-}
-
 /** Every endpoint of every placed piece, in world space. */
 function allEndpoints(pieces: ReadonlyArray<TrackPiece>): WorldEndpoint[] {
   const all: WorldEndpoint[] = [];
@@ -151,7 +146,12 @@ function snapToAnchor(
   localEp: { readonly x: number; readonly y: number; readonly outgoingAngleDeg: number },
   anchor: WorldEndpoint,
 ): Placement {
-  const rotationDeg = toRotationDeg(anchor.outgoingAngleDeg + 180 - localEp.outgoingAngleDeg);
+  /* Align the candidate's entry CONTINUOUSLY anti-parallel to the anchor's actual
+     outgoing heading — never rounded to the 45° grid. For an on-grid neighbour the
+     result is the clean grid angle anyway; for a BAKED, off-grid (flexed) end this
+     is what keeps the new joint continuous instead of kinking it by the flex angle
+     (the single coordinate frame means a stored rotationDeg can be off-grid). */
+  const rotationDeg = normaliseAngle(anchor.outgoingAngleDeg + 180 - localEp.outgoingAngleDeg);
   const rad = (rotationDeg * Math.PI) / 180;
   const cos = Math.cos(rad);
   const sin = Math.sin(rad);

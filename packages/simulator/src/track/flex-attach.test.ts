@@ -73,4 +73,48 @@ describe('attach to a flexed end — continuous joint (D1/D2)', () => {
     const kink = Math.abs(angleDelta(p2entry.outgoingAngleDeg, p1far.outgoingAngleDeg + 180));
     expect(kink).toBeLessThan(0.001);
   });
+
+  it('a piece attached to a BAKED (off-grid) flexed end meets it continuously', () => {
+    /*
+     * Single-frame bake regression. After a slow drag bakes its flex into stored
+     * poses, the chain's open end carries an OFF-GRID rotationDeg (e.g. ~4°) and
+     * there is no flex map left. Attaching a new piece must align it CONTINUOUSLY
+     * with that off-grid end — placement must NOT round the new piece's rotation
+     * to the 45° grid, which would leave a heading kink equal to the flex angle
+     * (position coincident but the rail visibly bent at the new joint). This is
+     * the "can't attach to a flexed line / snaps to an invisible point" defect.
+     */
+    const p0 = straight('p0', 0, 0);
+    const p1 = straight('p1', 200, 0);
+
+    /* Flex p0–p1 by 4° anchored at p0, then BAKE: applyFlex output IS the new
+       stored geometry (no flex map persists — the single-frame release model). */
+    const joints = buildJoints([p0, p1]);
+    const j01 = joints[0];
+    if (j01 === undefined) throw new Error('expected a joint');
+    const flex: FlexState = new Map<string, JointFlex>([
+      [jointKey(j01), { joint: j01, deg: 4, dx: 0, dy: 0 }],
+    ]);
+    const baked = applyFlex([p0, p1], flex, 'p0');
+    const p1baked = baked.find((p) => p.id === 'p1');
+    if (p1baked === undefined) throw new Error('missing baked piece');
+    /* The bake really moved p1 off the 45° grid. */
+    expect(Math.abs(p1baked.rotationDeg % 45)).toBeGreaterThan(1);
+
+    /* Attach a new straight to p1's baked far (exit) endpoint via real placement. */
+    const p1far = getEndpoints(asTrackPiece(p1baked))[1];
+    if (p1far === undefined) throw new Error('missing far endpoint');
+    const placement = computePlacement(p1far.x, p1far.y, 'straight', baked);
+    expect(placement.connected).toBe(true);
+    const p2 = straight('p2', placement.x, placement.y, placement.rotationDeg);
+    const p2entry = getEndpoints(p2)[0];
+    if (p2entry === undefined) throw new Error('missing entry endpoint');
+
+    /* Coincident AND continuous: the new piece's entry sits on the baked end with
+       no gap and no heading kink — the rail flows straight through the joint. */
+    const gap = Math.hypot(p1far.x - p2entry.x, p1far.y - p2entry.y);
+    expect(gap).toBeLessThan(0.001);
+    const kink = Math.abs(angleDelta(p2entry.outgoingAngleDeg, p1far.outgoingAngleDeg + 180));
+    expect(kink).toBeLessThan(0.001);
+  });
 });
