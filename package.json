@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "pnpm -r --parallel dev",
+    "dev:stack": "pnpm --filter @trainframe/ui-tests exec node scripts/dev-stack.mjs",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "test:integration": "pnpm --filter @trainframe/simulator test:integration",
