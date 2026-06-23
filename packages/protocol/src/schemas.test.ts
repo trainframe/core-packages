@@ -21,6 +21,7 @@ FormatRegistry.Set('uri', (value) => {
 import { BUILTIN_CAPABILITIES, CapabilityId } from './capabilities.js';
 import {
   AssignRoute,
+  AssignTag,
   CORE_COMMAND_SCHEMAS,
   CoreCommand,
   EmergencyStop,
@@ -39,6 +40,7 @@ import {
   GateStateChanged,
   MarkerTraversed,
   SwitchStateChanged,
+  TagAssignment,
   TagObserved,
   TrainLengthChanged,
   TrainStatus,
@@ -340,6 +342,97 @@ describe('DeviceRetainedState', () => {
 
   it('rejects a payload missing capabilities', () => {
     expect(Value.Check(DeviceRetainedState, { train_length_mm: 100 })).toBe(false);
+  });
+});
+
+describe('garage commissioning protocol additions (0.12.0)', () => {
+  it('PROTOCOL_VERSION is 0.12.0 (commissioning fields landed)', () => {
+    expect(PROTOCOL_VERSION).toBe('0.12.0');
+  });
+
+  it('DeviceRegistered accepts an operator name, livery, and a first-class controls_marker_id', () => {
+    const payload = {
+      capabilities: ['core.controls_motion'],
+      device_kind_hint: 'train',
+      name: 'Flying Scotsman',
+      livery: 'apple-green',
+      controls_marker_id: VALID_UUID,
+    };
+    expect(Value.Check(DeviceRegistered, baseEnvelope('device_registered', payload))).toBe(true);
+  });
+
+  it('DeviceRegistered rejects a non-string operator name (the field is typed, not a free extra)', () => {
+    const payload = { capabilities: [], device_kind_hint: 'train', name: 42 };
+    expect(Value.Check(DeviceRegistered, baseEnvelope('device_registered', payload))).toBe(false);
+  });
+
+  it('DeviceRegistered rejects a controls_marker_id that is not a UUID', () => {
+    const payload = { capabilities: [], device_kind_hint: 'switch', controls_marker_id: 'M-junk' };
+    expect(Value.Check(DeviceRegistered, baseEnvelope('device_registered', payload))).toBe(false);
+  });
+
+  it('DeviceRetainedState carries the operator name + livery (a late joiner sees them)', () => {
+    expect(
+      Value.Check(DeviceRetainedState, {
+        capabilities: ['core.controls_motion'],
+        train_length_mm: 120,
+        name: 'Flying Scotsman',
+        livery: 'apple-green',
+      }),
+    ).toBe(true);
+  });
+
+  it('DeviceRetainedState rejects a non-string name (typed, not a free extra)', () => {
+    expect(
+      Value.Check(DeviceRetainedState, { capabilities: ['core.controls_motion'], name: 42 }),
+    ).toBe(false);
+  });
+
+  it('TagAssignment accepts an operator marker_name and a valid marker_kind', () => {
+    const payload = {
+      tag_id: 'TAG-04A39F2C',
+      assigned_kind: 'marker',
+      target_id: VALID_UUID,
+      marker_name: 'Platform 1',
+      marker_kind: 'station_stop',
+    };
+    expect(Value.Check(TagAssignment, baseEnvelope('tag_assignment', payload))).toBe(true);
+  });
+
+  it('TagAssignment rejects a non-enum marker_kind', () => {
+    const payload = {
+      tag_id: 'TAG-1',
+      assigned_kind: 'marker',
+      target_id: VALID_UUID,
+      marker_kind: 'platform',
+    };
+    expect(Value.Check(TagAssignment, baseEnvelope('tag_assignment', payload))).toBe(false);
+  });
+
+  it('AssignTag tightens marker_kind to the marker-kind enum (rejects a free string)', () => {
+    const good = {
+      tag_id: 'TAG-1',
+      assigned_kind: 'marker',
+      target_id: VALID_UUID,
+      marker_kind: 'station_stop',
+    };
+    expect(Value.Check(AssignTag, baseCommandEnvelope('assign_tag', good))).toBe(true);
+    expect(
+      Value.Check(
+        AssignTag,
+        baseCommandEnvelope('assign_tag', { ...good, marker_kind: 'platform' }),
+      ),
+    ).toBe(false);
+  });
+
+  it('AssignTag accepts an operator marker_name', () => {
+    const payload = {
+      tag_id: 'TAG-1',
+      assigned_kind: 'marker',
+      target_id: VALID_UUID,
+      marker_name: 'Platform 1',
+    };
+    expect(Value.Check(AssignTag, baseCommandEnvelope('assign_tag', payload))).toBe(true);
   });
 });
 

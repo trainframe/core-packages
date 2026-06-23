@@ -1,5 +1,6 @@
 import { type Static, Type } from '@sinclair/typebox';
 import { EdgeRef, Uuid, commandEnvelope } from './envelope.js';
+import { MarkerKind } from './layout.js';
 
 // ---------- assign_route ----------
 
@@ -146,7 +147,11 @@ const AssignTagPayload = Type.Object({
   assigned_kind: Type.Union([Type.Literal('vehicle'), Type.Literal('marker')]),
   /** ID of the entity this tag will refer to (marker_id or train_id). */
   target_id: Type.String(),
-  marker_kind: Type.Optional(Type.String()),
+  /** Tightened to the shared marker-kind enum (0.12.0) — was a free string, so a
+   *  kind that can't round-trip into the `tag_assignment` event could be sent. */
+  marker_kind: Type.Optional(MarkerKind),
+  /** Operator-authored display name for the marker (0.12.0); becomes its label. */
+  marker_name: Type.Optional(Type.String()),
   metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 });
 

@@ -17,7 +17,7 @@
  * provider — a real broker, a real client, real topics.
  */
 import { type AddressInfo, type Server as TcpServer, createServer } from 'node:net';
-import { type CoreEvent, type TagObserved, topics } from '@trainframe/protocol';
+import { type CoreEvent, PROTOCOL_VERSION, type TagObserved, topics } from '@trainframe/protocol';
 import { Aedes } from 'aedes';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { BeaconDevice } from '../devices/beacon-device.js';
@@ -123,7 +123,7 @@ describe('mqttPlatform — over a real aedes broker', () => {
         device_id: DEVICE,
         timestamp_server: '1970-01-01T00:00:00.000Z',
         command_type: 'grant_clearance',
-        protocol_version: '0.11.0',
+        protocol_version: PROTOCOL_VERSION,
         payload: { limit_marker_id: '55555555-5555-4555-8555-555555555555' },
       }),
     );
@@ -153,7 +153,7 @@ describe('mqttPlatform — over a real aedes broker', () => {
       device_id: DEVICE,
       timestamp_server: '1970-01-01T00:00:00.000Z',
       command_type: 'emergency_stop',
-      protocol_version: '0.11.0',
+      protocol_version: PROTOCOL_VERSION,
       payload: {},
     });
 
@@ -181,7 +181,7 @@ describe('mqttPlatform — over a real aedes broker', () => {
         device_id: DEVICE,
         timestamp_server: '1970-01-01T00:00:00.000Z',
         command_type: 'emergency_stop',
-        protocol_version: '0.11.0',
+        protocol_version: PROTOCOL_VERSION,
         payload: {},
       }),
     );

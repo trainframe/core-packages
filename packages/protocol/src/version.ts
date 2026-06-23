@@ -52,5 +52,15 @@
  * device derives it from its own footprint, ADR-031) and enforces that nothing
  * else controls a marker the frame owns. Backward-compatible addition; a device
  * that omits it owns nothing beyond its zone boundary, exactly as before.
+ * 0.12.0 — garage device commissioning (spec 2026-06-23). Operator-authored
+ * `name` + `livery` on `device_registered` AND the retained `DeviceRetainedState`
+ * (so a late-joining display sees them); `controls_marker_id` promoted to a
+ * first-class field on `device_registered` (was read via an out-of-schema cast,
+ * leaving third-party switches unable to actuate); `marker_name` added to
+ * `tag_assignment` + `assign_tag` (naming a marker at bind time); `assign_tag`'s
+ * `marker_kind` tightened from a free string to the shared `MarkerKind` enum (it
+ * could previously accept a kind that can't round-trip into the event). All
+ * additive/tightening; names/kinds are presentation only — the scheduler still
+ * reasons on capabilities + topology, never on these fields.
  */
-export const PROTOCOL_VERSION = '0.11.0' as const;
+export const PROTOCOL_VERSION = '0.12.0' as const;

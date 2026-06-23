@@ -1,6 +1,7 @@
 import { type Static, Type } from '@sinclair/typebox';
 import { CapabilityId } from './capabilities.js';
 import { Direction, EdgeRef, Uuid, eventEnvelope } from './envelope.js';
+import { MarkerKind } from './layout.js';
 
 // ---------- device_registered ----------
 
@@ -51,6 +52,26 @@ const DeviceRegisteredPayload = Type.Object({
    * its zone boundary. Only meaningful for devices declaring `core.gates_zone`.
    */
   owned_marker_ids: Type.Optional(Type.Array(Uuid)),
+  /**
+   * Operator-authored friendly NAME for this instance (commissioning, 0.12.0).
+   * Presentation only — the scheduler never reads it. Distinct from the
+   * device-declared `display_hint.label`: this is what the human typed in the
+   * garage. Carried into the retained snapshot so a late-joining display sees it.
+   */
+  name: Type.Optional(Type.String()),
+  /**
+   * Operator-authored LIVERY/colour for this instance (commissioning, 0.12.0).
+   * Presentation only. Overrides the device_id-hashed default in the visualiser.
+   */
+  livery: Type.Optional(Type.String()),
+  /**
+   * The junction marker this device actuates — first-class as of 0.12.0 (was
+   * previously read by core via an out-of-schema cast, so a spec-conformant
+   * third-party switch had nowhere to send it). Only meaningful for devices
+   * declaring `core.controls_switch`; without it the scheduler can gate on the
+   * switch's state but cannot throw it.
+   */
+  controls_marker_id: Type.Optional(Uuid),
 });
 
 export const DeviceRegistered = eventEnvelope('device_registered', DeviceRegisteredPayload);
@@ -311,16 +332,13 @@ const TagAssignmentPayload = Type.Object({
    * `assigned_kind === 'vehicle'`.
    */
   target_id: Type.String(),
-  marker_kind: Type.Optional(
-    Type.Union([
-      Type.Literal('block_boundary'),
-      Type.Literal('station_stop'),
-      Type.Literal('junction'),
-      Type.Literal('terminus'),
-      Type.Literal('yard_entry'),
-      Type.Literal('unspecified'),
-    ]),
-  ),
+  marker_kind: Type.Optional(MarkerKind),
+  /**
+   * Operator-authored display name for the marker this tag binds (0.12.0), e.g.
+   * "Platform 1". Presentation only; becomes the marker's `label`. Naming a
+   * marker at bind time was previously inexpressible on the wire.
+   */
+  marker_name: Type.Optional(Type.String()),
   metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 });
 
@@ -404,6 +422,13 @@ export const CORE_EVENT_SCHEMAS = {
 export const DeviceRetainedState = Type.Object({
   capabilities: Type.Array(CapabilityId),
   train_length_mm: Type.Optional(Type.Number({ minimum: 0, exclusiveMinimum: 0 })),
+  /**
+   * Operator-authored name + livery (commissioning, 0.12.0). Carried in the
+   * RETAINED snapshot — not just the registration event — so a display that joins
+   * after commissioning still sees them. Presentation only.
+   */
+  name: Type.Optional(Type.String()),
+  livery: Type.Optional(Type.String()),
 });
 export type DeviceRetainedState = Static<typeof DeviceRetainedState>;
 

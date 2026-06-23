@@ -107,7 +107,7 @@ Events use the `event_type` segment so consumers can subscribe selectively (the 
 { "capabilities": ["core.controls_motion", "core.accepts_route"], "train_length_mm": 250 }
 ```
 
-`capabilities` is always present. `train_length_mm` is present only when the device declared `core.controls_motion` and supplied a positive length on registration; omitted otherwise. Subscribers may use `train_length_mm` to render a length-scaled consist (ADR-016).
+`capabilities` is always present. `train_length_mm` is present only when the device declared `core.controls_motion` and supplied a positive length on registration; omitted otherwise. Subscribers may use `train_length_mm` to render a length-scaled consist (ADR-016). As of 0.12.0 the snapshot also carries optional operator-authored `name` and `livery` (presentation only) so a display joining after commissioning still sees them.
 
 A retained `railway/state/devices/{device_id}` payload with no `capabilities` field (e.g. `{}`) is a **deregister tombstone**: the server publishes it when a device disconnects or is deleted from memory, and subscribers drop the device from their roster. This is consistent with how the other per-entity state families signal "gone" (an empty `schedule`/`clearance` snapshot); no version bump — no shape change.
 
@@ -148,7 +148,7 @@ The broker does not set `timestamp_server`; the scheduler does, on consumption. 
 
 ### Event types
 
-`device_registered`: a device has joined. Payload: declared capabilities, device kind hint (free-form, human display only), metadata.
+`device_registered`: a device has joined. Payload: declared capabilities, device kind hint (free-form, human display only), metadata. Optional operator-authored `name` + `livery` (0.12.0, presentation only). Optional `controls_marker_id` (0.12.0) — the junction a `core.controls_switch` device actuates. Optional `priority`, `owned_marker_ids` (see capability notes).
 
 `tag_observed`: a tag was detected. Payload: `tag_id`, optional `direction`, optional `confidence`. The server resolves `tag_id` to either a vehicle, a marker, or "unknown" and emits a derived event.
 
@@ -170,7 +170,7 @@ The broker does not set `timestamp_server`; the scheduler does, on consumption. 
 
 `aspect_changed`: emitted by `displays_aspect` device when display updates.
 
-`tag_assignment`: emitted by `assigns_tags` device. Payload: `tag_id`, `assigned_kind` (`marker` | `vehicle`), `target_id` (the marker_id or train_id this tag refers to), optional `marker_kind`, metadata. Updates the tag→entity map. Honoured only if the emitting device declared `core.assigns_tags`.
+`tag_assignment`: emitted by `assigns_tags` device. Payload: `tag_id`, `assigned_kind` (`marker` | `vehicle`), `target_id` (the marker_id or train_id this tag refers to), optional `marker_kind` (from the shared `MarkerKind` enum), optional `marker_name` (0.12.0 — the marker's operator label), metadata. Updates the tag→entity map. Honoured only if the emitting device declared `core.assigns_tags`.
 
 `anomaly`: emitted by anything; describes unexpected conditions: unknown tags, missed-marker timeouts, two trains in one block, switch position contradicting command. Free-form description, severity.
 
@@ -198,7 +198,7 @@ Commands flow from server to devices via `railway/commands/{device_id}`. Same en
 
 `hold_gate` / `release_gate`: to a `gates_clearance` device. Used for server overrides of local gate logic. Rare.
 
-`assign_tag`: to an `assigns_tags` device. Payload: `tag_id`, `assigned_kind`, `target_id`, optional `marker_kind`, metadata. The server commits the assignment after the device confirms with a `tag_assignment` event.
+`assign_tag`: to an `assigns_tags` device. Payload: `tag_id`, `assigned_kind`, `target_id`, optional `marker_kind` (the shared `MarkerKind` enum as of 0.12.0 — previously a free string), optional `marker_name` (0.12.0), metadata. The server commits the assignment after the device confirms with a `tag_assignment` event.
 
 ---
 
@@ -286,4 +286,6 @@ The split between MQTT pub/sub and HTTP query API is currently informal; some qu
 
 **Changes in 0.7.0:** new `grant_reverse` command (ADR-022) — a bounded, signed (backward) clearance the scheduler issues to break an otherwise-unresolvable closed nose-to-nose standoff by backing one train out of an occupied block into track it provably holds. TCF registry epoch 1 → 2.
 
-*End of v0.2 (current protocol 0.7.0).*
+**Changes in 0.12.0:** garage device commissioning (design 2026-06-23). `device_registered` and the retained `railway/state/devices/{device_id}` payload gain operator-authored `name` + `livery` (presentation only; carried in the retained snapshot so a late-joining display sees them). `controls_marker_id` is promoted to a first-class field on `device_registered` (previously read by the scheduler via an out-of-schema cast, so a spec-conformant third-party `core.controls_switch` device had nowhere to declare which junction it throws). `tag_assignment` and `assign_tag` gain `marker_name` (naming a marker at bind time). `assign_tag`'s `marker_kind` is tightened from a free string to the shared `MarkerKind` enum, matching the `tag_assignment` event. `name`, `livery`, `marker_name`, and `marker_kind` are presentation annotations — the scheduler reasons on capabilities + topology only and never branches on them.
+
+*End of v0.2 (current protocol 0.12.0).*

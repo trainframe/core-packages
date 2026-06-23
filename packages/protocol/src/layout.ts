@@ -1,7 +1,14 @@
 import { type Static, Type } from '@sinclair/typebox';
 import { Uuid } from './envelope.js';
 
-const MarkerKind = Type.Union([
+/**
+ * The kinds of marker an operator can label a tag with. A PRESENTATION
+ * annotation only — the scheduler reasons on topology + capabilities, never on
+ * the kind (a "dead end" is a marker with no outgoing edge; a "junction" is one a
+ * switch device controls). Exported so the layout, the `tag_assignment` event,
+ * and the `assign_tag` command share the SAME closed set (no event/command drift).
+ */
+export const MarkerKind = Type.Union([
   Type.Literal('block_boundary'),
   Type.Literal('station_stop'),
   Type.Literal('junction'),
