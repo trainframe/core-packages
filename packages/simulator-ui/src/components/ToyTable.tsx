@@ -1039,6 +1039,16 @@ interface ToyTableProps {
   readonly initialUrl: string;
 }
 
+/** The effective (post-flex) rotation of the piece with `id`, or null when `id`
+ *  is null or absent — the live value behind the flex-angle readout. */
+function effectiveAngleOf(
+  pieces: ReadonlyArray<{ readonly id: string; readonly rotationDeg: number }>,
+  id: string | null,
+): number | null {
+  if (id === null) return null;
+  return pieces.find((p) => p.id === id)?.rotationDeg ?? null;
+}
+
 export function ToyTable({ initialUrl }: ToyTableProps) {
   const { client } = useBroker();
   const [pieces, setPieces] = useState<ReadonlyArray<TrackPiece>>([]);
@@ -1776,6 +1786,11 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   );
 
   const selectedPiece = pieces.find((p) => p.id === selectedId) ?? null;
+  /* The selected piece's EFFECTIVE rotation (post-flex), for the live angle
+     readout. Reads from `effectivePieces` (recomputed each render as the flex
+     map changes mid-drag), so the readout tracks the bend in real time rather
+     than the static rest pose. Null when nothing is selected. */
+  const selectedAngleDeg = effectiveAngleOf(effectivePieces, selectedId);
 
   // Coupling: which carriages each live train carries, in seeded proximity
   // order (`computeTrainTrails`). A railyard swap is made visible by the
@@ -1839,6 +1854,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
           selectedPiece={selectedPiece}
           selectedLive={selectedPiece !== null && liveIds.has(selectedPiece.id)}
           selectedPoweredOff={selectedPiece !== null && poweredOffIds.has(selectedPiece.id)}
+          selectedAngleDeg={selectedAngleDeg}
           onUndo={undo}
           canUndo={undoCount > 0}
           onRotate={rotateSelected}
@@ -2193,6 +2209,9 @@ interface ActionBarProps {
   readonly selectedLive: boolean;
   /** Whether the selected (live) train is powered OFF in place. */
   readonly selectedPoweredOff: boolean;
+  /** The selected piece's EFFECTIVE (post-flex) rotation in degrees, or null when
+   *  nothing is selected. Drives the live flex-angle readout. */
+  readonly selectedAngleDeg: number | null;
   /** Revert the last committed track edit. */
   readonly onUndo: () => void;
   /** Whether there is any edit to undo (the button is disabled otherwise). */
@@ -2246,7 +2265,9 @@ function actionBarStatus(
     return 'Pick a piece from the toybox';
   }
   const flip = selectedPiece.flipped === true ? ' · flipped' : '';
-  const base = `Selected: ${PIECE_LABELS[selectedPiece.type]} · ${selectedPiece.rotationDeg}°${flip}`;
+  /* The rotation is rendered separately as the live 2dp flex-angle readout (a
+     testid'd <output> in the status span), so it is omitted from this sentence. */
+  const base = `Selected: ${PIECE_LABELS[selectedPiece.type]}${flip}`;
   // A wire device (train / gate) does nothing until it's scanned onto the bus.
   if (isWireDevice(selectedPiece.type) && !selectedLive) {
     return `${base} — drag it onto the scan box to put it on the bus`;
@@ -2339,6 +2360,7 @@ function ActionBar({
   selectedPiece,
   selectedLive,
   selectedPoweredOff,
+  selectedAngleDeg,
   onUndo,
   canUndo,
   onRotate,
@@ -2430,6 +2452,17 @@ function ActionBar({
       </span>
       <span className="tf-toytable__status">
         {actionBarStatus(selectedPiece, selectedLive, selectedPoweredOff, armedType)}
+        {selectedAngleDeg !== null && (
+          <>
+            {' · '}
+            {/* The live flex-angle readout: the selected piece's EFFECTIVE rotation,
+               recomputed every render so it tracks the bend AS the operator flexes
+               (not only on bake), shown to exactly two decimal places. */}
+            <output className="tf-toytable__flex-angle" data-testid="flex-angle-readout">
+              {`${selectedAngleDeg.toFixed(2)}°`}
+            </output>
+          </>
+        )}
       </span>
     </div>
   );
