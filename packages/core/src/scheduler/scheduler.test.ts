@@ -2902,6 +2902,28 @@ describe('Scheduler — switch actuation for scheduled routes', () => {
     expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('X');
   });
 
+  it('WITHOUT a paired switch (no controls_marker_id), emits NO set_switch_position — the documented no-actuation case', () => {
+    /* Same diverge layout + route, but NO switch device is registered, so no
+       `controls_marker_id` pairing exists. The scheduler has nothing to actuate:
+       it withholds at the junction (the position must be changed by some other
+       agent) and emits zero set_switch_position. This pins the no-actuation
+       consequence of an unpaired junction — the WITHOUT half of the contract. */
+    const registry = new CapabilityRegistry();
+    registry.registerAll(BUILTIN_CAPABILITIES);
+    registry.freeze();
+    const layout = new LayoutState(DIVERGE, { now: () => 0 });
+    const scheduler = new Scheduler(registry, layout, { now: () => 0 });
+    seedIdentityTags(scheduler, ['A1', 'A2', 'J', 'PM', 'PD', 'X', 'Y']);
+    registerTrain(scheduler, 'T1');
+
+    const assigned = scheduler.assignSchedule('T1', 'route-1', ['A1', 'X']);
+
+    expect(scheduler.getLayout().switchDeviceForMarker('J')).toBeUndefined();
+    expect(findSetSwitch(assigned)).toHaveLength(0);
+    // Clearance still reaches the junction, but is withheld at the unactuatable edge.
+    expect(scheduler.getTrainState('T1')?.clearance_limit_marker_id).toBe('J');
+  });
+
   it('serializes two trains over one junction needing conflicting positions, flipping once per handover', () => {
     const { scheduler } = setupDiverge();
     // Length-aware trains (length_mm > 0) are REQUIRED for switched-junction

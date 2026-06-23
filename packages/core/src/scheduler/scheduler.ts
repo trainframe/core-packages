@@ -92,6 +92,29 @@ interface DeviceRecord {
 }
 
 /**
+ * The `device_registered` fields the scheduler consumes. The server validates
+ * the envelope against the protocol schema before dispatch, so reading them
+ * through this one typed view at the registration boundary is sound — a SINGLE
+ * coercion point (per the no-scattered-casts rule), replacing the ad-hoc
+ * `payload as {...}` reads that used to dot the registration path.
+ */
+interface DeviceRegistrationView {
+  readonly capabilities: string[];
+  readonly train_length_mm?: number;
+  readonly priority?: number;
+  /** The junction marker a `core.controls_switch` device actuates (0.12.0,
+   *  first-class — previously read via an untyped cast). */
+  readonly controls_marker_id?: string;
+  /** Operator-authored presentation fields (0.12.0); echoed into retained state. */
+  readonly name?: string;
+  readonly livery?: string;
+}
+
+function readRegistration(payload: unknown): DeviceRegistrationView {
+  return (payload ?? {}) as DeviceRegistrationView;
+}
+
+/**
  * The scheduler. Stateful, but the state is fully observable and all
  * mutations happen through `handleEvent`.
  */
@@ -229,7 +252,8 @@ export class Scheduler {
     deviceId: string,
     payload: unknown,
   ): ReadonlyArray<SchedulerEffect> {
-    const { capabilities } = payload as { capabilities: string[] };
+    const reg = readRegistration(payload);
+    const { capabilities } = reg;
 
     const unknownCaps = this.registry.validateDeviceCapabilities(capabilities);
     if (unknownCaps.length > 0) {
@@ -256,7 +280,7 @@ export class Scheduler {
     });
 
     if (capabilities.includes('core.controls_motion')) {
-      this.initTrainState(deviceId, payload);
+      this.initTrainState(deviceId, reg);
     }
 
     const ownership: SchedulerEffect[] = [];
@@ -264,14 +288,23 @@ export class Scheduler {
       ownership.push(...this.recordZoneOwnership(deviceId, payload));
     }
     if (capabilities.includes('core.controls_switch')) {
-      ownership.push(...this.maybeRecordSwitchPairing(deviceId, payload));
+      ownership.push(...this.maybeRecordSwitchPairing(deviceId, reg.controls_marker_id));
     }
 
-    const trainLengthMm = (payload as { train_length_mm?: number }).train_length_mm;
-    const deviceState =
-      typeof trainLengthMm === 'number' && trainLengthMm > 0
-        ? { capabilities, train_length_mm: trainLengthMm }
-        : { capabilities };
+    /* Retained device state. Carries operator-authored name/livery (0.12.0) so a
+       display joining after commissioning sees them — they are presentation only,
+       never read back by the scheduler. */
+    const deviceState: {
+      capabilities: string[];
+      train_length_mm?: number;
+      name?: string;
+      livery?: string;
+    } = { capabilities };
+    if (typeof reg.train_length_mm === 'number' && reg.train_length_mm > 0) {
+      deviceState.train_length_mm = reg.train_length_mm;
+    }
+    if (reg.name !== undefined) deviceState.name = reg.name;
+    if (reg.livery !== undefined) deviceState.livery = reg.livery;
     return [...ownership, effects.updateState('devices', deviceId, deviceState)];
   }
 
@@ -280,15 +313,15 @@ export class Scheduler {
    * `core.controls_motion`. Captures optional physical length for
    * tail-clearance deferral.
    */
-  private initTrainState(deviceId: string, payload: unknown): void {
+  private initTrainState(deviceId: string, reg: DeviceRegistrationView): void {
     if (!this.trains.has(deviceId)) {
       /* Assign the registration-sequence number only on FIRST registration, so
        * a reconnecting train keeps its place in the arrival order. The optional
        * announced priority is resolved to a concrete number here (default 0). */
-      const priority = (payload as { priority?: number }).priority ?? 0;
+      const priority = reg.priority ?? 0;
       this.trains.set(deviceId, initialTrainState(deviceId, this.nextRegistrationSeq++, priority));
     }
-    const trainLengthMm = (payload as { train_length_mm?: number }).train_length_mm;
+    const trainLengthMm = reg.train_length_mm;
     if (trainLengthMm !== undefined && trainLengthMm > 0) {
       const train = this.trains.get(deviceId);
       if (train) {
@@ -306,10 +339,9 @@ export class Scheduler {
    */
   private maybeRecordSwitchPairing(
     deviceId: string,
-    payload: unknown,
+    controlsMarkerId: string | undefined,
   ): ReadonlyArray<SchedulerEffect> {
-    const controlsMarkerId = (payload as { controls_marker_id?: unknown }).controls_marker_id;
-    if (typeof controlsMarkerId !== 'string') return [];
+    if (controlsMarkerId === undefined) return [];
     const owner = this.zoneOwnedMarkers.get(controlsMarkerId);
     if (owner !== undefined && owner !== deviceId) {
       return [
