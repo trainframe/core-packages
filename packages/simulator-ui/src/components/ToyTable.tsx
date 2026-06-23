@@ -96,6 +96,14 @@ import { ConnectionStatus } from './ConnectionStatus.js';
 import { ScanBox } from './ScanBox.js';
 import { Settings } from './Settings.js';
 import { Feature, Groove, PieceBody, WOOD_FILL, WoodDefs } from './piece-art.js';
+import {
+  deleteSlot,
+  listSlots,
+  loadAutosave,
+  loadSlot,
+  saveAutosave,
+  saveSlot,
+} from './track-storage.js';
 
 // Canvas scale: 1 mm = SCALE px. Matches the old TrackBuilder so coordinates
 // translate one-for-one across the refactor.
@@ -1039,6 +1047,62 @@ interface ToyTableProps {
   readonly initialUrl: string;
 }
 
+/** Named-slot save/load wiring (localStorage), as a hook so its branches live
+ *  outside the already-large ToyTable body. The slot list is React state so the
+ *  UI re-renders after a save/delete. A named-slot LOAD replaces the layout and
+ *  clears the live undo stack (no cross-layout undo); only autosave-on-reload
+ *  rehydrates undo. */
+function useTrackSlots(opts: {
+  readonly piecesRef: { readonly current: ReadonlyArray<TrackPiece> };
+  readonly applyFlexState: (next: FlexState, anchorId: string | null) => void;
+  readonly clearUndo: () => void;
+  readonly setPieces: (pieces: ReadonlyArray<TrackPiece>) => void;
+}): {
+  readonly slotNames: ReadonlyArray<string>;
+  readonly saveToSlot: (name: string) => void;
+  readonly loadFromSlot: (name: string) => void;
+  readonly removeSlot: (name: string) => void;
+} {
+  const { piecesRef, applyFlexState, clearUndo, setPieces } = opts;
+  const [slotNames, setSlotNames] = useState<ReadonlyArray<string>>(() => listSlots());
+  const saveToSlot = useCallback(
+    (name: string) => {
+      const trimmed = name.trim();
+      if (trimmed === '') return;
+      saveSlot(trimmed, piecesRef.current);
+      setSlotNames(listSlots());
+    },
+    [piecesRef],
+  );
+  const loadFromSlot = useCallback(
+    (name: string) => {
+      const slot = loadSlot(name);
+      if (slot === null) return; // missing slot: safe no-op
+      clearUndo();
+      applyFlexState(new Map(), null);
+      setPieces(slot);
+    },
+    [applyFlexState, clearUndo, setPieces],
+  );
+  const removeSlot = useCallback((name: string) => {
+    deleteSlot(name);
+    setSlotNames(listSlots());
+  }, []);
+  return { slotNames, saveToSlot, loadFromSlot, removeSlot };
+}
+
+/** The autosaved working state split into the three seeds ToyTable initialises
+ *  from (pieces, undo stack, undo count). Empty when no/!shaped autosave. */
+function restoreAutosaveSeeds(): {
+  readonly pieces: TrackPiece[];
+  readonly undo: TrackPiece[][];
+  readonly count: number;
+} {
+  const saved = loadAutosave();
+  if (saved === null) return { pieces: [], undo: [], count: 0 };
+  return { pieces: saved.pieces, undo: saved.undo, count: saved.undo.length };
+}
+
 /** The effective (post-flex) rotation of the piece with `id`, or null when `id`
  *  is null or absent — the live value behind the flex-angle readout. */
 function effectiveAngleOf(
@@ -1051,7 +1115,12 @@ function effectiveAngleOf(
 
 export function ToyTable({ initialUrl }: ToyTableProps) {
   const { client } = useBroker();
-  const [pieces, setPieces] = useState<ReadonlyArray<TrackPiece>>([]);
+  /* AUTOSAVE RESTORE: on mount, rehydrate the working track AND its undo history
+     from localStorage so a page reload picks up exactly where the operator left
+     off (read once — `useRef` initialises a single time, unlike a bare call that
+     would re-read every render). Empty/absent autosave ⇒ a clean empty table. */
+  const restoredRef = useRef(restoreAutosaveSeeds());
+  const [pieces, setPieces] = useState<ReadonlyArray<TrackPiece>>(() => restoredRef.current.pieces);
   /* Ref mirror of the committed pieces, kept current every render so any handler
      (and the undo snapshot) can read the latest committed state without a stale
      closure. */
@@ -1093,8 +1162,9 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
    * is NOT an undoable edit — it clears the stack so undo can't cross into a
    * different layout. Bounded to the most recent `UNDO_LIMIT` edits.
    */
-  const undoStackRef = useRef<ReadonlyArray<ReadonlyArray<TrackPiece>>>([]);
-  const [undoCount, setUndoCount] = useState(0);
+  /* Seeded from the autosave restore so undo history survives a reload. */
+  const undoStackRef = useRef<ReadonlyArray<ReadonlyArray<TrackPiece>>>(restoredRef.current.undo);
+  const [undoCount, setUndoCount] = useState(() => restoredRef.current.count);
   const pushUndo = useCallback(() => {
     const next = [...undoStackRef.current, piecesRef.current];
     undoStackRef.current = next.length > UNDO_LIMIT ? next.slice(next.length - UNDO_LIMIT) : next;
@@ -1116,6 +1186,24 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     applyFlexState(new Map(), null);
     setPieces(restored);
   }, [applyFlexState]);
+
+  /* AUTOSAVE WRITE: persist the working track + undo stack whenever either changes
+     (every committed edit bumps both `pieces` and `undoCount`). Synchronous and
+     cheap for bounded plain data; on the next mount the restore above rehydrates
+     it. The first run re-persists the just-restored state — harmless. */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: undoStackRef is a ref; undoCount is the change signal that mirrors it
+  useEffect(() => {
+    saveAutosave(pieces, undoStackRef.current, UNDO_LIMIT);
+  }, [pieces, undoCount]);
+
+  /* Named-slot save/load (localStorage) — branches live in the hook. */
+  const { slotNames, saveToSlot, loadFromSlot, removeSlot } = useTrackSlots({
+    piecesRef,
+    applyFlexState,
+    clearUndo,
+    setPieces,
+  });
+
   /* Mirrors so a release handler can read the live flex without re-subscribing. */
   const flexRef = useRef(flex);
   flexRef.current = flex;
@@ -1848,6 +1936,12 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
         <header className="tf-toytable__header">
           <h1>Trainframe Toy Table</h1>
           <ConnectionStatus />
+          <SavedTracks
+            slots={slotNames}
+            onSave={saveToSlot}
+            onLoad={loadFromSlot}
+            onDelete={removeSlot}
+          />
           <Settings initialUrl={initialUrl} />
         </header>
         <ActionBar
@@ -2196,6 +2290,73 @@ function ToyboxButton({ type, armed, variantProps, onArm }: ToyboxButtonProps) {
       <PiecePreview type={type} {...variantProps} />
       <span className="tf-toybox__label">{PIECE_LABELS[type]}</span>
     </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Saved tracks (named slots)
+// ---------------------------------------------------------------------------
+
+interface SavedTracksProps {
+  /** Names of the currently saved slots (sorted). */
+  readonly slots: ReadonlyArray<string>;
+  /** Save the current track under the given name (trimmed; empty is ignored). */
+  readonly onSave: (name: string) => void;
+  /** Load the named slot, replacing the current track. */
+  readonly onLoad: (name: string) => void;
+  /** Delete the named slot. */
+  readonly onDelete: (name: string) => void;
+}
+
+/** A compact "Saved tracks" panel: name a slot + save the current track, and a
+ *  list of saved slots each with Load / Delete. localStorage-backed (see
+ *  `track-storage.ts`); the autosave is separate and silent. */
+function SavedTracks({ slots, onSave, onLoad, onDelete }: SavedTracksProps) {
+  const [name, setName] = useState('');
+  const save = (): void => {
+    onSave(name);
+    setName('');
+  };
+  return (
+    <div className="tf-toytable__saved" data-testid="saved-tracks">
+      <input
+        type="text"
+        className="tf-toytable__saved-name"
+        data-testid="save-name-input"
+        placeholder="Track name"
+        aria-label="Track name"
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') save();
+        }}
+      />
+      <button
+        type="button"
+        data-testid="save-slot-button"
+        onClick={save}
+        disabled={name.trim() === ''}
+      >
+        Save
+      </button>
+      <ul className="tf-toytable__saved-list">
+        {slots.map((slot) => (
+          <li key={slot} data-testid={`slot-${slot}`} className="tf-toytable__saved-item">
+            <span className="tf-toytable__saved-slot-name">{slot}</span>
+            <button type="button" data-testid={`load-slot-${slot}`} onClick={() => onLoad(slot)}>
+              Load
+            </button>
+            <button
+              type="button"
+              data-testid={`delete-slot-${slot}`}
+              onClick={() => onDelete(slot)}
+            >
+              Delete
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

@@ -202,6 +202,66 @@ body {
   color: var(--tf-color-fg-muted);
 }
 
+/* The live flex-angle readout — the rotation portion of the status line. */
+.tf-toytable__flex-angle {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: #6a4f2b;
+}
+
+/* "Saved tracks" panel in the header: name + Save, then a wrapping row of saved
+   slot chips, each with Load / Delete. Compact so it rides in the header. */
+.tf-toytable__saved {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+  font-size: 0.82em;
+}
+.tf-toytable__saved-name {
+  width: 8.5rem;
+  padding: 0.25rem 0.45rem;
+  border: 1px solid #cbb78e;
+  border-radius: 6px;
+  background: #fffdf8;
+  font: inherit;
+}
+.tf-toytable__saved button {
+  padding: 0.25rem 0.5rem;
+  border: 1px solid #cbb78e;
+  border-radius: 6px;
+  background: #f5e9cf;
+  color: #6a4f2b;
+  cursor: pointer;
+  font: inherit;
+}
+.tf-toytable__saved button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.tf-toytable__saved-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.tf-toytable__saved-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1rem 0.35rem;
+  border: 1px solid #e0cca2;
+  border-radius: 999px;
+  background: #fffdf8;
+}
+.tf-toytable__saved-slot-name {
+  font-weight: 600;
+  color: #6a4f2b;
+}
+
 .tf-toytable__canvas {
   border: 1px solid #cbb78e;
   /* A warm wooden tabletop: a soft radial light from the top, on beech. */
