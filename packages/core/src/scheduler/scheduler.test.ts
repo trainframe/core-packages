@@ -2721,6 +2721,58 @@ describe('Scheduler — switch device pairing', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Commissioning invariant (0.12.0): operator-authored presentation fields
+// (name, livery) and marker kinds never change scheduling — core reasons on
+// capabilities + topology ONLY.
+// ---------------------------------------------------------------------------
+
+describe('Scheduler — presentation fields never change scheduling (commissioning invariant)', () => {
+  const commands = (effs: ReadonlyArray<SchedulerEffect>) => effs.filter((e) => e.kind === 'send_command');
+
+  const routeWith = (extra: Record<string, unknown>) => {
+    const { scheduler } = setup();
+    scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'T1',
+      payload: { capabilities: ['core.controls_motion', 'core.accepts_route'], ...extra },
+    });
+    return scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+  };
+
+  it('a train with an operator name + livery schedules IDENTICALLY to one without', () => {
+    const plain = routeWith({});
+    const named = routeWith({ name: 'Flying Scotsman', livery: 'apple-green' });
+    // Every scheduling command (route/clearance/switch) is byte-identical.
+    expect(commands(named)).toEqual(commands(plain));
+  });
+
+  it('name + livery surface ONLY in the retained device state, never in a scheduling command', () => {
+    const { scheduler } = setup();
+    const regEffects = scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'T1',
+      payload: {
+        capabilities: ['core.controls_motion', 'core.accepts_route'],
+        name: 'Rocket',
+        livery: 'crimson',
+      },
+    });
+    // Registration echoes name/livery into the retained device snapshot.
+    const deviceState = regEffects.find(
+      (e) => e.kind === 'update_state_snapshot' && e.entity_type === 'devices',
+    );
+    expect(deviceState?.kind === 'update_state_snapshot' && deviceState.state).toMatchObject({
+      name: 'Rocket',
+      livery: 'crimson',
+    });
+    // No scheduling command (route/clearance/switch) ever carries them.
+    const inCommands = JSON.stringify(commands(scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3'])));
+    expect(inCommands).not.toContain('Rocket');
+    expect(inCommands).not.toContain('crimson');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Zone owned-marker declaration (ADR-034): a gates_zone frame declares the
 // interior markers it owns; core records ownership and enforces it.
 // ---------------------------------------------------------------------------
