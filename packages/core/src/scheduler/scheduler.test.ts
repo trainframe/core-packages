@@ -2727,7 +2727,8 @@ describe('Scheduler — switch device pairing', () => {
 // ---------------------------------------------------------------------------
 
 describe('Scheduler — presentation fields never change scheduling (commissioning invariant)', () => {
-  const commands = (effs: ReadonlyArray<SchedulerEffect>) => effs.filter((e) => e.kind === 'send_command');
+  const commands = (effs: ReadonlyArray<SchedulerEffect>) =>
+    effs.filter((e) => e.kind === 'send_command');
 
   const routeWith = (extra: Record<string, unknown>) => {
     const { scheduler } = setup();
@@ -2766,7 +2767,9 @@ describe('Scheduler — presentation fields never change scheduling (commissioni
       livery: 'crimson',
     });
     // No scheduling command (route/clearance/switch) ever carries them.
-    const inCommands = JSON.stringify(commands(scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3'])));
+    const inCommands = JSON.stringify(
+      commands(scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3'])),
+    );
     expect(inCommands).not.toContain('Rocket');
     expect(inCommands).not.toContain('crimson');
   });

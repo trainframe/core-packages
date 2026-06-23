@@ -29,9 +29,13 @@ function setup(): {
   const client = new InMemoryBrokerSubscriber();
   client.connect('inmem://');
   let seq = 0;
+  const newId = (): string => {
+    seq += 1;
+    return `id-${seq}`;
+  };
   const view = new CommissioningView({
     client,
-    newId: () => `id-${(seq += 1)}`,
+    newId,
     now: () => '2026-06-23T00:00:00.000Z',
     authorityId: 'GARAGE',
   });
