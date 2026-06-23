@@ -132,6 +132,10 @@ export interface OpenVisualiserOptions {
   readonly brokerUrl?: string;
   /** Set the admin API URL the visualiser uses for tag assignments. */
   readonly adminApiUrl?: string;
+  /** When set, record a video of this page into the given directory. */
+  readonly recordVideoDir?: string;
+  /** Video resolution (defaults to 1280×900). */
+  readonly recordVideoSize?: { readonly width: number; readonly height: number };
 }
 
 export async function openVisualiser(
@@ -139,7 +143,16 @@ export async function openVisualiser(
   opts: OpenVisualiserOptions = {},
 ): Promise<Page> {
   const brokerUrl = opts.brokerUrl ?? 'ws://127.0.0.1:9001';
-  const ctx = await browser.newContext();
+  const ctx = await browser.newContext(
+    opts.recordVideoDir !== undefined
+      ? {
+          recordVideo: {
+            dir: opts.recordVideoDir,
+            size: opts.recordVideoSize ?? { width: 1280, height: 900 },
+          },
+        }
+      : {},
+  );
   await ctx.addInitScript(
     ({ broker, admin }) => {
       localStorage.setItem('trainframe.visualiser.brokerUrl', broker);
