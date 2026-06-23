@@ -77,6 +77,34 @@ describe('Server — startup', () => {
   });
 });
 
+describe('Server — commissioned profile durability (0.12.0)', () => {
+  it('a device announced with an operator name/livery surfaces them in the retained snapshot a LATE subscriber sees', () => {
+    const { client } = makeServer();
+    // Commissioning: the device (re-)announces itself with the operator-authored
+    // name + livery, exactly as the visualiser's CommissioningView republishes.
+    publishWireEvent(client, 'device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      device_kind_hint: 'train',
+      name: 'Flying Scotsman',
+      livery: 'apple-green',
+      train_length_mm: 180,
+    });
+
+    // A display joining AFTER commissioning (the in-memory client replays retained
+    // messages to new subscribers) still sees the name/livery — they are durable,
+    // not lost to a thin snapshot.
+    let snapshot: { name?: string; livery?: string; train_length_mm?: number } | undefined;
+    client.subscribe('railway/state/devices/T1', (m) => {
+      snapshot = decode<typeof snapshot>(m.payload);
+    });
+    expect(snapshot).toMatchObject({
+      name: 'Flying Scotsman',
+      livery: 'apple-green',
+      train_length_mm: 180,
+    });
+  });
+});
+
 describe('Server — registers a train and grants its initial clearance', () => {
   it('publishes a grant_clearance command after assignSchedule', () => {
     const { server, client } = makeServer();
