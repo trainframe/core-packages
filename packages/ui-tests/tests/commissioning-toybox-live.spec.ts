@@ -43,9 +43,20 @@ test.describe
       });
       await waitForVisualiserConnected(vis);
 
-      // Place a loco on a bit of track and SCAN it (the real scan-box flow, which
-      // publishes device_registered onto the bus).
-      await placePieceOnToyTable(sim, { type: 'straight', xMm: 200, yMm: 200 });
+      // Scan a plain TRACK piece first: with a real server it binds its marker,
+      // so it surfaces in the visualiser's Markers roster (criterion 4, track).
+      const straightPiece = await placePieceOnToyTable(sim, {
+        type: 'straight',
+        xMm: 200,
+        yMm: 200,
+      });
+      await scanPiece(sim, straightPiece);
+      await expect(vis.getByTestId(`device-row-M-${straightPiece}`)).toBeVisible({
+        timeout: 30_000,
+      });
+
+      // Now a LOCO on that track and SCAN it (the real scan-box flow publishes
+      // device_registered onto the bus).
       const trainPiece = await placePieceOnToyTable(sim, { type: 'train', xMm: 200, yMm: 200 });
       await scanPiece(sim, trainPiece);
       const deviceId = `T-${trainPiece}`;

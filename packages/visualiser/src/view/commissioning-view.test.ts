@@ -99,6 +99,14 @@ describe('CommissioningView — pending queue (criterion 3)', () => {
     expect(h.view.getState().pending).toHaveLength(0);
   });
 
+  it('a RESCAN (the same device re-announcing) does not duplicate the queue item', () => {
+    announceDevice(h.client, 'T1', { capabilities: ['core.controls_motion'] });
+    announceDevice(h.client, 'T1', { capabilities: ['core.controls_motion'] }); // rescan
+    announceDevice(h.client, 'T1', { capabilities: ['core.controls_motion'] }); // and again
+    const pending = h.view.getState().pending.filter((p) => p.id === 'T1');
+    expect(pending).toHaveLength(1);
+  });
+
   it('an unknown observed tag enters the queue suggested as TRACK', () => {
     observeTag(h.client, 'READER-1', 'TAG-04A39F2C');
     const pending = h.view.getState().pending;

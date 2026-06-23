@@ -30,8 +30,27 @@ real dev servers + the real broker.
 
 ## Pre-flight
 
-The two UIs and the broker have to be reachable before there's any point
-opening a browser:
+**Use `pnpm dev:stack`.** It boots the WHOLE stack — an in-process MQTT/WS broker
+on `ws://127.0.0.1:9001`, a REAL `@trainframe/server` (discovery mode) + its admin
+HTTP on `:3000`, and both UIs (simulator-ui on 5274, visualiser on 5273) — in one
+command, then tears it all down on Ctrl-C. No Mosquitto/container needed.
+
+```sh
+pnpm dev:stack
+```
+
+**Why the server is non-negotiable:** the toy table publishes `device_registered`
+*events*; the visualiser renders the retained `railway/state/devices/*` *state*.
+ONLY the server bridges events→state. Without it, a loco scanned on the table
+vanishes into a silent void — it never reaches the visualiser's Commission panel
+or Devices roster. (Reproduced + fixed: `commissioning-no-server-repro.spec.ts`
+shows the void; `commissioning-toybox-live.spec.ts` shows the loop working with a
+server.)
+
+### Running the pieces by hand
+
+If you need to drive each process separately (different ports, an external
+Mosquitto, etc.):
 
 ```sh
 # Dev servers — pick any free ports. The repo's vite configs default to
@@ -44,6 +63,10 @@ pnpm --filter @trainframe/visualiser    dev --port 5273 --strictPort
 # bound to 1883 + 9001 via podman.
 podman start trainframe-broker
 nc -z 127.0.0.1 9001 && echo "broker WS up"
+
+# A real server, bridging events→state (without it, scans never surface):
+pnpm --filter @trainframe/server build
+node packages/server/dist/cli.js --discovery --broker ws://127.0.0.1:9001 --http-port 3000
 ```
 
 Two gotchas that cost real time:
@@ -195,16 +218,19 @@ republish; the visualiser stays on the previous layout.
 
 ---
 
-## What's NOT available in this setup
+## Running the UIs WITHOUT a server (degenerate)
 
-The standalone simulator-ui has its own in-browser scheduler. **There is
-no `@trainframe/server` running** — that's the binary that exposes the
-admin HTTP API on port 3000 for tag-assignment, route-reassignment, and
-gate hold/release. Discovery-loop journeys that POST to `/api/tags` or
-`/api/trains/<id>/route` need the server up; the dev-server-only setup
-won't service them.
+You *can* run just the two UIs + a broker (`pnpm dev` or the by-hand commands
+above without the server) — but it is a degenerate mode: there is no
+`@trainframe/server`, so nothing bridges `device_registered` events into the
+retained `railway/state/*` the visualiser reads. A loco scanned on the table
+goes onto the bus but **never appears in the visualiser** (no Commission panel
+entry, no Devices roster, no layout). Track-building on the toy table works
+(it's local to that UI), but anything cross-UI — commissioning, the device
+roster, schedules, the admin API on `:3000` (`/api/tags`,
+`/api/trains/<id>/route`) — needs the server. **Use `pnpm dev:stack`.**
 
-If you need the admin API for a journey:
+If you must run the server by hand against an existing broker:
 
 ```sh
 pnpm --filter @trainframe/server build
