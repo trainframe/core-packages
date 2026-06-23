@@ -93,7 +93,10 @@ test.describe
         timeout: 30_000,
       });
       await expect(vis.getByTestId('device-length-T-loco')).toHaveText('180 mm');
-      await vis.waitForTimeout(900);
+      // Hold the re-populated post-reload state on camera long enough that the
+      // recording clearly shows the named device SURVIVING the reload (a short
+      // hold gets truncated mid-reconnect by the video flush).
+      await vis.waitForTimeout(3000);
 
       bus.disconnect();
       // Close the context so Playwright finalises the recorded video (a manually
