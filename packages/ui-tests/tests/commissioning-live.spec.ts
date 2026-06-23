@@ -96,5 +96,8 @@ test.describe
       await vis.waitForTimeout(900);
 
       bus.disconnect();
+      // Close the context so Playwright finalises the recorded video (a manually
+      // created context is not auto-closed by the test runner).
+      await vis.context().close();
     });
   });
