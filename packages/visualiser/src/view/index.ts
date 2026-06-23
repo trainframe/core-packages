@@ -35,3 +35,10 @@
 
 export type { RegisteredDevice, RegisteredDevices } from './registered-devices-view.js';
 export { RegisteredDevicesView } from './registered-devices-view.js';
+export type {
+  CommissionCategory,
+  CommissionItem,
+  CommissioningPorts,
+  CommissioningState,
+} from './commissioning-view.js';
+export { CommissioningView } from './commissioning-view.js';

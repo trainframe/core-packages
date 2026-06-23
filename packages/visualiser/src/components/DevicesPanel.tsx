@@ -163,8 +163,14 @@ function TrainRow({ device, schedule, marker, status, highlighted, adminApiUrl }
         className="tf-devices__row-id"
         style={{ color: trainColor(device.device_id), fontWeight: 'bold' }}
       >
-        {device.device_id}
+        {/* The operator-authored name when commissioned, else the raw device id. */}
+        {device.name ?? device.device_id}
       </span>
+      {device.train_length_mm !== undefined && (
+        <span className="tf-devices__row-meta" data-testid={`device-length-${device.device_id}`}>
+          {device.train_length_mm} mm
+        </span>
+      )}
       <span className="tf-devices__row-meta">
         {schedule ? `route ${schedule.stops.join(' → ')}` : 'no schedule'}
       </span>

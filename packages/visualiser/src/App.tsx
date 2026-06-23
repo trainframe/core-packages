@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { BrokerProvider } from './broker/broker-context.js';
 import type { BrokerSubscriber } from './broker/client.js';
 import { MqttBrokerSubscriber } from './broker/mqtt-client.js';
+import { CommissioningPanel } from './components/CommissioningPanel.js';
 import { ConnectionStatus } from './components/ConnectionStatus.js';
 import { DeadlockBanner } from './components/DeadlockBanner.js';
 import { DevicesPanel } from './components/DevicesPanel.js';
@@ -43,6 +44,7 @@ export function App({ client }: AppProps = {}) {
         <ScheduleList />
         <ScheduleAssigner />
         <LearnTrackPanel />
+        <CommissioningPanel />
         <DevicesPanel adminApiUrl={adminApiUrl} />
         <MaintenancePanel adminApiUrl={adminApiUrl} onReset={() => setResetNonce((n) => n + 1)} />
         <LayoutCanvas />

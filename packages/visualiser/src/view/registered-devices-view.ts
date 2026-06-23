@@ -33,6 +33,9 @@ export interface RegisteredDevice {
    * `train_length_mm` value (ADR-016).
    */
   readonly train_length_mm?: number;
+  /** Operator-authored friendly name from the retained snapshot (0.12.0),
+   *  present once the device has been commissioned. Presentation only. */
+  readonly name?: string;
 }
 
 export type RegisteredDevices = ReadonlyMap<string, RegisteredDevice>;
@@ -88,7 +91,8 @@ export class RegisteredDevicesView {
       if (
         existing &&
         capabilitiesEqual(existing.capabilities, parsed.capabilities) &&
-        existing.train_length_mm === parsed.train_length_mm
+        existing.train_length_mm === parsed.train_length_mm &&
+        existing.name === parsed.name
       ) {
         return;
       }
@@ -99,6 +103,7 @@ export class RegisteredDevicesView {
         ...(parsed.train_length_mm !== undefined
           ? { train_length_mm: parsed.train_length_mm }
           : {}),
+        ...(parsed.name !== undefined ? { name: parsed.name } : {}),
       };
       next.set(deviceId, device);
       this.state = next;
@@ -118,6 +123,7 @@ function capabilitiesEqual(a: ReadonlyArray<string>, b: ReadonlyArray<string>): 
 interface DecodedDevicePayload {
   readonly capabilities: ReadonlyArray<string>;
   readonly train_length_mm?: number;
+  readonly name?: string;
 }
 
 function decodeDevicePayload(payload: Uint8Array): DecodedDevicePayload | null {
@@ -146,8 +152,10 @@ function decodeDevicePayload(payload: Uint8Array): DecodedDevicePayload | null {
   const rawLen = obj.train_length_mm;
   const trainLengthMm =
     typeof rawLen === 'number' && Number.isFinite(rawLen) && rawLen > 0 ? rawLen : undefined;
+  const name = typeof obj.name === 'string' && obj.name.length > 0 ? obj.name : undefined;
   return {
     capabilities: caps,
     ...(trainLengthMm !== undefined ? { train_length_mm: trainLengthMm } : {}),
+    ...(name !== undefined ? { name } : {}),
   };
 }
