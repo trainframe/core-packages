@@ -953,7 +953,93 @@ declare global {
      * harness reads it to confirm an edit pushed an entry and an undo popped it.
      * Registered behind `import.meta.env.DEV`; absent in production. */
     __tfUndoDepth?: (() => number) | undefined;
+    /** DEV-only: a running log of any detected "vanish" — a RENDERED piece going
+     * non-finite, flung far off-canvas, or dropped from the set between renders.
+     * The flex+add path is proven sound in tests, so this normally stays empty;
+     * it captures the FAILING observation (piece set + poses before vs after,
+     * which piece vanished, and where it went) the instant one ever occurs live,
+     * turning an intermittent "sometimes" report into concrete evidence.
+     * Registered behind `import.meta.env.DEV`; absent in production. */
+    __tfVanishLog?: VanishRecord[] | undefined;
   }
+}
+
+/** One captured vanish: a rendered piece flung far off-canvas or gone non-finite,
+ *  with the before-vs-after piece set so the failing observation is fully
+ *  reconstructable. (A piece LEAVING the set isn't watched — `applyFlex` provably
+ *  never drops one, so a removal is always an intentional delete, not a vanish.) */
+interface VanishRecord {
+  readonly reason: 'non-finite' | 'off-canvas';
+  readonly pieceId: string;
+  readonly flexActive: number;
+  readonly anchor: string | null;
+  readonly before: ReadonlyArray<{ id: string; x: number; y: number; deg: number }>;
+  readonly after: ReadonlyArray<{ id: string; x: number; y: number; deg: number }>;
+}
+
+/** Far beyond any real layout's geometric reach — past this is a fling, not a bend. */
+const VANISH_OFF_CANVAS_MM = 4000;
+
+function snapPoses(
+  ps: ReadonlyArray<EffectivePiece>,
+): ReadonlyArray<{ id: string; x: number; y: number; deg: number }> {
+  return ps.map((p) => ({
+    id: p.id,
+    x: Math.round(p.position.x),
+    y: Math.round(p.position.y),
+    deg: Math.round(p.rotationDeg),
+  }));
+}
+
+/** Classify a rendered piece as a vanish, or null if it is sound. */
+function vanishReason(p: EffectivePiece): VanishRecord['reason'] | null {
+  if (
+    !Number.isFinite(p.position.x) ||
+    !Number.isFinite(p.position.y) ||
+    !Number.isFinite(p.rotationDeg)
+  ) {
+    return 'non-finite';
+  }
+  if (
+    Math.abs(p.position.x) > VANISH_OFF_CANVAS_MM ||
+    Math.abs(p.position.y) > VANISH_OFF_CANVAS_MM
+  ) {
+    return 'off-canvas';
+  }
+  return null;
+}
+
+/** DEV-only vanish watch (see the call site): records any rendered piece that
+ *  goes non-finite or flung far off-canvas into `window.__tfVanishLog`, with the
+ *  before/after piece set. Pure observation; absent in production. */
+function useVanishWatch(
+  effectivePieces: ReadonlyArray<EffectivePiece>,
+  flexActive: number,
+  anchor: string | null,
+): void {
+  const prevRef = useRef(effectivePieces);
+  useEffect(() => {
+    const prev = prevRef.current;
+    prevRef.current = effectivePieces;
+    if (!import.meta.env.DEV) return;
+    const records: VanishRecord[] = effectivePieces.flatMap((p) => {
+      const reason = vanishReason(p);
+      if (reason === null) return [];
+      return [
+        {
+          reason,
+          pieceId: p.id,
+          flexActive,
+          anchor,
+          before: snapPoses(prev),
+          after: snapPoses(effectivePieces),
+        },
+      ];
+    });
+    if (records.length > 0) {
+      window.__tfVanishLog = [...(window.__tfVanishLog ?? []), ...records];
+    }
+  }, [effectivePieces, flexActive, anchor]);
 }
 
 /** Viewport state: world-space origin (top-left corner) and zoom level. */
@@ -1309,6 +1395,15 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
 
   /* Stable TrackPiece view of effectivePieces — same memo guard. */
   const hardwarePieces = useMemo(() => asTrackPieces(effectivePieces), [effectivePieces]);
+
+  /* DEV-only VANISH WATCH (systematic-debugging "no root cause → add monitoring";
+     mirrors the defect register's structured-trace recommendation). The flex+add
+     path is proven sound across the deterministic + live guards, so this stays
+     silent — but if a RENDERED piece is ever lost (dropped from the set),
+     non-finite, or flung far off-canvas in live use, it records the failing
+     observation (the piece set + poses before vs after, which piece, where) into
+     `window.__tfVanishLog` so an intermittent report becomes concrete evidence. */
+  useVanishWatch(effectivePieces, flex.size, flexAnchorId);
 
   // Stand up an in-browser physics simulation wired to the broker. It hosts
   // the virtual trains and gates the operator scans onto the bus, and reacts
