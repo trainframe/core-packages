@@ -31,17 +31,28 @@ drag is a plain MOVE that commits on release.
 **Test:** component test — a lone piece, press-hold-drag, asserts it relocated and
 STAYS (no spring-back) and never entered flex (no ripple / flex state).
 
-## Part 2 — Click-placing against an existing piece vanishes (bug)
+## Part 2 — Drag is the single placement path (remove arming) and attaches cleanly (bug + UX)
 
-**Symptom:** arm a piece, click it against an existing open end → the piece vanishes;
-the workaround is to drop it in open space then drag it to attach.
+**Operator feedback:** arming is confusing (a second placement path) AND unusable (you
+can't see the piece's angle/direction before you click). The drag-from-menu path
+(Feature B) already carries the real piece, orientable with R/F in-flight, and snaps —
+so it strictly supersedes arming.
 
-**Lead:** the armed click path (`handleClick` → `computePlacement`) differs from the
-working move-to-attach path (`computeMovePlacement`). Reproduce live first to capture
-which piece is lost and where it goes, then root-cause the placement divergence.
+**Decision (locked):** REMOVE the arm-then-click canvas placement. Tapping a parts-menu
+tile only opens its variant options (straight length, carriage/loco livery) to
+configure the next drag — it no longer arms anything. Dragging a tile is the SOLE
+placement path.
 
-**Test:** deterministic — placing an armed piece onto an occupied open end keeps both
-pieces, finite + on-canvas, connected (one component). Fails first on the bug.
+**Bug to fix (the user's actual report):** a menu-DRAG (not the armed click) dropped
+against an existing open end VANISHES; the workaround is drop-in-open-space-then-drag.
+The drag commits via the Feature-B place-then-`computeMovePlacement` sequence — reproduce
+live first (which piece is lost, where it goes), root-cause that commit, fix so a drag
+onto an occupied open end attaches in one action.
+
+**Test:** migrate the click-based `placePieceOnToyTable` helper + its callers to the
+drag path; deterministic + e2e — a menu-drag onto an occupied open end keeps both pieces
+(finite + on-canvas, one component); R/F set orientation in-flight; the variant fan still
+configures a dragged piece; NO canvas-click placement path remains.
 
 ## Part 3 — Connectivity under flex on a real layout (bug)
 

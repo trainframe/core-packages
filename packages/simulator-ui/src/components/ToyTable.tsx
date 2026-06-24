@@ -9,6 +9,7 @@ import { composeEdgePath, pieceIdFromMarkerId } from '@trainframe/simulator/trac
 import {
   type ClosureResult,
   freeEndpointIndex,
+  hasFlexAnchor,
   selectAnchor,
   solveClose,
   solveFollow,
@@ -3777,6 +3778,7 @@ function Table({
               onDragMove={handlePieceDragMove}
               onDragEnd={handlePieceDragEnd}
               onFlexEnter={handleFlexEnter}
+              flexable={hasFlexAnchor(restPieces, p.id)}
               closureAvailable={closureAvailableId === p.id}
             />
           );
@@ -4056,6 +4058,10 @@ interface PieceRendererProps {
   /** The hold-dwell elapsed within the deadzone: FLEX MODE engaged — fire the
    * blue flex-mode ripple from this piece. */
   readonly onFlexEnter: (pieceId: string) => void;
+  /** Whether this piece is on a flexable chain (has a flex anchor). Flex is
+   * meaningless for a lone/unconnected piece, so the hold-dwell only engages flex
+   * when this is true; otherwise a hold-then-drag is a plain MOVE that commits. */
+  readonly flexable: boolean;
   /* True while this piece is being slow-dragged and its free endpoint is close
      enough to an open endpoint that a loop closure is feasible — renders the
      flash affordance so the operator sees that releasing will snap the loop shut. */
@@ -4106,6 +4112,7 @@ function PieceRenderer({
   onDragMove,
   onDragEnd,
   onFlexEnter,
+  flexable,
   closureAvailable,
 }: PieceRendererProps) {
   const shape = getPieceShape(asTrackPiece(piece));
@@ -4153,7 +4160,10 @@ function PieceRenderer({
        deadzone chooses MOVE mode, or on release. */
     const holdTimer = setTimeout(() => {
       const d = dragRef.current;
-      if (d !== null && d.mode === 'pending') {
+      // Flex only engages on a flexable chain. For a lone/unconnected piece flex
+      // is meaningless, so the hold does NOT enter flex — a subsequent drag is a
+      // plain MOVE (which commits), not a flex that springs back on release.
+      if (d !== null && d.mode === 'pending' && flexable) {
         d.mode = 'flex';
         onFlexEnter(piece.id);
       }
