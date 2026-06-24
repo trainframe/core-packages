@@ -114,6 +114,24 @@ describe('CommissioningView — pending queue (criterion 3)', () => {
     expect(pending[0]?.id).toBe('TAG-04A39F2C');
     expect(pending[0]?.suggestedCategory).toBe('track');
   });
+
+  it('a tag-AUTHORITY device (assigns_tags: the GARAGE / ADMIN-API) is NOT commissionable', () => {
+    // The toy table announces a synthetic GARAGE and the server an ADMIN-API,
+    // both pure `core.assigns_tags` authorities. They are infrastructure that
+    // MINTS commissions — never themselves things an operator confirms. They
+    // must never appear in the queue (the bug: "admin/garage shown to confirm").
+    announceDevice(h.client, 'GARAGE', { capabilities: ['core.assigns_tags'] });
+    announceDevice(h.client, 'ADMIN-API', { capabilities: ['core.assigns_tags'] });
+    announceDevice(h.client, 'VISUALISER-GARAGE', { capabilities: ['core.assigns_tags'] });
+    expect(h.view.getState().pending).toHaveLength(0);
+  });
+
+  it('a device that ALSO assigns tags but drives motion is still NOT commissionable (authority wins)', () => {
+    announceDevice(h.client, 'WEIRD', {
+      capabilities: ['core.assigns_tags', 'core.controls_motion'],
+    });
+    expect(h.view.getState().pending).toHaveLength(0);
+  });
 });
 
 describe('CommissioningView — commands + confirm emit correctness facts + profile (criterion 3)', () => {

@@ -82,6 +82,12 @@ interface Draft {
 
 const DEFAULT_AUTHORITY = 'VISUALISER-GARAGE';
 
+/** A tag authority (`core.assigns_tags`) is infrastructure — the garage / admin
+ *  that MINTS tag assignments — not a device an operator commissions. */
+function isTagAuthority(capabilities: ReadonlyArray<string>): boolean {
+  return capabilities.includes('core.assigns_tags');
+}
+
 /** Train if it drives motion; device if it has any other capability; track for a
  *  bare tag. The accessible default the operator usually accepts. */
 function suggestCategory(
@@ -175,6 +181,12 @@ export class CommissioningView {
     const decoded = decodeDevice(message.payload);
     if (decoded === null) {
       // Tombstone / malformed: forget the appearance.
+      this.appearances.delete(id);
+    } else if (isTagAuthority(decoded.capabilities)) {
+      // Infrastructure that MINTS commissions (the toy table's GARAGE, the
+      // server's ADMIN-API, the visualiser's own VISUALISER-GARAGE) — never a
+      // thing an operator confirms. Keep it out of the queue (and drop it if it
+      // was queued before declaring the capability).
       this.appearances.delete(id);
     } else {
       this.appearances.set(id, {
