@@ -114,6 +114,32 @@ function assertNoVanish(poses: Pose[], present: ReadonlySet<string>, where: stri
   }
 }
 
+/* DRAG-ADD a straight via Feature B onto the flexed free end's vicinity (px
+   target inside the visible band), then assert nothing vanished. */
+async function dragAddNearEnd(
+  sim: Page,
+  ids: string[],
+  present: Set<string>,
+  v: View,
+  round: number,
+): Promise<void> {
+  const canvas = sim.getByTestId('toy-table-canvas');
+  const end = await poseOf(sim, ids[ids.length - 1] as string);
+  const endPx = await mmToPx(sim, Math.min(end.x + 120, v.vpX + v.worldW * 0.9), end.y);
+  const cBox = await canvas.boundingBox();
+  if (cBox === null) throw new Error('no canvas');
+  const before = new Set((await readPoses(sim)).map((p) => p.id));
+  await dragPieceFromToybox(sim, 'straight', {
+    targetPosition: { x: endPx.x - cBox.x, y: endPx.y - cBox.y },
+  });
+  await sim.waitForTimeout(400);
+  const added = (await readPoses(sim)).map((p) => p.id).find((id) => !before.has(id));
+  if (added === undefined) throw new Error(`round ${round}: drag-add produced no piece`);
+  ids.push(added);
+  present.add(added);
+  assertNoVanish(await readPoses(sim), present, `round ${round} after drag-add`);
+}
+
 test.describe
   .serial('flex then Feature-B drag-add never vanishes a piece', () => {
     test.describe.configure({ retries: 2 });
@@ -157,31 +183,9 @@ test.describe
         await disarm(sim);
         const flexId = round === 1 ? (ids[0] as string) : (ids[ids.length - 1] as string);
         const moved = await flex(sim, flexId, 0, round % 2 === 0 ? dy : -dy);
-        // eslint-disable-next-line no-console
-        console.log(
-          `r${round} flex ${flexId}: moved=${moved.toFixed(1)} count=${(await readPoses(sim)).length}`,
-        );
         expect(moved, `round ${round}: flex moved the chain`).toBeGreaterThan(4);
         assertNoVanish(await readPoses(sim), present, `round ${round} after flex`);
-
-        // DRAG-ADD via Feature B onto the flexed end's vicinity (px target inside
-        // the visible band, near the flexed free end).
-        const end = await poseOf(sim, ids[ids.length - 1] as string);
-        const endPx = await mmToPx(sim, Math.min(end.x + 120, v.vpX + v.worldW * 0.9), end.y);
-        const cBox = await canvas.boundingBox();
-        if (cBox === null) throw new Error('no canvas');
-        const before = new Set((await readPoses(sim)).map((p) => p.id));
-        await dragPieceFromToybox(sim, 'straight', {
-          targetPosition: { x: endPx.x - cBox.x, y: endPx.y - cBox.y },
-        });
-        await sim.waitForTimeout(400);
-        const added = (await readPoses(sim)).map((p) => p.id).find((id) => !before.has(id));
-        if (added === undefined) throw new Error(`round ${round}: drag-add produced no piece`);
-        ids.push(added);
-        present.add(added);
-        // eslint-disable-next-line no-console
-        console.log(`r${round} drag-added ${added}; count=${(await readPoses(sim)).length}`);
-        assertNoVanish(await readPoses(sim), present, `round ${round} after drag-add`);
+        await dragAddNearEnd(sim, ids, present, v, round);
       }
 
       expect(errors, `console/page errors: ${errors.join(' | ')}`).toEqual([]);

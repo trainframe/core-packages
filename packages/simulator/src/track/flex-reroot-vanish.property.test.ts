@@ -110,41 +110,48 @@ function assertGestureSound(
   expect(baked.length, `g${g}: piece count`).toBe(before.length);
 }
 
+/* ADD a piece onto the chain's open end (extends it → the next anchor shifts
+   further — the report's "flex then add" compounding). */
+function extendChain(pieces: TrackPiece[], type: TrackPieceType, g: number): void {
+  const end = getEndpoints(pieces[pieces.length - 1] as TrackPiece)[1];
+  if (end === undefined) return;
+  const placement = computePlacement(end.x, end.y, type, pieces);
+  pieces.push({
+    id: `add${g}`,
+    type,
+    position: { x: placement.x, y: placement.y },
+    rotationDeg: placement.rotationDeg,
+    tagged: false,
+  });
+}
+
+/* One re-root gesture: alternate the dragged end (flips selectAnchor → re-roots
+   applyFlex's FK — the D6 trigger), solve, bake, assert sound. Returns baked. */
+function reRootGesture(
+  pieces: ReadonlyArray<TrackPiece>,
+  g: number,
+  rand: () => number,
+): TrackPiece[] {
+  const draggedId = g % 2 === 0 ? (pieces[pieces.length - 1] as TrackPiece).id : 'p0';
+  const anchorId = selectAnchor(pieces, draggedId);
+  const flex: FlexState = solveFollow(pieces, draggedId, {
+    x: 80 + rand() * 700,
+    y: 60 + rand() * 480,
+  });
+  const baked = [...applyFlex(pieces, flex, anchorId)];
+  assertGestureSound(pieces, baked, anchorId, g);
+  return baked;
+}
+
 describe('junction-less cross-gesture re-root never vanishes a piece (D6, criteria 1–3)', () => {
   for (const type of ['curve', 'straight', 'curve-tight'] as const) {
     for (const seed of [1, 7, 23, 99, 512]) {
       it(`${type} seed ${seed}: alternating-end flex (anchor flips) keeps the chain sound`, () => {
         const rand = rng(seed);
         let pieces = openChain(6, type);
-
         for (let g = 0; g < 12; g++) {
-          // Alternate dragging the two ends — flips selectAnchor → re-roots the FK
-          // on each gesture (the D6 trigger).
-          const draggedId = g % 2 === 0 ? (pieces[pieces.length - 1] as TrackPiece).id : 'p0';
-          const anchorId = selectAnchor(pieces, draggedId);
-          const flex: FlexState = solveFollow(pieces, draggedId, {
-            x: 80 + rand() * 700,
-            y: 60 + rand() * 480,
-          });
-          const baked = [...applyFlex(pieces, flex, anchorId)];
-          assertGestureSound(pieces, baked, anchorId, g);
-          pieces = baked;
-
-          // Every third gesture, ADD onto an end (extends the chain → the next
-          // anchor shifts further — the report's "flex then add" compounding).
-          if (g % 3 === 2) {
-            const end = getEndpoints(pieces[pieces.length - 1] as TrackPiece)[1];
-            if (end !== undefined) {
-              const placement = computePlacement(end.x, end.y, type, pieces);
-              pieces.push({
-                id: `add${g}`,
-                type,
-                position: { x: placement.x, y: placement.y },
-                rotationDeg: placement.rotationDeg,
-                tagged: false,
-              });
-            }
-          }
+          pieces = reRootGesture(pieces, g, rand);
+          if (g % 3 === 2) extendChain(pieces, type, g);
         }
       });
     }
