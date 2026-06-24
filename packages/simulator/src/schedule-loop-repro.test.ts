@@ -107,4 +107,35 @@ describe('scheduled train cycles its stops on a loop', () => {
       12,
     );
   });
+
+  /* The user's exact case: a CLOSED loop (blue-wave confirmed, train laps it) but
+     a 2-stop schedule does stop-A → stop-B → STOP, never wrapping back to A. The
+     real toy-table layout has BIDIRECTIONAL edges (unlike straightLoop), so the
+     wrap from the last stop back to the first can be SHORTER going backwards. If
+     the train's heading isn't carried into the wrap replan, the planner picks the
+     reverse path → ordinary routing can't reverse → the train parks. Schedule
+     [S1, S3]: the wrap S3→S1 is 2 edges backwards vs 4 forwards. */
+  it('a CLOSED BIDIRECTIONAL loop cycles a 2-stop schedule (wrap must go forward, not reverse)', () => {
+    const closed = buildRing();
+    const reversed = closed.layout.edges.map((e) => ({
+      from_marker_id: e.to_marker_id,
+      to_marker_id: e.from_marker_id,
+      estimated_length_mm: e.estimated_length_mm ?? 300,
+    }));
+    const bidir = { ...closed.layout, edges: [...closed.layout.edges, ...reversed] };
+    env.shutdown();
+    env = startPhysicsEnv({ ...closed, layout: bidir });
+    env.spawnTrain('T4', { atMarker: 'S1' });
+    env.assignSchedule('T4', ['S1', 'S3']);
+    env.advance(180_000);
+    const counts = visitCounts('T4', ['S1', 'S3']);
+    // eslint-disable-next-line no-console
+    console.log('CLOSED BIDIRECTIONAL 2-stop visit counts:', JSON.stringify(counts));
+    for (const stop of ['S1', 'S3']) {
+      expect(
+        counts[stop],
+        `${stop} visited repeatedly (cycles, not stop-after-B)`,
+      ).toBeGreaterThanOrEqual(3);
+    }
+  });
 });

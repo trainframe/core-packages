@@ -987,7 +987,15 @@ export class Scheduler {
 
     const newIndex = train.transit.progress_index + 1;
     train.transit = { ...train.transit, progress_index: newIndex };
-    train.current_edge = train.transit.edges[newIndex];
+    /* Advance the heading to the next edge while the transit is in progress; but
+     * when it COMPLETES (no next edge) KEEP the arrival edge as the heading. The
+     * heading is what `planAndExecuteCurrentTransit` feeds the planner to forbid a
+     * 180° U-turn — wiping it to `undefined` here let a schedule WRAP (last stop →
+     * first stop) plan the reverse shortcut on a bidirectional loop, so the train
+     * was handed a route it can't drive (no `grant_reverse`) and parked at the
+     * last stop instead of looping. Keeping the arrival heading makes the wrap
+     * continue FORWARD around the loop. */
+    train.current_edge = train.transit.edges[newIndex] ?? currentEdge;
 
     // Transit still in progress — caller continues with maybeExtendClearance
     // against the same transit.
