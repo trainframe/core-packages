@@ -279,43 +279,61 @@ benign in the current (post bake-on-release / authoritative-connection) code.
 
 ---
 
-## Vanish report — "flex a chain, add a piece, the anchor or a far piece disappears" 🟢 (NOT REPRODUCIBLE; exonerated + guarded 2026-06-24)
+## Vanish report — "flex a chain, add a piece, the anchor or a far piece disappears" 🟢 (REPRODUCED on `38423a5`; ROOT-CAUSED; fixed by per-component `applyFlex`; regression-guarded 2026-06-24)
 
 **Repro (user):** place a set of pieces, flex the chain, then add a new piece —
 *sometimes* the presumed anchor, or a piece far down the flexed line, vanishes
 (gone from the rendered set / flung off-canvas / to NaN).
 
-**Investigation (drove the real stack + exhaustive deterministic sweeps):** the
-vanish does NOT reproduce in the current code, in any tested configuration —
-- LIVE (real browser, real flex gestures of the end AND the anchor-side piece,
-  then add): no vanish, count preserved, all poses finite + on-canvas, confirmed
-  frame-by-frame by a second adversary;
-- deterministic place→flex→add over curves / tight / flips / 24-frame warm-start
-  drags / 3 compounding rounds (`flex-add-vanish.property.test.ts`);
-- branching topologies — junctions (3 ends), crossings (4) — flexing RANDOM
-  pieces deep in branches via the exact live flow (`flex-branch-vanish.property.test.ts`);
-- the D6 junction-less cross-gesture re-root, measured + guarded (above).
+**CAPTURED FAILING OBSERVATION (the original flex commit `38423a5`, run live in an
+isolated worktree):** input pieces `[a0, a1, b0]` (chain A = `a0`+`a1`, plus a
+detached piece `b0`) under a flex of chain A → `effectivePoses(pieces, flex, 'a0')`
+returned `[a0, a1]`. **`b0` VANISHED** — present in the input, absent from the
+rendered set (omitted from the result map → never drawn).
 
-**Why no vanish (root cause of soundness):** `applyFlex` maps *every* input piece
-(never drops one); the FK is finite arithmetic; the DLS solve is damped +
-pivot-guarded (no NaN); bake clears the flex map so a post-add render is just the
-rest poses; the renderer draws all pieces bucketed by layer (a sever can't hide
-one); and the gesture anchor stays pinned (D6 measurement).
+**ROOT CAUSE (with evidence):** the original `effectivePoses` rendered a flex by
+walking a spanning tree from a SINGLE anchor (`walkTree`) and returning ONLY the
+pieces it reached; `loops.ts` had no `connectedComponents`. So on any flex render
+of a layout with >1 connected component, every piece NOT in the anchor's
+component was omitted → vanished. The "set of pieces, flex, then add" recipe hits
+this exactly: adding a piece that doesn't snap onto the chain (or a flex that
+over-bends a joint past the heading tolerance and SPLITS the chain) creates a
+second component — and whichever component the single anchor isn't in disappears
+(its pieces can be "the anchor" you presumed, or any piece "far down the line").
+**Intermittent** because it requires >1 component during a flex render; with one
+fully-connected chain the walk reaches everything.
 
-**Why the original report stands anyway:** it almost certainly predates the
-**bake-on-release (2026-06-22)** and **authoritative-connection (2026-06-22)**
-rewrites — both AFTER this register was opened (2026-06-21). Those rewrites
-eliminated the rest-vs-effective desync (D1/D2) and the persisted-stray-flex
-phantom snaps (D9) that were the real piece-displacement bugs. Separately, the
-parts-menu drag was reworked (feature B, 2026-06-24) to a controlled pointer drag,
-**removing the native-HTML5-DnD add path** — the one add-path that couldn't be
-stress-tested live. No speculative fix was applied (no confirmed root cause in
-current code); four regression guards now fail loudly if a vanish is reintroduced.
-If still reproducible, the exact recipe (piece types, which piece flexed + how,
-how the new piece is added) is needed to localise it.
+**Why the existing flex/closure tests didn't catch it:** they all flexed a SINGLE
+connected chain from an end, so the single-anchor walk reached every piece — the
+multi-component case was never exercised.
 
-**Why the existing flex/closure tests "didn't catch it":** there was nothing to
-catch in current code — but the *coverage gap* that would have hidden a re-root
-vanish was real: every prior sweep flexed a consistent end (stable anchor) or used
-a junction (stable anchor). The new junction-less + branching + random-piece
-guards close that gap.
+**FIX (current `applyFlex`, `flex.ts` ~380–410):** split the layout into
+`connectedComponents`, root EACH at its own anchor (the drag's anchor when it is
+in that component, else the component's first piece), and return
+`pieces.map(p => poses.get(p.id) ?? {...rest})` — so EVERY input piece is in the
+output (its FK pose, or its rest pose). A piece can no longer be dropped, in any
+number of components. This was the bake-on-release / authoritative-connection
+rewrite (2026-06-22), which is why the vanish does not reproduce in current code.
+
+**Regression test (red on `38423a5`, green now):**
+`packages/simulator/src/track/flex-multicomponent-vanish.property.test.ts` —
+replays the multi-component place→flex→add (a flexed chain + a detached piece;
+place→flex→add a non-connecting piece; three separate components) and asserts
+applyFlex returns EVERY piece, all finite. Plus the broader soundness guards:
+- LIVE (real browser, real flex of the end AND anchor-side piece, then add): no
+  vanish, second-adversary CANNOT-REFUTE;
+- deterministic place→flex→add over curves/tight/flips/warm-start/compounding
+  (`flex-add-vanish.property.test.ts`);
+- branching junctions/crossings, random-piece flex (`flex-branch-vanish.property.test.ts`);
+- junction-less cross-gesture re-root, D6 (`flex-reroot-vanish.property.test.ts`).
+
+**Why current code is sound:** `applyFlex` maps *every* input piece across all
+components (never drops one); the FK is finite; the DLS solve is damped +
+pivot-guarded (no NaN); bake clears the flex map; the renderer draws all pieces
+by layer; the gesture anchor stays pinned (D6). A DEV vanish-watch
+(`window.__tfVanishLog`) also captures any future non-finite/off-canvas piece live.
+
+**Also addressed:** the parts-menu drag was reworked (feature B, 2026-06-24) to a
+controlled pointer drag, removing the native-HTML5-DnD add path; and the D6
+junction-less re-root concern was measured benign (above). The report was REAL
+(it bit on `38423a5`) and is fixed — not a misperception.
