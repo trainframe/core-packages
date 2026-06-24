@@ -258,10 +258,64 @@ range in real use. Strong candidate for REMOVAL (let loops close rigidly — 8
 curves do this perfectly — and delete the flex/solver/wave machinery), rather
 than continued nursing. Pending user decision.
 
-## D6 — Cross-gesture anchor re-root may shift a junction-less component ⚪
+## D6 — Cross-gesture anchor re-root may shift a junction-less component 🟢 (MEASURED — sound; guarded 2026-06-24)
 
 When the FK anchor changes between drags (a junction-less open chain whose
 far-point depends on which piece is dragged), re-rooting pins a different piece
-at rest and rigid-shifts the component. Out of scope for the D4 fix (which pins
-one anchor per gesture); logged so it isn't mistaken for "covered." Junction
-components are unaffected (the junction is a stable anchor).
+at rest. Out of scope for the D4 fix (which pins one anchor per gesture); logged
+so it isn't mistaken for "covered." Junction components are unaffected (the
+junction is a stable anchor).
+
+**Resolution (2026-06-24, by direct measurement — see the vanish-report entry
+below):** the re-root does NOT rigid-shift the component. Measured across many
+alternating-end flex+bake gestures on junction-less curve/straight/tight chains:
+the gesture's anchor stays pinned to within < 0.5 mm, every pose stays finite,
+and no piece ever sits beyond the chain's own geometric reach of the anchor (it
+cannot teleport / fling / go NaN). The earlier "rigid offset" was D4 (render vs
+solver anchor), already fixed; the residual cross-gesture concern logged here is
+benign in the current (post bake-on-release / authoritative-connection) code.
+**Guard:** `packages/simulator/src/track/flex-reroot-vanish.property.test.ts`
+(anchor pinned + finite + within-reach + count-preserved, 15 seeds/types).
+
+---
+
+## Vanish report — "flex a chain, add a piece, the anchor or a far piece disappears" 🟢 (NOT REPRODUCIBLE; exonerated + guarded 2026-06-24)
+
+**Repro (user):** place a set of pieces, flex the chain, then add a new piece —
+*sometimes* the presumed anchor, or a piece far down the flexed line, vanishes
+(gone from the rendered set / flung off-canvas / to NaN).
+
+**Investigation (drove the real stack + exhaustive deterministic sweeps):** the
+vanish does NOT reproduce in the current code, in any tested configuration —
+- LIVE (real browser, real flex gestures of the end AND the anchor-side piece,
+  then add): no vanish, count preserved, all poses finite + on-canvas, confirmed
+  frame-by-frame by a second adversary;
+- deterministic place→flex→add over curves / tight / flips / 24-frame warm-start
+  drags / 3 compounding rounds (`flex-add-vanish.property.test.ts`);
+- branching topologies — junctions (3 ends), crossings (4) — flexing RANDOM
+  pieces deep in branches via the exact live flow (`flex-branch-vanish.property.test.ts`);
+- the D6 junction-less cross-gesture re-root, measured + guarded (above).
+
+**Why no vanish (root cause of soundness):** `applyFlex` maps *every* input piece
+(never drops one); the FK is finite arithmetic; the DLS solve is damped +
+pivot-guarded (no NaN); bake clears the flex map so a post-add render is just the
+rest poses; the renderer draws all pieces bucketed by layer (a sever can't hide
+one); and the gesture anchor stays pinned (D6 measurement).
+
+**Why the original report stands anyway:** it almost certainly predates the
+**bake-on-release (2026-06-22)** and **authoritative-connection (2026-06-22)**
+rewrites — both AFTER this register was opened (2026-06-21). Those rewrites
+eliminated the rest-vs-effective desync (D1/D2) and the persisted-stray-flex
+phantom snaps (D9) that were the real piece-displacement bugs. Separately, the
+parts-menu drag was reworked (feature B, 2026-06-24) to a controlled pointer drag,
+**removing the native-HTML5-DnD add path** — the one add-path that couldn't be
+stress-tested live. No speculative fix was applied (no confirmed root cause in
+current code); four regression guards now fail loudly if a vanish is reintroduced.
+If still reproducible, the exact recipe (piece types, which piece flexed + how,
+how the new piece is added) is needed to localise it.
+
+**Why the existing flex/closure tests "didn't catch it":** there was nothing to
+catch in current code — but the *coverage gap* that would have hidden a re-root
+vanish was real: every prior sweep flexed a consistent end (stable anchor) or used
+a junction (stable anchor). The new junction-less + branching + random-piece
+guards close that gap.
