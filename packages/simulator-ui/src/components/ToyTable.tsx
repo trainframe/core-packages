@@ -1532,11 +1532,11 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   }, []);
 
   const placePiece = useCallback(
-    (xMm: number, yMm: number, type?: TrackPieceType, rotation?: number) => {
+    (xMm: number, yMm: number, type?: TrackPieceType, rotation?: number): string | undefined => {
       const pieceType = type ?? armedType;
       if (pieceType === null) {
         setSelectedId(null);
-        return;
+        return undefined;
       }
       // A train snapped onto a marker faces the way it will travel at power-on
       // (no heading pop); other pieces keep their placement rotation. Computed
@@ -1566,6 +1566,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       setSelectedId(piece.id);
       // Stay armed so the operator can drop multiple of the same type without
       // re-clicking the toybox.
+      return piece.id;
     },
     [armedType, activeLayer, armedCarriageColor, armedTrainColor, armedStraightLength, pushUndo],
   );
@@ -1575,8 +1576,10 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   // it where released, keeping its current rotation so a free move doesn't
   // surprise-rotate it back to 0°.
   const movePiece = useCallback(
-    (pieceId: string, xMm: number, yMm: number) => {
-      pushUndo();
+    (pieceId: string, xMm: number, yMm: number, skipUndo = false) => {
+      // A toybox-drag commit skips undo: the provisional place already pushed a
+      // pre-place snapshot, so one undo cleanly removes the dropped piece.
+      if (!skipUndo) pushUndo();
       setPieces((prev) => {
         /* Placement is a REST-domain operation: snap the moved piece to a
          neighbour's REST endpoint so applyFlex's forward kinematics then
@@ -1605,6 +1608,26 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     },
     [pushUndo],
   );
+
+  /* ── Parts-menu drag (feature B) ───────────────────────────────────────────
+     A press on a toybox tile starts a drag that carries the REAL piece onto the
+     table — no static drag-image placeholder. The Table child owns the gesture
+     (it has the canvas geometry + move/snap machinery); ToyTable just holds the
+     signal and the place/commit/cancel handlers Table calls. R/F orient the
+     in-flight piece via the existing selected-piece keybindings. */
+  const grabNonceRef = useRef(0);
+  const [toyboxGrab, setToyboxGrab] = useState<{ type: TrackPieceType; nonce: number } | null>(
+    null,
+  );
+  const beginToyboxGrab = useCallback((type: TrackPieceType) => {
+    grabNonceRef.current += 1;
+    setToyboxGrab({ type, nonce: grabNonceRef.current });
+  }, []);
+  const endToyboxGrab = useCallback(() => setToyboxGrab(null), []);
+  const deletePieceById = useCallback((pieceId: string) => {
+    setPieces((prev) => prev.filter((p) => p.id !== pieceId));
+    setSelectedId((cur) => (cur === pieceId ? null : cur));
+  }, []);
 
   /* When a drop commits a loop closure, find the cycle containing the dragged
      piece in the committed effective geometry and mount the ClosureWave for one
@@ -1996,6 +2019,9 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
             onCanvasClick={placePiece}
             onMovePiece={movePiece}
             onSelectPiece={setSelectedId}
+            onDeletePiece={deletePieceById}
+            toyboxGrab={toyboxGrab}
+            onToyboxGrabEnd={endToyboxGrab}
             onScanPiece={requestScan}
             onPieceAction={handlePiecePointerAction}
             onDragFlex={applyFlexState}
@@ -2026,6 +2052,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
         armedType={armedType}
         expandedType={expandedType}
         onArm={armPieceType}
+        onGrabStart={beginToyboxGrab}
         straightLength={armedStraightLength}
         carriageColour={armedCarriageColor}
         trainColour={armedTrainColor}
@@ -2045,6 +2072,8 @@ interface ToyboxProps {
   /** The variant family whose option fan is open, if any. */
   readonly expandedType: TrackPieceType | null;
   readonly onArm: (type: TrackPieceType) => void;
+  /** Press-drag a tile to carry the REAL piece onto the table (feature B). */
+  readonly onGrabStart: (type: TrackPieceType) => void;
   /** Each colour family keeps its own pick + default (carriage blue, loco red),
    *  so both tiles show their own livery; the straight keeps its chosen length. */
   readonly straightLength: number;
@@ -2222,6 +2251,7 @@ function ToyboxGroup({
   armedType,
   expandedType,
   onArm,
+  onGrabStart,
   straightLength,
   carriageColour,
   trainColour,
@@ -2253,6 +2283,7 @@ function ToyboxGroup({
                 armed={armedType === type}
                 variantProps={tileVariantProps(variation, straightLength, colour)}
                 onArm={onArm}
+                onGrabStart={onGrabStart}
               />
             </li>
           );
@@ -2268,12 +2299,18 @@ interface ToyboxButtonProps {
   /** Chosen-variant preview props so the tile shows the piece as configured. */
   readonly variantProps: { lengthMm?: number; colorId?: CarriageColorId; frameMm?: number };
   readonly onArm: (type: TrackPieceType) => void;
+  readonly onGrabStart: (type: TrackPieceType) => void;
 }
 
-function ToyboxButton({ type, armed, variantProps, onArm }: ToyboxButtonProps) {
-  function handleDragStart(e: React.DragEvent<HTMLButtonElement>) {
-    e.dataTransfer.setData(TOYBOX_DRAG_MIME, type);
-    e.dataTransfer.effectAllowed = 'copy';
+function ToyboxButton({ type, armed, variantProps, onArm, onGrabStart }: ToyboxButtonProps) {
+  /* A press begins a drag that carries the REAL piece onto the table; the Table
+     child tracks the pointer (via window listeners) and places/follows/commits
+     it, orientable with R/F in flight. We do NOT use native HTML5 DnD — a drag
+     image is a static snapshot that can't be rotated/flipped mid-drag. A plain
+     click (no drag) still arms the type via onClick. */
+  function handlePointerDown(e: React.PointerEvent<HTMLButtonElement>) {
+    if (e.button > 0) return;
+    onGrabStart(type);
   }
 
   return (
@@ -2281,10 +2318,9 @@ function ToyboxButton({ type, armed, variantProps, onArm }: ToyboxButtonProps) {
       type="button"
       className={`tf-toybox__button${armed ? ' tf-toybox__button--armed' : ''}`}
       onClick={() => onArm(type)}
-      onDragStart={handleDragStart}
-      draggable
+      onPointerDown={handlePointerDown}
       aria-pressed={armed}
-      title={`${PIECE_LABELS[type]} — drag onto the table`}
+      title={`${PIECE_LABELS[type]} — drag onto the table (R rotate, F flip)`}
       data-testid={`toybox-${type}`}
     >
       <PiecePreview type={type} {...variantProps} />
@@ -2677,9 +2713,20 @@ interface TableProps {
     yMm: number,
     type?: TrackPieceType,
     rotation?: number,
-  ) => void;
-  /** Reposition an already-placed piece (pointer-dragged across the canvas). */
-  readonly onMovePiece: (pieceId: string, xMm: number, yMm: number) => void;
+  ) => string | undefined;
+  /** Reposition an already-placed piece (pointer-dragged across the canvas).
+   *  `skipUndo` is set by the toybox-drag commit (the provisional place already
+   *  pushed an undo snapshot). */
+  readonly onMovePiece: (pieceId: string, xMm: number, yMm: number, skipUndo?: boolean) => void;
+  /** Remove a piece by id — used to CANCEL a toybox drag released off-table. */
+  readonly onDeletePiece: (pieceId: string) => void;
+  /** Active parts-menu drag signal (feature B): a tile was pressed; Table tracks
+   *  the pointer, places the REAL piece on the table, follows the cursor, and
+   *  commits on release (R/F orient it in flight). Null when no drag is active. */
+  readonly toyboxGrab: { readonly type: TrackPieceType; readonly nonce: number } | null;
+  /** Called when the toybox drag finishes (commit or cancel) so ToyTable clears
+   *  the grab signal. */
+  readonly onToyboxGrabEnd: () => void;
   /** Select a piece at the very start of a drag, so keyboard actions (R/Flip)
    *  target the piece in hand, not whatever was selected before the grab. */
   readonly onSelectPiece: (pieceId: string) => void;
@@ -2897,6 +2944,113 @@ export function newLoopCenterline(
   return points.length >= 2 ? points : null;
 }
 
+/** Mutable-ref shape (only `.current` is read), kept local so the hook needn't
+ *  import React's RefObject just for typing. */
+interface Ref<T> {
+  current: T;
+}
+
+interface ToyboxDragDeps {
+  readonly toyboxGrab: { readonly type: TrackPieceType; readonly nonce: number } | null;
+  readonly svgRef: Ref<SVGSVGElement | null>;
+  readonly viewportRef: Ref<Viewport>;
+  readonly boxAspectRef: Ref<number>;
+  readonly restPiecesRef: Ref<ReadonlyArray<TrackPiece>>;
+  readonly fnsRef: Ref<{
+    onCanvasClick: (
+      x: number,
+      y: number,
+      type?: TrackPieceType,
+      rotation?: number,
+    ) => string | undefined;
+    onMovePiece: (id: string, x: number, y: number, skipUndo?: boolean) => void;
+    onDeletePiece: (id: string) => void;
+    onSelectPiece: (id: string) => void;
+    onToyboxGrabEnd: () => void;
+  }>;
+  readonly setPreview: (
+    p: { id: string; x: number; y: number; rotationDeg: number } | null,
+  ) => void;
+}
+
+/**
+ * Feature B — the parts-menu drag gesture, owned by the canvas (it has the
+ * geometry + the move/snap machinery). On a tile press (`toyboxGrab`), track the
+ * pointer via window listeners; the moment it enters the table, place the REAL
+ * piece (one undo snapshot) and let it follow the cursor + snap-preview. R/F
+ * orient it in flight via the existing selected-piece keybindings. On release
+ * over the table, commit (snap, no extra undo); released off-table, cancel
+ * (delete). A press without a drag onto the table places nothing — the tile's
+ * onClick still arms the type, preserving the click-to-arm path.
+ *
+ * Refs (not values) are read inside the listeners so a single grab keeps one
+ * stable set of handlers for its whole lifetime — no stale closures, no mid-drag
+ * re-registration.
+ */
+function useToyboxDrag({
+  toyboxGrab,
+  svgRef,
+  viewportRef,
+  boxAspectRef,
+  restPiecesRef,
+  fnsRef,
+  setPreview,
+}: ToyboxDragDeps): void {
+  useEffect(() => {
+    if (toyboxGrab === null) return;
+    const { type } = toyboxGrab;
+    let placedId: string | null = null;
+    const toMm = (e: { clientX: number; clientY: number }): { x: number; y: number } => {
+      const rect = svgRef.current?.getBoundingClientRect() ?? new DOMRect();
+      return clientToMm(rect, e.clientX, e.clientY, viewportRef.current);
+    };
+    const inBounds = (x: number, y: number): boolean =>
+      x >= 0 &&
+      x <= CANVAS_W_MM &&
+      y >= 0 &&
+      y <= worldHeightMm(viewportRef.current.zoom, boxAspectRef.current);
+    const previewAt = (id: string, x: number, y: number): void => {
+      const rest = restPiecesRef.current;
+      const moving = rest.find((p) => p.id === id);
+      if (moving === undefined) return;
+      const placement = computeMovePlacement(
+        moving,
+        x,
+        y,
+        rest.filter((p) => p.id !== id),
+      );
+      setPreview({ id, x: placement.x, y: placement.y, rotationDeg: placement.rotationDeg });
+    };
+    const onMove = (e: PointerEvent): void => {
+      const { x, y } = toMm(e);
+      if (placedId === null) {
+        if (!inBounds(x, y)) return; // still over the parts tray — wait
+        placedId = fnsRef.current.onCanvasClick(x, y, type) ?? null;
+        return;
+      }
+      fnsRef.current.onSelectPiece(placedId); // keep selected so R/F target it
+      previewAt(placedId, x, y);
+    };
+    const finish = (): void => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    function onUp(e: PointerEvent): void {
+      finish();
+      if (placedId !== null) {
+        setPreview(null);
+        const { x, y } = toMm(e);
+        if (inBounds(x, y)) fnsRef.current.onMovePiece(placedId, x, y, true);
+        else fnsRef.current.onDeletePiece(placedId);
+      }
+      fnsRef.current.onToyboxGrabEnd();
+    }
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    return finish;
+  }, [toyboxGrab, svgRef, viewportRef, boxAspectRef, restPiecesRef, fnsRef, setPreview]);
+}
+
 function Table({
   pieces,
   restPieces,
@@ -2913,6 +3067,9 @@ function Table({
   onCanvasClick,
   onMovePiece,
   onSelectPiece,
+  onDeletePiece,
+  toyboxGrab,
+  onToyboxGrabEnd,
   onScanPiece,
   onPieceAction,
   onDragFlex,
@@ -3048,6 +3205,38 @@ function Table({
   function getRect(): DOMRect {
     return svgRef.current?.getBoundingClientRect() ?? new DOMRect();
   }
+
+  /* Refs so the parts-menu drag listeners (registered once per grab) always read
+     current state without re-registering mid-drag (feature B). */
+  const restPiecesRef = useRef(restPieces);
+  restPiecesRef.current = restPieces;
+  const viewportRef = useRef(viewport);
+  viewportRef.current = viewport;
+  const boxAspectRef = useRef(boxAspect);
+  boxAspectRef.current = boxAspect;
+  const toyboxFnsRef = useRef({
+    onCanvasClick,
+    onMovePiece,
+    onDeletePiece,
+    onSelectPiece,
+    onToyboxGrabEnd,
+  });
+  toyboxFnsRef.current = {
+    onCanvasClick,
+    onMovePiece,
+    onDeletePiece,
+    onSelectPiece,
+    onToyboxGrabEnd,
+  };
+  useToyboxDrag({
+    toyboxGrab,
+    svgRef,
+    viewportRef,
+    boxAspectRef,
+    restPiecesRef,
+    fnsRef: toyboxFnsRef,
+    setPreview: setPieceDragPreview,
+  });
 
   function handlePointerDown(e: React.PointerEvent<SVGSVGElement>) {
     // Middle mouse always pans. Left mouse pans only when nothing is armed
