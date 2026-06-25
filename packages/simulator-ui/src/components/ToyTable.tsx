@@ -1217,6 +1217,39 @@ function effectiveAngleOf(
   return pieces.find((p) => p.id === id)?.rotationDeg ?? null;
 }
 
+/**
+ * Where a dragged piece should land at the cursor. For an ordinary move (an
+ * already-placed piece), `computeMovePlacement` snaps whichever of its ends is
+ * CLOSEST to a neighbour's open end. For a piece dragged fresh FROM THE TRAY,
+ * that closest-end rule can reverse a curve (its exit end snaps instead of its
+ * entry), so the rail does not continue — a curved loop built by dragging never
+ * closes. A fresh tray piece therefore orients like the retired click-place:
+ * `computePlacement` snaps its ENTRY endpoint onto the nearest open end,
+ * continuing the rail. Only when it actually connects — otherwise fall back to
+ * `computeMovePlacement` so an in-flight R/F rotation in free space is kept.
+ */
+function placeFromCursor(
+  piece: TrackPiece,
+  xMm: number,
+  yMm: number,
+  others: ReadonlyArray<TrackPiece>,
+  fromTray: boolean,
+): ReturnType<typeof computeMovePlacement> {
+  if (fromTray) {
+    const snapped = computePlacement(
+      xMm,
+      yMm,
+      piece.type,
+      others,
+      piece.flipped ?? false,
+      piece.layer ?? 0,
+      piece.lengthMm,
+    );
+    if (snapped.connected) return snapped;
+  }
+  return computeMovePlacement(piece, xMm, yMm, others);
+}
+
 export function ToyTable({ initialUrl }: ToyTableProps) {
   const { client } = useBroker();
   /* AUTOSAVE RESTORE: on mount, rehydrate the working track AND its undo history
@@ -1722,7 +1755,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
   // it where released, keeping its current rotation so a free move doesn't
   // surprise-rotate it back to 0°.
   const movePiece = useCallback(
-    (pieceId: string, xMm: number, yMm: number, skipUndo = false) => {
+    (pieceId: string, xMm: number, yMm: number, skipUndo = false, fromTray = false) => {
       // A toybox-drag commit skips undo: the provisional place already pushed a
       // pre-place snapshot, so one undo cleanly removes the dropped piece.
       if (!skipUndo) pushUndo();
@@ -1734,7 +1767,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
         const moving = prev.find((p) => p.id === pieceId);
         if (moving === undefined) return prev;
         const others = prev.filter((p) => p.id !== pieceId);
-        const placement = computeMovePlacement(moving, xMm, yMm, others);
+        const placement = placeFromCursor(moving, xMm, yMm, others, fromTray);
         // A moved train re-orients to its (new) spawn edge so it stays pop-free.
         const orient =
           moving.type === 'train'
@@ -2854,7 +2887,13 @@ interface TableProps {
   /** Reposition an already-placed piece (pointer-dragged across the canvas).
    *  `skipUndo` is set by the toybox-drag commit (the provisional place already
    *  pushed an undo snapshot). */
-  readonly onMovePiece: (pieceId: string, xMm: number, yMm: number, skipUndo?: boolean) => void;
+  readonly onMovePiece: (
+    pieceId: string,
+    xMm: number,
+    yMm: number,
+    skipUndo?: boolean,
+    fromTray?: boolean,
+  ) => void;
   /** Remove a piece by id — used to CANCEL a toybox drag released off-table. */
   readonly onDeletePiece: (pieceId: string) => void;
   /** Active parts-menu drag signal (feature B): a tile was pressed; Table tracks
@@ -3100,7 +3139,7 @@ interface ToyboxDragDeps {
       type?: TrackPieceType,
       rotation?: number,
     ) => string | undefined;
-    onMovePiece: (id: string, x: number, y: number, skipUndo?: boolean) => void;
+    onMovePiece: (id: string, x: number, y: number, skipUndo?: boolean, fromTray?: boolean) => void;
     onDeletePiece: (id: string) => void;
     onSelectPiece: (id: string) => void;
     onToyboxGrabEnd: () => void;
@@ -3141,20 +3180,28 @@ function useToyboxDrag({
       const rect = svgRef.current?.getBoundingClientRect() ?? new DOMRect();
       return clientToMm(rect, e.clientX, e.clientY, viewportRef.current);
     };
-    const inBounds = (x: number, y: number): boolean =>
-      x >= 0 &&
-      x <= CANVAS_W_MM &&
-      y >= 0 &&
-      y <= worldHeightMm(viewportRef.current.zoom, boxAspectRef.current);
+    /* On the canvas = inside the VISIBLE world window (the rect `clientToMm` maps
+       onto), not the fixed 0..900 base table. Honouring pan + zoom lets a piece be
+       dropped anywhere on a zoomed-out / panned view — a layout wider than 900mm,
+       say — instead of silently refusing to place beyond the base table. */
+    const inBounds = (x: number, y: number): boolean => {
+      const vp = viewportRef.current;
+      const worldW = CANVAS_W_MM / vp.zoom;
+      const worldH = worldHeightMm(vp.zoom, boxAspectRef.current);
+      return x >= vp.x && x <= vp.x + worldW && y >= vp.y && y <= vp.y + worldH;
+    };
     const previewAt = (id: string, x: number, y: number): void => {
       const rest = restPiecesRef.current;
       const moving = rest.find((p) => p.id === id);
       if (moving === undefined) return;
-      const placement = computeMovePlacement(
+      // fromTray: orient like the click-place (entry endpoint continues the rail)
+      // so a dragged curve continues the arc — see placeFromCursor.
+      const placement = placeFromCursor(
         moving,
         x,
         y,
         rest.filter((p) => p.id !== id),
+        true,
       );
       setPreview({ id, x: placement.x, y: placement.y, rotationDeg: placement.rotationDeg });
     };
@@ -3177,7 +3224,7 @@ function useToyboxDrag({
       if (placedId !== null) {
         setPreview(null);
         const { x, y } = toMm(e);
-        if (inBounds(x, y)) fnsRef.current.onMovePiece(placedId, x, y, true);
+        if (inBounds(x, y)) fnsRef.current.onMovePiece(placedId, x, y, true, true);
         else fnsRef.current.onDeletePiece(placedId);
       }
       fnsRef.current.onToyboxGrabEnd();

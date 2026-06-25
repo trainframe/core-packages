@@ -272,7 +272,11 @@ export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): 
 
   // Feature-B drag: press the tile, drag onto the canvas at the drop point, and
   // release to commit. The gesture places a real piece on the first in-bounds
-  // move and follows the cursor until pointerup snaps + commits it.
+  // move and follows the cursor until pointerup snaps + commits it. Scroll the
+  // tile into view first — a tile in a lower tray section (e.g. the Experiments
+  // box) can sit off-screen, and a raw mouse press at its bounding box would miss
+  // it (unlike `.click()`, which auto-scrolls).
+  await toyboxBtn.scrollIntoViewIfNeeded();
   const tileBox = await toyboxBtn.boundingBox();
   if (tileBox === null) {
     throw new Error('placePieceOnToyTable: toybox tile has no bounding box');

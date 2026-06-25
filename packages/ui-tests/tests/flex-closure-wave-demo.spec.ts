@@ -213,12 +213,8 @@ test.describe
       const sepEnd = await endpointOf(sim, sep, 'straight', 0);
       await expect(sim.locator('[data-piece-id]')).toHaveCount(11);
 
-      /* Disarm whatever toybox tile is armed (placing the separate straight left
-         STRAIGHT armed) so a pointer-down on a piece starts a drag, not a
-         placement. */
-      const armedTile = sim.locator('[data-testid^="toybox-"][aria-pressed="true"]').first();
-      if ((await armedTile.count()) > 0) await armedTile.click();
-      await expect(sim.locator('[data-testid^="toybox-"][aria-pressed="true"]')).toHaveCount(0);
+      /* Arming is gone — placement is drag-only, so a pointer-down on a placed
+         piece already starts a drag (no disarm step needed). */
       /* Hold on the rest layout — the near-closed oval with its open end, and the
          separate straight sitting apart in the middle. */
       await sim.waitForTimeout(700);
@@ -268,6 +264,9 @@ test.describe
       const target = await mmToPx(sim, firstEntry.x, firstEntry.y);
       await sim.mouse.move(grab.x, grab.y);
       await sim.mouse.down();
+      /* Hold still past the flex dwell (FLEX_HOLD_MS 250ms) so the gesture engages
+         FLEX mode (bend the chain shut) rather than MOVE (detach the open end). */
+      await sim.waitForTimeout(350);
       const STEPS = 14;
       const FRAC = 0.35; // inside the window where the closing solve stays feasible
       for (let s = 1; s <= STEPS; s++) {
