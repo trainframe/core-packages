@@ -100,15 +100,8 @@ test.describe
         )
         .toBeGreaterThan(0);
 
-      // Disarm the toybox so the next click on the train piece reaches its own
-      // handler rather than placing a fresh train. After placePieceOnToyTable
-      // the 'train' button is still armed (aria-pressed="true"); clicking it
-      // again toggles armedType back to null.
-      await sim.getByTestId('toybox-train').click();
-      await sim.waitForFunction(() => {
-        const btn = document.querySelector('[data-testid="toybox-train"]');
-        return btn?.getAttribute('aria-pressed') === 'false';
-      });
+      // Arming is gone — placement is drag-only, so a click on the train piece
+      // reaches its own handler (selects it) without any disarm step.
 
       // Click the train piece body — this SELECTS it (it does not power off
       // or disconnect). The ActionBar now offers the explicit power affordance.

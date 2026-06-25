@@ -165,13 +165,8 @@ test.describe
       });
       await expect(sim.locator('[data-piece-id]')).toHaveCount(3);
 
-      /* Disarm the armed piece type so pointer-down on a piece starts a drag
-       instead of placing a new piece. */
-      await sim.getByRole('button', { name: 'Straight', exact: true }).click();
-      await expect(sim.getByRole('button', { name: 'Straight', exact: true })).toHaveAttribute(
-        'aria-pressed',
-        'false',
-      );
+      /* Arming is gone — placement is drag-only, so a pointer-down on a placed
+       piece already starts a drag (no disarm step needed). */
 
       /* Read the rest-pose transform of the tail piece. */
       const before = await readTransform(sim, s2);
@@ -183,6 +178,10 @@ test.describe
        baked, so the tail's transform changes (rotation + position). */
       await sim.mouse.move(cx, cy);
       await sim.mouse.down();
+      /* Hold still past the flex dwell (FLEX_HOLD_MS 250ms) so the gesture engages
+         FLEX mode (bend the chain) rather than MOVE (which would detach the tail
+         and snap it back to the chain on release — no net change). */
+      await sim.waitForTimeout(350);
       for (let step = 1; step <= 10; step++) {
         await sim.mouse.move(cx, cy + step * 6);
         await sim.waitForTimeout(50);
