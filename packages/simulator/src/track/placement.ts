@@ -329,9 +329,10 @@ export function computePlacement(
 function bestEndpointPair(
   pieceEndpoints: ReadonlyArray<WorldPoint>,
   openEnds: ReadonlyArray<WorldEndpoint>,
+  maxDist: number = CONNECT_CAPTURE_MM,
 ): { readonly pieceEndpointIndex: number; readonly anchor: WorldEndpoint } | undefined {
   let best: { pieceEndpointIndex: number; anchor: WorldEndpoint } | undefined;
-  let bestDist = CONNECT_CAPTURE_MM;
+  let bestDist = maxDist;
   for (let i = 0; i < pieceEndpoints.length; i++) {
     const pe = pieceEndpoints[i];
     if (pe === undefined) continue;
@@ -391,7 +392,19 @@ export function computeMovePlacement(
   // corresponds to index i in `localEndpoints` (rotation/translation reorder
   // nothing).
   const atCursor = getEndpoints({ ...piece, position: { x: cursorXMm, y: cursorYMm } });
-  const best = bestEndpointPair(atCursor, openEndpoints(others));
+  /* Capture reaches the piece's own half-extent: dragging a piece so its BODY
+     overlaps a neighbour (dropping it "on/against" the join, centre near the
+     neighbour's open end) attaches it — its near end can be up to a half-extent
+     from the open end. Without this a drop overlapping a neighbour found no pair
+     within the bare CONNECT_CAPTURE_MM and landed RAW, overlapping the neighbour
+     — reading as the dropped piece "vanishing". The teleport guard below still
+     bounds the result so a far graze can't fling the piece across a joint. */
+  const halfExtent = Math.max(...localEndpoints.map((e) => Math.hypot(e.x, e.y)));
+  const best = bestEndpointPair(
+    atCursor,
+    openEndpoints(others),
+    Math.max(CONNECT_CAPTURE_MM, halfExtent),
+  );
   if (best === undefined) return free;
   const localEp = localEndpoints[best.pieceEndpointIndex];
   if (localEp === undefined) return free;
@@ -403,7 +416,6 @@ export function computeMovePlacement(
      jumps its centre too far. The allowance is the piece's own half-extent (the
      centre legitimately lands up to one half-extent away when an end is brought to
      a joint) plus a capture radius; a fling crosses the joint and exceeds that. */
-  const halfExtent = Math.max(...localEndpoints.map((e) => Math.hypot(e.x, e.y)));
   if (distance(snapped.x, snapped.y, cursorXMm, cursorYMm) > halfExtent + CONNECT_CAPTURE_MM) {
     return free;
   }
