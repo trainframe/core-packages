@@ -86,7 +86,6 @@ import {
   CONNECT_CAPTURE_MM,
   computeMovePlacement,
   computePlacement,
-  nearestConnectablePoint,
 } from '@trainframe/simulator/track/placement.js';
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useBroker } from '../broker/broker-context.js';
@@ -145,9 +144,6 @@ function isTextEntryTarget(target: EventTarget | null): boolean {
 function isUndoChord(e: KeyboardEvent): boolean {
   return (e.metaKey || e.ctrlKey) && !e.shiftKey && (e.key === 'z' || e.key === 'Z');
 }
-
-/** MIME type for pieces being dragged from the toybox onto the canvas. */
-const TOYBOX_DRAG_MIME = 'application/x-trainframe-toybox-type';
 
 /**
  * The garage device id used by the toy-table when announcing tag bindings.
@@ -944,6 +940,27 @@ declare global {
      * precise chain such as the logged 7-curve arc). Registered behind
      * `import.meta.env.DEV`; absent in production builds. */
     __tfLoadPieces?: ((pieces: ReadonlyArray<TrackPiece>) => void) | undefined;
+    /** DEV-only: ADD one piece at an EXACT pose (no snap, no bounds clamp) via the
+     * canonical placement path, returning its id. Scenario-setup affordance for
+     * the flex / closure / vanish invariant tests, which must construct a precise
+     * geometry the user pointer-drag (which snaps + respects bounds) cannot stage.
+     * Registered behind `import.meta.env.DEV`; absent in production builds. */
+    __tfPlacePiece?:
+      | ((
+          type: TrackPieceType,
+          xMm: number,
+          yMm: number,
+          rotationDeg?: number,
+        ) => string | undefined)
+      | undefined;
+    /** DEV-only: SNAP-then-place a piece at (xMm,yMm) — computes the same
+     * connect/auto-orient snap onto a nearby open end the move/flip paths use,
+     * then commits via the canonical placePiece. Scenario-setup affordance for the
+     * flex / closure tests, which build connected chains by dropping pieces near a
+     * neighbour's open end. Registered behind `import.meta.env.DEV`; absent in production. */
+    __tfDropPiece?:
+      | ((type: TrackPieceType, xMm: number, yMm: number, lengthMm?: number) => string | undefined)
+      | undefined;
     /** DEV-only: the authoritative-connection metrics for the CURRENTLY RENDERED
      * (effective) geometry — components, loop count, and the largest joint
      * deviation from the 45° grid. The adversarial harness reads these per drag
@@ -1048,12 +1065,6 @@ interface Viewport {
   readonly x: number;
   readonly y: number;
   readonly zoom: number;
-}
-
-/** Snap target: an existing endpoint that a dragged piece is near enough to snap to. */
-interface SnapTarget {
-  readonly x: number;
-  readonly y: number;
 }
 
 /**
@@ -1322,11 +1333,9 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     applyFlexState(new Map(), null);
   }, [applyFlexState, pushUndo]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  /** Which piece type the operator has "armed" from the toybox, if any. */
-  const [armedType, setArmedType] = useState<TrackPieceType | null>(null);
   /** Which variant family's option fan is currently expanded (open) in the
-   *  toybox, if any. Arming a variant piece opens its fan; picking an option or
-   *  arming another piece collapses it. */
+   *  toybox, if any. Tapping a variant tile opens its fan; picking an option or
+   *  tapping another tile collapses it. */
   const [expandedType, setExpandedType] = useState<TrackPieceType | null>(null);
   /** Livery applied to the next carriage placed (the toybox swatch selection). */
   const [armedCarriageColor, setArmedCarriageColor] = useState<CarriageColorId>('blue');
@@ -1440,15 +1449,20 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     },
   });
 
-  // Devtools handle — a tiny escape hatch for poking the page from the console.
-  // The toy-table v1 has no internal tick loop (devices come and go only via
-  // operator actions), so `pause/resume/step` are no-ops in this build but
-  // present so the API stays stable.
+  // Devtools handle — a tiny escape hatch for poking the page from the console
+  // and for tests/orchestrator scripts to advance the sim deterministically.
+  // `pause/resume` are no-ops (the RAF loop in useToyHardware is the only pump);
+  // `step(ms)` advances the hardware one frame AND bumps a render, mirroring what
+  // the RAF tick + onTick does in a live browser — so a headless env (jsdom, no
+  // RAF) can read render-time state that the post-render spawn effect just seeded.
   useEffect(() => {
     const handle: TrainframeSimHandle = {
       pause: () => {},
       resume: () => {},
-      step: () => {},
+      step: (ms) => {
+        hardwareRef.current?.tick(ms);
+        setTickCount((n) => n + 1);
+      },
       bodies: () => hardwareRef.current?.bodies() ?? null,
       setFlex,
     };
@@ -1594,29 +1608,26 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     return () => window.removeEventListener('pagehide', handlePageHide);
   }, [client]);
 
-  // Arming a piece: clicking an already-armed piece disarms (and collapses any
-  // fan); clicking a fresh one arms it and — if it has variants — fans its
-  // options open. Arming a different piece collapses the previous fan.
-  const armPieceType = useCallback(
-    (type: TrackPieceType) => {
-      if (armedType === type) {
-        setArmedType(null);
-        setExpandedType(null);
-        return;
-      }
-      setArmedType(type);
-      setExpandedType(PIECE_VARIATIONS[type] !== undefined ? type : null);
-    },
-    [armedType],
-  );
+  // Tapping a parts-menu tile only opens/closes its variant-options fan (the
+  // tile shows length/livery choices to configure the next DRAG). It does NOT
+  // place or "arm" anything — dragging a tile is the sole placement path. A tile
+  // with no variants has nothing to open, so a tap is a no-op there.
+  const toggleVariantFan = useCallback((type: TrackPieceType) => {
+    // A tile with no variants has nothing to configure — tapping it just closes
+    // any open fan. A variant tile toggles its own fan (and replaces any other).
+    if (PIECE_VARIATIONS[type] === undefined) {
+      setExpandedType(null);
+      return;
+    }
+    setExpandedType((cur) => (cur === type ? null : type));
+  }, []);
 
-  // Picking a variant reconfigures that family, then collapses the fan AND
-  // disarms ("resets arm") — the tile now shows the chosen variant, and a fresh
-  // press re-arms to it. `value` is a length (mm) for a length family.
+  // Picking a variant reconfigures that family and collapses the fan — the tile
+  // then shows the chosen variant, which the next dragged piece carries. `value`
+  // is a length (mm) for a length family.
   const pickStraightLength = useCallback((mm: number) => {
     setArmedStraightLength(mm);
     setExpandedType(null);
-    setArmedType(null);
   }, []);
 
   // ...and a livery for a colour family (carriage / loco keep separate picks).
@@ -1624,16 +1635,17 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     if (type === 'train') setArmedTrainColor(colour);
     else setArmedCarriageColor(colour);
     setExpandedType(null);
-    setArmedType(null);
   }, []);
 
   const placePiece = useCallback(
     (xMm: number, yMm: number, type?: TrackPieceType, rotation?: number): string | undefined => {
-      const pieceType = type ?? armedType;
-      if (pieceType === null) {
+      // placePiece is invoked only by the toybox DRAG gesture, which always
+      // passes an explicit type. A bare call (no type) just clears the selection.
+      if (type === undefined) {
         setSelectedId(null);
         return undefined;
       }
+      const pieceType = type;
       // A train snapped onto a marker faces the way it will travel at power-on
       // (no heading pop); other pieces keep their placement rotation. Computed
       // from the current pieces (the snap/orient is over track already placed).
@@ -1660,12 +1672,44 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       pushUndo();
       setPieces((prev) => [...prev, piece]);
       setSelectedId(piece.id);
-      // Stay armed so the operator can drop multiple of the same type without
-      // re-clicking the toybox.
+      // The tray's variant selection (livery / length) persists, so the operator
+      // can drag out multiple of the same configured piece without re-picking.
       return piece.id;
     },
-    [armedType, activeLayer, armedCarriageColor, armedTrainColor, armedStraightLength, pushUndo],
+    [activeLayer, armedCarriageColor, armedTrainColor, armedStraightLength, pushUndo],
   );
+
+  // DEV-only: expose the canonical exact-placement (placePiece) as an additive
+  // scenario-setup hook for the flex/closure/vanish invariant tests. It reuses
+  // placePiece verbatim (no second placement path), but lets a test stage a
+  // precise pose the bounds-and-snap pointer gesture cannot.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    window.__tfPlacePiece = (type, xMm, yMm, rotationDeg) =>
+      placePiece(xMm, yMm, type, rotationDeg);
+    /* The old toybox HTML5-drop path's snap-then-place, exposed for tests that
+       build connected chains: identical to the retired handleDrop (computePlacement
+       onto a nearby open end → placePiece), minus the user-facing DnD wiring. */
+    window.__tfDropPiece = (type, xMm, yMm, lengthMm) => {
+      /* Thread the configured straight length (as handleDrop did) so a variant
+         straight snaps flush — placePiece stamps the same length on the piece. */
+      const len = lengthMm ?? (type === 'straight' ? armedStraightLength : undefined);
+      const placement = computePlacement(
+        xMm,
+        yMm,
+        type,
+        piecesRef.current,
+        false,
+        activeLayer,
+        len,
+      );
+      return placePiece(placement.x, placement.y, type, placement.rotationDeg);
+    };
+    return () => {
+      window.__tfPlacePiece = undefined;
+      window.__tfDropPiece = undefined;
+    };
+  }, [placePiece, activeLayer, armedStraightLength]);
 
   // Reposition an already-placed piece (dragged across the canvas). Snaps +
   // orients onto a neighbour's open end when one is in reach; otherwise drops
@@ -2091,7 +2135,6 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
           onPlaceCrate={() => {
             if (selectedPiece !== null) transferCrate(selectedPiece.id, false);
           }}
-          armedType={armedType}
           activeLayer={activeLayer}
           maxLevel={pieces.reduce((m, p) => Math.max(m, layerOf(p)), activeLayer)}
           onActiveLayerChange={setActiveLayer}
@@ -2105,8 +2148,6 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
             liveIds={liveIds}
             poweredOffIds={poweredOffIds}
             selectedId={selectedId}
-            armedType={armedType}
-            armedStraightLength={armedStraightLength}
             activeLayer={activeLayer}
             trainTrails={trainTrails}
             renderPositions={renderPositions}
@@ -2145,9 +2186,8 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       {/* The parts shelf sits OFF the table — on the desk below the white card.
           Drag a wooden part up onto the table to place it. */}
       <Toybox
-        armedType={armedType}
         expandedType={expandedType}
-        onArm={armPieceType}
+        onTileTap={toggleVariantFan}
         onGrabStart={beginToyboxGrab}
         straightLength={armedStraightLength}
         carriageColour={armedCarriageColor}
@@ -2164,11 +2204,12 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
 // ---------------------------------------------------------------------------
 
 interface ToyboxProps {
-  readonly armedType: TrackPieceType | null;
   /** The variant family whose option fan is open, if any. */
   readonly expandedType: TrackPieceType | null;
-  readonly onArm: (type: TrackPieceType) => void;
-  /** Press-drag a tile to carry the REAL piece onto the table (feature B). */
+  /** Tap a tile to open/close its variant-options fan (no placement). */
+  readonly onTileTap: (type: TrackPieceType) => void;
+  /** Press-drag a tile to carry the REAL piece onto the table (feature B) — the
+   *  sole placement path. */
   readonly onGrabStart: (type: TrackPieceType) => void;
   /** Each colour family keeps its own pick + default (carriage blue, loco red),
    *  so both tiles show their own livery; the straight keeps its chosen length. */
@@ -2344,9 +2385,8 @@ interface ToyboxGroupProps extends ToyboxProps {
 function ToyboxGroup({
   heading,
   types,
-  armedType,
   expandedType,
-  onArm,
+  onTileTap,
   onGrabStart,
   straightLength,
   carriageColour,
@@ -2376,9 +2416,9 @@ function ToyboxGroup({
               )}
               <ToyboxButton
                 type={type}
-                armed={armedType === type}
+                open={expandedType === type}
                 variantProps={tileVariantProps(variation, straightLength, colour)}
-                onArm={onArm}
+                onTileTap={onTileTap}
                 onGrabStart={onGrabStart}
               />
             </li>
@@ -2391,19 +2431,24 @@ function ToyboxGroup({
 
 interface ToyboxButtonProps {
   readonly type: TrackPieceType;
-  readonly armed: boolean;
+  /** True when this tile's variant-options fan is open (the only "selected"
+   *  state a tile has — there is no arm-for-click-placement any more). */
+  readonly open: boolean;
   /** Chosen-variant preview props so the tile shows the piece as configured. */
   readonly variantProps: { lengthMm?: number; colorId?: CarriageColorId; frameMm?: number };
-  readonly onArm: (type: TrackPieceType) => void;
+  /** Tap the tile: open/close its variant-options fan (no-op for a tile with no
+   *  variants). It does NOT place anything — DRAGGING the tile is the sole
+   *  placement path. */
+  readonly onTileTap: (type: TrackPieceType) => void;
   readonly onGrabStart: (type: TrackPieceType) => void;
 }
 
-function ToyboxButton({ type, armed, variantProps, onArm, onGrabStart }: ToyboxButtonProps) {
-  /* A press begins a drag that carries the REAL piece onto the table; the Table
-     child tracks the pointer (via window listeners) and places/follows/commits
-     it, orientable with R/F in flight. We do NOT use native HTML5 DnD — a drag
-     image is a static snapshot that can't be rotated/flipped mid-drag. A plain
-     click (no drag) still arms the type via onClick. */
+function ToyboxButton({ type, open, variantProps, onTileTap, onGrabStart }: ToyboxButtonProps) {
+  /* DRAGGING a tile is the sole placement path: the press begins a drag that
+     carries the REAL piece onto the table, orientable with R (rotate) / F (flip)
+     in flight, snapping on drop (the Table child tracks the pointer via window
+     listeners and commits it). A plain TAP (no drag) only opens this tile's
+     variant-options fan — it never places or "arms" anything. */
   function handlePointerDown(e: React.PointerEvent<HTMLButtonElement>) {
     if (e.button > 0) return;
     onGrabStart(type);
@@ -2412,10 +2457,10 @@ function ToyboxButton({ type, armed, variantProps, onArm, onGrabStart }: ToyboxB
   return (
     <button
       type="button"
-      className={`tf-toybox__button${armed ? ' tf-toybox__button--armed' : ''}`}
-      onClick={() => onArm(type)}
+      className={`tf-toybox__button${open ? ' tf-toybox__button--armed' : ''}`}
+      onClick={() => onTileTap(type)}
       onPointerDown={handlePointerDown}
-      aria-pressed={armed}
+      aria-pressed={open}
       title={`${PIECE_LABELS[type]} — drag onto the table (R rotate, F flip)`}
       data-testid={`toybox-${type}`}
     >
@@ -2529,7 +2574,6 @@ interface ActionBarProps {
   readonly onLiftCrate: () => void;
   /** Place a crate from the stack onto the wagon under the hook. */
   readonly onPlaceCrate: () => void;
-  readonly armedType: TrackPieceType | null;
   /** The deck new pieces land on (0 = ground). */
   readonly activeLayer: number;
   /** Highest deck the selector shows — the deeper of the highest deck any piece
@@ -2549,13 +2593,9 @@ function actionBarStatus(
   selectedPiece: TrackPiece | null,
   selectedLive: boolean,
   selectedPoweredOff: boolean,
-  armedType: TrackPieceType | null,
 ): string {
-  if (armedType !== null) {
-    return `Armed: ${PIECE_LABELS[armedType]} — click or drag to place`;
-  }
   if (selectedPiece === null) {
-    return 'Pick a piece from the toybox';
+    return 'Drag a piece from the parts tray onto the table';
   }
   const flip = selectedPiece.flipped === true ? ' · flipped' : '';
   /* The rotation is rendered separately as the live 2dp flex-angle readout (a
@@ -2667,7 +2707,6 @@ function ActionBar({
   craneCanPlace,
   onLiftCrate,
   onPlaceCrate,
-  armedType,
   activeLayer,
   maxLevel,
   onActiveLayerChange,
@@ -2744,7 +2783,7 @@ function ActionBar({
         </button>
       </span>
       <span className="tf-toytable__status">
-        {actionBarStatus(selectedPiece, selectedLive, selectedPoweredOff, armedType)}
+        {actionBarStatus(selectedPiece, selectedLive, selectedPoweredOff)}
         {selectedAngleDeg !== null && (
           <>
             {' · '}
@@ -2780,10 +2819,6 @@ interface TableProps {
   /** Subset of live train ids powered OFF in place (rendered dark / inert). */
   readonly poweredOffIds: ReadonlySet<string>;
   readonly selectedId: string | null;
-  readonly armedType: TrackPieceType | null;
-  /** The armed straight length (mm), threaded into the click-place snap so a
-   *  LILLABO variant lands flush onto a neighbour instead of as a 200mm plank. */
-  readonly armedStraightLength: number;
   /** The deck new pieces land on / snapping is gated to (0 = ground). */
   readonly activeLayer: number;
   /** The live hardware, used to read each live train's current edge so it draws
@@ -3153,8 +3188,6 @@ function Table({
   liveIds,
   poweredOffIds,
   selectedId,
-  armedType,
-  armedStraightLength,
   activeLayer,
   hardware,
   trainTrails,
@@ -3261,10 +3294,6 @@ function Table({
     };
   }, [pieces, boxAspect]);
 
-  /** The open endpoint a dragged toybox piece will snap onto, highlighted
-   * during dragover. */
-  const [snapHighlight, setSnapHighlight] = useState<SnapTarget | null>(null);
-
   /* Closure flash: the piece ID whose free endpoint is currently within reach
      of an open endpoint AND solveClose returned feasible. Null when no closure
      is imminent. Stored as state so PieceRenderer re-renders the flash glyph. */
@@ -3338,7 +3367,7 @@ function Table({
     // Middle mouse always pans. Left mouse pans only when nothing is armed
     // and the pointer is on the background canvas (not a piece).
     const isMiddle = e.button === 1;
-    const isLeftOnBackground = e.button === 0 && armedType === null && e.target === e.currentTarget;
+    const isLeftOnBackground = e.button === 0 && e.target === e.currentTarget;
     if (!isMiddle && !isLeftOnBackground) return;
 
     e.preventDefault();
@@ -3402,30 +3431,10 @@ function Table({
       suppressNextClickRef.current = false;
       return;
     }
-    const rect = getRect();
-    const { x: xMm, y: yMm } = clientToMm(rect, e.clientX, e.clientY, viewport);
-    // With nothing armed, a click just clears the selection.
-    if (armedType === null) {
-      onCanvasClick(xMm, yMm);
-      return;
-    }
-    // Armed: snap + orient the new piece to continue from a nearby open
-    // endpoint so curved loops can be built by clicking, not pixel-nudging.
-    // Gated to the active layer so an upper-deck piece ignores ground joints.
-    // Pass the armed straight length so a LILLABO variant snaps flush (its own
-    // half-length, not 200mm, sets where its centre sits) — without it an uneven
-    // oval can't be laid flush, and that's exactly the loop flex-closure needs.
-    const lengthMm = armedType === 'straight' ? armedStraightLength : undefined;
-    const placement = computePlacement(
-      xMm,
-      yMm,
-      armedType,
-      restPieces,
-      false,
-      activeLayer,
-      lengthMm,
-    );
-    onCanvasClick(placement.x, placement.y, armedType, placement.rotationDeg);
+    // A canvas click ONLY clears the selection. Pieces are placed by DRAGGING a
+    // tile from the parts tray (orientable in-flight) — there is no click-to-place.
+    const { x: xMm, y: yMm } = clientToMm(getRect(), e.clientX, e.clientY, viewport);
+    onCanvasClick(xMm, yMm);
   }
 
   // The canvas behaves as a placement surface, not an interactive control —
@@ -3437,58 +3446,6 @@ function Table({
       e.preventDefault();
       onCanvasClick(CANVAS_W_MM / 2, CANVAS_H_MM / 2);
     }
-  }
-
-  // ---------------------------------------------------------------------------
-  // HTML5 drag-from-toybox: dragover + drop on the canvas
-  // ---------------------------------------------------------------------------
-
-  function handleDragOver(e: React.DragEvent<SVGSVGElement>) {
-    // Only toybox drags use HTML5 DnD onto the canvas (the toybox entries are
-    // HTML buttons). Placed pieces are SVG and are repositioned with pointer
-    // events instead (see PieceRenderer), not dropped here.
-    if (!e.dataTransfer.types.includes(TOYBOX_DRAG_MIME)) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'copy';
-
-    // Preview where the dragged piece will snap. The dragged type isn't
-    // readable mid-drag, so highlight the nearest open endpoint (the join a
-    // track piece would orient onto); harmless for device drags.
-    const { x: xMm, y: yMm } = clientToMm(getRect(), e.clientX, e.clientY, viewport);
-    setSnapHighlight(nearestConnectablePoint(xMm, yMm, restPieces));
-  }
-
-  function handleDragLeave() {
-    setSnapHighlight(null);
-  }
-
-  function handleDrop(e: React.DragEvent<SVGSVGElement>) {
-    e.preventDefault();
-    setSnapHighlight(null);
-
-    const rect = getRect();
-    const { x: xMm, y: yMm } = clientToMm(rect, e.clientX, e.clientY, viewport);
-
-    // A new piece dragged in from the toybox. Snap + auto-orient it onto a
-    // nearby open end exactly like the click and move paths do, so dragging a
-    // piece in connects it instead of dropping it loose.
-    const pieceType = e.dataTransfer.getData(TOYBOX_DRAG_MIME) as TrackPieceType | '';
-    if (pieceType === '') return;
-    // Thread the armed straight length so a dragged-in LILLABO variant snaps flush
-    // (same as the click path); placePiece stamps the same length on the piece, so
-    // without this the drop computes a 200mm snap but stores a shorter piece → it
-    // lands off the joint.
-    const lengthMm = pieceType === 'straight' ? armedStraightLength : undefined;
-    const placement = computePlacement(
-      xMm,
-      yMm,
-      pieceType,
-      restPieces,
-      false,
-      activeLayer,
-      lengthMm,
-    );
-    onCanvasClick(placement.x, placement.y, pieceType, placement.rotationDeg);
   }
 
   // ---------------------------------------------------------------------------
@@ -3628,8 +3585,8 @@ function Table({
     onMovePiece(pieceId, x, y);
   }
 
-  // Cursor logic: crosshair when armed, grabbing while panning, default otherwise.
-  const cursor = armedType !== null ? 'crosshair' : isPanningRef.current ? 'grabbing' : 'default';
+  // Cursor: grabbing while panning the canvas, default otherwise.
+  const cursor = isPanningRef.current ? 'grabbing' : 'default';
 
   const viewBox = `${viewport.x} ${viewport.y} ${CANVAS_W_MM / viewport.zoom} ${worldHeightMm(viewport.zoom, boxAspect)}`;
 
@@ -3697,9 +3654,6 @@ function Table({
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
         role="img"
         aria-label="Toy table"
         data-testid="toy-table-canvas"
@@ -3746,7 +3700,9 @@ function Table({
             active one so the operator can see which deck a drop will land on —
             the one disambiguation a stacked 2D view needs. Quiet, and only while
             authoring; normal viewing shows every deck at full strength. */
-          const dimmed = armedType !== null && layer !== activeLayer;
+          // While a tile is being dragged in, fade the non-active decks so the
+          // operator sees which deck the drop will land on.
+          const dimmed = toyboxGrab !== null && layer !== activeLayer;
           const renderPiece = (p: EffectivePiece) => (
             <PieceRenderer
               key={p.id}
@@ -3754,7 +3710,6 @@ function Table({
               selected={p.id === selectedId}
               live={liveIds.has(p.id)}
               poweredOff={poweredOffIds.has(p.id)}
-              armedType={armedType}
               invalidOverlap={overlapIds.has(p.id)}
               coupledToTrainId={carriageCoupledTo.get(p.id)}
               renderPosition={renderPositions.get(p.id)}
@@ -3814,20 +3769,6 @@ function Table({
             </g>
           );
         })}
-        {/* Snap highlight — a faint ring drawn over the would-snap-to endpoint. */}
-        {snapHighlight !== null && (
-          <circle
-            cx={snapHighlight.x}
-            cy={snapHighlight.y}
-            r={SNAP_DISTANCE / 2}
-            fill="none"
-            stroke="#facc15"
-            strokeWidth={3}
-            strokeOpacity={0.85}
-            style={{ pointerEvents: 'none' }}
-            data-testid="snap-highlight"
-          />
-        )}
         {/* Closure wave: one-shot glow pulse along the newly-closed loop's
             centreline. Mounted by ToyTable on closure commit; cleared on done. */}
         {waveOverlay}
@@ -4014,7 +3955,6 @@ interface PieceRendererProps {
   /** A live train the operator has powered OFF in place: inert and silent,
    * rendered dark at its frozen sim position. */
   readonly poweredOff: boolean;
-  readonly armedType: TrackPieceType | null;
   /** When true, this piece is part of an invalid same-layer track-on-track
    * overlap and is drawn with a red error outline. */
   readonly invalidOverlap: boolean;
@@ -4068,14 +4008,6 @@ interface PieceRendererProps {
   readonly closureAvailable: boolean;
 }
 
-/** The pointer cursor for a piece body: crosshair while a type is armed
- * (placing), grab otherwise. The body click selects (and a press-drag moves);
- * power-off lives on the power dot, which carries its own pointer cursor. */
-function pieceCursor(armed: boolean): string {
-  if (armed) return 'crosshair';
-  return 'grab';
-}
-
 /** The a11y label suffix describing a piece's power state. Empty for a piece
  * not on the bus; otherwise "powered on" (driven) or "powered off" (inert in
  * place). Extracted so `PieceRenderer` stays under the complexity budget. Pure. */
@@ -4100,7 +4032,6 @@ function PieceRenderer({
   selected,
   live,
   poweredOff,
-  armedType,
   invalidOverlap,
   coupledToTrainId,
   renderPosition,
@@ -4151,7 +4082,7 @@ function PieceRenderer({
     // When a piece type is armed the operator is placing, not moving — let the
     // event bubble so the canvas places a fresh piece here. Only the primary
     // button starts a drag.
-    if (armedType !== null || e.button > 0) return;
+    if (e.button > 0) return;
     e.stopPropagation(); // don't start a canvas pan
     /* Reset any stale per-drag state in the parent before this new drag begins. */
     onDragStart(piece.id);
@@ -4220,10 +4151,7 @@ function PieceRenderer({
   }
 
   function handleClick(e: React.MouseEvent) {
-    // When armed, let the click bubble so the canvas places a fresh piece.
-    if (armedType !== null) return;
-    // Otherwise this piece owns the click: keep it off the canvas (which would
-    // deselect / place).
+    // This piece owns the click: keep it off the canvas (which would deselect).
     e.stopPropagation();
     if (suppressClickRef.current) {
       suppressClickRef.current = false;
@@ -4245,7 +4173,7 @@ function PieceRenderer({
   // Keyboard equivalent of the click: Enter/Space selects the piece (rotate and
   // delete then work via the global R / Delete shortcuts).
   function handleKeyDown(e: React.KeyboardEvent) {
-    if (armedType !== null || (e.key !== 'Enter' && e.key !== ' ')) return;
+    if (e.key !== 'Enter' && e.key !== ' ') return;
     e.preventDefault();
     e.stopPropagation();
     onAction('select');
@@ -4263,7 +4191,8 @@ function PieceRenderer({
   // layered on top — a glow not a stroke, so a multi-plank piece (junction,
   // crossing) never shows a seam where its sub-paths meet.
   const filter = pieceFilter(invalidOverlap, selected);
-  const cursorStyle = pieceCursor(armedType !== null);
+  // A placed piece is always grab-draggable now (no arm-for-click-place mode).
+  const cursorStyle = 'grab';
   // A device that is not under power dims to read as inert / off-bus.
   const dim = isDevice && !powered ? 0.5 : 1;
   // A powered-off train is on the bus but inert: label it distinctly so the
@@ -4307,7 +4236,6 @@ function PieceRenderer({
           piece={piece}
           live={live}
           powered={powered}
-          armed={armedType !== null}
           cx={shape.width / 2 - POWER_DOT_RADIUS}
           cy={-shape.height / 2 + POWER_DOT_RADIUS}
           onTogglePower={() => onAction({ type: 'power-toggle', pieceId: piece.id })}
@@ -4547,7 +4475,6 @@ function PowerDot({
   piece,
   live,
   powered,
-  armed,
   cx,
   cy,
   onTogglePower,
@@ -4555,7 +4482,6 @@ function PowerDot({
   readonly piece: EffectivePiece;
   readonly live: boolean;
   readonly powered: boolean;
-  readonly armed: boolean;
   readonly cx: number;
   readonly cy: number;
   readonly onTogglePower: () => void;
@@ -4565,7 +4491,7 @@ function PowerDot({
   // is a train concept (VirtualGate has no inert state) and `togglePower`
   // no-ops for non-trains, so making the gate dot a button would be a lying
   // affordance. An un-scanned device's dot is inert too.
-  const interactive = live && !armed && piece.type === 'train';
+  const interactive = live && piece.type === 'train';
   const fire = (e: React.SyntheticEvent) => {
     if (!interactive) return;
     e.stopPropagation();

@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { PROTOCOL_VERSION } from '@trainframe/protocol';
 import { InMemoryBrokerClient } from '@trainframe/simulator/broker/in-memory-client.js';
+import { CARRIAGE_SPACING_MM } from '@trainframe/simulator/track/coupling.js';
 import { FLEX_BUDGET_DEG } from '@trainframe/simulator/track/flex.js';
 import type { TrackPiece } from '@trainframe/simulator/track/pieces.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -151,90 +152,6 @@ function mockCanvasRect(): () => void {
   return () => spy.mockRestore();
 }
 
-/** Build a stub DragEvent dataTransfer with a given MIME payload.
- *  jsdom does not implement DataTransfer or DragEvent; we stub them. */
-function makeDataTransfer(mime: string, value: string): object {
-  const store: Record<string, string> = { [mime]: value };
-  return {
-    types: [mime],
-    getData: (m: string) => store[m] ?? '',
-    setData: (m: string, v: string) => {
-      store[m] = v;
-    },
-    effectAllowed: 'copy' as string,
-    dropEffect: 'copy' as string,
-  };
-}
-
-/**
- * Dispatch a synthetic dragover + drop on the given element, carrying both
- * clientX/Y coordinates AND a dataTransfer stub.
- *
- * jsdom's `fireEvent.drop` does not propagate `clientX`/`clientY` — it only
- * passes the `dataTransfer` object. We must use `MouseEvent('drop', ...)` +
- * `Object.defineProperty(evt, 'dataTransfer', ...)` to get coordinates through
- * to the handler.
- */
-function dispatchDragWithCoords(
-  element: Element,
-  mime: string,
-  value: string,
-  clientX: number,
-  clientY: number,
-): void {
-  const dt = makeDataTransfer(mime, value);
-
-  // dragover first — fires setDraggingToyboxType → snap-highlight state update.
-  // Wrapped in act() so React state updates (snap highlight) flush before drop.
-  act(() => {
-    const overEvt = new MouseEvent('dragover', {
-      bubbles: true,
-      cancelable: true,
-      clientX,
-      clientY,
-    });
-    Object.defineProperty(overEvt, 'dataTransfer', { value: dt });
-    element.dispatchEvent(overEvt);
-  });
-
-  // drop carries the same coordinates and dataTransfer.
-  // act() ensures the piece placement state update flushes synchronously.
-  act(() => {
-    const dropEvt = new MouseEvent('drop', {
-      bubbles: true,
-      cancelable: true,
-      clientX,
-      clientY,
-    });
-    Object.defineProperty(dropEvt, 'dataTransfer', { value: dt });
-    element.dispatchEvent(dropEvt);
-  });
-}
-
-/** Dispatch a synthetic toybox drag start on the button so React's
- * `onDragStart` fires and updates `draggingToyboxType` state. */
-function dispatchToyboxDragStart(button: HTMLElement, type: string): void {
-  const TOYBOX_MIME = 'application/x-trainframe-toybox-type';
-  const store: Record<string, string> = {};
-  const dt = {
-    types: [TOYBOX_MIME],
-    getData: (m: string) => store[m] ?? '',
-    setData: (m: string, v: string) => {
-      store[m] = v;
-    },
-    effectAllowed: 'copy' as string,
-    dropEffect: 'copy' as string,
-  };
-  // act() ensures the React onDragStart handler's state update (draggingToyboxType)
-  // flushes before the subsequent dragover/drop events.
-  act(() => {
-    fireEvent.dragStart(button, { dataTransfer: dt });
-    // The handler calls setData(TOYBOX_MIME, type); our stub captures it.
-    // Also ensure the store has the type so subsequent getData calls see it.
-    store[TOYBOX_MIME] = type;
-  });
-}
-
 describe('ToyTable — palette and placement', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -251,11 +168,9 @@ describe('ToyTable — palette and placement', () => {
   });
 
   it('places a railyard as wooden track straddled by a steel gantry', async () => {
-    const user = userEvent.setup();
     renderToyTable();
 
-    await user.click(screen.getByTestId('toybox-railyard'));
-    await user.click(screen.getByTestId('toy-table-canvas'));
+    placeByDrag('railyard');
 
     const placed = document.querySelector('[data-testid^="piece-railyard-"]');
     if (placed === null) throw new Error('no railyard placed');
@@ -276,14 +191,11 @@ describe('ToyTable — palette and placement', () => {
     expect(placed.querySelectorAll('animateTransform')).toHaveLength(0);
   });
 
-  it('arms a piece type and places it on the canvas without publishing any device traffic', async () => {
-    const user = userEvent.setup();
+  it('drags a piece type onto the canvas without publishing any device traffic', async () => {
     const { client } = renderToyTable();
 
-    await user.click(screen.getByTestId('toybox-straight'));
+    placeByDrag('straight');
     const canvas = screen.getByTestId('toy-table-canvas');
-    // Click anywhere — geometry conversion is exercised by handleClick.
-    await user.click(canvas);
 
     // A piece-* node now exists on the table.
     const placed = canvas.querySelectorAll('[data-testid^="piece-"]');
@@ -364,14 +276,9 @@ describe('ToyTable — palette and placement', () => {
     expect(screen.getByTestId('toybox-carriage-color-purple')).toBeInTheDocument();
   });
 
-  it('places a carriage in the picked livery (arm → pick → re-arm → place)', async () => {
-    const user = userEvent.setup();
+  it('places a carriage in the picked livery (drag with the chosen variant)', () => {
     renderToyTable();
-
-    await user.click(screen.getByTestId('toybox-carriage')); // arm + fan out
-    await user.click(screen.getByTestId('toybox-carriage-color-purple')); // pick → collapse + disarm
-    await user.click(screen.getByTestId('toybox-carriage')); // re-arm to the chosen variant
-    await user.click(screen.getByTestId('toy-table-canvas')); // place
+    placeByDrag('carriage', { colorId: 'purple' });
 
     const placed = document.querySelector('[data-testid^="piece-carriage-"]') as HTMLElement | null;
     if (!placed) throw new Error('no carriage placed');
@@ -415,27 +322,19 @@ describe('ToyTable — palette and placement', () => {
     expect(screen.getByTestId('toybox-straight-length-60')).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('places a straight at the picked length (arm → pick → re-arm → place)', async () => {
-    const user = userEvent.setup();
+  it('places a straight at the picked length (drag with the chosen variant)', () => {
     renderToyTable();
-
-    await user.click(screen.getByTestId('toybox-straight'));
-    await user.click(screen.getByTestId('toybox-straight-length-60')); // configure
-    await user.click(screen.getByTestId('toybox-straight')); // re-arm to 60 mm
-    await user.click(screen.getByTestId('toy-table-canvas'));
+    placeByDrag('straight', { lengthMm: 60 });
 
     const placed = document.querySelector('[data-testid^="piece-straight-"]') as HTMLElement | null;
     if (!placed) throw new Error('no straight placed');
     expect(placed.getAttribute('data-length-mm')).toBe('60');
   });
 
-  it('stamps no length override on a straight placed at the default 200 mm', async () => {
-    const user = userEvent.setup();
+  it('stamps no length override on a straight dragged at the default 200 mm', () => {
     renderToyTable();
-
-    // Arm the straight but leave the default (200 mm) — place straight away.
-    await user.click(screen.getByTestId('toybox-straight'));
-    await user.click(screen.getByTestId('toy-table-canvas'));
+    // Drag the straight without configuring a length → keeps the default (200 mm).
+    placeByDrag('straight');
 
     const placed = document.querySelector('[data-testid^="piece-straight-"]') as HTMLElement | null;
     if (!placed) throw new Error('no straight placed');
@@ -466,14 +365,9 @@ describe('ToyTable — palette and placement', () => {
     expect(screen.getByTestId('toybox-train-color-red')).toHaveAttribute('aria-pressed', 'true');
   });
 
-  it('places a train in the picked livery (arm → pick → re-arm → place)', async () => {
-    const user = userEvent.setup();
+  it('places a train in the picked livery (drag with the chosen variant)', () => {
     renderToyTable();
-
-    await user.click(screen.getByTestId('toybox-train'));
-    await user.click(screen.getByTestId('toybox-train-color-green'));
-    await user.click(screen.getByTestId('toybox-train')); // re-arm to green
-    await user.click(screen.getByTestId('toy-table-canvas'));
+    placeByDrag('train', { colorId: 'green' });
 
     const placed = document.querySelector('[data-testid^="piece-train-"]') as HTMLElement | null;
     if (!placed) throw new Error('no train placed');
@@ -483,13 +377,10 @@ describe('ToyTable — palette and placement', () => {
     expect(fills).not.toContain('#cf4436'); // not the default red loco
   });
 
-  it('leaves a default (red) train its standard colour with no livery override', async () => {
-    const user = userEvent.setup();
+  it('leaves a default (red) train its standard colour with no livery override', () => {
     renderToyTable();
-
-    // Arm the train but leave the default red pick — the loco keeps DEVICE_FILL.
-    await user.click(screen.getByTestId('toybox-train'));
-    await user.click(screen.getByTestId('toy-table-canvas'));
+    // Drag the train without picking a livery — the loco keeps DEVICE_FILL.
+    placeByDrag('train');
 
     const placed = document.querySelector('[data-testid^="piece-train-"]') as HTMLElement | null;
     if (!placed) throw new Error('no train placed');
@@ -498,16 +389,55 @@ describe('ToyTable — palette and placement', () => {
   });
 });
 
-/** Place an armed piece of the given type and return its piece id. */
-async function placeArmedPiece(type: string): Promise<string> {
-  const user = userEvent.setup();
-  await user.click(screen.getByTestId(`toybox-${type}`));
-  await user.click(screen.getByTestId('toy-table-canvas'));
+function rawPtr(type: string, xPx: number, yPx: number): Event {
+  return new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    clientX: xPx,
+    clientY: yPx,
+  });
+}
+
+/**
+ * Place a piece by DRAGGING it from the parts tray (the sole placement path now
+ * arming is gone): optionally configure a variant first (tap the tile to open
+ * the fan + pick a length/livery), then press the tile and drag onto the canvas
+ * at (xMm,yMm), releasing to commit. Returns the new piece's id.
+ */
+function placeByDrag(
+  type: string,
+  opts: { xMm?: number; yMm?: number; lengthMm?: number; colorId?: string } = {},
+): string {
+  const restore = mockCanvasRect();
+  try {
+    const tile = screen.getByTestId(`toybox-${type}`);
+    if (opts.lengthMm !== undefined) {
+      act(() => void fireEvent.click(tile)); // open the fan
+      act(() => void fireEvent.click(screen.getByTestId(`toybox-${type}-length-${opts.lengthMm}`)));
+    }
+    if (opts.colorId !== undefined) {
+      act(() => void fireEvent.click(tile));
+      act(() => void fireEvent.click(screen.getByTestId(`toybox-${type}-color-${opts.colorId}`)));
+    }
+    const xMm = opts.xMm ?? CANVAS_W_MM / 2;
+    const yMm = opts.yMm ?? CANVAS_H_MM / 2;
+    act(() => void tile.dispatchEvent(rawPtr('pointerdown', 5, 5)));
+    act(() => void window.dispatchEvent(rawPtr('pointermove', xMm * SCALE, yMm * SCALE)));
+    act(() => void window.dispatchEvent(rawPtr('pointerup', xMm * SCALE, yMm * SCALE)));
+  } finally {
+    restore();
+  }
   const placed = document.querySelector(`[data-testid^="piece-${type}-"]`) as HTMLElement | null;
   if (!placed) throw new Error(`no ${type} placed`);
   const pieceId = placed.getAttribute('data-piece-id');
   if (!pieceId) throw new Error('placed piece missing data-piece-id');
   return pieceId;
+}
+
+/** Place a piece of the given type via the drag path and return its piece id. */
+async function placeArmedPiece(type: string): Promise<string> {
+  return placeByDrag(type);
 }
 
 describe('ToyTable — scan and power', () => {
@@ -516,11 +446,9 @@ describe('ToyTable — scan and power', () => {
   });
 
   it('placing a train without scanning emits no broker events for that device', async () => {
-    const user = userEvent.setup();
     const { client } = renderToyTable();
 
-    await user.click(screen.getByTestId('toybox-train'));
-    await user.click(screen.getByTestId('toy-table-canvas'));
+    await placeArmedPiece('train');
 
     // No `railway/events/*/T-…` topic should have been published for the new
     // train — train pieces don't contribute to topology so neither the scan
@@ -994,8 +922,7 @@ describe('ToyTable — keyboard and selection', () => {
   it('R rotates the selected piece by 45 degrees', async () => {
     const user = userEvent.setup();
     renderToyTable();
-    await user.click(screen.getByTestId('toybox-straight'));
-    await user.click(screen.getByTestId('toy-table-canvas'));
+    placeByDrag('straight'); // a dragged piece is left selected
 
     const placed = document.querySelector('[data-testid^="piece-"]');
     expect(placed?.getAttribute('transform')).toMatch(/rotate\(0\)/);
@@ -1007,8 +934,7 @@ describe('ToyTable — keyboard and selection', () => {
   it('Delete removes the selected piece', async () => {
     const user = userEvent.setup();
     renderToyTable();
-    await user.click(screen.getByTestId('toybox-straight'));
-    await user.click(screen.getByTestId('toy-table-canvas'));
+    placeByDrag('straight'); // a dragged piece is left selected
 
     expect(document.querySelectorAll('[data-testid^="piece-"]').length).toBe(1);
     await user.keyboard('{Delete}');
@@ -1030,10 +956,8 @@ describe('ToyTable — drag-from-toybox', () => {
     try {
       renderToyTable();
       const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
-      const straight = screen.getByTestId('toybox-straight');
 
-      dispatchToyboxDragStart(straight, 'straight');
-      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 600, 400);
+      dragPlaceAtPx('straight', 600, 400);
 
       const placed = canvas.querySelectorAll('[data-testid^="piece-"]');
       expect(placed.length).toBe(1);
@@ -1047,37 +971,16 @@ describe('ToyTable — drag-from-toybox', () => {
     try {
       renderToyTable();
       const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
-      const straight = screen.getByTestId('toybox-straight');
 
       // Canvas is 1800px wide = 900mm, 1200px high = 600mm (zoom=1, pan=(0,0)).
       // clientX=900 → 450mm, clientY=600 → 300mm.
-      dispatchToyboxDragStart(straight, 'straight');
-      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 900, 600);
+      dragPlaceAtPx('straight', 900, 600);
 
       const pieceEl = canvas.querySelector('[data-testid^="piece-"]') as SVGGElement | null;
       expect(pieceEl).not.toBeNull();
       // transform should encode the mm position at canvas centre: translate(450, 300).
       const transform = pieceEl?.getAttribute('transform') ?? '';
       expect(transform).toContain('translate(450, 300)');
-    } finally {
-      restore();
-    }
-  });
-
-  it('toybox drag does not affect the scan-box (different MIME type)', () => {
-    const restore = mockCanvasRect();
-    try {
-      renderToyTable();
-      const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
-      const straight = screen.getByTestId('toybox-straight');
-
-      // Drop with the scan-box MIME on the canvas — should be ignored.
-      dispatchToyboxDragStart(straight, 'straight');
-      dispatchDragWithCoords(canvas, 'application/x-trainframe-piece', 'some-piece-id', 900, 600);
-
-      // No piece placed (wrong MIME).
-      const placed = canvas.querySelectorAll('[data-testid^="piece-"]');
-      expect(placed.length).toBe(0);
     } finally {
       restore();
     }
@@ -1094,19 +997,16 @@ describe('ToyTable — snap-to-connect', () => {
     try {
       renderToyTable();
       const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
-      const straightButton = screen.getByTestId('toybox-straight');
 
       // Place first straight at canvas centre (450mm, 300mm).
       // Its east endpoint is at 450+100=550mm, 300mm.
-      dispatchToyboxDragStart(straightButton, 'straight');
-      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 900, 600);
+      dragPlaceAtPx('straight', 900, 600);
 
       // Drop the second straight within the connect radius of the east endpoint
       // (550mm). Dropping the *click point* within CONNECT_CAPTURE_MM (60mm) of
       // an open endpoint snaps + orients the new piece onto it. Drop at 580mm
       // (30mm away) → 580/900*1800 = 1160px.
-      dispatchToyboxDragStart(straightButton, 'straight');
-      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 1160, 600);
+      dragPlaceAtPx('straight', 1160, 600);
 
       const pieces = canvas.querySelectorAll('[data-testid^="piece-"]');
       expect(pieces.length).toBe(2);
@@ -1125,16 +1025,13 @@ describe('ToyTable — snap-to-connect', () => {
     try {
       renderToyTable();
       const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
-      const straightButton = screen.getByTestId('toybox-straight');
 
       // Place first straight at canvas centre (450mm, 300mm).
-      dispatchToyboxDragStart(straightButton, 'straight');
-      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 900, 600);
+      dragPlaceAtPx('straight', 900, 600);
 
       // Drop second straight far away at (100mm, 100mm).
       // 100mm → 100/900*1800 = 200px
-      dispatchToyboxDragStart(straightButton, 'straight');
-      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 200, 200);
+      dragPlaceAtPx('straight', 200, 200);
 
       const pieces = canvas.querySelectorAll('[data-testid^="piece-"]');
       expect(pieces.length).toBe(2);
@@ -1149,15 +1046,29 @@ describe('ToyTable — snap-to-connect', () => {
   });
 });
 
-const TOYBOX_MIME = 'application/x-trainframe-toybox-type';
+/** Drag a toybox tile of `type` onto the canvas, dropping at the given CLIENT px
+ *  coordinates (the sole placement path). The caller must have a canvas rect mock
+ *  active. Mirrors the Feature-B gesture: press the tile, move onto the table,
+ *  release to snap + commit. */
+function dragPlaceAtPx(type: string, clientX: number, clientY: number): void {
+  act(() => void screen.getByTestId(`toybox-${type}`).dispatchEvent(rawPtr('pointerdown', 5, 5)));
+  act(() => void window.dispatchEvent(rawPtr('pointermove', clientX, clientY)));
+  act(() => void window.dispatchEvent(rawPtr('pointerup', clientX, clientY)));
+}
 
-/** Place a straight via a toybox drag-drop at the given client px, return its id. */
+/** Place a straight via the drag gesture at the given client px, returning the
+ *  id of the piece that appeared (by set difference — robust when several
+ *  straights are placed in sequence). */
 function placeStraightAt(canvas: Element, clientX: number, clientY: number): string {
-  dispatchToyboxDragStart(screen.getByTestId('toybox-straight'), 'straight');
-  dispatchDragWithCoords(canvas, TOYBOX_MIME, 'straight', clientX, clientY);
-  const pieces = canvas.querySelectorAll('[data-piece-id]');
-  const last = pieces[pieces.length - 1];
-  return last?.getAttribute('data-piece-id') ?? '';
+  const before = new Set(
+    [...canvas.querySelectorAll('[data-piece-id]')].map((e) => e.getAttribute('data-piece-id')),
+  );
+  dragPlaceAtPx('straight', clientX, clientY);
+  const fresh = [...canvas.querySelectorAll('[data-piece-id]')]
+    .map((e) => e.getAttribute('data-piece-id') ?? '')
+    .find((id) => !before.has(id));
+  if (fresh === undefined) throw new Error('placeStraightAt: no piece placed');
+  return fresh;
 }
 
 /** Pointer-drag a placed piece element from its current spot to a client point.
@@ -1345,13 +1256,15 @@ describe('ToyTable — drag gestures (move / flex)', () => {
       renderToyTable();
       const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
 
-      /* Place anchor A at centre (450mm, 300mm). Its east endpoint is at 550mm. */
-      placeStraightAt(canvas, 900, 600);
-
-      /* Place B by clicking near A's east endpoint at (550mm, 300mm) → client
-         (1100px, 600px). computePlacement snaps B's west end onto A's east end,
-         landing B's centre at (650mm, 300mm). */
-      const bId = placeStraightAt(canvas, 1100, 600);
+      /* Stage two collinear straights end-to-end via the exact-placement setup
+         hook: A at (450,300) (east end 550), B flush at (650,300) (west end 550),
+         both rotation 0. A gesture drop snaps B onto A but orients it anti-parallel
+         (rotate 180) — wrong for a joint we want to bend from a shared heading. */
+      let bId = '';
+      act(() => {
+        window.__tfPlacePiece?.('straight', 450, 300);
+        bId = window.__tfPlacePiece?.('straight', 650, 300) ?? '';
+      });
       const bEl = canvas.querySelector(`[data-piece-id="${bId}"]`) as SVGGElement;
 
       /* Confirm B starts at rotation 0. */
@@ -1555,18 +1468,15 @@ describe('ToyTable — pan', () => {
     }
   });
 
-  it('left-mouse drag does NOT pan when a piece type is armed', async () => {
-    const user = userEvent.setup();
+  it('left-mouse drag on the empty background PANS the canvas (no arming to block it)', () => {
     const restore = mockCanvasRect();
     try {
       renderToyTable();
-      await user.click(screen.getByTestId('toybox-straight'));
 
       const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
       const initialX = Number(canvas.getAttribute('data-viewport-x'));
-      const initialY = Number(canvas.getAttribute('data-viewport-y'));
 
-      // Attempt to pan — but since a type is armed, left-drag should not pan.
+      // Arming is gone — a left-drag starting on the empty background now pans.
       act(() => {
         canvas.dispatchEvent(
           new MouseEvent('pointerdown', { bubbles: true, button: 0, clientX: 500, clientY: 300 }),
@@ -1579,12 +1489,8 @@ describe('ToyTable — pan', () => {
         );
       });
 
-      const afterX = Number(canvas.getAttribute('data-viewport-x'));
-      const afterY = Number(canvas.getAttribute('data-viewport-y'));
-
-      // Viewport should NOT have changed.
-      expect(afterX).toBe(initialX);
-      expect(afterY).toBe(initialY);
+      // The viewport moved (a pan happened).
+      expect(Number(canvas.getAttribute('data-viewport-x'))).not.toBe(initialX);
     } finally {
       restore();
     }
@@ -1669,12 +1575,10 @@ describe('ToyTable — carriage placement and wire silence', () => {
     expect(screen.getByTestId('toybox-carriage')).toBeInTheDocument();
   });
 
-  it('placing a carriage without scanning emits no broker events', async () => {
-    const user = userEvent.setup();
+  it('placing a carriage without scanning emits no broker events', () => {
     const { client } = renderToyTable();
 
-    await user.click(screen.getByTestId('toybox-carriage'));
-    await user.click(screen.getByTestId('toy-table-canvas'));
+    placeByDrag('carriage');
 
     const placed = document.querySelectorAll('[data-testid^="piece-carriage-"]');
     expect(placed.length).toBe(1);
@@ -1733,10 +1637,8 @@ describe('ToyTable — carriage coupling', () => {
       const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
 
       // Place and scan a train near canvas centre (450, 300).
-      const trainButton = screen.getByTestId('toybox-train');
-      dispatchToyboxDragStart(trainButton, 'train');
       // 900px wide = 900mm. Drop at 900, 600 px → 450mm, 300mm.
-      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'train', 900, 600);
+      dragPlaceAtPx('train', 900, 600);
 
       const trainPieceEl = canvas.querySelector(
         '[data-testid^="piece-train-"]',
@@ -1751,9 +1653,7 @@ describe('ToyTable — carriage coupling', () => {
 
       // Place a carriage 80mm east of the train (well within coupling distance of 100mm).
       // 450mm + 80mm = 530mm. 530/900 * 1800px = 1060px.
-      const carriageButton = screen.getByTestId('toybox-carriage');
-      dispatchToyboxDragStart(carriageButton, 'carriage');
-      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'carriage', 1060, 600);
+      dragPlaceAtPx('carriage', 1060, 600);
 
       const carriagePieceEl = canvas.querySelector(
         '[data-testid^="piece-carriage-"]',
@@ -1777,9 +1677,7 @@ describe('ToyTable — carriage coupling', () => {
       const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
 
       // Place and scan a train at canvas centre.
-      const trainButton = screen.getByTestId('toybox-train');
-      dispatchToyboxDragStart(trainButton, 'train');
-      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'train', 900, 600);
+      dragPlaceAtPx('train', 900, 600);
 
       const trainPieceEl = canvas.querySelector(
         '[data-testid^="piece-train-"]',
@@ -1790,9 +1688,7 @@ describe('ToyTable — carriage coupling', () => {
       dropPieceOnScanBox(screen.getByTestId('scan-box'), trainPieceId);
 
       // Place a carriage far away: 300mm east = 750mm, i.e. 750/900 * 1800 = 1500px.
-      const carriageButton = screen.getByTestId('toybox-carriage');
-      dispatchToyboxDragStart(carriageButton, 'carriage');
-      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'carriage', 1500, 600);
+      dragPlaceAtPx('carriage', 1500, 600);
 
       const carriagePieceEl = canvas.querySelector(
         '[data-testid^="piece-carriage-"]',
@@ -1814,39 +1710,31 @@ describe('ToyTable — carriage coupling', () => {
 /**
  * Build the two-straight + train setup needed by the carriage physics tests.
  *
- * Places straight-A at (450, 300), straight-B snapped to (650, 300), a train
- * on top of straight-A, scans all three, and returns the train piece id.
- * The canvas mock rect MUST be active when called.
+ * Places straight-A at (450, 300), straight-B flush at (650, 300), a train on
+ * top of straight-A, scans all three, and returns the train piece id. Uses the
+ * exact-placement setup hook so the geometry is precise — the bounds-and-snap
+ * pointer gesture would re-snap a piece dropped on top of another. The canvas
+ * mock rect MUST be active when called.
  */
-function setupTwoStraightsThenTrain(canvas: Element): string {
-  const straightButton = screen.getByTestId('toybox-straight');
-
-  // Place straight-A at canvas centre (450, 300mm). clientX=900 → 450mm.
-  dispatchToyboxDragStart(straightButton, 'straight');
-  dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 900, 600);
-  const straightAEl = canvas.querySelector(
-    '[data-testid^="piece-straight-"]',
-  ) as HTMLElement | null;
-  const straightAId = straightAEl?.getAttribute('data-piece-id') ?? '';
-
-  // Place straight-B snapping to A's east endpoint. Drop at 660mm → 1320px:
-  // B's west endpoint (560mm) is 10mm from A's east (550mm) → snaps to 650mm.
-  dispatchToyboxDragStart(straightButton, 'straight');
-  dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'straight', 1320, 600);
-  const straightEls = canvas.querySelectorAll('[data-testid^="piece-straight-"]');
-  const straightBEl = straightEls[1] as HTMLElement | undefined;
-  const straightBId = straightBEl?.getAttribute('data-piece-id') ?? '';
+function setupTwoStraightsThenTrain(_canvas: Element): string {
+  // Straight-A at canvas centre (endpoints 350 / 550); straight-B flush east of
+  // it (endpoints 550 / 750) so A.east coincides with B.west.
+  let straightAId = '';
+  let straightBId = '';
+  let trainPieceId = '';
+  act(() => {
+    straightAId = window.__tfPlacePiece?.('straight', 450, 300) ?? '';
+    straightBId = window.__tfPlacePiece?.('straight', 650, 300) ?? '';
+  });
 
   // Scan both straights to bind their markers.
   dropPieceOnScanBox(screen.getByTestId('scan-box'), straightAId);
   dropPieceOnScanBox(screen.getByTestId('scan-box'), straightBId);
 
-  // Place and scan a train on straight-A (450, 300mm). clientX=900.
-  const trainButton = screen.getByTestId('toybox-train');
-  dispatchToyboxDragStart(trainButton, 'train');
-  dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'train', 900, 600);
-  const trainEl = canvas.querySelector('[data-testid^="piece-train-"]') as HTMLElement | null;
-  const trainPieceId = trainEl?.getAttribute('data-piece-id') ?? '';
+  // Place and scan a train on straight-A (450, 300mm).
+  act(() => {
+    trainPieceId = window.__tfPlacePiece?.('train', 450, 300) ?? '';
+  });
   dropPieceOnScanBox(screen.getByTestId('scan-box'), trainPieceId);
 
   return trainPieceId;
@@ -1857,14 +1745,12 @@ describe('ToyTable — carriage render positions follow sim physics', () => {
     localStorage.clear();
   });
 
-  it('coupled carriage renders at the edge-start world position, not its drop position', () => {
+  it('coupled carriage renders at its sim position trailing the loco, not its drop position', () => {
     // Two straights + train setup so the train spawns in-sim on edge
-    // M-straight-A(450,300) → M-straight-B(650,300). RAF never fires in jsdom
-    // so distance_into_edge stays 0. Carriage clamped to 0 → renders at (450,300).
-    //
-    // Carriage is dropped at (370, 300) — 80mm west of the train, within
-    // coupling range. Its transform must reflect the sim position (450,300),
-    // NOT the placement position (370,300).
+    // M-straight-A(450,300) → M-straight-B(650,300). The loco seats at the train
+    // piece (450,300) — the edge start, distance_into_edge 0. A coupled carriage
+    // renders at its SIM BODY pose: one carriage-spacing back along the rail
+    // (450 − CARRIAGE_SPACING_MM), NOT at where it was dropped (370,300).
     const restore = mockCanvasRect();
     try {
       renderToyTable();
@@ -1872,11 +1758,19 @@ describe('ToyTable — carriage render positions follow sim physics', () => {
 
       const trainPieceId = setupTwoStraightsThenTrain(canvas);
 
-      // Place a carriage 80mm west of the train at (370, 300):
-      // clientX = (370/900)*1800 = 740px.
-      const carriageButton = screen.getByTestId('toybox-carriage');
-      dispatchToyboxDragStart(carriageButton, 'carriage');
-      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'carriage', 740, 600);
+      // Place a carriage 80mm west of the train at exactly (370, 300) (within the
+      // 100mm coupling range). Exact-placement setup hook — a gesture drop would
+      // re-snap it onto straight-A's open end and shift the coupling geometry.
+      act(() => {
+        window.__tfPlacePiece?.('carriage', 370, 300);
+      });
+      // Re-render to read the seeded carriage body: the loco's rake is seeded in
+      // the post-render sync effect, which a live browser reflects on the next RAF
+      // tick. jsdom has no RAF, so step(0) bumps the render WITHOUT stepping the
+      // world (a non-zero step would let the physics settle the rake spacing).
+      act(() => {
+        window.trainframeSim?.step(0);
+      });
 
       const carriageEl = canvas.querySelector(
         '[data-testid^="piece-carriage-"]',
@@ -1886,9 +1780,10 @@ describe('ToyTable — carriage render positions follow sim physics', () => {
       // Coupling: data-coupled-to must reference the train.
       expect(carriageEl.getAttribute('data-coupled-to')).toBe(trainPieceId);
 
-      // Physics: transform must be from-marker position (450, 300), not drop (370, 300).
+      // Physics: the carriage renders at its sim body pose — one spacing back from
+      // the loco's edge-start (450,300) along the rail — NOT at its drop (370,300).
       const transform = carriageEl.getAttribute('transform') ?? '';
-      expect(transform).toContain('translate(450, 300)');
+      expect(transform).toContain(`translate(${450 - CARRIAGE_SPACING_MM}, 300)`);
       expect(transform).not.toContain('translate(370, 300)');
     } finally {
       restore();
@@ -1903,9 +1798,7 @@ describe('ToyTable — carriage render positions follow sim physics', () => {
       const canvas = screen.getByTestId('toy-table-canvas') as unknown as Element;
 
       // Place carriage at canvas centre (450mm, 300mm). clientX=900.
-      const carriageButton = screen.getByTestId('toybox-carriage');
-      dispatchToyboxDragStart(carriageButton, 'carriage');
-      dispatchDragWithCoords(canvas, 'application/x-trainframe-toybox-type', 'carriage', 900, 600);
+      dragPlaceAtPx('carriage', 900, 600);
 
       const carriageEl = canvas.querySelector(
         '[data-testid^="piece-carriage-"]',

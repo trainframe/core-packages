@@ -196,62 +196,34 @@ export interface PlacePieceOptions {
 }
 
 /**
- * Place a piece on the toy-table canvas.
+ * Place a piece on the toy-table canvas by DRAGGING it out of the parts tray —
+ * the sole placement path now arming is gone.
  *
- * 1. If the toybox button for `type` is not already armed (aria-pressed ≠ "true"),
- *    click it to arm it.
- * 2. Click the canvas at the given position (mm coords mapped to px via the
- *    SVG's current bounding rect and the data-viewport-* attributes the canvas
- *    exposes).
- * 3. Return the `data-piece-id` of the newly placed piece (read from the DOM
- *    rather than predicted from a module-level counter, which is fragile).
+ * 1. Optionally configure a variant first: tap the toybox tile to open its fan,
+ *    then pick the length/livery. (Tapping a tile only opens variant options;
+ *    it does not arm anything.)
+ * 2. Press the tile and drag onto the canvas at the given position (mm coords
+ *    mapped to px via the SVG's bounding rect and the data-viewport-* attributes
+ *    the canvas exposes), releasing to commit — the real Feature-B gesture.
+ * 3. Return the `data-piece-id` of the newly placed piece (found by SET
+ *    difference, not document order, since pieces render bucketed by layer).
  */
 export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): Promise<string> {
   const { type, xMm = 450, yMm = 300, carriageColor, straightLengthMm } = opts;
 
-  // Arm the toybox button if not already armed.
   const toyboxBtn = sim.getByTestId(`toybox-${type}`);
-  const pressed = await toyboxBtn.getAttribute('aria-pressed');
-  if (pressed !== 'true') {
-    await toyboxBtn.click();
-  }
 
-  // Pick a straight length variant from the fan that opens when the straight
-  // tool is armed, then re-arm to the chosen length (press → pick → press →
-  // place — picking resets the arm). Mirrors the carriage-livery flow below.
+  // Configure a variant first by opening the tile's fan and picking the option.
   if (type === 'straight' && straightLengthMm !== undefined && straightLengthMm !== 200) {
+    await toyboxBtn.click(); // open the fan
     await sim.getByTestId(`toybox-straight-length-${straightLengthMm}`).click();
-    await toyboxBtn.click();
-    await sim.waitForFunction(
-      (t: string) =>
-        document.querySelector(`[data-testid="toybox-${t}"]`)?.getAttribute('aria-pressed') ===
-        'true',
-      type,
-    );
   }
-
-  // Wait for the arm to take effect: the button must report aria-pressed="true"
-  // before we fire the canvas click, otherwise React may not have re-rendered
-  // with the new armedType yet.
-  await sim.waitForFunction((t: string) => {
-    const btn = document.querySelector(`[data-testid="toybox-${t}"]`);
-    return btn?.getAttribute('aria-pressed') === 'true';
-  }, type);
-
-  // Pick the carriage livery from the fan that opens when the carriage tool is
-  // armed. Picking a variant reconfigures the family and RESETS the arm (a
-  // configuration gesture, not a placement one), so re-arm to the chosen variant
-  // before placing — exactly the operator flow (press → pick → press → place).
   if (type === 'carriage' && carriageColor !== undefined) {
-    await sim.getByTestId(`toybox-carriage-color-${carriageColor}`).click();
     await toyboxBtn.click();
-    await sim.waitForFunction((t: string) => {
-      const btn = document.querySelector(`[data-testid="toybox-${t}"]`);
-      return btn?.getAttribute('aria-pressed') === 'true';
-    }, type);
+    await sim.getByTestId(`toybox-carriage-color-${carriageColor}`).click();
   }
 
-  // Capture the piece IDs that exist before the click, so we can diff. The
+  // Capture the piece IDs that exist before the drag, so we can diff. The
   // new piece must be found by SET difference, not document order: pieces
   // render bucketed by layer and track-before-device phases, so the newest
   // piece is NOT necessarily last in the DOM (a station placed after a
@@ -270,7 +242,7 @@ export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): 
   const canvas = sim.getByTestId('toy-table-canvas');
   await canvas.waitFor({ state: 'visible' });
 
-  const clickInfo = await canvas.evaluate(
+  const dropInfo = await canvas.evaluate(
     (el, { xMm, yMm }) => {
       const svg = el as SVGSVGElement;
       const rect = svg.getBoundingClientRect();
@@ -289,10 +261,7 @@ export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): 
       // Offset from the element's top-left corner.
       const offsetX = fracX * rect.width;
       const offsetY = fracY * rect.height;
-      // Absolute client coordinates for page.mouse.click().
       return {
-        clientX: rect.left + offsetX,
-        clientY: rect.top + offsetY,
         // Clamp to visible viewport (window.innerWidth/innerHeight).
         clampedX: Math.min(rect.left + offsetX, window.innerWidth - 1),
         clampedY: Math.min(rect.top + offsetY, window.innerHeight - 1),
@@ -301,7 +270,17 @@ export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): 
     { xMm, yMm },
   );
 
-  await sim.mouse.click(clickInfo.clampedX, clickInfo.clampedY);
+  // Feature-B drag: press the tile, drag onto the canvas at the drop point, and
+  // release to commit. The gesture places a real piece on the first in-bounds
+  // move and follows the cursor until pointerup snaps + commits it.
+  const tileBox = await toyboxBtn.boundingBox();
+  if (tileBox === null) {
+    throw new Error('placePieceOnToyTable: toybox tile has no bounding box');
+  }
+  await sim.mouse.move(tileBox.x + tileBox.width / 2, tileBox.y + tileBox.height / 2);
+  await sim.mouse.down();
+  await sim.mouse.move(dropInfo.clampedX, dropInfo.clampedY, { steps: 8 });
+  await sim.mouse.up();
 
   // Wait for a new piece to appear.
   await sim.waitForFunction(
@@ -309,7 +288,7 @@ export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): 
     idsBefore.size,
   );
 
-  // The newly placed piece is the one that wasn't there before the click.
+  // The newly placed piece is the one that wasn't there before the drag.
   const allPieceIds = await sim
     .locator('[data-piece-id]')
     .evaluateAll((els) =>
@@ -317,7 +296,7 @@ export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): 
     );
   const pieceId = allPieceIds.find((id) => !idsBefore.has(id));
   if (pieceId === undefined) {
-    throw new Error('placePieceOnToyTable: no piece appeared after click');
+    throw new Error('placePieceOnToyTable: no piece appeared after drag');
   }
 
   // A freshly-placed piece is selected, so the R/F keyboard shortcuts act on it

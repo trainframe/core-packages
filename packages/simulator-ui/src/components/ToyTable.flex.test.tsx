@@ -71,7 +71,6 @@ function makePiece(
   return { id, type: 'straight', position: { x, y }, rotationDeg, tagged: false };
 }
 
-const TOYBOX_MIME = 'application/x-trainframe-toybox-type';
 const CANVAS_W_PX = 1800;
 const CANVAS_H_PX = 1200;
 
@@ -100,34 +99,24 @@ function mockCanvasRect(): () => void {
   return () => spy.mockRestore();
 }
 
-/* Place a track piece via toybox drag-drop at the given client-px position.
+/* Place a track piece at the given client-px position via the snap-then-place
+   setup hook (the retired toybox-drop behaviour: computePlacement onto a nearby
+   open end → placePiece). Builds connected chains exactly as the old drop did.
    Returns the new piece's data-piece-id. */
-function placePieceAt(canvas: Element, type: string, clientX: number, clientY: number): string {
-  const dt: Record<string, string> = { [TOYBOX_MIME]: type };
-  const makeTransfer = () => ({
-    types: [TOYBOX_MIME],
-    getData: (m: string) => dt[m] ?? '',
-    setData: (m: string, v: string) => {
-      dt[m] = v;
-    },
-    effectAllowed: 'copy' as string,
-    dropEffect: 'copy' as string,
-  });
-
+function placePieceAt(
+  _canvas: Element,
+  type: TrackPiece['type'],
+  clientX: number,
+  clientY: number,
+): string {
+  // CANVAS is 900mm wide across CANVAS_W_PX px → mm = px * 900 / CANVAS_W_PX.
+  const xMm = (clientX * 900) / CANVAS_W_PX;
+  const yMm = (clientY * 600) / CANVAS_H_PX;
+  let id = '';
   act(() => {
-    const ov = new MouseEvent('dragover', { bubbles: true, cancelable: true, clientX, clientY });
-    Object.defineProperty(ov, 'dataTransfer', { value: makeTransfer() });
-    canvas.dispatchEvent(ov);
+    id = window.__tfDropPiece?.(type, xMm, yMm) ?? '';
   });
-  act(() => {
-    const dp = new MouseEvent('drop', { bubbles: true, cancelable: true, clientX, clientY });
-    Object.defineProperty(dp, 'dataTransfer', { value: makeTransfer() });
-    canvas.dispatchEvent(dp);
-  });
-
-  const pieces = canvas.querySelectorAll('[data-piece-id]');
-  const last = pieces[pieces.length - 1];
-  return last?.getAttribute('data-piece-id') ?? '';
+  return id;
 }
 
 /* Build a MouseEvent typed as a pointer event with an explicit timeStamp. */

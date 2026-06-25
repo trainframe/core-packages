@@ -59,7 +59,9 @@ function pointer(type: string, xPx: number, yPx: number): Event {
 }
 
 function ids(canvas: Element): string[] {
-  return [...canvas.querySelectorAll('[data-piece-id]')].map((el) => el.getAttribute('data-piece-id') ?? '');
+  return [...canvas.querySelectorAll('[data-piece-id]')].map(
+    (el) => el.getAttribute('data-piece-id') ?? '',
+  );
 }
 
 function asPieces(canvas: Element): TrackPiece[] {
@@ -108,7 +110,10 @@ describe('drag-from-menu attaches against an existing piece (Part 2)', () => {
       expect(after, `both pieces present (got ${JSON.stringify(after)})`).toHaveLength(2);
       const pieces = asPieces(canvas);
       for (const p of pieces) {
-        expect(Number.isFinite(p.position.x) && Number.isFinite(p.position.y), `${p.id} finite`).toBe(true);
+        expect(
+          Number.isFinite(p.position.x) && Number.isFinite(p.position.y),
+          `${p.id} finite`,
+        ).toBe(true);
       }
       // And they attached: one connected component.
       expect(connectedComponents(pieces).length, 'attached into one component').toBe(1);

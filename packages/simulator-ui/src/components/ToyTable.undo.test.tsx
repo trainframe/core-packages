@@ -125,9 +125,11 @@ describe('track-edit undo — one entry per op + exact restore (criterion 1)', (
       renderToyTable();
       const canvas = getCanvas();
       expect(undoDepth()).toBe(0);
-      // Arm a straight from the toybox, then click the canvas to place one.
-      act(() => screen.getByTestId('toybox-straight').dispatchEvent(ptr('click', 0, 0)));
-      act(() => canvas.dispatchEvent(ptr('click', 450 * SCALE, 300 * SCALE)));
+      // Drag a straight from the toybox onto the canvas to place one (the sole
+      // placement path now arming is gone).
+      act(() => screen.getByTestId('toybox-straight').dispatchEvent(ptr('pointerdown', 5, 5)));
+      act(() => window.dispatchEvent(ptr('pointermove', 450 * SCALE, 300 * SCALE)));
+      act(() => window.dispatchEvent(ptr('pointerup', 450 * SCALE, 300 * SCALE)));
       expect(ids(canvas)).toHaveLength(1);
       expect(undoDepth()).toBe(1);
 

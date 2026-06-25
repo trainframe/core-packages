@@ -61,8 +61,6 @@ function ptr(type: string, xPx: number, yPx: number): Event {
   });
 }
 
-const TOYBOX_DRAG_MIME = 'application/x-trainframe-toybox-type';
-
 /* A chain of `n` curves snapped end-to-end via the real placement path — the
    same connected open arc the flex property test builds. Off-grid rotations
    accumulate down the line, so flexing it bends real angles (unlike straights). */
@@ -91,26 +89,6 @@ function curveChain(n: number): TrackPiece[] {
     });
   }
   return pieces;
-}
-
-/* Dispatch the native toybox→canvas DnD drop (the path the parts menu uses),
-   carrying `type` via the toybox MIME, at canvas px (xPx,yPx). jsdom has no real
-   DataTransfer, so attach a minimal stand-in matching what handleDrop reads. */
-function dropToybox(canvas: Element, type: string, xPx: number, yPx: number): void {
-  const ev = new Event('drop', { bubbles: true, cancelable: true });
-  Object.defineProperties(ev, {
-    clientX: { value: xPx },
-    clientY: { value: yPx },
-    dataTransfer: {
-      value: {
-        types: [TOYBOX_DRAG_MIME],
-        getData: (k: string) => (k === TOYBOX_DRAG_MIME ? type : ''),
-        setData: () => {},
-        dropEffect: 'copy',
-      },
-    },
-  });
-  canvas.dispatchEvent(ev);
 }
 
 interface Pose {
@@ -176,8 +154,9 @@ describe('flex then add a piece — no piece vanishes (criterion 1/3)', () => {
       assertNoVanish(canvas, ['P0', 'P1', 'P2', 'P3'], 'after flex');
 
       // Add a NEW piece: arm a straight from the toybox, click the canvas in open space.
-      act(() => screen.getByTestId('toybox-straight').dispatchEvent(ptr('click', 0, 0)));
-      act(() => canvas.dispatchEvent(ptr('click', 300 * SCALE, 480 * SCALE)));
+      act(() => screen.getByTestId('toybox-straight').dispatchEvent(ptr('pointerdown', 5, 5)));
+      act(() => window.dispatchEvent(ptr('pointermove', 300 * SCALE, 480 * SCALE)));
+      act(() => window.dispatchEvent(ptr('pointerup', 300 * SCALE, 480 * SCALE)));
       const ids = [...canvas.querySelectorAll('[data-piece-id]')].map((el) =>
         el.getAttribute('data-piece-id'),
       );
@@ -207,8 +186,9 @@ describe('flex then add a piece — no piece vanishes (criterion 1/3)', () => {
       act(() => mid.dispatchEvent(ptr('pointerup', 350 * SCALE, 350 * SCALE)));
       assertNoVanish(canvas, ['P0', 'P1', 'P2', 'P3'], 'after mid-flex');
 
-      act(() => screen.getByTestId('toybox-straight').dispatchEvent(ptr('click', 0, 0)));
-      act(() => canvas.dispatchEvent(ptr('click', 200 * SCALE, 500 * SCALE)));
+      act(() => screen.getByTestId('toybox-straight').dispatchEvent(ptr('pointerdown', 5, 5)));
+      act(() => window.dispatchEvent(ptr('pointermove', 200 * SCALE, 500 * SCALE)));
+      act(() => window.dispatchEvent(ptr('pointerup', 200 * SCALE, 500 * SCALE)));
       expect([...canvas.querySelectorAll('[data-piece-id]')]).toHaveLength(5);
       const ps = poses(canvas);
       for (const p of ps) {
@@ -243,8 +223,9 @@ describe('flex then add a piece — no piece vanishes (criterion 1/3)', () => {
       flex(250); // re-flex the other way
       flex(360);
       assertNoVanish(canvas, ['P0', 'P1', 'P2', 'P3'], 'after re-flex');
-      act(() => screen.getByTestId('toybox-straight').dispatchEvent(ptr('click', 0, 0)));
-      act(() => canvas.dispatchEvent(ptr('click', 300 * SCALE, 500 * SCALE)));
+      act(() => screen.getByTestId('toybox-straight').dispatchEvent(ptr('pointerdown', 5, 5)));
+      act(() => window.dispatchEvent(ptr('pointermove', 300 * SCALE, 500 * SCALE)));
+      act(() => window.dispatchEvent(ptr('pointerup', 300 * SCALE, 500 * SCALE)));
       expect([...canvas.querySelectorAll('[data-piece-id]')]).toHaveLength(5);
       for (const p of poses(canvas)) {
         expect(Number.isFinite(p.x) && Number.isFinite(p.y), `re-flex add: ${p.id} finite`).toBe(
@@ -279,10 +260,16 @@ describe('flex then add a piece — no piece vanishes (criterion 1/3)', () => {
       act(() => end.dispatchEvent(ptr('pointerup', (ep.x + 30) * SCALE, (ep.y + 40) * SCALE)));
       assertNoVanish(canvas, restIds, 'curve after flex+bake');
 
-      // DROP a new curve from the parts menu onto the baked (off-grid) open end.
+      // ADD a new curve at the baked (off-grid) open end. Uses the exact-placement
+      // setup hook: the point under test is that adding a piece after a flex+bake
+      // re-renders without vanishing any existing piece — not the pointer gesture,
+      // and the baked end can sit off-canvas where the bounds-checked drag won't
+      // place. __tfPlacePiece routes through the same placePiece the gesture commits.
       const baked = poses(canvas).find((p) => p.id === endId);
       if (baked === undefined) throw new Error('baked end pose missing');
-      act(() => dropToybox(canvas, 'curve', baked.x * SCALE, baked.y * SCALE));
+      act(() => {
+        window.__tfPlacePiece?.('curve', baked.x, baked.y);
+      });
 
       const ids = [...canvas.querySelectorAll('[data-piece-id]')].map((el) =>
         el.getAttribute('data-piece-id'),

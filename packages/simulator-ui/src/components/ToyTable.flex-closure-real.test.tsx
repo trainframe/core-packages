@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 /**
  * UN-MOCKED closure tests (goal clause 2c + N1 regression).
@@ -7,8 +7,8 @@ import userEvent from '@testing-library/user-event';
  * detectLoopClosure, newLoopCenterline, findLoops and placement all run against a
  * real uneven stadium oval built through the component's own placement path.
  *
- *  - drop-variant-flush: a LILLABO straight variant dropped (dragged) from the
- *    toybox snaps FLUSH onto a neighbour — proving handleDrop threads the armed
+ *  - drop-variant-flush: a LILLABO straight variant dropped from the toybox snaps
+ *    FLUSH onto a neighbour — proving the snap-place path threads the configured
  *    length into placement (the click path is covered in placement.test.ts).
  *  - wave-fires-on-mouse-up: building a real uneven oval and slow-dragging its open
  *    end to within closure range flashes `data-closure-available`; releasing the
@@ -23,7 +23,6 @@ import { ToyTable } from './ToyTable.js';
 const CANVAS_W_MM = 900;
 const CANVAS_H_MM = 600;
 const SCALE = 2; // client px per mm under the mocked canvas rect
-const TOYBOX_MIME = 'application/x-trainframe-toybox-type';
 
 function renderToyTable(): void {
   const client = new InMemoryBrokerClient();
@@ -50,35 +49,14 @@ function mockCanvasRect(): () => void {
   return () => spy.mockRestore();
 }
 
-/* Drop a toybox piece of `type` at client (cx, cy) — dragstart + dragover + drop,
-   carrying both coordinates and the dataTransfer stub through jsdom. */
-function dropAt(canvas: Element, type: string, cx: number, cy: number): void {
-  const store: Record<string, string> = { [TOYBOX_MIME]: type };
-  const dt = {
-    types: [TOYBOX_MIME],
-    getData: (m: string) => store[m] ?? '',
-    setData: (m: string, v: string) => {
-      store[m] = v;
-    },
-    effectAllowed: 'copy' as string,
-    dropEffect: 'copy' as string,
-  };
+/* Drop a toybox piece of `type` at client (cx, cy) via the snap-then-place setup
+   hook — the retired toybox-drop behaviour (computePlacement onto a nearby open
+   end → placePiece), threading the configured straight length so a variant snaps
+   flush. Builds connected chains exactly as the old drop did. */
+function dropAt(_canvas: Element, type: TrackPiece['type'], cx: number, cy: number): void {
   act(() => {
-    fireEvent.dragStart(screen.getByTestId(`toybox-${type}`), { dataTransfer: dt });
-    store[TOYBOX_MIME] = type;
+    window.__tfDropPiece?.(type, cx / SCALE, cy / SCALE);
   });
-  for (const evtType of ['dragover', 'drop']) {
-    act(() => {
-      const e = new MouseEvent(evtType, {
-        bubbles: true,
-        cancelable: true,
-        clientX: cx,
-        clientY: cy,
-      });
-      Object.defineProperty(e, 'dataTransfer', { value: dt });
-      canvas.dispatchEvent(e);
-    });
-  }
 }
 
 /* Parse `translate(x, y) rotate(deg) ...` from a piece group's transform. */
@@ -129,18 +107,19 @@ function pieceFromEl(el: Element, type: TrackPiece['type']): TrackPiece {
   };
 }
 
-/* Set the armed straight length to `lengthMm` by opening the variant fan and
-   picking the chip. Arming toggles, so we first arm a DIFFERENT tile (curve) to
-   guarantee straight is not already armed, then arming straight reliably expands
-   the fan. The drop path reads the TYPE from the drag MIME and the LENGTH from
-   armedStraightLength — so only the length pick matters for a dropped straight. */
+/* Set the configured straight length to `lengthMm` by opening the variant fan
+   and picking the chip. The fan toggles open/closed per tile, so we first open a
+   DIFFERENT tile's fan (curve) to guarantee straight's fan is closed, then
+   tapping straight reliably expands it. The drag drop path reads the TYPE from
+   the drag MIME and the LENGTH from the configured straight length — so only the
+   length pick matters for a dropped straight. */
 async function pickLength(
   user: ReturnType<typeof userEvent.setup>,
   lengthMm: number,
 ): Promise<void> {
-  await user.click(screen.getByTestId('toybox-curve')); // force armedType !== straight
-  await user.click(screen.getByTestId('toybox-straight')); // arm + expand the straight fan
-  await user.click(screen.getByTestId(`toybox-straight-length-${lengthMm}`)); // sets armedStraightLength
+  await user.click(screen.getByTestId('toybox-curve')); // open a different fan to close straight's
+  await user.click(screen.getByTestId('toybox-straight')); // expand the straight fan
+  await user.click(screen.getByTestId(`toybox-straight-length-${lengthMm}`)); // sets the straight length
 }
 
 describe('UN-MOCKED loop closure — flush variant drop + wave on mouse-up', () => {
@@ -167,13 +146,13 @@ describe('UN-MOCKED loop closure — flush variant drop + wave on mouse-up', () 
       const anchorEast = getEndpoints(anchor)[1];
       if (anchorEast === undefined) throw new Error('no anchor east');
 
-      /* Arm a 60mm variant and DROP it on the anchor's east end. */
+      /* Configure a 60mm variant and DROP it on the anchor's east end. */
       await pickLength(user, 60);
       dropAt(canvas, 'straight', anchorEast.x * SCALE, anchorEast.y * SCALE);
       const dropped = pieceFromEl(lastPieceEl(canvas), 'straight');
 
       /* It carries the 60mm override AND its entry sits flush on the joint —
-         which only holds if handleDrop passed lengthMm into placement. */
+         which only holds if the snap-place path passed lengthMm into placement. */
       expect(dropped.lengthMm).toBe(60);
       const droppedWest = getEndpoints(dropped)[0];
       if (droppedWest === undefined) throw new Error('no dropped west');
@@ -197,8 +176,8 @@ describe('UN-MOCKED loop closure — flush variant drop + wave on mouse-up', () 
          stays in lockstep with the component's actual poses). */
       const place = async (type: TrackPiece['type'], lengthMm?: number): Promise<TrackPiece> => {
         const [cx, cy] = nextDropClient(canvas, 300);
-        /* Curves carry their type in the drag MIME — no arming needed. Straights
-           need the armed length set so the variant snaps flush. */
+        /* Curves need no variant config. Straights need the configured length set
+           (via the fan) so the variant snaps flush. */
         if (type === 'straight') await pickLength(user, lengthMm ?? 200);
         dropAt(canvas, type, cx, cy);
         return pieceFromEl(lastPieceEl(canvas), type);

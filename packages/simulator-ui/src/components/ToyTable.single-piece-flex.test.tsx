@@ -59,7 +59,10 @@ function ptr(type: string, xPx: number, yPx: number): Event {
 function poseOf(canvas: Element, id: string): { x: number; y: number } {
   const t = canvas.querySelector(`[data-piece-id="${id}"]`)?.getAttribute('transform') ?? '';
   const tr = /translate\(([-\d.]+),?\s*([-\d.]+)\)/.exec(t);
-  return { x: tr ? Number.parseFloat(tr[1] ?? '0') : 0, y: tr ? Number.parseFloat(tr[2] ?? '0') : 0 };
+  return {
+    x: tr ? Number.parseFloat(tr[1] ?? '0') : 0,
+    y: tr ? Number.parseFloat(tr[2] ?? '0') : 0,
+  };
 }
 
 describe('single-piece flex — a lone piece holds-then-moves, never flexes (Part 1)', () => {
@@ -91,7 +94,10 @@ describe('single-piece flex — a lone piece holds-then-moves, never flexes (Par
       // not sprung back to its origin (300,300).
       const pose = poseOf(canvas, 'X');
       expect(Math.hypot(pose.x - 300, pose.y - 300), 'piece left its origin').toBeGreaterThan(100);
-      expect(Math.hypot(pose.x - 600, pose.y - 420), 'piece committed near the drop point').toBeLessThan(80);
+      expect(
+        Math.hypot(pose.x - 600, pose.y - 420),
+        'piece committed near the drop point',
+      ).toBeLessThan(80);
     } finally {
       restore();
     }
