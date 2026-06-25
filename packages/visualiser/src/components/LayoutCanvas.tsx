@@ -15,6 +15,7 @@ import {
   useTrainStatuses,
 } from '../state/use-train-statuses.js';
 import { trainColor, trainHue } from '../train-color.js';
+import { layoutMarkers } from './layout-markers.js';
 
 interface Point {
   readonly x: number;
@@ -1390,17 +1391,34 @@ function computeMarkerPositions(layout: VisualiserLayout): MarkerPositionResult 
   if (spatial.length === layout.markers.length && spatial.length > 0) {
     return scaleSpatialPositions(layout.markers);
   }
-  /* Auto-place: evenly spaced around a circle, in marker-array order. */
+  /* No spatial coords: lay the inferred topology out readably (graph-adjacent
+     markers near each other, junction legs splayed, components in their own
+     bands) instead of a circle-in-array-order that cuts every edge across the
+     disc. `layoutMarkers` is pure + deterministic; fit its box to the viewport. */
+  const laid = layoutMarkers(layout.markers, layout.edges);
+  return { markerPositions: fitToViewport(laid), mmToSvgScale: null };
+}
+
+/** Fit a computed (unitless) layout's bounding box into the viewport disc, the
+ *  same framing `scaleSpatialPositions` applies to real mm coordinates. */
+function fitToViewport(points: ReadonlyMap<string, Point>): Map<string, Point> {
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const p of points.values()) {
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x);
+    maxY = Math.max(maxY, p.y);
+  }
+  const span = Math.max(maxX - minX, maxY - minY, 1e-6);
+  const scale = (RADIUS * 1.6) / span;
+  const offsetX = CENTER - ((minX + maxX) / 2) * scale;
+  const offsetY = CENTER - ((minY + maxY) / 2) * scale;
   const out = new Map<string, Point>();
-  const n = layout.markers.length;
-  layout.markers.forEach((marker, i) => {
-    const angle = (i / Math.max(n, 1)) * Math.PI * 2 - Math.PI / 2;
-    out.set(marker.id, {
-      x: CENTER + Math.cos(angle) * RADIUS,
-      y: CENTER + Math.sin(angle) * RADIUS,
-    });
-  });
-  return { markerPositions: out, mmToSvgScale: null };
+  for (const [id, p] of points) out.set(id, { x: p.x * scale + offsetX, y: p.y * scale + offsetY });
+  return out;
 }
 
 function scaleSpatialPositions(markers: ReadonlyArray<VisualiserMarker>): MarkerPositionResult {

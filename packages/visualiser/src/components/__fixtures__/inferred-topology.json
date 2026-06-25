@@ -1,0 +1,343 @@
+{
+  "name": "test-track",
+  "markers": [
+    {
+      "id": "M-curve-2",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-junction-3",
+      "kind": "junction"
+    },
+    {
+      "id": "M-curve-4",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-curve-5",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-curve-6",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-curve-7",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-station-8",
+      "kind": "station_stop"
+    },
+    {
+      "id": "M-curve-13",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-curve-14",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-curve-15",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-curve-16",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-straight-18",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-curve-tight-21",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-straight-22",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-junction-23",
+      "kind": "junction"
+    },
+    {
+      "id": "M-curve-26",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-curve-27",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-curve-28",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-curve-29",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-straight-30",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-curve-32",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-station-33",
+      "kind": "station_stop"
+    },
+    {
+      "id": "M-curve-34",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-straight-35",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-curve-37",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-curve-tight-38",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-curve-tight-39",
+      "kind": "block_boundary"
+    },
+    {
+      "id": "M-straight-40",
+      "kind": "block_boundary"
+    }
+  ],
+  "edges": [
+    {
+      "from_marker_id": "M-junction-3",
+      "to_marker_id": "M-straight-22"
+    },
+    {
+      "from_marker_id": "M-straight-22",
+      "to_marker_id": "M-junction-3"
+    },
+    {
+      "from_marker_id": "M-junction-3",
+      "to_marker_id": "M-curve-4"
+    },
+    {
+      "from_marker_id": "M-curve-4",
+      "to_marker_id": "M-junction-3"
+    },
+    {
+      "from_marker_id": "M-junction-3",
+      "to_marker_id": "M-curve-5"
+    },
+    {
+      "from_marker_id": "M-curve-5",
+      "to_marker_id": "M-junction-3"
+    },
+    {
+      "from_marker_id": "M-curve-4",
+      "to_marker_id": "M-curve-26"
+    },
+    {
+      "from_marker_id": "M-curve-26",
+      "to_marker_id": "M-curve-4"
+    },
+    {
+      "from_marker_id": "M-curve-5",
+      "to_marker_id": "M-curve-6"
+    },
+    {
+      "from_marker_id": "M-curve-6",
+      "to_marker_id": "M-curve-5"
+    },
+    {
+      "from_marker_id": "M-curve-6",
+      "to_marker_id": "M-curve-7"
+    },
+    {
+      "from_marker_id": "M-curve-7",
+      "to_marker_id": "M-curve-6"
+    },
+    {
+      "from_marker_id": "M-curve-7",
+      "to_marker_id": "M-station-8"
+    },
+    {
+      "from_marker_id": "M-station-8",
+      "to_marker_id": "M-curve-7"
+    },
+    {
+      "from_marker_id": "M-station-8",
+      "to_marker_id": "M-junction-23"
+    },
+    {
+      "from_marker_id": "M-junction-23",
+      "to_marker_id": "M-station-8"
+    },
+    {
+      "from_marker_id": "M-curve-13",
+      "to_marker_id": "M-curve-14"
+    },
+    {
+      "from_marker_id": "M-curve-14",
+      "to_marker_id": "M-curve-13"
+    },
+    {
+      "from_marker_id": "M-curve-13",
+      "to_marker_id": "M-junction-23"
+    },
+    {
+      "from_marker_id": "M-junction-23",
+      "to_marker_id": "M-curve-13"
+    },
+    {
+      "from_marker_id": "M-curve-14",
+      "to_marker_id": "M-curve-15"
+    },
+    {
+      "from_marker_id": "M-curve-15",
+      "to_marker_id": "M-curve-14"
+    },
+    {
+      "from_marker_id": "M-curve-15",
+      "to_marker_id": "M-curve-16"
+    },
+    {
+      "from_marker_id": "M-curve-16",
+      "to_marker_id": "M-curve-15"
+    },
+    {
+      "from_marker_id": "M-curve-16",
+      "to_marker_id": "M-straight-18"
+    },
+    {
+      "from_marker_id": "M-straight-18",
+      "to_marker_id": "M-curve-16"
+    },
+    {
+      "from_marker_id": "M-straight-18",
+      "to_marker_id": "M-curve-tight-21"
+    },
+    {
+      "from_marker_id": "M-curve-tight-21",
+      "to_marker_id": "M-straight-18"
+    },
+    {
+      "from_marker_id": "M-curve-tight-21",
+      "to_marker_id": "M-straight-22"
+    },
+    {
+      "from_marker_id": "M-straight-22",
+      "to_marker_id": "M-curve-tight-21"
+    },
+    {
+      "from_marker_id": "M-junction-23",
+      "to_marker_id": "M-curve-37"
+    },
+    {
+      "from_marker_id": "M-curve-37",
+      "to_marker_id": "M-junction-23"
+    },
+    {
+      "from_marker_id": "M-curve-26",
+      "to_marker_id": "M-curve-27"
+    },
+    {
+      "from_marker_id": "M-curve-27",
+      "to_marker_id": "M-curve-26"
+    },
+    {
+      "from_marker_id": "M-curve-27",
+      "to_marker_id": "M-curve-28"
+    },
+    {
+      "from_marker_id": "M-curve-28",
+      "to_marker_id": "M-curve-27"
+    },
+    {
+      "from_marker_id": "M-curve-28",
+      "to_marker_id": "M-curve-29"
+    },
+    {
+      "from_marker_id": "M-curve-29",
+      "to_marker_id": "M-curve-28"
+    },
+    {
+      "from_marker_id": "M-curve-29",
+      "to_marker_id": "M-straight-30"
+    },
+    {
+      "from_marker_id": "M-straight-30",
+      "to_marker_id": "M-curve-29"
+    },
+    {
+      "from_marker_id": "M-straight-30",
+      "to_marker_id": "M-station-33"
+    },
+    {
+      "from_marker_id": "M-station-33",
+      "to_marker_id": "M-straight-30"
+    },
+    {
+      "from_marker_id": "M-curve-32",
+      "to_marker_id": "M-curve-34"
+    },
+    {
+      "from_marker_id": "M-curve-34",
+      "to_marker_id": "M-curve-32"
+    },
+    {
+      "from_marker_id": "M-curve-32",
+      "to_marker_id": "M-station-33"
+    },
+    {
+      "from_marker_id": "M-station-33",
+      "to_marker_id": "M-curve-32"
+    },
+    {
+      "from_marker_id": "M-curve-34",
+      "to_marker_id": "M-straight-35"
+    },
+    {
+      "from_marker_id": "M-straight-35",
+      "to_marker_id": "M-curve-34"
+    },
+    {
+      "from_marker_id": "M-straight-35",
+      "to_marker_id": "M-straight-40"
+    },
+    {
+      "from_marker_id": "M-straight-40",
+      "to_marker_id": "M-straight-35"
+    },
+    {
+      "from_marker_id": "M-curve-37",
+      "to_marker_id": "M-curve-tight-38"
+    },
+    {
+      "from_marker_id": "M-curve-tight-38",
+      "to_marker_id": "M-curve-37"
+    },
+    {
+      "from_marker_id": "M-curve-tight-38",
+      "to_marker_id": "M-curve-tight-39"
+    },
+    {
+      "from_marker_id": "M-curve-tight-39",
+      "to_marker_id": "M-curve-tight-38"
+    },
+    {
+      "from_marker_id": "M-curve-tight-39",
+      "to_marker_id": "M-straight-40"
+    },
+    {
+      "from_marker_id": "M-straight-40",
+      "to_marker_id": "M-curve-tight-39"
+    }
+  ]
+}
