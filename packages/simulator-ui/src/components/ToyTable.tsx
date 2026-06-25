@@ -3130,7 +3130,6 @@ interface ToyboxDragDeps {
   readonly toyboxGrab: { readonly type: TrackPieceType; readonly nonce: number } | null;
   readonly svgRef: Ref<SVGSVGElement | null>;
   readonly viewportRef: Ref<Viewport>;
-  readonly boxAspectRef: Ref<number>;
   readonly restPiecesRef: Ref<ReadonlyArray<TrackPiece>>;
   readonly fnsRef: Ref<{
     onCanvasClick: (
@@ -3167,7 +3166,6 @@ function useToyboxDrag({
   toyboxGrab,
   svgRef,
   viewportRef,
-  boxAspectRef,
   restPiecesRef,
   fnsRef,
   setPreview,
@@ -3183,11 +3181,15 @@ function useToyboxDrag({
     /* On the canvas = inside the VISIBLE world window (the rect `clientToMm` maps
        onto), not the fixed 0..900 base table. Honouring pan + zoom lets a piece be
        dropped anywhere on a zoomed-out / panned view — a layout wider than 900mm,
-       say — instead of silently refusing to place beyond the base table. */
+       say — instead of silently refusing to place beyond the base table. Derive the
+       window height from the SAME fresh rect `clientToMm` uses (not a cached aspect)
+       so the bound can't disagree with the mapping mid-drag. */
     const inBounds = (x: number, y: number): boolean => {
+      const rect = svgRef.current?.getBoundingClientRect();
+      if (rect === undefined || rect.width <= 0 || rect.height <= 0) return false;
       const vp = viewportRef.current;
       const worldW = CANVAS_W_MM / vp.zoom;
-      const worldH = worldHeightMm(vp.zoom, boxAspectRef.current);
+      const worldH = worldW * (rect.height / rect.width);
       return x >= vp.x && x <= vp.x + worldW && y >= vp.y && y <= vp.y + worldH;
     };
     const previewAt = (id: string, x: number, y: number): void => {
@@ -3232,7 +3234,7 @@ function useToyboxDrag({
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
     return finish;
-  }, [toyboxGrab, svgRef, viewportRef, boxAspectRef, restPiecesRef, fnsRef, setPreview]);
+  }, [toyboxGrab, svgRef, viewportRef, restPiecesRef, fnsRef, setPreview]);
 }
 
 function Table({
@@ -3390,8 +3392,6 @@ function Table({
   restPiecesRef.current = restPieces;
   const viewportRef = useRef(viewport);
   viewportRef.current = viewport;
-  const boxAspectRef = useRef(boxAspect);
-  boxAspectRef.current = boxAspect;
   const toyboxFnsRef = useRef({
     onCanvasClick,
     onMovePiece,
@@ -3410,7 +3410,6 @@ function Table({
     toyboxGrab,
     svgRef,
     viewportRef,
-    boxAspectRef,
     restPiecesRef,
     fnsRef: toyboxFnsRef,
     setPreview: setPieceDragPreview,
