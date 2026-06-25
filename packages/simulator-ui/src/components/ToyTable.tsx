@@ -27,6 +27,7 @@ import {
   connectedComponents,
   findLoops,
 } from '@trainframe/simulator/track/loops.js';
+import { normalizeJointGaps } from '@trainframe/simulator/track/normalize.js';
 import { detectSameLayerOverlaps, pierSuppressed } from '@trainframe/simulator/track/overlap.js';
 import {
   CRANE_GANTRY_X_MM,
@@ -1178,7 +1179,10 @@ function useTrackSlots(opts: {
       if (slot === null) return; // missing slot: safe no-op
       clearUndo();
       applyFlexState(new Map(), null);
-      setPieces(slot);
+      // Close any residual joint gaps the saved layout carries (e.g. loop-closing
+      // seams a few mm short) so a loaded layout renders connected — the flush
+      // geometry fresh placement produces. A no-op on an already gap-free layout.
+      setPieces(normalizeJointGaps(slot));
     },
     [applyFlexState, clearUndo, setPieces],
   );
@@ -1198,7 +1202,9 @@ function restoreAutosaveSeeds(): {
 } {
   const saved = loadAutosave();
   if (saved === null) return { pieces: [], undo: [], count: 0 };
-  return { pieces: saved.pieces, undo: saved.undo, count: saved.undo.length };
+  // Close residual joint gaps on rehydrate so a reloaded layout renders connected
+  // (idempotent on the in-session autosave, which is already gap-free from placement).
+  return { pieces: normalizeJointGaps(saved.pieces), undo: saved.undo, count: saved.undo.length };
 }
 
 /** The effective (post-flex) rotation of the piece with `id`, or null when `id`
