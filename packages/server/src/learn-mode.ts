@@ -1,4 +1,5 @@
 import type { LayoutState } from '@trainframe/core';
+import type { LayoutEdge } from '@trainframe/protocol';
 
 /**
  * Operator-facing state of the track-learn machine. Mirrors the retained
@@ -64,6 +65,13 @@ interface ActiveSession {
   readonly visitedMarkers: Set<string>;
   /** Whether the open-ended exploration clearance has been issued this session. */
   exploring: boolean;
+  /**
+   * Per-junction (marker id → switch position) the position LearnMode last
+   * commanded this session. Anti-thrash: an identical `set_switch_position` is
+   * suppressed, and since the chosen leg only advances when the current one is
+   * traversed, a junction is re-thrown at most once per leg.
+   */
+  readonly commandedSwitch: Map<string, string>;
   /** Current operator-visible state. */
   status: LearnModeStateName;
 }
@@ -168,6 +176,7 @@ export class LearnMode {
         visitedEdges: new Set(),
         visitedMarkers: new Set(),
         exploring: false,
+        commandedSwitch: new Map(),
         status: 'waiting_for_train',
       };
       this.publishCurrentState();
@@ -195,6 +204,7 @@ export class LearnMode {
       visitedEdges: new Set(),
       visitedMarkers: new Set(),
       exploring: false,
+      commandedSwitch: new Map(),
       status: 'driving',
     };
     if (seen !== undefined) {
@@ -251,6 +261,12 @@ export class LearnMode {
       return;
     }
 
+    // Junction surveying: aim every junction's points at a not-yet-traversed
+    // leg, so the self-driving loco takes the diverging legs instead of only the
+    // loop the points happened to point at. Forward-only — this throws switches,
+    // never routes or reverses the train.
+    this.armJunctions();
+
     // Completion: back at the start marker with every outgoing edge from every
     // visited marker already traversed — the reachable loop is fully mapped.
     if (this.reachableGraphFullyTraversed(markerId)) {
@@ -264,6 +280,51 @@ export class LearnMode {
     // sure the open clearance has been granted (idempotent).
     this.ensureExploring();
     this.publishCurrentState();
+  }
+
+  /**
+   * Aim every junction's points at a deterministically-chosen not-yet-traversed
+   * outgoing leg, commanding the OWNING switch device (never the marker id).
+   * Anti-thrash: skip a junction already aimed at that position, and a junction
+   * with all legs traversed. The chosen leg advances only as legs get traversed,
+   * so a junction is re-thrown at most once per leg — survey progress is
+   * monotone and the pass terminates.
+   */
+  private armJunctions(): void {
+    if (!this.session) return;
+    for (const junction of this.ports.layoutState.junctionMarkerIds()) {
+      const target = this.firstUntraversedLeg(junction);
+      const position = target?.requires_switch_state;
+      if (position === undefined) continue; // all legs surveyed (or none switched)
+      if (this.session.commandedSwitch.get(junction) === position) continue; // already aimed
+      const device = this.ports.layoutState.switchDeviceForMarker(junction);
+      if (device === undefined) continue; // no controller registered yet
+      this.session.commandedSwitch.set(junction, position);
+      this.ports.sendCommand(device, 'set_switch_position', {
+        junction_marker_id: junction,
+        position,
+      });
+    }
+  }
+
+  /**
+   * The first not-yet-traversed outgoing leg of `junction`, by a stable order
+   * (switch position then destination marker) so the choice is deterministic.
+   * `undefined` when every leg has been traversed.
+   *
+   * A leg is throwable only if it carries `requires_switch_state` — which the
+   * layout inference (`compileLayout`) always emits for a junction's legs, and a
+   * declared layout always carries. (A junction whose legs were discovered as bare
+   * inferred edges with no switch state is not produced by the toy-table's
+   * inference, so it is out of scope here.)
+   */
+  private firstUntraversedLeg(junction: string): LayoutEdge | undefined {
+    if (!this.session) return undefined;
+    const session = this.session;
+    return this.ports.layoutState
+      .edgesFrom(junction)
+      .filter((e) => !session.visitedEdges.has(edgeKey(e.from_marker_id, e.to_marker_id)))
+      .sort(compareLegs)[0];
   }
 
   /** Issue the open-ended exploration clearance once per session. */
@@ -330,6 +391,15 @@ export class LearnMode {
 
 function edgeKey(from: string, to: string): string {
   return `${from}->${to}`;
+}
+
+/** Stable total order over a junction's legs: by required switch position, then
+ *  destination marker. Makes the surveyed-leg choice deterministic. */
+function compareLegs(a: LayoutEdge, b: LayoutEdge): number {
+  const sa = a.requires_switch_state ?? '';
+  const sb = b.requires_switch_state ?? '';
+  if (sa !== sb) return sa < sb ? -1 : 1;
+  return a.to_marker_id < b.to_marker_id ? -1 : a.to_marker_id > b.to_marker_id ? 1 : 0;
 }
 
 function extractTrainId(payload: unknown): string | undefined {

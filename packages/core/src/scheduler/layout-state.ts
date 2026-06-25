@@ -226,6 +226,15 @@ export class LayoutState {
   }
 
   /**
+   * The marker ids of every known junction. LearnMode reads this to find the
+   * junctions whose legs it must survey (throwing each toward a not-yet-traversed
+   * outgoing leg).
+   */
+  junctionMarkerIds(): ReadonlyArray<string> {
+    return [...this.junctionsByMarkerId.keys()];
+  }
+
+  /**
    * Add a newly-discovered edge to the graph (from discovery mode).
    * No-op if the edge already exists.
    */

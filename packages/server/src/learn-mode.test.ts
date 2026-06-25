@@ -56,6 +56,27 @@ const JUNCTION_LAYOUT: Layout = {
   junctions: [{ marker_id: 'JCT', initial_state: 'main' }],
 };
 
+/* A junction whose two legs each LOOP BACK to the start — so a forward-only
+   self-driving loco, with LearnMode throwing the points toward the untraversed
+   leg, can survey BOTH legs across successive laps and return to start. */
+const BRANCHED_LOOP: Layout = {
+  name: 'branched-loop',
+  markers: [
+    { id: 'M1', kind: 'block_boundary' },
+    { id: 'JCT', kind: 'junction' },
+    { id: 'MA', kind: 'block_boundary' },
+    { id: 'MB', kind: 'block_boundary' },
+  ],
+  edges: [
+    { from_marker_id: 'M1', to_marker_id: 'JCT', estimated_length_mm: 200 },
+    { from_marker_id: 'JCT', to_marker_id: 'MA', requires_switch_state: 'main' },
+    { from_marker_id: 'MA', to_marker_id: 'M1', estimated_length_mm: 200 },
+    { from_marker_id: 'JCT', to_marker_id: 'MB', requires_switch_state: 'branch' },
+    { from_marker_id: 'MB', to_marker_id: 'M1', estimated_length_mm: 200 },
+  ],
+  junctions: [{ marker_id: 'JCT', initial_state: 'main' }],
+};
+
 const FIXED_ID = '00000000-0000-4000-8000-000000000000';
 
 function makeServer(layout: Layout): { server: Server; client: InMemoryBrokerClient } {
@@ -371,7 +392,7 @@ describe('LearnMode — learn_track_stop returns to idle', () => {
 });
 
 describe('LearnMode — junctions under exploration', () => {
-  it('drives via exploration and leaves branch selection to the physical switch (v1)', () => {
+  it('throws a junction toward an untraversed leg (still self-driving, never routed or reversed)', () => {
     const { client } = makeServer(JUNCTION_LAYOUT);
     publishWireEvent(client, 'device_registered', 'T1', {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
@@ -394,15 +415,64 @@ describe('LearnMode — junctions under exploration', () => {
     publishWireEvent(client, 'tag_observed', 'T1', { tag_id: 'M1' });
     publishWireEvent(client, 'tag_observed', 'T1', { tag_id: 'JCT' });
 
-    // Per ADR-015, discovery drives via one open exploration clearance; the
-    // train follows the rails (and the physical switch) itself. LearnMode does
-    // NOT route it edge-by-edge, and in v1 does NOT flip switches to chase
-    // branches — automatic multi-branch exploration is a documented follow-up.
+    // Part 4: discovery still drives via ONE open exploration clearance (the loco
+    // follows the rails itself — no edge-by-edge route, no reverse), but LearnMode
+    // now THROWS the junction toward a not-yet-traversed leg so the diverging legs
+    // get surveyed instead of only the loop the points happened to point at.
     expect(commandsFor(client, 'T1', 'begin_exploration')).toHaveLength(1);
     expect(commandsFor(client, 'T1', 'assign_route')).toHaveLength(0);
-    expect(commandsFor(client, 'SWITCH-JCT', 'set_switch_position')).toHaveLength(0);
-    // And nothing is ever addressed to the marker id directly.
+    expect(commandsFor(client, 'T1', 'grant_reverse')).toHaveLength(0);
+    const thrown = commandsFor(client, 'SWITCH-JCT', 'set_switch_position');
+    expect(thrown.length).toBeGreaterThanOrEqual(1);
+    // Toward a real leg of this junction (main / divert), addressed to the switch
+    // DEVICE — never to the marker id directly.
+    expect(['main', 'divert']).toContain(thrown[0]?.payload.position);
     expect(commandsFor(client, 'JCT', 'set_switch_position')).toHaveLength(0);
+  });
+
+  it('surveys BOTH legs of a junction on a branched loop, then completes', () => {
+    const { client } = makeServer(BRANCHED_LOOP);
+    publishWireEvent(client, 'device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    publishWireEvent(client, 'device_registered', 'GARAGE', {
+      capabilities: ['core.assigns_tags'],
+    });
+    for (const m of ['M1', 'JCT', 'MA', 'MB']) {
+      publishWireEvent(client, 'tag_assignment', 'GARAGE', {
+        tag_id: m,
+        assigned_kind: 'marker',
+        target_id: m,
+      });
+    }
+    publishWireEvent(client, 'device_registered', 'SWITCH-JCT', {
+      capabilities: ['core.controls_switch'],
+      controls_marker_id: 'JCT',
+    });
+    publishOperatorCommand(client, 'learn_track_start', {});
+
+    /* Drive the loco as it self-follows the points LearnMode throws: a lap down
+       one leg, back to start; then LearnMode aims the points at the OTHER
+       untraversed leg, so the next lap surveys it. */
+    const tags = (...ids: string[]) => {
+      for (const id of ids) publishWireEvent(client, 'tag_observed', 'T1', { tag_id: id });
+    };
+    const legMarker = (position: string | undefined) => (position === 'branch' ? 'MB' : 'MA');
+    const aims = () =>
+      commandsFor(client, 'SWITCH-JCT', 'set_switch_position').map((c) => c.payload.position);
+
+    tags('M1', 'JCT'); // points aimed at the first untraversed leg
+    const aim1 = aims()[0];
+    tags(legMarker(aim1), 'M1', 'JCT'); // take it, loop back, return to the junction
+    // With the first leg now traversed, LearnMode aims at the OTHER leg.
+    const aim2 = aims().find((p) => p !== aim1);
+    tags(legMarker(aim2), 'M1'); // take the other leg, loop back to start
+
+    // Both legs were aimed at (surveyed), and the survey completed (back at start
+    // with every outgoing edge of every visited marker traversed).
+    expect(new Set(aims())).toEqual(new Set(['main', 'branch']));
+    expect(commandsFor(client, 'T1', 'grant_reverse')).toHaveLength(0);
+    expect(latestLearnState(client)?.state).toBe('complete');
   });
 });
 
