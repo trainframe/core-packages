@@ -43,13 +43,13 @@ export const CONNECT_CAPTURE_MM = 60;
 
 /**
  * How near a dropped/moved device piece (train/gate/carriage) must fall to a
- * track marker (a non-device piece's centre) to snap onto it (mm). Generous —
- * pieces are ~200 mm long, so half a piece-length lets an operator drop a train
- * roughly on a piece and have it land cleanly on that piece's marker. This is
- * what makes "placement point == spawn point": the snapped centre is the marker
- * the simulator spawns the train onto (`nearestStartEdge`, distance 0).
+ * rail centre-line to snap onto it (mm). Tight on purpose: a device dropped ON
+ * the track (within a plank half-width, 13 mm, of the rail) snaps cleanly onto
+ * it; a device dropped OFF the track STAYS WHERE PUT (the operator's expectation
+ * — a train placed in open space is not on the railway). A generous capture used
+ * to yank an off-track drop onto a distant rail.
  */
-export const DEVICE_SNAP_CAPTURE_MM = 120;
+export const DEVICE_SNAP_CAPTURE_MM = 13;
 
 export interface Placement {
   readonly x: number;

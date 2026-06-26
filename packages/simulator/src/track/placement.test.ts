@@ -41,6 +41,15 @@ describe('computePlacement — free placement', () => {
     expect(p).toEqual({ x: 900, y: 300, rotationDeg: 0, connected: false });
   });
 
+  it('a train dropped OFF the rail stays where put (not yanked onto a nearby rail)', () => {
+    const straight = piece('s1', 'straight', 450, 300, 0); // rail along y=300
+    // Dropped 50 mm OFF the rail (y=350) — well beyond the plank, so it is NOT on
+    // the railway. It must STAY where dropped, free, not jump onto the rail.
+    const p = computePlacement(450, 350, 'train', [straight]);
+    expect(p.connected).toBe(false);
+    expect(p).toMatchObject({ x: 450, y: 350 });
+  });
+
   it('drops free when the click is beyond the capture radius of any endpoint', () => {
     const straight = piece('s1', 'straight', 450, 300, 0);
     // East endpoint is at 550; click well past the capture radius.
