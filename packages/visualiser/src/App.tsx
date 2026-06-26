@@ -7,6 +7,7 @@ import { ConnectionStatus } from './components/ConnectionStatus.js';
 import { DeadlockBanner } from './components/DeadlockBanner.js';
 import { DevicesPanel } from './components/DevicesPanel.js';
 import { EventLog } from './components/EventLog.js';
+import { GarageDiscovery } from './components/GarageDiscovery.js';
 import { LayoutCanvas } from './components/LayoutCanvas.js';
 import { LearnTrackPanel } from './components/LearnTrackPanel.js';
 import { MaintenancePanel } from './components/MaintenancePanel.js';
@@ -48,6 +49,7 @@ export function App({ client }: AppProps = {}) {
         <DevicesPanel adminApiUrl={adminApiUrl} />
         <MaintenancePanel adminApiUrl={adminApiUrl} onReset={() => setResetNonce((n) => n + 1)} />
         <LayoutCanvas />
+        <GarageDiscovery />
         <UnknownTags adminApiUrl={adminApiUrl} resetNonce={resetNonce} />
         <EventLog />
       </main>
