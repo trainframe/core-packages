@@ -2,6 +2,15 @@
 
 ## Status
 
+**Amended by [ADR-035](035-device-onboarding-and-pairing.md)**: the seam gained
+an OPTIONAL fourth backing, `EspNowPlatform` (`broker/espnow-platform.ts`), and
+an optional `commission(spec)` method on `PlatformProvider` for the
+pairing-then-register onboarding lifecycle (a constrained device that must pair
+before it can register). The three original backings omit `commission` and are
+unchanged; `registerDevice` branches on its presence. Devices stay
+transport-free — the switch's late-bound identity (its junction marker arriving
+via association) hides entirely behind the seam.
+
 Accepted — **built** (the platform-provider seam). The `PlatformProvider`
 interface (`devices/platform-provider.ts`) is the device↔core seam: a device
 imports only it and never a transport. Three backings land — the in-process bus
