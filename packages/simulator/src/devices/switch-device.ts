@@ -30,8 +30,11 @@ export interface SwitchDeviceDeps {
   /** The world actuator that physically throws these points. */
   readonly actuator: SwitchActuator;
   /** The junction marker this device controls — the scheduler pairs the device to
-   *  the junction by this id (`controls_marker_id` on `device_registered`). */
-  readonly junctionMarkerId: string;
+   *  the junction by this id (`controls_marker_id` on `device_registered`).
+   *  OPTIONAL: a switch on the constrained (ESP-NOW) path doesn't know its marker
+   *  at construction — it arrives via `device_association` and is bound late
+   *  (ADR-035). In-process/MQTT switches still pass it at construction. */
+  readonly junctionMarkerId?: string;
   /** The valid positions for this junction (e.g. `['thru','branch']`). */
   readonly positions: readonly string[];
   /** Fresh envelope id source. Defaults to `crypto.randomUUID`. The mqtt edge
@@ -47,12 +50,16 @@ export class SwitchDevice {
   private readonly newId: () => string;
   private readonly now: () => string;
   private unsubscribe: (() => void) | undefined;
+  /** The junction marker this switch is bound to — known at construction
+   *  (in-process) or resolved late via association (ESP-NOW, ADR-035). */
+  private resolvedMarker: string | undefined;
 
   constructor(deviceId: string, deps: SwitchDeviceDeps) {
     this.id = deviceId;
     this.d = deps;
     this.newId = deps.newId ?? defaultNewId;
     this.now = deps.now ?? defaultNow;
+    this.resolvedMarker = deps.junctionMarkerId;
   }
 
   get deviceId(): string {
@@ -67,7 +74,13 @@ export class SwitchDevice {
      *  (`mqttPlatform.register` ships only capabilities + kind). */
     this.unsubscribe = registerDevice(this.d.platform, {
       manifest: this.manifest(),
-      registeredEvent: this.registeredEvent(),
+      /* A builder: on the ESP-NOW path the marker arrives via association, so it's
+         bound here when the seam supplies it; in-process passes `undefined` and we
+         keep the construction-time marker. */
+      registeredEvent: (markerId) => {
+        if (markerId !== undefined) this.resolvedMarker = markerId;
+        return this.registeredEvent();
+      },
       onCommand: (command) => this.handle(command),
     });
   }
@@ -90,7 +103,7 @@ export class SwitchDevice {
   private handle(command: CoreCommand): void {
     if (command.command_type !== 'set_switch_position') return;
     const { junction_marker_id, position } = (command as SetSwitchPosition).payload;
-    if (junction_marker_id !== this.d.junctionMarkerId) return;
+    if (junction_marker_id !== this.resolvedMarker) return;
     if (!this.d.positions.includes(position)) return;
     this.d.actuator.set(position);
     this.d.platform.publish(this.confirmEvent(position));
@@ -104,7 +117,7 @@ export class SwitchDevice {
       version: '0.1.0',
       protocol_version: PROTOCOL_VERSION,
       display_name: `Switch ${this.id}`,
-      description: `Main-line junction points at ${this.d.junctionMarkerId}.`,
+      description: `Main-line junction points at ${this.resolvedMarker ?? 'an unpaired junction'}.`,
       capabilities: ['core.controls_switch'],
     };
   }
@@ -113,14 +126,14 @@ export class SwitchDevice {
     return this.envelope('device_registered', {
       capabilities: ['core.controls_switch'],
       device_kind_hint: 'mainline-switch',
-      controls_marker_id: this.d.junctionMarkerId,
+      controls_marker_id: this.resolvedMarker,
       valid_positions: [...this.d.positions],
     });
   }
 
   private confirmEvent(position: string): CoreEvent {
     return this.envelope('switch_state_changed', {
-      junction_marker_id: this.d.junctionMarkerId,
+      junction_marker_id: this.resolvedMarker,
       position,
       confirmed: true,
     });

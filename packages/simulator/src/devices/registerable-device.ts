@@ -24,10 +24,16 @@ import type { CommandHandler, PlatformProvider } from './platform-provider.js';
  */
 export interface RegisterDeviceSpec {
   readonly manifest: DeviceManifest;
-  /** The `device_registered` event to publish immediately after `register`.
-   *  Omit for a device (e.g. a beacon) that registers + subscribes but emits its
-   *  identity event later. */
-  readonly registeredEvent?: CoreEvent;
+  /**
+   * The `device_registered` event — a fixed event when the device knows its
+   * identity at construction, OR a BUILDER `(markerId?) => event` when identity
+   * is late-bound (a switch whose junction marker arrives via association on the
+   * ESP-NOW path; ADR-035). Omit for a device (a beacon) that emits its identity
+   * later. The builder is called with the resolved marker on the ESP-NOW path,
+   * and with `undefined` on an immediate backing (the device falls back to its
+   * construction-time marker).
+   */
+  readonly registeredEvent?: CoreEvent | ((markerId: string | undefined) => CoreEvent);
   /** Command handler to subscribe. Omit for a device that core never commands
    *  (a zone driven entirely by world sensing) — `registerDevice` then returns a
    *  no-op teardown. */
@@ -35,9 +41,23 @@ export interface RegisterDeviceSpec {
 }
 
 export function registerDevice(platform: PlatformProvider, spec: RegisterDeviceSpec): () => void {
-  platform.register(spec.manifest);
-  if (spec.registeredEvent !== undefined) {
-    platform.publish(spec.registeredEvent);
+  const ev = spec.registeredEvent;
+  const build = ev === undefined ? undefined : typeof ev === 'function' ? ev : () => ev;
+
+  /* A backing that must pair before registering (the ESP-NOW path) runs the full
+     onboarding lifecycle — the registered event is built once the marker is known
+     via association, not now. */
+  if (platform.commission !== undefined) {
+    return platform.commission({
+      manifest: spec.manifest,
+      ...(build === undefined ? {} : { buildRegisteredEvent: build }),
+      ...(spec.onCommand === undefined ? {} : { onCommand: spec.onCommand }),
+    });
   }
+
+  /* Immediate backing (in-process / MQTT / parent): the device is already
+     connected, so register → publish(identity) → subscribe, in order. */
+  platform.register(spec.manifest);
+  if (build !== undefined) platform.publish(build(undefined));
   return spec.onCommand === undefined ? () => {} : platform.onCommand(spec.onCommand);
 }

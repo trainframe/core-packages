@@ -31,6 +31,22 @@ import type { CoreCommand, CoreEvent, DeviceManifest } from '@trainframe/protoco
 export type CommandHandler = (command: CoreCommand) => void;
 
 /**
+ * The onboarding lifecycle a backing runs (ADR-035). The registered event is
+ * supplied as a BUILDER taking the resolved marker, because a device on the
+ * constrained (ESP-NOW) path does not know its marker at construction — it
+ * arrives via `device_association`, and the event is built then. An immediate
+ * backing calls the builder with `undefined` (the device falls back to its
+ * construction-time identity). `buildRegisteredEvent` is omitted by a device
+ * that emits its identity later (a beacon); `onCommand` by a device core never
+ * commands (a zone).
+ */
+export interface CommissionSpec {
+  readonly manifest: DeviceManifest;
+  readonly buildRegisteredEvent?: (markerId: string | undefined) => CoreEvent;
+  readonly onCommand?: CommandHandler;
+}
+
+/**
  * The device↔core link. A device is fully described by the world providers it
  * senses/acts through plus this one platform provider; nothing else crosses its
  * boundary (ADR-031 §1).
@@ -44,6 +60,14 @@ export interface PlatformProvider {
   /** Subscribe to commands core sends to this device (clearance, routes, …).
    *  Returns an unsubscribe function. */
   onCommand(handler: CommandHandler): () => void;
+  /**
+   * Run the pairing-then-register onboarding lifecycle for a backing that must
+   * PAIR before it can register (the ESP-NOW path, ADR-035). OPTIONAL: a backing
+   * whose device is already connected omits it, and `registerDevice` falls back
+   * to register → publish → onCommand directly. Returns the command-subscription
+   * teardown.
+   */
+  commission?(spec: CommissionSpec): () => void;
 }
 
 /**
