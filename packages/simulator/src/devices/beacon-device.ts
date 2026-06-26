@@ -15,7 +15,8 @@
  */
 import type { DeviceManifest } from '@trainframe/protocol';
 import { PROTOCOL_VERSION } from '@trainframe/protocol';
-import type { CommandHandler, PlatformProvider } from './platform-provider.js';
+import type { PlatformProvider } from './platform-provider.js';
+import { registerDevice } from './registerable-device.js';
 
 export class BeaconDevice {
   private readonly deviceId: string;
@@ -44,11 +45,15 @@ export class BeaconDevice {
 
   /** Announce to core and start listening for commands. */
   start(): void {
-    this.platform.register(this.manifest());
-    const onCommand: CommandHandler = (command) => {
-      this.received.push(command.command_type);
-    };
-    this.unsubscribe = this.platform.onCommand(onCommand);
+    /* A beacon registers + subscribes but emits no identity event up front — its
+     *  `tag_observed` events come later via `sight()` — so it omits the
+     *  registeredEvent. */
+    this.unsubscribe = registerDevice(this.platform, {
+      manifest: this.manifest(),
+      onCommand: (command) => {
+        this.received.push(command.command_type);
+      },
+    });
   }
 
   /** Report seeing a tag — a `tag_observed` event upward to core. */

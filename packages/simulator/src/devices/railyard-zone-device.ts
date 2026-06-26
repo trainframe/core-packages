@@ -24,6 +24,7 @@ import { Crane, type CraneBounds } from './crane.js';
 import { LadderYardController, type Sighting, type SlotGeom } from './ladder-yard-controller.js';
 import type { MotorActuator } from './motor-actuator.js';
 import type { PlatformProvider } from './platform-provider.js';
+import { registerDevice } from './registerable-device.js';
 import type { SwitchActuator } from './switch-actuator.js';
 import { TrainDevice } from './train-device.js';
 
@@ -98,8 +99,12 @@ export class RailyardZoneDevice {
   start(): void {
     this.d.throat.set(this.d.thruPos);
     for (const sw of this.d.ladder) sw.set(this.d.ladderThruPos);
-    this.d.platform.register(this.manifest());
-    this.d.platform.publish(this.registeredEvent());
+    /* Tick-driven (no core commands), so it subscribes to none — just register +
+     *  the device_registered event carrying gates_zone + owned-marker declaration. */
+    registerDevice(this.d.platform, {
+      manifest: this.manifest(),
+      registeredEvent: this.registeredEvent(),
+    });
     this.announce();
   }
 

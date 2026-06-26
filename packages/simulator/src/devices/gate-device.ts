@@ -28,6 +28,7 @@ import {
   type ReleaseGate,
 } from '@trainframe/protocol';
 import type { PlatformProvider } from './platform-provider.js';
+import { registerDevice } from './registerable-device.js';
 
 export interface GateDeviceDeps {
   /** The device↔core link (mqtt in the gate/script, in-process in unit tests). */
@@ -67,9 +68,11 @@ export class GateDevice {
   /** Register the `core.gates_clearance` manifest, announce it, withhold any
    *  initially-closed markers, and listen for operator override commands. */
   start(): void {
-    this.d.platform.register(this.manifest());
-    this.d.platform.publish(this.registeredEvent());
-    this.unsubscribe = this.d.platform.onCommand((command) => this.handle(command));
+    this.unsubscribe = registerDevice(this.d.platform, {
+      manifest: this.manifest(),
+      registeredEvent: this.registeredEvent(),
+      onCommand: (command) => this.handle(command),
+    });
     for (const marker of this.d.initialWithheld ?? []) this.hold(marker, 'closed');
   }
 

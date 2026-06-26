@@ -45,6 +45,7 @@ import { Crane } from './crane.js';
 import type { MotorActuator } from './motor-actuator.js';
 import { ParentPlatform } from './parent-platform.js';
 import type { CommandHandler, PlatformProvider } from './platform-provider.js';
+import { registerDevice } from './registerable-device.js';
 import type { SwitchActuator } from './switch-actuator.js';
 import { TrainDevice } from './train-device.js';
 import { type Sighting, YardController, craneBounds } from './yard-controller.js';
@@ -210,12 +211,15 @@ export class YardZoneDevice {
   start(): void {
     this.westPoints.set('thru');
     this.eastPoints.set('thru');
-    this.d.platform.register(this.manifest());
     /* The scheduler reads the gates_zone capability off the `device_registered`
      *  EVENT payload — the manifest register ships only capabilities + kind. This
      *  mirrors the existing convention (ScheduledTrainDevice ships train_length_mm
-     *  the same way); the device's surface stays additive (ADR-031). */
-    this.d.platform.publish(this.registeredEvent());
+     *  the same way); the device's surface stays additive (ADR-031). A zone is
+     *  driven by world sensing, not core commands, so it subscribes to none. */
+    registerDevice(this.d.platform, {
+      manifest: this.manifest(),
+      registeredEvent: this.registeredEvent(),
+    });
     this.announce();
   }
 

@@ -35,6 +35,7 @@ import type { Motion } from '../physics/observation.js';
 import type { MarkerSensor } from './marker-sensor.js';
 import type { MotorActuator } from './motor-actuator.js';
 import type { PlatformProvider } from './platform-provider.js';
+import { registerDevice } from './registerable-device.js';
 
 /** A directed marker-pair edge — the protocol's `EdgeRef` shape, derived from the
  *  `assign_route` payload (the protocol package exports no standalone type). */
@@ -164,12 +165,15 @@ export class ScheduledTrainDevice {
 
   /** Register the manifest + length, and start listening to core + the sensor. */
   start(): void {
-    this.d.platform.register(this.manifest());
     /* The scheduler reads `train_length_mm` off a `device_registered` event
-     *  payload; `mqttPlatform.register` ships only capabilities + kind, so we
-     *  also publish the event carrying the length (the existing convention). */
-    this.d.platform.publish(this.registeredEvent());
-    this.offCommand = this.d.platform.onCommand((command) => this.handle(command));
+     *  payload; `mqttPlatform.register` ships only capabilities + kind, so the
+     *  seam also publishes the event carrying the length (the existing
+     *  convention). */
+    this.offCommand = registerDevice(this.d.platform, {
+      manifest: this.manifest(),
+      registeredEvent: this.registeredEvent(),
+      onCommand: (command) => this.handle(command),
+    });
     this.offSensor = this.d.sensor.onMarker((markerId, direction) =>
       this.onMarker(markerId, direction),
     );

@@ -21,6 +21,7 @@ import {
   type SetSwitchPosition,
 } from '@trainframe/protocol';
 import type { PlatformProvider } from './platform-provider.js';
+import { registerDevice } from './registerable-device.js';
 import type { SwitchActuator } from './switch-actuator.js';
 
 export interface SwitchDeviceDeps {
@@ -61,13 +62,14 @@ export class SwitchDevice {
   /** Register the manifest, announce the switch↔junction pairing, and listen for
    *  position commands. */
   start(): void {
-    this.d.platform.register(this.manifest());
-    /* Pairing rides a `device_registered` event carrying `controls_marker_id` —
-     *  the scheduler reads the pairing off that field (mirrors how a train's
-     *  length reaches the scheduler; `mqttPlatform.register` ships only
-     *  capabilities + kind). */
-    this.d.platform.publish(this.registeredEvent());
-    this.unsubscribe = this.d.platform.onCommand((command) => this.handle(command));
+    /* Pairing rides a `device_registered` event carrying `controls_marker_id` +
+     *  `valid_positions` — the scheduler reads the pairing off those fields
+     *  (`mqttPlatform.register` ships only capabilities + kind). */
+    this.unsubscribe = registerDevice(this.d.platform, {
+      manifest: this.manifest(),
+      registeredEvent: this.registeredEvent(),
+      onCommand: (command) => this.handle(command),
+    });
   }
 
   /** Stop listening. */
