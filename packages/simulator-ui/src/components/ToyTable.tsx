@@ -533,9 +533,21 @@ function toRotationDeg(deg: number): RotationDeg {
 function spawnOrientationDeg(
   position: { readonly x: number; readonly y: number },
   pieces: ReadonlyArray<TrackPiece>,
+  currentRotationDeg?: number,
 ): RotationDeg | undefined {
   const layout = compileLayout(pieces, 'orient');
-  const startEdge = nearestStartEdge(layout, position);
+  /* Pass the piece's CURRENT heading so the nearest rail's leg most aligned with
+     it is chosen — a moved/placed train keeps its direction instead of flipping
+     180° to whatever the deterministic edge sort happens to pick (the reported
+     "oriented incorrectly", and a no-U-turn invariant). */
+  const facing =
+    currentRotationDeg === undefined
+      ? undefined
+      : {
+          x: Math.cos((currentRotationDeg * Math.PI) / 180),
+          y: Math.sin((currentRotationDeg * Math.PI) / 180),
+        };
+  const startEdge = nearestStartEdge(layout, position, facing);
   if (startEdge === undefined) return undefined;
   const fromId = startEdge.from_marker_id.startsWith('M-')
     ? startEdge.from_marker_id.slice(2)
@@ -1690,7 +1702,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       // from the current pieces (the snap/orient is over track already placed).
       const orient =
         pieceType === 'train'
-          ? spawnOrientationDeg({ x: xMm, y: yMm }, piecesRef.current)
+          ? spawnOrientationDeg({ x: xMm, y: yMm }, piecesRef.current, rotation)
           : undefined;
       const piece: TrackPiece = {
         id: nextPieceId(pieceType),
@@ -1771,7 +1783,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
         // A moved train re-orients to its (new) spawn edge so it stays pop-free.
         const orient =
           moving.type === 'train'
-            ? spawnOrientationDeg({ x: placement.x, y: placement.y }, others)
+            ? spawnOrientationDeg({ x: placement.x, y: placement.y }, others, moving.rotationDeg)
             : undefined;
         return prev.map((p) =>
           p.id === pieceId
