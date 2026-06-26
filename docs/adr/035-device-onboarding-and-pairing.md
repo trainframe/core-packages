@@ -180,6 +180,36 @@ devices must therefore accept their marker through an association callback and
 defer building/emitting `device_registered` until it resolves — they cannot
 self-describe to core at `start()`. (See Gotchas.)
 
+### 5a. Where the announce flow applies — and where the sim legitimately skips it (RESOLVED)
+
+Item 5 envisioned "drag a device onto the toy table = pair mode → `device_discovered`".
+Building that surfaced a real tension with the working Phase-1 live-learn, and the
+honest resolution is a scoping one:
+
+- A **real constrained device doesn't know its marker** — it must announce, be
+  scanned, and bind late. That is the ESP-NOW backing: built, handshake-verified
+  end-to-end, and the garage `device_discovered` panel (one scan, no naming) is
+  its operator surface.
+- A **toy-table piece DOES know its marker** — the piece *is* the device and its
+  location, so the sim device uses the IMMEDIATE backing and registers with its
+  known `controls_marker_id` directly. This is not the sim "cheating": a device
+  that genuinely knows its identity registering immediately is a valid path on the
+  bus (in-process/MQTT backing), distinct from the constrained ESP-NOW path. It is
+  also precisely what makes Phase-1 live-learn work out of the box — the toy-table
+  switch auto-registers its known marker + `valid_positions`, so discovery
+  materialises the junction with no operator association step.
+
+Forcing the toy-table to emit `device_discovered` + require an operator scan would
+model nothing real (the sim already knows the marker) AND would break the verified
+live-learn flow (the operator would have to garage-associate every switch before a
+learn could begin). So the toy-table keeps the immediate path; the announce flow is
+the real-hardware onboarding, and the two coexist as the two `PlatformProvider`
+backings already do. Per ADR-013 the sim stays a peer of hardware at the PROTOCOL
+level — a device on either backing presents the same MQTT face; which backing it
+uses reflects whether it knows its own identity, which a virtual piece does and a
+constrained radio does not. (A future "unpaired virtual device" mode could exercise
+the garage flow from the table for demo purposes — out of scope, recorded.)
+
 ### 6. Phase 3 — migration completeness, and what late-binding actually reaches (RESOLVED)
 
 A completeness workflow audited every platform-bearing device. Findings, recorded
