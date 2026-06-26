@@ -8,9 +8,9 @@ import { type UiHarness, startUiHarness } from '../src/test-harness.js';
  * Garage commissioning over the LIVE stack (goal criteria 6 & 7, UI half).
  *
  * The full real path: a device appears on the bus (capabilities only), the
- * operator commissions it in the visualiser (classify Train → name → measured
- * length → confirm), the server merges the profile into the retained snapshot,
- * and the device row shows the name + length. A reload proves a LATE client
+ * operator commissions it in the visualiser (classify Train → measured length →
+ * confirm; NO naming — ADR-035), the server merges the profile into the retained
+ * snapshot, and the device row shows the device + length. A reload proves a LATE client
  * still sees the commissioned profile. The passing assertions ARE the adversarial
  * refutations: a scan that never queues, a confirm that drops name/length, and a
  * late client missing the profile would each fail this test. Records a video for
@@ -33,7 +33,7 @@ function deviceRegistered(deviceId: string, payload: Record<string, unknown>): U
 }
 
 test.describe
-  .serial('commissioning: name a scanned device live; it survives a reload', () => {
+  .serial('commissioning: a scanned device commissions live (no naming); it survives a reload', () => {
     let harness: UiHarness;
 
     test.beforeAll(async () => {
@@ -43,7 +43,7 @@ test.describe
       await harness.shutdown();
     });
 
-    test('a scanned train queues → operator names + measures it → device row shows it → survives reload', async ({
+    test('a scanned train queues → operator measures it (no naming) → device row shows it → survives reload', async ({
       browser,
     }) => {
       test.setTimeout(120_000);
@@ -69,15 +69,16 @@ test.describe
       await expect(vis.getByTestId('commission-item-T-loco')).toBeVisible({ timeout: 30_000 });
       await expect(vis.getByTestId('commission-category-T-loco')).toHaveValue('train');
 
-      // The operator names it + enters the measured length, then confirms.
-      await vis.getByTestId('commission-name-T-loco').fill('Flying Scotsman');
+      // The operator enters the measured length, then confirms — NO naming
+      // (ADR-035): a device self-declares its kind and is known by its id.
+      await expect(vis.getByTestId('commission-name-T-loco')).toHaveCount(0);
       await vis.getByTestId('commission-length-T-loco').fill('180');
       await vis.waitForTimeout(400); // legible on camera
       await vis.getByTestId('commission-confirm-T-loco').click();
 
-      // Re-announce → server merge → the DEVICE ROW shows the name + length.
-      // (Refutes "confirm drops name/length".)
-      await expect(vis.getByTestId('device-row-T-loco')).toContainText('Flying Scotsman', {
+      // Re-announce → server merge → the DEVICE ROW shows the device + length.
+      // (Refutes "confirm drops the length".)
+      await expect(vis.getByTestId('device-row-T-loco')).toContainText('T-loco', {
         timeout: 30_000,
       });
       await expect(vis.getByTestId('device-length-T-loco')).toHaveText('180 mm');
@@ -89,7 +90,7 @@ test.describe
       // (Refutes "late client missing the profile".)
       await vis.reload({ waitUntil: 'domcontentloaded' });
       await waitForVisualiserConnected(vis);
-      await expect(vis.getByTestId('device-row-T-loco')).toContainText('Flying Scotsman', {
+      await expect(vis.getByTestId('device-row-T-loco')).toContainText('T-loco', {
         timeout: 30_000,
       });
       await expect(vis.getByTestId('device-length-T-loco')).toHaveText('180 mm');

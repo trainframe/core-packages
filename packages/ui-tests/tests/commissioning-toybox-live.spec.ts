@@ -67,14 +67,14 @@ test.describe
       await expect(item).toBeVisible({ timeout: 30_000 });
       await expect(vis.getByTestId(`commission-category-${deviceId}`)).toHaveValue('train');
 
-      // The operator names + measures it, then confirms.
-      await vis.getByTestId(`commission-name-${deviceId}`).fill('Flying Scotsman');
+      // The operator measures it, then confirms — NO naming (ADR-035).
+      await expect(vis.getByTestId(`commission-name-${deviceId}`)).toHaveCount(0);
       await vis.getByTestId(`commission-length-${deviceId}`).fill('180');
       await vis.waitForTimeout(400);
       await vis.getByTestId(`commission-confirm-${deviceId}`).click();
 
-      // The Devices roster now shows the friendly name + length; the queue clears.
-      await expect(vis.getByTestId(`device-row-${deviceId}`)).toContainText('Flying Scotsman', {
+      // The Devices roster now shows the device + length; the queue clears.
+      await expect(vis.getByTestId(`device-row-${deviceId}`)).toContainText(deviceId, {
         timeout: 30_000,
       });
       await expect(vis.getByTestId(`device-length-${deviceId}`)).toHaveText('180 mm');
@@ -84,7 +84,7 @@ test.describe
       // Survives a visualiser reload (the server's retained snapshot is durable).
       await vis.reload({ waitUntil: 'domcontentloaded' });
       await waitForVisualiserConnected(vis);
-      await expect(vis.getByTestId(`device-row-${deviceId}`)).toContainText('Flying Scotsman', {
+      await expect(vis.getByTestId(`device-row-${deviceId}`)).toContainText(deviceId, {
         timeout: 30_000,
       });
       await expect(vis.getByTestId(`device-length-${deviceId}`)).toHaveText('180 mm');
