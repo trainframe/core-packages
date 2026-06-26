@@ -48,7 +48,9 @@ describe('registerDevice — the shared registration lifecycle seam (ADR-035)', 
       onCommand: (c) => commands.push(c),
     });
 
-    /* The device_registered event went out exactly once. */
+    /* The manifest registered (the first lifecycle step), and the
+       device_registered event went out exactly once. */
+    expect(bus.manifestOf('DEV-1')).toEqual(MANIFEST);
     expect(events.filter((e) => e.event_type === 'device_registered')).toHaveLength(1);
     /* Commands are delivered to the handler. */
     bus.sendCommand('DEV-1', aCommand());
