@@ -69,5 +69,12 @@
  * LearnMode survey its legs) in DISCOVERY mode without a declared layout.
  * Additive optional field; bumps the protocol version but NOT the TCF registry
  * epoch (a new field, not a new event type — per ADR-021 §3).
+ *
+ * 0.14.0 — device onboarding, ADR-035 (Phase 2). Two new event TYPES:
+ * `device_discovered` (the bridge relays an unpaired device's announce so the
+ * garage can offer to scan it) and `device_association` (binds a discovered
+ * `device_ref` to the marker `tag_id` the operator scanned). New event types, so
+ * this bumps BOTH the protocol version AND the TCF registry epoch (5 → 6, per
+ * ADR-021 §3). Both ride the generic JSON carrier (no pinned compact codec).
  */
-export const PROTOCOL_VERSION = '0.13.0' as const;
+export const PROTOCOL_VERSION = '0.14.0' as const;

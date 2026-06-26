@@ -35,6 +35,8 @@ import {
   ClearanceRequest,
   ClearanceRevoked,
   CoreEvent,
+  DeviceAssociation,
+  DeviceDiscovered,
   DeviceRegistered,
   DeviceRetainedState,
   GateStateChanged,
@@ -346,8 +348,8 @@ describe('DeviceRetainedState', () => {
 });
 
 describe('garage commissioning protocol additions (0.12.0)', () => {
-  it('PROTOCOL_VERSION is 0.13.0 (device-onboarding valid_positions landed, ADR-035)', () => {
-    expect(PROTOCOL_VERSION).toBe('0.13.0');
+  it('PROTOCOL_VERSION is 0.14.0 (device-onboarding events landed, ADR-035)', () => {
+    expect(PROTOCOL_VERSION).toBe('0.14.0');
   });
 
   it('DeviceRegistered accepts an operator name, livery, and a first-class controls_marker_id', () => {
@@ -369,6 +371,22 @@ describe('garage commissioning protocol additions (0.12.0)', () => {
   it('DeviceRegistered rejects a controls_marker_id that is not a UUID', () => {
     const payload = { capabilities: [], device_kind_hint: 'switch', controls_marker_id: 'M-junk' };
     expect(Value.Check(DeviceRegistered, baseEnvelope('device_registered', payload))).toBe(false);
+  });
+
+  it('DeviceDiscovered requires device_ref + device_kind_hint (ADR-035)', () => {
+    const ok = { device_ref: 'AA:BB', device_kind_hint: 'mainline-switch' };
+    expect(Value.Check(DeviceDiscovered, baseEnvelope('device_discovered', ok))).toBe(true);
+    expect(
+      Value.Check(DeviceDiscovered, baseEnvelope('device_discovered', { device_ref: 'AA:BB' })),
+    ).toBe(false); // missing kind hint
+  });
+
+  it('DeviceAssociation binds a device_ref to a scanned tag_id (ADR-035)', () => {
+    const ok = { device_ref: 'AA:BB', tag_id: 'RFID-01' };
+    expect(Value.Check(DeviceAssociation, baseEnvelope('device_association', ok))).toBe(true);
+    expect(
+      Value.Check(DeviceAssociation, baseEnvelope('device_association', { device_ref: 'AA:BB' })),
+    ).toBe(false); // missing tag_id
   });
 
   it('DeviceRegistered accepts valid_positions for a switch (ADR-035), and stays valid without it', () => {

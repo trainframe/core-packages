@@ -87,6 +87,40 @@ const DeviceRegisteredPayload = Type.Object({
 export const DeviceRegistered = eventEnvelope('device_registered', DeviceRegisteredPayload);
 export type DeviceRegistered = Static<typeof DeviceRegistered>;
 
+// ---------- device_discovered (onboarding, ADR-035) ----------
+
+/**
+ * An UNPAIRED device announced itself on the constrained link and the bridge
+ * relayed it onto MQTT (ADR-035 Phase 2). The garage subscribes to this to offer
+ * "a new device was noticed — scan a tag for it". `device_ref` is the
+ * bridge-assigned handle (ADR-021 §5) that names this pending device until
+ * association binds it to a marker; `device_kind_hint` is the announce beacon's
+ * self-declared kind. Carries no marker/capabilities yet — those arrive in the
+ * later `device_registered`.
+ */
+const DeviceDiscoveredPayload = Type.Object({
+  device_ref: Type.String({ minLength: 1 }),
+  device_kind_hint: Type.String(),
+});
+export const DeviceDiscovered = eventEnvelope('device_discovered', DeviceDiscoveredPayload);
+export type DeviceDiscovered = Static<typeof DeviceDiscovered>;
+
+// ---------- device_association (onboarding, ADR-035) ----------
+
+/**
+ * Binds a discovered device (`device_ref`) to the marker `tag_id` the operator
+ * scanned for it (ADR-035 Phase 2). Emitted by the garage; the bridge relays it
+ * back down the link so the device persists its marker and then re-registers
+ * quoting it. Type-1 devices (a loco that already knows its identity) never need
+ * this.
+ */
+const DeviceAssociationPayload = Type.Object({
+  device_ref: Type.String({ minLength: 1 }),
+  tag_id: Type.String({ minLength: 1 }),
+});
+export const DeviceAssociation = eventEnvelope('device_association', DeviceAssociationPayload);
+export type DeviceAssociation = Static<typeof DeviceAssociation>;
+
 // ---------- tag_observed ----------
 
 const TagObservedPayload = Type.Object({
@@ -386,6 +420,8 @@ export const CoreEvent = Type.Union([
   AspectChanged,
   TagAssignment,
   Anomaly,
+  DeviceDiscovered,
+  DeviceAssociation,
 ]);
 export type CoreEvent = Static<typeof CoreEvent>;
 
@@ -411,6 +447,8 @@ export const CORE_EVENT_SCHEMAS = {
   aspect_changed: AspectChanged,
   tag_assignment: TagAssignment,
   anomaly: Anomaly,
+  device_discovered: DeviceDiscovered,
+  device_association: DeviceAssociation,
 } as const;
 
 // ---------- retained device state (railway/state/devices/{device_id}) ----------

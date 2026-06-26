@@ -47,6 +47,8 @@ describe('TCF registry anti-drift', () => {
       'zone_state_changed',
       'train_length_changed',
       'zone_train_released',
+      'device_discovered',
+      'device_association',
     ]);
   });
 
