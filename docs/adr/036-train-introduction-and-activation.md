@@ -137,8 +137,11 @@ main line and introducing it there is supported but discouraged.
 - New event `train_introduction_conflict` (or an `anomaly` of that kind) — §5.
 - New capability `core.provides_train_heading` — a zone/device that supplies a
   train's heading on emergence (§3b).
-- A train lifecycle/`active` flag in retained train state so the garage can list
-  not-yet-introduced trains.
+- A train lifecycle flag `introduced` on the retained device state
+  (`DeviceRetainedState`, alongside the existing train-specific `train_length_mm`)
+  — `true` once a train's vector has resolved, absent/false while it is
+  registered but not yet introduced, so the garage can list trains awaiting
+  introduction.
 
 New event types append to the TCF registry, so this bumps the protocol minor and
 the registry epoch together (per `version.ts`).

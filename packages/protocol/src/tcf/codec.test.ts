@@ -83,6 +83,45 @@ const EVENT_PAYLOADS: Record<string, unknown> = {
   aspect_changed: { current_aspect: 'green' },
   tag_assignment: { tag_id: 'M3', assigned_kind: 'marker', target_id: 'M3' },
   anomaly: { severity: 'warning', description: 'short' },
+  topology_violation: {
+    train_id: 'aaaaaaaa-0000-4000-8000-000000000001',
+    last_known_marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+    reported_marker_id: 'aaaaaaaa-0000-4000-8000-000000000003',
+    suspected_cause: 'unknown',
+    detected_at_ms: 1000,
+  },
+  zone_state_changed: {
+    zone_marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+    capacity: 4,
+    occupancy: 1,
+  },
+  train_length_changed: {
+    train_id: 'aaaaaaaa-0000-4000-8000-000000000001',
+    train_length_mm: 250,
+  },
+  zone_train_released: {
+    zone_marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+    train_id: 'aaaaaaaa-0000-4000-8000-000000000001',
+  },
+  device_discovered: { device_ref: 'AA:BB:CC', device_kind_hint: 'mainline-switch' },
+  device_association: { device_ref: 'AA:BB:CC', tag_id: 'RFID-01' },
+  train_introduced: {
+    train_id: 'aaaaaaaa-0000-4000-8000-000000000001',
+    marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+    heading_edge: {
+      from_marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+      to_marker_id: 'aaaaaaaa-0000-4000-8000-000000000003',
+    },
+  },
+  train_introduction_conflict: {
+    train_id: 'aaaaaaaa-0000-4000-8000-000000000001',
+    conflicting_train_id: 'aaaaaaaa-0000-4000-8000-000000000004',
+    block_edge: {
+      from_marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+      to_marker_id: 'aaaaaaaa-0000-4000-8000-000000000003',
+    },
+    reason: 'head-on overlap',
+  },
 };
 
 /** A representative payload for each command type. */
@@ -109,6 +148,16 @@ const COMMAND_PAYLOADS: Record<string, unknown> = {
   hold_gate: { marker_id: 'aaaaaaaa-0000-4000-8000-000000000002' },
   release_gate: { marker_id: 'aaaaaaaa-0000-4000-8000-000000000002' },
   assign_tag: { tag_id: 'M3', assigned_kind: 'marker', target_id: 'M3' },
+  grant_reverse: {
+    limit_marker_id: 'aaaaaaaa-0000-4000-8000-000000000003',
+    edges: [
+      {
+        from_marker_id: 'aaaaaaaa-0000-4000-8000-000000000002',
+        to_marker_id: 'aaaaaaaa-0000-4000-8000-000000000003',
+      },
+    ],
+  },
+  introduce_train: {},
 };
 
 function pairedContext() {

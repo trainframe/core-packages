@@ -21,6 +21,7 @@ export const BUILTIN_CAPABILITIES = [
   'core.gates_zone',
   'core.reports_length',
   'core.can_reverse',
+  'core.provides_train_heading',
 ] as const;
 
 export type BuiltinCapability = (typeof BUILTIN_CAPABILITIES)[number];

@@ -66,6 +66,8 @@ Defined capabilities for v0.2:
 
 `assigns_tags`: the device can assign meaning to previously-unknown tags. Garages and registration interfaces have this capability.
 
+`provides_train_heading` *(added 0.15.0; [ADR-036](../adr/036-train-introduction-and-activation.md))*: the device (typically a railyard or turntable) can supply a train's heading at the moment it is introduced — before the train is released to open track. When a train is introduced from such a zone, the zone emits a `train_introduced` event carrying the resolved vector, and no blind forward roll is required. This is pure capability-based extension: the scheduler takes the zone's emitted vector when present and falls back to the two-marker roll otherwise.
+
 A device may declare multiple capabilities. A train: `identifies_vehicles` (its own tag, for garage scanning), `reports_marker_traversal`, `controls_motion`, `accepts_route`. A garage: `identifies_vehicles`, `assigns_tags`.
 
 ---
@@ -107,7 +109,7 @@ Events use the `event_type` segment so consumers can subscribe selectively (the 
 { "capabilities": ["core.controls_motion", "core.accepts_route"], "train_length_mm": 250 }
 ```
 
-`capabilities` is always present. `train_length_mm` is present only when the device declared `core.controls_motion` and supplied a positive length on registration; omitted otherwise. Subscribers may use `train_length_mm` to render a length-scaled consist (ADR-016). As of 0.12.0 the snapshot also carries optional operator-authored `name` and `livery` (presentation only) so a display joining after commissioning still sees them.
+`capabilities` is always present. `train_length_mm` is present only when the device declared `core.controls_motion` and supplied a positive length on registration; omitted otherwise. Subscribers may use `train_length_mm` to render a length-scaled consist (ADR-016). As of 0.12.0 the snapshot also carries optional operator-authored `name` and `livery` (presentation only) so a display joining after commissioning still sees them. As of 0.15.0 it carries an optional boolean `introduced` (ADR-036): `true` once a train's vector has resolved (it is on the track and routable); absent or `false` for a registered-but-not-yet-introduced train, so the garage can list trains awaiting introduction.
 
 A retained `railway/state/devices/{device_id}` payload with no `capabilities` field (e.g. `{}`) is a **deregister tombstone**: the server publishes it when a device disconnects or is deleted from memory, and subscribers drop the device from their roster. This is consistent with how the other per-entity state families signal "gone" (an empty `schedule`/`clearance` snapshot); no version bump — no shape change.
 
@@ -174,6 +176,10 @@ The broker does not set `timestamp_server`; the scheduler does, on consumption. 
 
 `anomaly`: emitted by anything; describes unexpected conditions: unknown tags, missed-marker timeouts, two trains in one block, switch position contradicting command. Free-form description, severity.
 
+`train_introduced` *(added 0.15.0; [ADR-036](../adr/036-train-introduction-and-activation.md))*: the resolved position and heading of a newly-introduced train. Payload: `train_id`, `marker_id` (the marker at which the vector resolved), `heading_edge` (the directed edge the train is currently traversing — its canonical heading). Emitted by the core when the two-marker introduction roll completes, or by a `core.provides_train_heading` zone *before* it releases the train, so the vector is always known before the train reaches open track.
+
+`train_introduction_conflict` *(added 0.15.0; [ADR-036](../adr/036-train-introduction-and-activation.md))*: emitted when an introduced train's resolved vector lands in a block a peer occupies and the conflict cannot be resolved by yielding — a genuine deadlock or safety overlap. The introduced train is stopped. Payload: `train_id`, `conflicting_train_id`, `block_edge` (the contested block as a directed edge), `reason` (free-form hint for the operator UI). The operator must move one of the named trains; no pending schedule starts until the conflict is cleared.
+
 ---
 
 ## Command schema
@@ -199,6 +205,8 @@ Commands flow from server to devices via `railway/commands/{device_id}`. Same en
 `hold_gate` / `release_gate`: to a `gates_clearance` device. Used for server overrides of local gate logic. Rare.
 
 `assign_tag`: to an `assigns_tags` device. Payload: `tag_id`, `assigned_kind`, `target_id`, optional `marker_kind` (the shared `MarkerKind` enum as of 0.12.0 — previously a free string), optional `marker_name` (0.12.0), metadata. The server commits the assignment after the device confirms with a `tag_assignment` event.
+
+`introduce_train` *(added 0.15.0; [ADR-036](../adr/036-train-introduction-and-activation.md))*: to a `controls_motion` device. Optional `reason`. The operator gesture that begins vector resolution for a registered but not-yet-introduced train. Authorises the bounded two-marker introduction roll (§3a of ADR-036): the train drives forward at introduction speed until it has crossed two markers, at which point the core ends the roll and the train rests as an active, vector-known train. When the train sits in a `core.provides_train_heading` zone, that zone resolves the vector instead (§3b) with no blind forward motion. "Clearance, not commands" holds: the train stays stopped until this grant arrives.
 
 ---
 
@@ -288,4 +296,10 @@ The split between MQTT pub/sub and HTTP query API is currently informal; some qu
 
 **Changes in 0.12.0:** garage device commissioning (design 2026-06-23). `device_registered` and the retained `railway/state/devices/{device_id}` payload gain operator-authored `name` + `livery` (presentation only; carried in the retained snapshot so a late-joining display sees them). `controls_marker_id` is promoted to a first-class field on `device_registered` (previously read by the scheduler via an out-of-schema cast, so a spec-conformant third-party `core.controls_switch` device had nowhere to declare which junction it throws). `tag_assignment` and `assign_tag` gain `marker_name` (naming a marker at bind time). `assign_tag`'s `marker_kind` is tightened from a free string to the shared `MarkerKind` enum, matching the `tag_assignment` event. `name`, `livery`, `marker_name`, and `marker_kind` are presentation annotations — the scheduler reasons on capabilities + topology only and never branches on them.
 
-*End of v0.2 (current protocol 0.12.0).*
+**Changes in 0.13.0:** `valid_positions` added to `device_registered` (ADR-035 Phase 1) — a `core.controls_switch` device declares its selectable switch positions so the server can materialise a junction in discovery mode without a declared layout. Additive optional field; no TCF epoch bump (new field, not a new type).
+
+**Changes in 0.14.0:** device onboarding, ADR-035 Phase 2. New `device_discovered` event (bridge relays an unpaired device's announce beacon so the garage can offer to scan it) and `device_association` event (binds a discovered `device_ref` to the scanned `tag_id`). New event types — TCF epoch 5 → 6.
+
+**Changes in 0.15.0:** train introduction and activation lifecycle, ADR-036. New `introduce_train` command (operator gesture that begins vector resolution for a registered train). New `train_introduced` event (resolved position and heading, emitted by the core after a two-marker roll or by a `core.provides_train_heading` zone before it releases the train). New `train_introduction_conflict` event (unresolvable overlap at the moment the vector resolves — operator must intervene). New capability `core.provides_train_heading` (a zone/device that supplies a train's heading on emergence, enabling zero-roll introduction). New optional boolean `introduced` on the retained `railway/state/devices/{device_id}` payload — the train lifecycle flag, `true` once the vector has resolved, so the garage can list trains awaiting introduction. New command and event types — TCF epoch 6 → 7.
+
+*End of v0.2 (current protocol 0.15.0).*

@@ -76,5 +76,16 @@
  * `device_ref` to the marker `tag_id` the operator scanned). New event types, so
  * this bumps BOTH the protocol version AND the TCF registry epoch (5 → 6, per
  * ADR-021 §3). Both ride the generic JSON carrier (no pinned compact codec).
+ *
+ * 0.15.0 — train introduction and activation lifecycle, ADR-036. New command
+ * `introduce_train` (the operator gesture that begins vector resolution for a
+ * registered train); new event `train_introduced` (the resolved position and
+ * heading, emitted by the core after a two-marker roll or by a
+ * `core.provides_train_heading` zone before it releases the train); new event
+ * `train_introduction_conflict` (an unresolvable overlap at the moment the
+ * vector resolves — operator must intervene); new capability
+ * `core.provides_train_heading` (a zone/device that supplies a train's heading
+ * on emergence). New event/command types append so this bumps BOTH the
+ * protocol version AND the TCF registry epoch (6 → 7, per ADR-021 §3).
  */
-export const PROTOCOL_VERSION = '0.14.0' as const;
+export const PROTOCOL_VERSION = '0.15.0' as const;

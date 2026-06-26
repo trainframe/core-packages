@@ -400,6 +400,48 @@ const AnomalyPayload = Type.Object({
 export const Anomaly = eventEnvelope('anomaly', AnomalyPayload);
 export type Anomaly = Static<typeof Anomaly>;
 
+// ---------- train_introduced ----------
+
+/**
+ * The resolved position and heading of a newly-introduced train (ADR-036).
+ * Emitted by the core when the two-marker introduction roll completes (§3a),
+ * OR by a `core.provides_train_heading` zone before it releases the train to
+ * leave (§3b) — so the vector is always known before the train reaches open
+ * track. `heading_edge` is the directed edge (from → to) the train is
+ * currently traversing; it becomes the train's canonical vector.
+ */
+const TrainIntroducedPayload = Type.Object({
+  train_id: Uuid,
+  marker_id: Uuid,
+  heading_edge: EdgeRef,
+});
+
+export const TrainIntroduced = eventEnvelope('train_introduced', TrainIntroducedPayload);
+export type TrainIntroduced = Static<typeof TrainIntroduced>;
+
+// ---------- train_introduction_conflict ----------
+
+/**
+ * Emitted when an introduced train's resolved vector lands in a block a peer
+ * occupies and the conflict cannot be resolved by yielding — a genuine deadlock
+ * or safety overlap (ADR-036 §5). The introduced train is stopped; the operator
+ * must move one of the named trains before any pending schedule starts.
+ * `block_edge` names the contested block; `reason` is a free-form hint for the
+ * operator UI only.
+ */
+const TrainIntroductionConflictPayload = Type.Object({
+  train_id: Uuid,
+  conflicting_train_id: Uuid,
+  block_edge: EdgeRef,
+  reason: Type.String(),
+});
+
+export const TrainIntroductionConflict = eventEnvelope(
+  'train_introduction_conflict',
+  TrainIntroductionConflictPayload,
+);
+export type TrainIntroductionConflict = Static<typeof TrainIntroductionConflict>;
+
 // ---------- Discriminated union ----------
 
 export const CoreEvent = Type.Union([
@@ -422,6 +464,8 @@ export const CoreEvent = Type.Union([
   Anomaly,
   DeviceDiscovered,
   DeviceAssociation,
+  TrainIntroduced,
+  TrainIntroductionConflict,
 ]);
 export type CoreEvent = Static<typeof CoreEvent>;
 
@@ -449,6 +493,8 @@ export const CORE_EVENT_SCHEMAS = {
   anomaly: Anomaly,
   device_discovered: DeviceDiscovered,
   device_association: DeviceAssociation,
+  train_introduced: TrainIntroduced,
+  train_introduction_conflict: TrainIntroductionConflict,
 } as const;
 
 // ---------- retained device state (railway/state/devices/{device_id}) ----------
@@ -477,6 +523,14 @@ export const DeviceRetainedState = Type.Object({
    */
   name: Type.Optional(Type.String()),
   livery: Type.Optional(Type.String()),
+  /**
+   * Train lifecycle flag (ADR-036). Set `true` once a train's vector has
+   * resolved — it is on the track and routable. Absent or `false` for a
+   * registered-but-not-yet-introduced train, so the garage can list trains
+   * awaiting introduction. Only meaningful for devices declaring
+   * `core.controls_motion`.
+   */
+  introduced: Type.Optional(Type.Boolean()),
 });
 export type DeviceRetainedState = Static<typeof DeviceRetainedState>;
 

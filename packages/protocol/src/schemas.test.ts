@@ -26,6 +26,7 @@ import {
   CoreCommand,
   EmergencyStop,
   GrantClearance,
+  IntroduceTrain,
 } from './commands.js';
 import { Direction, EdgeRef, Iso8601, Uuid } from './envelope.js';
 import {
@@ -44,6 +45,8 @@ import {
   SwitchStateChanged,
   TagAssignment,
   TagObserved,
+  TrainIntroduced,
+  TrainIntroductionConflict,
   TrainLengthChanged,
   TrainStatus,
   ZoneRetainedState,
@@ -345,13 +348,34 @@ describe('DeviceRetainedState', () => {
   it('rejects a payload missing capabilities', () => {
     expect(Value.Check(DeviceRetainedState, { train_length_mm: 100 })).toBe(false);
   });
+
+  it('accepts the introduced lifecycle flag, and stays valid without it (ADR-036)', () => {
+    expect(
+      Value.Check(DeviceRetainedState, {
+        capabilities: ['core.controls_motion'],
+        introduced: true,
+      }),
+    ).toBe(true);
+    expect(Value.Check(DeviceRetainedState, { capabilities: ['core.controls_motion'] })).toBe(true);
+  });
+
+  it('rejects a non-boolean introduced flag', () => {
+    expect(
+      Value.Check(DeviceRetainedState, {
+        capabilities: ['core.controls_motion'],
+        introduced: 'yes',
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('protocol version', () => {
+  it('PROTOCOL_VERSION is 0.15.0 (train introduction lifecycle landed, ADR-036)', () => {
+    expect(PROTOCOL_VERSION).toBe('0.15.0');
+  });
 });
 
 describe('garage commissioning protocol additions (0.12.0)', () => {
-  it('PROTOCOL_VERSION is 0.14.0 (device-onboarding events landed, ADR-035)', () => {
-    expect(PROTOCOL_VERSION).toBe('0.14.0');
-  });
-
   it('DeviceRegistered accepts an operator name, livery, and a first-class controls_marker_id', () => {
     const payload = {
       capabilities: ['core.controls_motion'],
@@ -573,6 +597,114 @@ describe('ZoneRetainedState', () => {
 
   it('rejects a missing zone_marker_id', () => {
     expect(Value.Check(ZoneRetainedState, { capacity: 4, occupancy: 0 })).toBe(false);
+  });
+});
+
+describe('train introduction protocol additions (0.15.0, ADR-036)', () => {
+  it('IntroduceTrain validates a payload with no reason', () => {
+    expect(Value.Check(IntroduceTrain, baseCommandEnvelope('introduce_train', {}))).toBe(true);
+  });
+
+  it('IntroduceTrain validates a payload with an optional reason', () => {
+    expect(
+      Value.Check(
+        IntroduceTrain,
+        baseCommandEnvelope('introduce_train', { reason: 'operator placed loco at yard exit' }),
+      ),
+    ).toBe(true);
+  });
+
+  it('IntroduceTrain rejects a non-string reason', () => {
+    expect(
+      Value.Check(IntroduceTrain, baseCommandEnvelope('introduce_train', { reason: 42 })),
+    ).toBe(false);
+  });
+
+  it('TrainIntroduced validates a well-formed payload', () => {
+    const payload = {
+      train_id: VALID_UUID,
+      marker_id: OTHER_UUID,
+      heading_edge: { from_marker_id: VALID_UUID, to_marker_id: OTHER_UUID },
+    };
+    expect(Value.Check(TrainIntroduced, baseEnvelope('train_introduced', payload))).toBe(true);
+  });
+
+  it('TrainIntroduced rejects a payload missing heading_edge', () => {
+    const payload = { train_id: VALID_UUID, marker_id: OTHER_UUID };
+    expect(Value.Check(TrainIntroduced, baseEnvelope('train_introduced', payload))).toBe(false);
+  });
+
+  it('TrainIntroduced rejects a heading_edge with only one marker', () => {
+    const payload = {
+      train_id: VALID_UUID,
+      marker_id: OTHER_UUID,
+      heading_edge: { from_marker_id: VALID_UUID },
+    };
+    expect(Value.Check(TrainIntroduced, baseEnvelope('train_introduced', payload))).toBe(false);
+  });
+
+  it('TrainIntroduced rejects a non-UUID train_id (the Uuid format is enforced)', () => {
+    const payload = {
+      train_id: 'not-a-uuid',
+      marker_id: OTHER_UUID,
+      heading_edge: { from_marker_id: VALID_UUID, to_marker_id: OTHER_UUID },
+    };
+    expect(Value.Check(TrainIntroduced, baseEnvelope('train_introduced', payload))).toBe(false);
+  });
+
+  it('TrainIntroductionConflict validates a well-formed payload', () => {
+    const payload = {
+      train_id: VALID_UUID,
+      conflicting_train_id: OTHER_UUID,
+      block_edge: { from_marker_id: VALID_UUID, to_marker_id: OTHER_UUID },
+      reason: 'head-on overlap in shared block',
+    };
+    expect(
+      Value.Check(TrainIntroductionConflict, baseEnvelope('train_introduction_conflict', payload)),
+    ).toBe(true);
+  });
+
+  it('TrainIntroductionConflict rejects a payload missing conflicting_train_id', () => {
+    const payload = {
+      train_id: VALID_UUID,
+      block_edge: { from_marker_id: VALID_UUID, to_marker_id: OTHER_UUID },
+      reason: 'overlap',
+    };
+    expect(
+      Value.Check(TrainIntroductionConflict, baseEnvelope('train_introduction_conflict', payload)),
+    ).toBe(false);
+  });
+
+  it('TrainIntroductionConflict rejects a non-UUID train_id (the Uuid format is enforced)', () => {
+    const payload = {
+      train_id: 'not-a-uuid',
+      conflicting_train_id: OTHER_UUID,
+      block_edge: { from_marker_id: VALID_UUID, to_marker_id: OTHER_UUID },
+      reason: 'overlap',
+    };
+    expect(
+      Value.Check(TrainIntroductionConflict, baseEnvelope('train_introduction_conflict', payload)),
+    ).toBe(false);
+  });
+
+  it('BUILTIN_CAPABILITIES includes core.provides_train_heading (ADR-036)', () => {
+    expect(BUILTIN_CAPABILITIES).toContain('core.provides_train_heading');
+  });
+
+  it('CoreEvent accepts train_introduced and train_introduction_conflict', () => {
+    const introduced = baseEnvelope('train_introduced', {
+      train_id: VALID_UUID,
+      marker_id: OTHER_UUID,
+      heading_edge: { from_marker_id: VALID_UUID, to_marker_id: OTHER_UUID },
+    });
+    const conflict = baseEnvelope('train_introduction_conflict', {
+      train_id: VALID_UUID,
+      conflicting_train_id: OTHER_UUID,
+      block_edge: { from_marker_id: VALID_UUID, to_marker_id: OTHER_UUID },
+      reason: 'head-on',
+    });
+    expect(Value.Check(CoreEvent, introduced)).toBe(true);
+    expect(Value.Check(CoreEvent, conflict)).toBe(true);
   });
 });
 

@@ -49,6 +49,8 @@ describe('TCF registry anti-drift', () => {
       'zone_train_released',
       'device_discovered',
       'device_association',
+      'train_introduced',
+      'train_introduction_conflict',
     ]);
   });
 
@@ -66,6 +68,7 @@ describe('TCF registry anti-drift', () => {
       'release_gate',
       'assign_tag',
       'grant_reverse',
+      'introduce_train',
     ]);
   });
 

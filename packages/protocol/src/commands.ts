@@ -158,6 +158,25 @@ const AssignTagPayload = Type.Object({
 export const AssignTag = commandEnvelope('assign_tag', AssignTagPayload);
 export type AssignTag = Static<typeof AssignTag>;
 
+// ---------- introduce_train ----------
+
+/**
+ * Operator gesture that begins vector resolution for a registered train
+ * (ADR-036). Addressed to the train. Authorises the bounded introduction roll
+ * (§3a): the train drives forward at introduction speed until it has crossed
+ * two markers, at which point the core owns the release and the train rests as
+ * an active, vector-known train. When the train sits in a
+ * `core.provides_train_heading` zone, that zone resolves the vector instead
+ * (§3b) and no blind motion occurs. "Clearance, not commands" holds: the train
+ * stays stopped until this grant arrives.
+ */
+const IntroduceTrainPayload = Type.Object({
+  reason: Type.Optional(Type.String()),
+});
+
+export const IntroduceTrain = commandEnvelope('introduce_train', IntroduceTrainPayload);
+export type IntroduceTrain = Static<typeof IntroduceTrain>;
+
 // ---------- Discriminated union ----------
 
 export const CoreCommand = Type.Union([
@@ -173,6 +192,7 @@ export const CoreCommand = Type.Union([
   HoldGate,
   ReleaseGate,
   AssignTag,
+  IntroduceTrain,
 ]);
 export type CoreCommand = Static<typeof CoreCommand>;
 
@@ -189,4 +209,5 @@ export const CORE_COMMAND_SCHEMAS = {
   hold_gate: HoldGate,
   release_gate: ReleaseGate,
   assign_tag: AssignTag,
+  introduce_train: IntroduceTrain,
 } as const;
