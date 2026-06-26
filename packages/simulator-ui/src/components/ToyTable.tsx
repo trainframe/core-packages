@@ -455,8 +455,16 @@ function ExperimentParts({
 const POWER_DOT_RADIUS = 6;
 
 let pieceCounter = 0;
-function nextPieceId(prefix: string): string {
-  pieceCounter += 1;
+/* A fresh piece id of the form `<type>-<n>`, guaranteed distinct from every
+   `existing` id. The module counter alone is not enough: a LOADED/restored layout
+   (e.g. `test-track-layout.json` with `curve-2`, `curve-4`, …) does not advance
+   the counter, so a plain increment can mint an id that collides with a placed
+   piece — React then drops the duplicate-keyed node and the existing piece
+   vanishes. Skipping taken ids closes that. */
+function nextPieceId(prefix: string, existing: ReadonlySet<string>): string {
+  do {
+    pieceCounter += 1;
+  } while (existing.has(`${prefix}-${pieceCounter}`));
   return `${prefix}-${pieceCounter}`;
 }
 
@@ -1705,7 +1713,7 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
           ? spawnOrientationDeg({ x: xMm, y: yMm }, piecesRef.current, rotation)
           : undefined;
       const piece: TrackPiece = {
-        id: nextPieceId(pieceType),
+        id: nextPieceId(pieceType, new Set(piecesRef.current.map((p) => p.id))),
         type: pieceType,
         position: { x: xMm, y: yMm },
         rotationDeg: orient ?? rotation ?? 0,
