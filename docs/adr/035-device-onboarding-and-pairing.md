@@ -180,6 +180,54 @@ devices must therefore accept their marker through an association callback and
 defer building/emitting `device_registered` until it resolves — they cannot
 self-describe to core at `start()`. (See Gotchas.)
 
+### 6. Phase 3 — migration completeness, and what late-binding actually reaches (RESOLVED)
+
+A completeness workflow audited every platform-bearing device. Findings, recorded
+here so nothing is silently omitted:
+
+- **No seam bypass anywhere.** The only `platform.register(...)` in production is
+  inside `registerDevice` itself; all six core-facing devices (`BeaconDevice`,
+  `SwitchDevice`, `GateDevice`, `ScheduledTrainDevice`, `YardZoneDevice`,
+  `RailyardZoneDevice`) route `start()` through the Task-2 seam. The direct
+  `publish` calls (gate/zone state changes, loco `train_status`, beacon
+  `tag_observed`) are post-registration RUNTIME events, not registration. World-
+  side controllers/actuators (`*-controller`, `*-actuator`, cranes, sensors) don't
+  touch a core-facing platform — correctly out of scope. `ParentPlatform` is
+  interior infra. **`DepotController` has no core-facing registration** — it is an
+  interior parent (ADR-032) presented to core only via the zone device that wraps
+  it; nothing to migrate (recorded, not a gap).
+
+- **Late-binding via the commission seam reaches only identity carried in
+  `device_registered`.** The switch's `controls_marker_id` IS in its registered
+  payload, so the §5 builder binds it late — done. But a **zone's throat marker
+  is NOT in `device_registered`** (it rides `zone_state_changed`/`announce`, sent
+  after register), and a **gate's marker set lives in its config + `gate_state_changed`**,
+  not the registered event. So the commission seam cannot late-bind them by the
+  switch's mechanism; doing so would require deferring the post-register announce
+  (a separate lifecycle hook) or moving the marker into `device_registered` (a
+  protocol-shape change). **Deferred by design, with rationale** — these devices
+  are migrated *to the seam* (Task 2) and stay immediate-identity for now.
+
+Per-device late-binding status: **switch** = late-bound (done); **yard/railyard
+zone** = throat identity flows via `zone_state_changed`, late-binding deferred
+(needs an announce-defer hook or registered-payload throat); **gate** = multi-
+marker footprint, no marker in `device_registered`, deferred (a marker *list* in
+association is a separate protocol change); **beacon, loco** = intrinsic identity,
+no trackside marker — `registeredEvent` correctly omitted/fixed, late-binding not
+applicable (must NOT be converted to a builder); **depot** = interior-only.
+
+Cross-cutting decisions recorded for the ESP-NOW path (built later, not in this
+phase): **(a)** marker **persistence across reboot** — a late-bound device MUST
+store its associated marker to NVM and re-assert on `start()`, else it re-pairs
+every cold start; **(b)** a gate's **withheld set** must likewise persist (the
+disconnect fail-safe defaults to GRANTING); **(c)** **composite-parent association
+fan-in** (a zone/depot gathering its children's associations) has no lifecycle
+yet — one shared deferred design item; **(d)** the **heartbeat/duty-cycle**
+conflict (gotcha 5): a sleepy ESP-NOW loco can't publish `train_status` every
+tick, so ADR-028 dwell-resume must be decoupled from the continuous heartbeat
+onto an explicit `dwell_elapsed`/on-crossing trigger — open decision, must not
+collide with the existing power-off-falls-silent semantics.
+
 ## Gotchas surfaced by a device audit
 
 A pass over all 25 files under `devices/`/`sensors/` (8 are platform-bearing)
