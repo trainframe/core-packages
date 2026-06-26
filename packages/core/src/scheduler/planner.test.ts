@@ -372,4 +372,63 @@ describe('planTransit', () => {
       ]);
     });
   });
+
+  describe('junction reached via two arrivals — the search must not settle on the barred one', () => {
+    /**
+     * The cheap way to the junction J arrives on leg L1 (cost 2) — and from
+     * there the exit to leg L2 is barred (leg-to-leg). The valid way arrives on
+     * the trunk T the long way round (cost 6), from where J→L2 is a legal
+     * trunk→leg move. A search keyed by MARKER alone settles J on the cheap
+     * arrival, bars L2, and wrongly reports L2 unreachable. Keyed by
+     * (marker, arrival) it keeps the trunk arrival as a distinct state and finds
+     * the route round — the operator's "go round and catch it from the other
+     * side" instead of stalling at the junction.
+     */
+    const branchLoop = (): LayoutState =>
+      new LayoutState(
+        {
+          name: 'branch-loop',
+          markers: [
+            { id: 'S', kind: 'block_boundary' },
+            { id: 'T', kind: 'block_boundary' },
+            { id: 'J', kind: 'junction' },
+            { id: 'L1', kind: 'block_boundary' },
+            { id: 'L2', kind: 'block_boundary' },
+          ],
+          edges: [
+            { from_marker_id: 'S', to_marker_id: 'L1', estimated_length_mm: 1 },
+            { from_marker_id: 'L1', to_marker_id: 'S', estimated_length_mm: 1 },
+            {
+              from_marker_id: 'J',
+              to_marker_id: 'L1',
+              estimated_length_mm: 1,
+              requires_switch_state: 'main',
+            },
+            { from_marker_id: 'L1', to_marker_id: 'J', estimated_length_mm: 1 },
+            { from_marker_id: 'S', to_marker_id: 'T', estimated_length_mm: 5 },
+            { from_marker_id: 'T', to_marker_id: 'S', estimated_length_mm: 5 },
+            { from_marker_id: 'T', to_marker_id: 'J', estimated_length_mm: 1 },
+            { from_marker_id: 'J', to_marker_id: 'T', estimated_length_mm: 1 },
+            {
+              from_marker_id: 'J',
+              to_marker_id: 'L2',
+              estimated_length_mm: 1,
+              requires_switch_state: 'divert',
+            },
+            { from_marker_id: 'L2', to_marker_id: 'J', estimated_length_mm: 1 },
+          ],
+          junctions: [{ marker_id: 'J', initial_state: 'main' }],
+        },
+        { now: () => 0 },
+      );
+
+    it('routes round via the trunk when the cheap leg arrival bars the exit', () => {
+      const path = planTransit(branchLoop(), 'S', 'L2');
+      expect(path).toEqual([
+        { from_marker_id: 'S', to_marker_id: 'T' },
+        { from_marker_id: 'T', to_marker_id: 'J' },
+        { from_marker_id: 'J', to_marker_id: 'L2' },
+      ]);
+    });
+  });
 });

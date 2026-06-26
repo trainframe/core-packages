@@ -2,10 +2,31 @@ import type { LayoutState } from './layout-state.js';
 import type { EdgeRef } from './types.js';
 
 /**
+ * A search state is a marker PLUS the marker we arrived from — not the marker
+ * alone. At a turnout the set of legal exits depends on how the train entered
+ * it (the leg-to-leg bar), so the same marker reached via two different
+ * neighbours is two distinct states with different onward moves. Keying the
+ * search by marker alone lets the cheapest arrival settle a junction and bar
+ * an exit a costlier arrival would have allowed — silently dropping a route
+ * that exists (a train "stuck" at a junction rather than routing round).
+ */
+interface FrontierEntry {
+  readonly marker: string;
+  readonly arrivedFrom: string | undefined;
+  readonly cost: number;
+}
+
+/** State identity for the augmented search: marker + arrival direction. */
+function stateKey(marker: string, arrivedFrom: string | undefined): string {
+  return `${arrivedFrom ?? ''}>${marker}`;
+}
+
+/**
  * Compute a transit — an ordered list of edges — from `fromMarker` to
- * `toMarker` through the static layout graph. Plain Dijkstra: cost is each
- * edge's `estimated_length_mm` (or `1` for edges without a length), and the
- * graph is the layout's marker→outgoing-edges map.
+ * `toMarker` through the static layout graph. Dijkstra over
+ * (marker, arrival-direction) states: cost is each edge's `estimated_length_mm`
+ * (or `1` for edges without a length), and the graph is the layout's
+ * marker→outgoing-edges map.
  *
  * The planner is **purely structural**: it looks only at the layout's static
  * topology. It does not consider current clearance holds, switch positions,
@@ -35,11 +56,6 @@ import type { EdgeRef } from './types.js';
  *   - `null` when the target is structurally unreachable from the source
  *     (in the train's permitted direction).
  */
-interface FrontierEntry {
-  readonly marker: string;
-  readonly cost: number;
-}
-
 export function planTransit(
   layout: LayoutState,
   fromMarker: string,
@@ -59,15 +75,9 @@ export function planTransit(
   // if this marker is a turnout, not across to another leg (it arrived via
   // `currentEdge.from`, so that side is the turnout entry).
   if (currentEdge?.to_marker_id === fromMarker && currentEdge.from_marker_id !== fromMarker) {
-    return dijkstra(
-      layout,
-      fromMarker,
-      toMarker,
-      { from_marker_id: fromMarker, to_marker_id: currentEdge.from_marker_id },
-      currentEdge.from_marker_id,
-    );
+    return dijkstra(layout, fromMarker, toMarker, currentEdge.from_marker_id);
   }
-  return dijkstra(layout, fromMarker, toMarker, undefined, undefined);
+  return dijkstra(layout, fromMarker, toMarker, undefined);
 }
 
 /**
@@ -111,42 +121,39 @@ function planContinuing(
   if (!layout.hasMarker(continueTo)) return null;
   // The train arrives at `continueTo` from `fromMarker`; bar the U-turn back,
   // and (if `continueTo` is a turnout reached via a leg) the leg-to-leg cross.
-  const rest = dijkstra(
-    layout,
-    continueTo,
-    toMarker,
-    { from_marker_id: continueTo, to_marker_id: fromMarker },
-    fromMarker,
-  );
+  const rest = dijkstra(layout, continueTo, toMarker, fromMarker);
   return rest === null ? null : [head, ...rest];
 }
 
 /**
- * Plain Dijkstra from `fromMarker` to `toMarker`, optionally refusing a single
- * `forbidEdge` (used to bar an immediate U-turn). `forbidEdge`'s `from` is
- * always the source, which a simple shortest path only ever leaves once, so
- * barring it globally bars exactly the first step.
+ * Dijkstra over (marker, arrival-direction) states from `fromMarker` to
+ * `toMarker`. `startArrivedFrom` seeds the heading the caller is committed to:
+ * the search will not reverse straight back onto it (nor, at a turnout, cross
+ * leg-to-leg through it). Pass `undefined` for a standing train with no
+ * heading — then any initial direction is allowed.
  */
 function dijkstra(
   layout: LayoutState,
   fromMarker: string,
   toMarker: string,
-  forbidEdge: EdgeRef | undefined,
   startArrivedFrom: string | undefined,
 ): ReadonlyArray<EdgeRef> | null {
   if (fromMarker === toMarker) return [];
-  const bestCost = new Map<string, number>([[fromMarker, 0]]);
-  const cameFrom = new Map<string, { fromMarkerId: string; edge: EdgeRef }>();
-  const frontier: FrontierEntry[] = [{ marker: fromMarker, cost: 0 }];
+  const startKey = stateKey(fromMarker, startArrivedFrom);
+  const bestCost = new Map<string, number>([[startKey, 0]]);
+  const cameFrom = new Map<string, { fromKey: string; edge: EdgeRef }>();
+  const frontier: FrontierEntry[] = [
+    { marker: fromMarker, arrivedFrom: startArrivedFrom, cost: 0 },
+  ];
 
   while (frontier.length > 0) {
     const current = popLowestCost(frontier);
     if (!current) break;
     if (isStale(current, bestCost)) continue;
     if (current.marker === toMarker) {
-      return reconstructTransit(cameFrom, fromMarker, toMarker);
+      return reconstructTransit(cameFrom, startKey, current);
     }
-    relaxNeighbours(layout, current, bestCost, cameFrom, frontier, forbidEdge, startArrivedFrom);
+    relaxNeighbours(layout, current, bestCost, cameFrom, frontier);
   }
 
   return null;
@@ -168,7 +175,7 @@ function popLowestCost(frontier: FrontierEntry[]): FrontierEntry | undefined {
 }
 
 function isStale(entry: FrontierEntry, bestCost: Map<string, number>): boolean {
-  const settled = bestCost.get(entry.marker);
+  const settled = bestCost.get(stateKey(entry.marker, entry.arrivedFrom));
   return settled !== undefined && entry.cost > settled;
 }
 
@@ -176,54 +183,51 @@ function relaxNeighbours(
   layout: LayoutState,
   current: FrontierEntry,
   bestCost: Map<string, number>,
-  cameFrom: Map<string, { fromMarkerId: string; edge: EdgeRef }>,
+  cameFrom: Map<string, { fromKey: string; edge: EdgeRef }>,
   frontier: FrontierEntry[],
-  forbidEdge: EdgeRef | undefined,
-  startArrivedFrom: string | undefined,
 ): void {
-  // How we reached this marker: its predecessor in the search, or — at the
-  // start node, which has no predecessor — the heading the caller seeded. Used
-  // to bar leg-to-leg moves through a turnout.
-  const arrivedFrom = cameFrom.get(current.marker)?.fromMarkerId ?? startArrivedFrom;
+  // How we reached this marker is carried IN the search state, so the leg-to-leg
+  // bar reflects this exact arrival — not whichever arrival happened to settle
+  // the marker first.
+  const arrivedFrom = current.arrivedFrom;
+  const fromKey = stateKey(current.marker, arrivedFrom);
   for (const edge of layout.edgesFrom(current.marker)) {
-    if (
-      forbidEdge !== undefined &&
-      edge.from_marker_id === forbidEdge.from_marker_id &&
-      edge.to_marker_id === forbidEdge.to_marker_id
-    ) {
-      continue;
-    }
+    // No immediate U-turn: a train with a heading never reverses straight back
+    // onto the edge it just arrived on. (A standing train — arrivedFrom
+    // undefined — has no heading to reverse, so this never bites the start.)
+    if (edge.to_marker_id === arrivedFrom) continue;
     if (isLegToLegMove(layout, current.marker, arrivedFrom, edge.to_marker_id)) continue;
     const stepCost = edge.estimated_length_mm ?? 1;
     const nextCost = current.cost + stepCost;
-    const known = bestCost.get(edge.to_marker_id);
+    const nextKey = stateKey(edge.to_marker_id, current.marker);
+    const known = bestCost.get(nextKey);
     if (known !== undefined && nextCost >= known) continue;
-    bestCost.set(edge.to_marker_id, nextCost);
-    cameFrom.set(edge.to_marker_id, {
-      fromMarkerId: current.marker,
+    bestCost.set(nextKey, nextCost);
+    cameFrom.set(nextKey, {
+      fromKey,
       edge: { from_marker_id: edge.from_marker_id, to_marker_id: edge.to_marker_id },
     });
-    frontier.push({ marker: edge.to_marker_id, cost: nextCost });
+    frontier.push({ marker: edge.to_marker_id, arrivedFrom: current.marker, cost: nextCost });
   }
 }
 
 function reconstructTransit(
-  cameFrom: Map<string, { fromMarkerId: string; edge: EdgeRef }>,
-  fromMarker: string,
-  toMarker: string,
+  cameFrom: Map<string, { fromKey: string; edge: EdgeRef }>,
+  startKey: string,
+  goal: FrontierEntry,
 ): ReadonlyArray<EdgeRef> {
   const reversed: EdgeRef[] = [];
-  let cursor = toMarker;
-  while (cursor !== fromMarker) {
+  let cursor = stateKey(goal.marker, goal.arrivedFrom);
+  while (cursor !== startKey) {
     const step = cameFrom.get(cursor);
     if (!step) {
-      // Defensive — reconstruct should only run after we popped `toMarker`
+      // Defensive — reconstruct should only run after we popped the goal state
       // with a complete predecessor chain. If we hit this, the planner's
       // book-keeping has gone wrong.
       throw new Error(`planner: missing predecessor for ${cursor}`);
     }
     reversed.push(step.edge);
-    cursor = step.fromMarkerId;
+    cursor = step.fromKey;
   }
   return reversed.reverse();
 }

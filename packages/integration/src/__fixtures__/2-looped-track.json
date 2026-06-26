@@ -1,0 +1,352 @@
+[
+  {
+    "id": "curve-tight-4",
+    "type": "curve-tight",
+    "position": {
+      "x": 778.4915877220692,
+      "y": 673.396375149997
+    },
+    "rotationDeg": 123.54225937775288,
+    "tagged": false
+  },
+  {
+    "id": "straight-6",
+    "type": "straight",
+    "position": {
+      "x": 749.0199696639409,
+      "y": 838.7714092410599
+    },
+    "rotationDeg": 355.92015368818915,
+    "tagged": false
+  },
+  {
+    "id": "curve-7",
+    "type": "curve",
+    "position": {
+      "x": 926.1817368283836,
+      "y": 841.4815800350374
+    },
+    "rotationDeg": 355.9827928255794,
+    "tagged": false
+  },
+  {
+    "id": "curve-tight-8",
+    "type": "curve-tight",
+    "position": {
+      "x": 79.9492216147919,
+      "y": 721.0562158544025
+    },
+    "rotationDeg": 169.90623478363057,
+    "tagged": false
+  },
+  {
+    "id": "curve-tight-9",
+    "type": "curve-tight",
+    "position": {
+      "x": 18.049428171545614,
+      "y": 676.451349374017
+    },
+    "rotationDeg": 216.6466573624736,
+    "tagged": false
+  },
+  {
+    "id": "curve-10",
+    "type": "curve",
+    "position": {
+      "x": 6.2020995529408935,
+      "y": 561.66863181205
+    },
+    "rotationDeg": 259.6630361256569,
+    "tagged": false
+  },
+  {
+    "id": "curve-11",
+    "type": "curve",
+    "position": {
+      "x": 93.36373364804865,
+      "y": 435.86886350212137
+    },
+    "rotationDeg": 304.7700513018879,
+    "tagged": false
+  },
+  {
+    "id": "straight-12",
+    "type": "straight",
+    "position": {
+      "x": 264.51732475487734,
+      "y": 390.2534082695714
+    },
+    "rotationDeg": 350.1886160471349,
+    "tagged": false
+  },
+  {
+    "id": "curve-1",
+    "type": "curve",
+    "position": {
+      "x": 839.4884932025335,
+      "y": 575.2303041014973
+    },
+    "rotationDeg": 81.67824431633825,
+    "tagged": false
+  },
+  {
+    "id": "curve-2",
+    "type": "curve",
+    "position": {
+      "x": 818.551971095126,
+      "y": 423.34689365169356
+    },
+    "rotationDeg": 37.62468686473322,
+    "tagged": false
+  },
+  {
+    "id": "curve-3",
+    "type": "curve",
+    "position": {
+      "x": 696.8242738100032,
+      "y": 330.9029002690139
+    },
+    "rotationDeg": -8.196239020232298,
+    "tagged": false
+  },
+  {
+    "id": "straight-4",
+    "type": "straight",
+    "position": {
+      "x": 589.2587225610819,
+      "y": 331.3777700024808
+    },
+    "rotationDeg": 351.117837117989,
+    "tagged": false,
+    "lengthMm": 60
+  },
+  {
+    "id": "train-5",
+    "type": "train",
+    "position": {
+      "x": 939.108423284692,
+      "y": 473.14674757844784
+    },
+    "rotationDeg": 45,
+    "tagged": false
+  },
+  {
+    "id": "junction-1",
+    "type": "junction",
+    "position": {
+      "x": 426.1811541700457,
+      "y": 735.6925470861232
+    },
+    "rotationDeg": -5.673724734844843,
+    "tagged": false
+  },
+  {
+    "id": "curve-tight-2",
+    "type": "curve-tight",
+    "position": {
+      "x": 304.6809662543393,
+      "y": 768.502661916138
+    },
+    "rotationDeg": 169.32446426586523,
+    "tagged": false
+  },
+  {
+    "id": "junction-3",
+    "type": "junction",
+    "position": {
+      "x": 461.1534918246485,
+      "y": 353.46395102277626
+    },
+    "rotationDeg": 349.94805366124075,
+    "tagged": false,
+    "flipped": true
+  },
+  {
+    "id": "station-4",
+    "type": "station",
+    "position": {
+      "x": 634.094613575231,
+      "y": 707.1323751082433
+    },
+    "rotationDeg": 350.22601303513767,
+    "tagged": false
+  },
+  {
+    "id": "curve-5",
+    "type": "curve",
+    "position": {
+      "x": 571.7482178486692,
+      "y": 836.970563707289
+    },
+    "rotationDeg": 40.31027720057701,
+    "tagged": false,
+    "flipped": true
+  },
+  {
+    "id": "straight-6",
+    "type": "straight",
+    "position": {
+      "x": 749.0199696639409,
+      "y": 838.7714092410599
+    },
+    "rotationDeg": 355.92015368818915,
+    "tagged": false
+  },
+  {
+    "id": "curve-7",
+    "type": "curve",
+    "position": {
+      "x": 926.1817368283836,
+      "y": 841.4815800350374
+    },
+    "rotationDeg": 355.9827928255794,
+    "tagged": false
+  },
+  {
+    "id": "curve-8",
+    "type": "curve",
+    "position": {
+      "x": 196.99154798347277,
+      "y": 722.6259510099842
+    },
+    "rotationDeg": -10.675535712326369,
+    "tagged": false
+  },
+  {
+    "id": "curve-9",
+    "type": "curve",
+    "position": {
+      "x": 1061.9151791749737,
+      "y": 918.5192584925906
+    },
+    "rotationDeg": 40.672743257339015,
+    "tagged": false,
+    "flipped": true
+  },
+  {
+    "id": "curve-12",
+    "type": "curve",
+    "position": {
+      "x": 1217.2835460808262,
+      "y": 893.996997349775
+    },
+    "rotationDeg": 352.7112072660832,
+    "tagged": false,
+    "flipped": true
+  },
+  {
+    "id": "curve-13",
+    "type": "curve",
+    "position": {
+      "x": 1310.2856600489104,
+      "y": 772.5899698623363
+    },
+    "rotationDeg": 82.19559849261012,
+    "tagged": false
+  },
+  {
+    "id": "curve-14",
+    "type": "curve",
+    "position": {
+      "x": 1288.362055160158,
+      "y": 621.3372093675829
+    },
+    "rotationDeg": 36.3095968930687,
+    "tagged": false
+  },
+  {
+    "id": "curve-15",
+    "type": "curve",
+    "position": {
+      "x": 1182.1643727710846,
+      "y": 506.9730059798659
+    },
+    "rotationDeg": 215.43133112519817,
+    "tagged": false,
+    "flipped": false
+  },
+  {
+    "id": "curve-17",
+    "type": "curve",
+    "position": {
+      "x": 1088.0796710879413,
+      "y": 165.40476119437338
+    },
+    "rotationDeg": 33.4254347731299,
+    "tagged": false
+  },
+  {
+    "id": "curve-18",
+    "type": "curve",
+    "position": {
+      "x": 960.0313017372689,
+      "y": 81.81295901604832
+    },
+    "rotationDeg": 347.84871613340886,
+    "tagged": false
+  },
+  {
+    "id": "straight-19",
+    "type": "straight",
+    "position": {
+      "x": 828.4319639551259,
+      "y": 92.67936792350189
+    },
+    "rotationDeg": 348.3000857333013,
+    "tagged": false,
+    "lengthMm": 110
+  },
+  {
+    "id": "curve-tight-20",
+    "type": "curve-tight",
+    "position": {
+      "x": 738.5801548774053,
+      "y": 118.89255531327976
+    },
+    "rotationDeg": 168.54576602836238,
+    "tagged": false,
+    "flipped": true
+  },
+  {
+    "id": "curve-tight-21",
+    "type": "curve-tight",
+    "position": {
+      "x": 683.3583409032701,
+      "y": 174.0294237547718
+    },
+    "rotationDeg": 124.04243762614355,
+    "tagged": false
+  },
+  {
+    "id": "curve-22",
+    "type": "curve",
+    "position": {
+      "x": 574.6087142978647,
+      "y": 217.32705878862703
+    },
+    "rotationDeg": 304.7895191173101,
+    "tagged": false
+  },
+  {
+    "id": "station-23",
+    "type": "station",
+    "position": {
+      "x": 1135.6785314476608,
+      "y": 325.64180853663265
+    },
+    "rotationDeg": 260.1852756369122,
+    "tagged": false
+  },
+  {
+    "id": "train-24",
+    "type": "train",
+    "position": {
+      "x": 264.51732475487734,
+      "y": 390.2534082695714
+    },
+    "rotationDeg": 0,
+    "tagged": false,
+    "colorId": "green",
+    "flipped": false
+  }
+]
