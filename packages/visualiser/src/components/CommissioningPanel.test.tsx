@@ -31,8 +31,8 @@ function deliverDevice(
   act(() => client.deliver({ topic: `railway/state/devices/${id}`, payload: encode(snapshot) }));
 }
 
-describe('CommissioningPanel — scan → commission → device row shows name + length', () => {
-  it('drives the real UI: a registered train is named + measured, then surfaces in the roster', () => {
+describe('CommissioningPanel — scan → commission (no naming) → device row', () => {
+  it('drives the real UI: a train is measured (NOT named — ADR-035), then surfaces in the roster', () => {
     const client = new InMemoryBrokerSubscriber();
     client.connect('inmem://');
     renderUi(client);
@@ -46,12 +46,10 @@ describe('CommissioningPanel — scan → commission → device row shows name +
       'train',
     );
 
-    // Operator names it and enters the measured length, then confirms.
-    act(() =>
-      fireEvent.change(within(row).getByTestId('commission-name-T1'), {
-        target: { value: 'Flying Scotsman' },
-      }),
-    );
+    // There is NO name prompt — the operator never names a piece (ADR-035).
+    expect(within(row).queryByTestId('commission-name-T1')).toBeNull();
+
+    // Operator enters the measured length only, then confirms.
     act(() =>
       fireEvent.change(within(row).getByTestId('commission-length-T1'), {
         target: { value: '180' },
@@ -59,7 +57,8 @@ describe('CommissioningPanel — scan → commission → device row shows name +
     );
     act(() => fireEvent.click(within(row).getByTestId('commission-confirm-T1')));
 
-    // The UI → ViewModel → broker path published a device re-announce with the profile.
+    // The UI → ViewModel → broker path published a device re-announce with the
+    // measured length and NO operator name.
     const reg = client.published.find((m) => m.topic === 'railway/events/device_registered/T1');
     expect(reg).toBeDefined();
     const payload = (
@@ -67,21 +66,20 @@ describe('CommissioningPanel — scan → commission → device row shows name +
         payload: { name?: string; train_length_mm?: number };
       }
     ).payload;
-    expect(payload).toMatchObject({ name: 'Flying Scotsman', train_length_mm: 180 });
+    expect(payload.train_length_mm).toBe(180);
+    expect(payload.name ?? '').toBe(''); // no operator name
 
     // Item left the commission queue.
     expect(screen.queryByTestId('commission-item-T1')).toBeNull();
 
-    // The server merges name/livery/length into the retained snapshot (proven in
-    // core). Simulate that echo; the DEVICE ROW then shows the name + length.
+    // The server merges the length into the retained snapshot; the DEVICE ROW
+    // then shows the length (the device id stands in for a name).
     deliverDevice(client, 'T1', {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
-      name: 'Flying Scotsman',
       train_length_mm: 180,
     });
 
     const deviceRow = screen.getByTestId('device-row-T1');
-    expect(deviceRow.textContent).toContain('Flying Scotsman');
     expect(within(deviceRow).getByTestId('device-length-T1').textContent).toBe('180 mm');
   });
 

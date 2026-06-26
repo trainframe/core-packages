@@ -5,10 +5,12 @@ import { useCommissioning } from '../state/use-commissioning.js';
 /**
  * Operator-facing device COMMISSIONING (garage setup). When a real device or a
  * track tag appears on the bus it carries only its self-declared facts; here the
- * operator classifies it (Track / Train / Device), names it, and — for a train —
- * enters its measured length, then confirms. The logic lives in the headless
- * `CommissioningView` (so the e-paper frontend binds to the same thing); this is
- * the React View. WHERE a track's marker sits is discovered later by driving.
+ * operator classifies it (Track / Train / Device) and — for a train — enters its
+ * measured length, then confirms. NO naming (ADR-035): a device self-declares
+ * its kind and track is just track, so naming every piece is needless friction.
+ * The logic lives in the headless `CommissioningView` (so the e-paper frontend
+ * binds the same thing); this is the React View. WHERE a track's marker sits is
+ * discovered later by driving.
  */
 export function CommissioningPanel() {
   const c = useCommissioning();
@@ -53,14 +55,9 @@ function CommissionRow({
           </option>
         ))}
       </select>
-      <input
-        type="text"
-        placeholder="Name"
-        aria-label="Name"
-        data-testid={`commission-name-${item.id}`}
-        value={item.name}
-        onChange={(e) => c.setName(item.id, e.target.value)}
-      />
+      {/* No operator NAME prompt (ADR-035): naming every piece is friction a
+          child shouldn't face — a device self-declares its kind, and track is
+          just track. The operator only classifies + (for a train) measures. */}
       {item.category === 'train' && (
         <input
           type="number"
