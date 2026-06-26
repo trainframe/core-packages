@@ -24,13 +24,13 @@ describe('computePlacement — free placement', () => {
     expect(p).toEqual({ x: 300, y: 200, rotationDeg: 0, connected: false });
   });
 
-  it('snaps a device piece (train) onto a nearby track marker (the rail)', () => {
-    const straight = piece('s1', 'straight', 450, 300, 0);
-    // Click near the straight's centre/marker (450, 300) — within the device
-    // snap capture radius. The train snaps onto the marker so it rides the rail.
+  it('snaps a device piece (train) onto the nearest point on the rail, where dropped', () => {
+    const straight = piece('s1', 'straight', 450, 300, 0); // rail along y=300, x∈[350,550]
+    // Drop a train at (500,300) — on the rail. It stays WHERE DROPPED on the rail
+    // (x≈500), not jerked to the piece centre (450). Riding the rail, not the centre.
     const p = computePlacement(500, 300, 'train', [straight]);
     expect(p.connected).toBe(true);
-    expect(p.x).toBe(450);
+    expect(p.x).toBe(500);
     expect(p.y).toBe(300);
   });
 
@@ -139,13 +139,14 @@ describe('computeMovePlacement — snaps on endpoint proximity, not centre', () 
     expect(dist(entry, { x: 550, y: 180 })).toBeLessThan(0.5);
   });
 
-  it('snaps a moved device piece (train) onto the nearest track marker', () => {
-    const anchor = piece('a1', 'straight', 450, 300, 0); // marker/centre at (450, 300)
+  it('snaps a moved device piece (train) onto the nearest point on the rail, where dropped', () => {
+    const anchor = piece('a1', 'straight', 450, 300, 0); // rail along y=300, x∈[350,550]
     const train = piece('t1', 'train', 0, 0, 0);
-    // Drag the train near the straight's centre (the marker) — it snaps onto it.
+    // Drag the train to (480,300) on the rail — it stays NEAR the drop on the rail
+    // (x≈480), not jerked to the piece centre (450).
     const p = computeMovePlacement(train, 480, 300, [anchor]);
     expect(p.connected).toBe(true);
-    expect(p.x).toBe(450);
+    expect(Math.abs(p.x - 480), `landed at ${p.x}, not near the drop (480)`).toBeLessThan(20);
     expect(p.y).toBe(300);
   });
 
@@ -165,16 +166,18 @@ describe('device snap invariant — placement point == spawn point (no pop)', ()
     const b = piece('b', 'straight', 500, 300, 0); // entry at (400,300) — adjacent
     const track = [a, b];
 
-    // Drop a train near piece A's centre/marker.
+    // Drop a train at (330,300) — on piece A's rail, near its marker end.
     const placement = computePlacement(330, 300, 'train', track);
     expect(placement.connected).toBe(true);
-    // It snapped onto A's centre exactly.
-    expect(placement.x).toBe(300);
+    // It snapped onto the RAIL where dropped (x≈330, on y=300) — not jerked to a
+    // centre — and stays on A's segment.
+    expect(Math.abs(placement.x - 330), `landed at ${placement.x}`).toBeLessThan(40);
     expect(placement.y).toBe(300);
 
-    // Drive the REAL spawn selector at the snapped position: it must resolve to
-    // marker M-a (the marker the train was snapped onto) — proving the on-canvas
-    // placement point equals the simulator's spawn point.
+    // Drive the REAL spawn selector at the snapped position: it must STILL resolve
+    // to marker M-a (the marker nearest the on-rail placement), so the train spawns
+    // onto the right edge with no pop — the toy-table seats the body via
+    // seatNearest(piece.position), which is this same on-rail point.
     const layout = compileLayout(track, 'inv');
     const startEdge = nearestStartEdge(layout, { x: placement.x, y: placement.y });
     expect(startEdge).toBeDefined();

@@ -28,6 +28,7 @@ import {
   type RotationDeg,
   type TrackPiece,
   type TrackPieceType,
+  getCentreLinePathAt,
   getEndpoints,
   isDevicePiece,
   layerOf,
@@ -189,14 +190,40 @@ function nearestOpenEndpoint(
 }
 
 /**
- * The nearest track marker (a non-device piece's centre) to `(x, y)` within
- * `DEVICE_SNAP_CAPTURE_MM`, or `undefined` if none is in reach. Device pieces
- * (train/gate/carriage) are NOT markers — `emitMarkers` skips them and so does
- * the simulator's spawn selector — so they are excluded as snap candidates.
- * Snapping a device piece onto this centre makes its on-canvas position equal
- * the marker the simulator spawns it onto (`nearestStartEdge`, distance 0).
+ * The nearest point ON a track rail (a non-device piece's CENTRE-LINE, not its
+ * centre) to `(x, y)` within `DEVICE_SNAP_CAPTURE_MM`, or `undefined` if no rail
+ * is in reach. Device pieces (train/gate/carriage) carry no rail and are excluded.
+ * Snapping a dropped device to the nearest rail point — the perpendicular foot —
+ * keeps it WHERE IT WAS DROPPED along the track (the operator's "it stays put"),
+ * rather than jerking it to the piece centre up to the whole capture radius away;
+ * it still rides the rail, and `nearestStartEdge` still resolves the on-rail point
+ * to the right spawn marker, so power-on does not pop.
  */
-function nearestMarkerCentre(
+/** The nearest point on ONE piece's rail centre-line to `(x, y)`, with its
+ *  distance — sampled over both half-paths (centre→each endpoint). `undefined`
+ *  for a piece with no centre-line (a device). */
+function nearestPointOnPieceRail(
+  piece: TrackPiece,
+  x: number,
+  y: number,
+): { readonly x: number; readonly y: number; readonly dist: number } | undefined {
+  const pose = { x: piece.position.x, y: piece.position.y, rotationDeg: piece.rotationDeg };
+  const SAMPLES = 12;
+  let best: { x: number; y: number; dist: number } | undefined;
+  const endpointCount = getEndpoints(piece).length;
+  for (let i = 0; i < endpointCount; i++) {
+    const path = getCentreLinePathAt(piece, pose, i);
+    if (path === undefined) continue;
+    for (let s = 0; s <= SAMPLES; s++) {
+      const pt = path.at((s / SAMPLES) * path.length);
+      const d = distance(x, y, pt.x, pt.y);
+      if (best === undefined || d < best.dist) best = { x: pt.x, y: pt.y, dist: d };
+    }
+  }
+  return best;
+}
+
+function nearestRailPoint(
   x: number,
   y: number,
   pieces: ReadonlyArray<TrackPiece>,
@@ -206,13 +233,13 @@ function nearestMarkerCentre(
   let bestDist = DEVICE_SNAP_CAPTURE_MM;
   for (const p of pieces) {
     if (isDevicePiece(p.type)) continue;
-    // Gate on layer so a train dropped on the upper deck snaps to an upper
-    // marker, not the ground marker directly beneath it.
+    // Gate on layer so a train dropped on the upper deck snaps to an upper rail,
+    // not the ground rail directly beneath it.
     if (layerOf(p) !== activeLayer) continue;
-    const d = distance(x, y, p.position.x, p.position.y);
-    if (d <= bestDist) {
-      bestDist = d;
-      best = { x: p.position.x, y: p.position.y };
+    const cand = nearestPointOnPieceRail(p, x, y);
+    if (cand !== undefined && cand.dist <= bestDist) {
+      bestDist = cand.dist;
+      best = { x: cand.x, y: cand.y };
     }
   }
   return best;
@@ -234,11 +261,11 @@ function placeDevicePiece(
   pieces: ReadonlyArray<TrackPiece>,
   activeLayer: number,
 ): Placement {
-  const marker = nearestMarkerCentre(x, y, pieces, activeLayer);
-  if (marker === undefined) {
+  const onRail = nearestRailPoint(x, y, pieces, activeLayer);
+  if (onRail === undefined) {
     return { x, y, rotationDeg, connected: false };
   }
-  return { x: marker.x, y: marker.y, rotationDeg, connected: true };
+  return { x: onRail.x, y: onRail.y, rotationDeg, connected: true };
 }
 
 /**
