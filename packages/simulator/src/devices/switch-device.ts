@@ -112,6 +112,7 @@ export class SwitchDevice {
       capabilities: ['core.controls_switch'],
       device_kind_hint: 'mainline-switch',
       controls_marker_id: this.d.junctionMarkerId,
+      valid_positions: [...this.d.positions],
     });
   }
 

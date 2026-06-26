@@ -53,7 +53,7 @@ const JUNCTION_LAYOUT: Layout = {
     { from_marker_id: 'JCT', to_marker_id: 'MAIN', requires_switch_state: 'main' },
     { from_marker_id: 'JCT', to_marker_id: 'DIV', requires_switch_state: 'divert' },
   ],
-  junctions: [{ marker_id: 'JCT', initial_state: 'main' }],
+  junctions: [{ marker_id: 'JCT', valid_positions: ['main', 'divert'], initial_state: 'main' }],
 };
 
 /* A junction whose two legs each LOOP BACK to the start — so a forward-only
@@ -74,7 +74,7 @@ const BRANCHED_LOOP: Layout = {
     { from_marker_id: 'JCT', to_marker_id: 'MB', requires_switch_state: 'branch' },
     { from_marker_id: 'MB', to_marker_id: 'M1', estimated_length_mm: 200 },
   ],
-  junctions: [{ marker_id: 'JCT', initial_state: 'main' }],
+  junctions: [{ marker_id: 'JCT', valid_positions: ['main', 'branch'], initial_state: 'main' }],
 };
 
 const FIXED_ID = '00000000-0000-4000-8000-000000000000';

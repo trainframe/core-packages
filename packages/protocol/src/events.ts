@@ -72,6 +72,16 @@ const DeviceRegisteredPayload = Type.Object({
    * switch's state but cannot throw it.
    */
   controls_marker_id: Type.Optional(Uuid),
+  /**
+   * The switch positions this device can be set to (e.g. `['main','divert']`) —
+   * 0.13.0. Only meaningful for devices declaring `core.controls_switch`. A
+   * device declares its own selectable positions so the server can discover a
+   * junction's legs without a layout being declared up front: in discovery mode
+   * the scheduler materialises a junction from this list, and LearnMode surveys
+   * each position in turn. OPTIONAL and additive — a switch that omits it can
+   * still be gated on a known position but cannot be surveyed.
+   */
+  valid_positions: Type.Optional(Type.Array(Type.String())),
 });
 
 export const DeviceRegistered = eventEnvelope('device_registered', DeviceRegisteredPayload);

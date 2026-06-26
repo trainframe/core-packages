@@ -48,7 +48,7 @@ export class LayoutState {
   private readonly switchDeviceByMarker = new Map<string, string>();
   private readonly junctionsByMarkerId = new Map<
     string,
-    { marker_id: string; initial_state?: string }
+    { marker_id: string; valid_positions?: string[]; initial_state?: string }
   >();
   /** Traversal counter per edge for discovery-mode confirmation (ADR-009). */
   private readonly traversalCounts = new Map<string, number>();
@@ -226,12 +226,44 @@ export class LayoutState {
   }
 
   /**
+   * Materialise a junction in DISCOVERY mode from a switch device's registration
+   * (ADR-035): a `core.controls_switch` device declaring `controls_marker_id` +
+   * `valid_positions` is the evidence that its marker is a junction with those
+   * selectable legs. Declared layouts populate `junctionsByMarkerId` via
+   * `loadFromLayout`; discovery has no declared junctions, so without this the
+   * marker is known only as `kind: 'junction'` and `junctionMarkerIds()` stays
+   * empty — LearnMode then has nothing to survey. Idempotent; upserts the marker
+   * as a junction if discovery hasn't seen it yet. A junction already recorded
+   * keeps its first entry (re-registration does not clobber a known one).
+   */
+  recordJunction(markerId: string, validPositions: ReadonlyArray<string>): void {
+    if (!this.markers.has(markerId)) {
+      this.upsertMarker(markerId, 'junction');
+    }
+    if (this.junctionsByMarkerId.has(markerId)) return;
+    this.junctionsByMarkerId.set(markerId, {
+      marker_id: markerId,
+      valid_positions: [...validPositions],
+    });
+  }
+
+  /**
    * The marker ids of every known junction. LearnMode reads this to find the
    * junctions whose legs it must survey (throwing each toward a not-yet-traversed
    * outgoing leg).
    */
   junctionMarkerIds(): ReadonlyArray<string> {
     return [...this.junctionsByMarkerId.keys()];
+  }
+
+  /**
+   * The valid switch positions of a known junction, or `undefined` if the marker
+   * is not a junction. LearnMode reads this to survey each leg by position
+   * (throwing the switch to every position in turn) rather than relying on edges
+   * that may not yet carry `requires_switch_state`.
+   */
+  junctionPositions(junctionMarkerId: string): ReadonlyArray<string> | undefined {
+    return this.junctionsByMarkerId.get(junctionMarkerId)?.valid_positions;
   }
 
   /**
@@ -305,10 +337,19 @@ export class LayoutState {
 
     let added = false;
     if (!this.findEdge(fromMarkerId, toMarkerId)) {
+      /* ADR-035: a leg leaving a junction is tagged with the switch position
+         currently set, so the learned graph records which physical path the
+         train took (the divert leg carries `requires_switch_state: 'divert'`,
+         etc.). Non-junction edges, and junction legs traversed before any
+         position was commanded, stay untagged. */
+      const switchState = this.junctionsByMarkerId.has(fromMarkerId)
+        ? this.switchPositions.get(fromMarkerId)
+        : undefined;
       this.addEdgeInternal({
         from_marker_id: fromMarkerId,
         to_marker_id: toMarkerId,
         inferred: true,
+        ...(switchState === undefined ? {} : { requires_switch_state: switchState }),
       });
       added = true;
     }

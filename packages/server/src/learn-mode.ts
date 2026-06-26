@@ -1,5 +1,4 @@
 import type { LayoutState } from '@trainframe/core';
-import type { LayoutEdge } from '@trainframe/protocol';
 
 /**
  * Operator-facing state of the track-learn machine. Mirrors the retained
@@ -72,6 +71,14 @@ interface ActiveSession {
    * traversed, a junction is re-thrown at most once per leg.
    */
   readonly commandedSwitch: Map<string, string>;
+  /**
+   * Per-junction (marker id → set of switch positions) whose leg the train has
+   * actually traversed this session — recorded when a traversal leaves a junction
+   * while that position was commanded. Survey progress is driven by this, not by
+   * edge tags, so a leg first crossed under the switch's default (uncommanded)
+   * position still gets explicitly surveyed once its position is thrown.
+   */
+  readonly surveyedPositions: Map<string, Set<string>>;
   /** Current operator-visible state. */
   status: LearnModeStateName;
 }
@@ -177,6 +184,7 @@ export class LearnMode {
         visitedMarkers: new Set(),
         exploring: false,
         commandedSwitch: new Map(),
+        surveyedPositions: new Map(),
         status: 'waiting_for_train',
       };
       this.publishCurrentState();
@@ -205,6 +213,7 @@ export class LearnMode {
       visitedMarkers: new Set(),
       exploring: false,
       commandedSwitch: new Map(),
+      surveyedPositions: new Map(),
       status: 'driving',
     };
     if (seen !== undefined) {
@@ -248,7 +257,19 @@ export class LearnMode {
       this.session.startMarkerId = markerId;
     }
     if (this.session.lastMarkerId !== undefined && this.session.lastMarkerId !== markerId) {
-      this.session.visitedEdges.add(edgeKey(this.session.lastMarkerId, markerId));
+      const from = this.session.lastMarkerId;
+      this.session.visitedEdges.add(edgeKey(from, markerId));
+      /* If we just left a junction, the leg we took surveys the position that was
+         commanded there — record it so `armJunctions` advances to the next leg. */
+      const commanded = this.session.commandedSwitch.get(from);
+      if (commanded !== undefined && this.ports.layoutState.junctionPositions(from) !== undefined) {
+        let surveyed = this.session.surveyedPositions.get(from);
+        if (surveyed === undefined) {
+          surveyed = new Set();
+          this.session.surveyedPositions.set(from, surveyed);
+        }
+        surveyed.add(commanded);
+      }
     }
     this.session.lastMarkerId = markerId;
 
@@ -268,8 +289,11 @@ export class LearnMode {
     this.armJunctions();
 
     // Completion: back at the start marker with every outgoing edge from every
-    // visited marker already traversed — the reachable loop is fully mapped.
-    if (this.reachableGraphFullyTraversed(markerId)) {
+    // visited marker already traversed AND every junction's every leg surveyed.
+    // The junction guard is essential: a divert leg the train hasn't taken yet is
+    // not a known edge, so the edge-coverage check alone would declare the survey
+    // complete after a single loop — the very bug that left junctions unexplored.
+    if (this.allJunctionsSurveyed() && this.reachableGraphFullyTraversed(markerId)) {
       this.releaseTrain();
       this.session.status = 'complete';
       this.publishCurrentState();
@@ -293,9 +317,8 @@ export class LearnMode {
   private armJunctions(): void {
     if (!this.session) return;
     for (const junction of this.ports.layoutState.junctionMarkerIds()) {
-      const target = this.firstUntraversedLeg(junction);
-      const position = target?.requires_switch_state;
-      if (position === undefined) continue; // all legs surveyed (or none switched)
+      const position = this.firstUnsurveyedPosition(junction);
+      if (position === undefined) continue; // every position's leg surveyed (or none declared)
       if (this.session.commandedSwitch.get(junction) === position) continue; // already aimed
       const device = this.ports.layoutState.switchDeviceForMarker(junction);
       if (device === undefined) continue; // no controller registered yet
@@ -308,23 +331,33 @@ export class LearnMode {
   }
 
   /**
-   * The first not-yet-traversed outgoing leg of `junction`, by a stable order
-   * (switch position then destination marker) so the choice is deterministic.
-   * `undefined` when every leg has been traversed.
-   *
-   * A leg is throwable only if it carries `requires_switch_state` — which the
-   * layout inference (`compileLayout`) always emits for a junction's legs, and a
-   * declared layout always carries. (A junction whose legs were discovered as bare
-   * inferred edges with no switch state is not produced by the toy-table's
-   * inference, so it is out of scope here.)
+   * The first valid switch position of `junction` whose leg the train has NOT yet
+   * traversed this session, in the junction's declared `valid_positions` order so
+   * the choice is deterministic. `undefined` once every position is surveyed (or
+   * the marker is not a known junction). Survey progress is tracked per session
+   * (`surveyedPositions`), not read off edge tags, so a leg first crossed under
+   * the switch's default position is still explicitly surveyed once its position
+   * is thrown — which is what guarantees both legs are visited and the pass
+   * terminates.
    */
-  private firstUntraversedLeg(junction: string): LayoutEdge | undefined {
+  /** True once every known junction has had every one of its valid positions
+   *  surveyed (the train traversed each leg under a commanded switch position).
+   *  Until then the survey is not complete, no matter how the known-edge graph
+   *  looks — the unexplored legs are simply not edges yet. */
+  private allJunctionsSurveyed(): boolean {
+    if (!this.session) return false;
+    for (const junction of this.ports.layoutState.junctionMarkerIds()) {
+      if (this.firstUnsurveyedPosition(junction) !== undefined) return false;
+    }
+    return true;
+  }
+
+  private firstUnsurveyedPosition(junction: string): string | undefined {
     if (!this.session) return undefined;
-    const session = this.session;
-    return this.ports.layoutState
-      .edgesFrom(junction)
-      .filter((e) => !session.visitedEdges.has(edgeKey(e.from_marker_id, e.to_marker_id)))
-      .sort(compareLegs)[0];
+    const positions = this.ports.layoutState.junctionPositions(junction);
+    if (positions === undefined) return undefined;
+    const surveyed = this.session.surveyedPositions.get(junction);
+    return positions.find((p) => surveyed === undefined || !surveyed.has(p));
   }
 
   /** Issue the open-ended exploration clearance once per session. */
@@ -391,15 +424,6 @@ export class LearnMode {
 
 function edgeKey(from: string, to: string): string {
   return `${from}->${to}`;
-}
-
-/** Stable total order over a junction's legs: by required switch position, then
- *  destination marker. Makes the surveyed-leg choice deterministic. */
-function compareLegs(a: LayoutEdge, b: LayoutEdge): number {
-  const sa = a.requires_switch_state ?? '';
-  const sb = b.requires_switch_state ?? '';
-  if (sa !== sb) return sa < sb ? -1 : 1;
-  return a.to_marker_id < b.to_marker_id ? -1 : a.to_marker_id > b.to_marker_id ? 1 : 0;
 }
 
 function extractTrainId(payload: unknown): string | undefined {

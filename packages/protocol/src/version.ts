@@ -62,5 +62,12 @@
  * could previously accept a kind that can't round-trip into the event). All
  * additive/tightening; names/kinds are presentation only — the scheduler still
  * reasons on capabilities + topology, never on these fields.
+ *
+ * 0.13.0 — device onboarding, ADR-035 (Phase 1). `valid_positions` added to
+ * `device_registered`: a `core.controls_switch` device declares the switch
+ * positions it can be set to, so the server can materialise a junction (and
+ * LearnMode survey its legs) in DISCOVERY mode without a declared layout.
+ * Additive optional field; bumps the protocol version but NOT the TCF registry
+ * epoch (a new field, not a new event type — per ADR-021 §3).
  */
-export const PROTOCOL_VERSION = '0.12.0' as const;
+export const PROTOCOL_VERSION = '0.13.0' as const;

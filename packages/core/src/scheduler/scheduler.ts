@@ -105,6 +105,9 @@ interface DeviceRegistrationView {
   /** The junction marker a `core.controls_switch` device actuates (0.12.0,
    *  first-class — previously read via an untyped cast). */
   readonly controls_marker_id?: string;
+  /** The selectable switch positions a `core.controls_switch` device declares
+   *  (0.13.0, ADR-035). Discovery materialises a junction with these legs. */
+  readonly valid_positions?: string[];
   /** Operator-authored presentation fields (0.12.0); echoed into retained state. */
   readonly name?: string;
   readonly livery?: string;
@@ -288,7 +291,9 @@ export class Scheduler {
       ownership.push(...this.recordZoneOwnership(deviceId, payload));
     }
     if (capabilities.includes('core.controls_switch')) {
-      ownership.push(...this.maybeRecordSwitchPairing(deviceId, reg.controls_marker_id));
+      ownership.push(
+        ...this.maybeRecordSwitchPairing(deviceId, reg.controls_marker_id, reg.valid_positions),
+      );
     }
 
     /* Retained device state. Carries operator-authored name/livery (0.12.0) so a
@@ -340,6 +345,7 @@ export class Scheduler {
   private maybeRecordSwitchPairing(
     deviceId: string,
     controlsMarkerId: string | undefined,
+    validPositions: ReadonlyArray<string> | undefined,
   ): ReadonlyArray<SchedulerEffect> {
     if (controlsMarkerId === undefined) return [];
     const owner = this.zoneOwnedMarkers.get(controlsMarkerId);
@@ -352,6 +358,12 @@ export class Scheduler {
       ];
     }
     this.layout.recordSwitchPairing(deviceId, controlsMarkerId);
+    /* ADR-035: a switch declaring its positions IS the discovery-mode evidence
+       that its marker is a junction with those legs. Without this, discovery
+       never populates `junctionMarkerIds()` and LearnMode cannot survey it. */
+    if (validPositions !== undefined && validPositions.length > 0) {
+      this.layout.recordJunction(controlsMarkerId, validPositions);
+    }
     return [];
   }
 

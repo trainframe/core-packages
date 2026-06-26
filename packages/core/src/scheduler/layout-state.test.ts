@@ -257,6 +257,47 @@ describe('LayoutState — switch pairing', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Discovery-mode junction materialisation (ADR-035)
+// ---------------------------------------------------------------------------
+
+describe('LayoutState.recordJunction (discovery materialisation, ADR-035)', () => {
+  const discovery = (): LayoutState =>
+    new LayoutState({ name: 'discovery', markers: [], edges: [], junctions: [] }, { now: () => 0 });
+
+  it('surfaces a discovered junction via junctionMarkerIds / junctionPositions', () => {
+    const layout = discovery();
+    expect(layout.junctionMarkerIds()).toEqual([]);
+    expect(layout.junctionPositions('JCT')).toBeUndefined();
+
+    layout.recordJunction('JCT', ['main', 'divert']);
+
+    expect(layout.junctionMarkerIds()).toEqual(['JCT']);
+    expect(layout.junctionPositions('JCT')).toEqual(['main', 'divert']);
+    /* Upserts the marker as a junction when discovery hasn't seen it yet. */
+    expect(layout.getMarker('JCT')?.kind).toBe('junction');
+  });
+
+  it('is idempotent — a re-registration keeps the first positions', () => {
+    const layout = discovery();
+    layout.recordJunction('JCT', ['main', 'divert']);
+    layout.recordJunction('JCT', ['something-else']);
+    expect(layout.junctionPositions('JCT')).toEqual(['main', 'divert']);
+  });
+
+  it('tags a junction leg with the active switch position when first traversed', () => {
+    const layout = discovery();
+    layout.upsertMarker('JCT', 'junction');
+    layout.upsertMarker('LEG', 'block_boundary');
+    layout.recordJunction('JCT', ['main', 'divert']);
+    layout.setSwitchPosition('JCT', 'divert');
+
+    layout.recordTraversal('JCT', 'LEG');
+
+    expect(layout.findEdge('JCT', 'LEG')?.requires_switch_state).toBe('divert');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Pruning orphaned markers
 // ---------------------------------------------------------------------------
 

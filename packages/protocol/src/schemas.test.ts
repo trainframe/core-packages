@@ -346,8 +346,8 @@ describe('DeviceRetainedState', () => {
 });
 
 describe('garage commissioning protocol additions (0.12.0)', () => {
-  it('PROTOCOL_VERSION is 0.12.0 (commissioning fields landed)', () => {
-    expect(PROTOCOL_VERSION).toBe('0.12.0');
+  it('PROTOCOL_VERSION is 0.13.0 (device-onboarding valid_positions landed, ADR-035)', () => {
+    expect(PROTOCOL_VERSION).toBe('0.13.0');
   });
 
   it('DeviceRegistered accepts an operator name, livery, and a first-class controls_marker_id', () => {
@@ -369,6 +369,21 @@ describe('garage commissioning protocol additions (0.12.0)', () => {
   it('DeviceRegistered rejects a controls_marker_id that is not a UUID', () => {
     const payload = { capabilities: [], device_kind_hint: 'switch', controls_marker_id: 'M-junk' };
     expect(Value.Check(DeviceRegistered, baseEnvelope('device_registered', payload))).toBe(false);
+  });
+
+  it('DeviceRegistered accepts valid_positions for a switch (ADR-035), and stays valid without it', () => {
+    const withPositions = {
+      capabilities: ['core.controls_switch'],
+      device_kind_hint: 'mainline-switch',
+      controls_marker_id: VALID_UUID,
+      valid_positions: ['main', 'divert'],
+    };
+    expect(Value.Check(DeviceRegistered, baseEnvelope('device_registered', withPositions))).toBe(
+      true,
+    );
+    /* Additive: a device that omits it is still valid. */
+    const without = { capabilities: ['core.controls_switch'], device_kind_hint: 'mainline-switch' };
+    expect(Value.Check(DeviceRegistered, baseEnvelope('device_registered', without))).toBe(true);
   });
 
   it('DeviceRetainedState carries the operator name + livery (a late joiner sees them)', () => {

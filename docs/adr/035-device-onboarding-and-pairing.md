@@ -269,6 +269,21 @@ A new event *type* bumps both `PROTOCOL_VERSION` and the TCF registry epoch
   marker-known-at-construction to marker-via-association, touching its announce,
   command filters, and manifest (gotchas 2–3). Phasing contains this: Phase 1
   needs none of it; the switch leads in Phase 2; the rest follow.
+- **Forward-only survey has a real ceiling: trailing junctions.** A junction the
+  train meets FACING (entering from the trunk) is fully surveyed — the switch is
+  thrown to each position and the loco drives out onto each leg, so the directed
+  trunk→leg edges are learned. A junction it only ever meets TRAILING (entering
+  from a leg, merging to the trunk) has both leg *tracks* traversed, but its
+  directed trunk→leg edges cannot be learned forward-only: that needs a facing
+  approach, which is the reverse way round the junction's loop. Phase 1 therefore
+  defines "learn the track" as full TRACK coverage of every reachable
+  connection + completion, and the live gate asserts exactly that (proven on the
+  operator's real layout, whose `junction-3` is facing and `junction-23` is
+  trailing). Learning the directed trunk→leg edges of a trailing junction needs a
+  reverse-aware pass — deliberately deferred, since "forward-only" is a stated
+  design principle (ADR-022 makes reverse special-circumstance). Not silently
+  omitted: it is the open follow-up for whether full directed-edge learning is
+  worth a bounded reverse step.
 - **Deferred:** the heartbeat/duty-cycle reconciliation for sleepy constrained
   locos (gotcha 5), composite-peer fan-out (gotcha 6), and marker persistence
   semantics, all called out for Phase 3+.
