@@ -308,6 +308,41 @@ describe('ToyHardware — placement is inert; only the scan flow commissions', (
     }
   });
 
+  it('a running train holds its pose across the FULL render sync (syncLayout THEN syncLive)', () => {
+    // The React hook calls syncLayout AND syncLive on every render. A topology
+    // edit therefore rebuilds the world TWICE: syncLayout (snapshots + re-seats)
+    // then syncLive (rebuilds again). If only the first snapshots, the second
+    // re-seats the train at its piece.position — it teleports. This drives the
+    // real sequence; the train must hold its driven pose, not snap to placement.
+    const client = new InMemoryBrokerClient();
+    client.connect('inmem://');
+    const hardware = new ToyHardware({ client, newId, maxTickMs: 1000 });
+    try {
+      const { pieces, train } = twoStraightsAndATrain();
+      const deviceId = `T-${train.id}`;
+      hardware.syncLayout(pieces);
+      hardware.syncLive(pieces, new Set([train.id]));
+      driveExploration(client, deviceId);
+      for (let i = 0; i < 3; i++) hardware.tick(200);
+      const advancedX = locoPose(hardware, deviceId)?.x ?? 0;
+      expect(advancedX).toBeGreaterThan(150);
+
+      // Edit elsewhere, exactly as the hook reconciles: BOTH calls.
+      const extra = piece('straight', 500, 100);
+      const edited = [...pieces, extra];
+      hardware.syncLayout(edited);
+      hardware.syncLive(edited, new Set([train.id]));
+
+      const afterX = locoPose(hardware, deviceId)?.x ?? 0;
+      expect(
+        Math.abs(afterX - advancedX),
+        `train teleported from x=${advancedX} to x=${afterX} (placement ~110)`,
+      ).toBeLessThan(30);
+    } finally {
+      hardware.dispose();
+    }
+  });
+
   it('caps tick advance at maxTickMs (a backgrounded tab cannot fast-forward minutes)', () => {
     const client = new InMemoryBrokerClient();
     client.connect('inmem://');

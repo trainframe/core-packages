@@ -412,10 +412,8 @@ export class ToyHardware {
    *  operator still has scanned on the fresh world. */
   private rebuild(pieces: ReadonlyArray<TrackPiece>, topology: string): void {
     this.topology = topology;
-    this.pendingDeviceState = this.snapshotDeviceState();
-    /* Capture running trains BEFORE teardown (the old world + devices are still
-     *  live here) so each is restored at its current pose, still driving. */
-    this.pendingTrainState = this.snapshotTrainState();
+    /* The running-train + device-state snapshot now happens in `rebuildDevices`
+       (so the syncLive rebuild that follows also preserves a running train). */
     const stillLive = this.lastLive;
     const piecesById = new Map<string, TrackPiece>();
     for (const p of pieces) piecesById.set(p.id, p);
@@ -434,6 +432,15 @@ export class ToyHardware {
    *  every live device on it. The gantry manages the operator's real slots in place; the
    *  world is ALWAYS `compileNetwork(pieces).net` (no synthetic yard, no translation). */
   private rebuildDevices(pieces: ReadonlyArray<TrackPiece>, liveIds: ReadonlySet<string>): void {
+    /* Snapshot running trains' poses + mechanical device state BEFORE teardown
+       (the old world + devices are still live here) so EVERY rebuild caller
+       preserves them — not just `rebuild()`. The React hook fires syncLayout
+       (→ rebuild, which snapshotted) THEN syncLive (→ this, directly); without a
+       snapshot here the second rebuild re-seated a running train at its piece
+       placement — a teleport on any track edit. Idempotent: a second rebuild in
+       the same render snapshots the already-re-seated pose. */
+    this.pendingDeviceState = this.snapshotDeviceState();
+    this.pendingTrainState = this.snapshotTrainState();
     this.teardownAllDevices();
     this.claimedCarriagePieceIds = new Set();
     this.compiled = compileNetwork(pieces);
