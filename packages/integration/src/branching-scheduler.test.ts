@@ -344,7 +344,16 @@ describe('Branching railyard on the REAL scheduler (headless gate)', () => {
   it('(c) queues multiple trains at the yard: deny-and-hold while full, FIFO admit on a freed slot', async () => {
     /* Capacity is 1 (demo default) and the yard starts empty. Route both T2 and
      *  T4 to the throat; one will be serviced, the other held short while the
-     *  zone is occupied. */
+     *  zone is occupied. Under ADR-036 all three trains are introduced, so an
+     *  unscheduled T1 would idle at its home stop holding that block; giving T1
+     *  a schedule keeps it moving. The assertions below count only T2/T4 at the
+     *  throat, so T1 also visiting the yard makes this a stricter 3-way queue. */
+    rig.harness.server.assignSchedule('T1', 'rA-express', [
+      'M-main-e',
+      'M-top',
+      'M-central',
+      'M-yard-throat',
+    ]);
     rig.harness.server.assignSchedule('T2', 'rB-yardturn', ['M-top', 'M-yard-throat', 'M-spur']);
     rig.harness.server.assignSchedule('T4', 'rD-reliever', [
       'M-branch-bot',
@@ -438,12 +447,20 @@ describe('Branching railyard on the REAL scheduler (headless gate)', () => {
      *  long right ascending straight, exactly the geometry that would expose a
      *  phantom 180° flip if the PLANNER ever U-turned the loco on the open line. We
      *  sample headings only while T1 is on those running-line segments, never
-     *  inside the opaque yard. */
+     *  inside the opaque yard. T2 and T4 are also introduced (ADR-036), so they
+     *  get their schedules to keep them moving and clear of T1's running-line path. */
     rig.harness.server.assignSchedule('T1', 'rA-express', [
       'M-main-e',
       'M-top',
       'M-central',
       'M-yard-throat',
+    ]);
+    rig.harness.server.assignSchedule('T2', 'rB-yardturn', ['M-top', 'M-yard-throat', 'M-spur']);
+    rig.harness.server.assignSchedule('T4', 'rD-reliever', [
+      'M-branch-bot',
+      'M-top',
+      'M-yard-throat',
+      'M-branch-bot',
     ]);
 
     /* The main-line cornered leg T1 sweeps from its home (`M-main-e`, on the right

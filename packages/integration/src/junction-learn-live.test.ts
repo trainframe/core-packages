@@ -111,7 +111,15 @@ beforeEach(() => {
   /* Real driving loco on the segment carrying its start marker. */
   const seg = compiled.segmentsForPiece.get('curve-16')?.[0];
   if (seg === undefined) throw new Error('no segment for the train start piece curve-16');
-  env.spawnTrain(TRAIN, { atMarker: START_MARKER, segment: seg, railPos: 30, facing: 1 });
+  /* ADR-036: discovery layout has no edges, so heading cannot be derived.
+   * The vector is established via the learn-track exploration roll (§3a). */
+  env.spawnTrain(TRAIN, {
+    atMarker: START_MARKER,
+    segment: seg,
+    railPos: 30,
+    facing: 1,
+    introduced: false,
+  });
 });
 
 afterEach(() => {

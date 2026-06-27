@@ -112,6 +112,8 @@ describe('Server — registers a train and grants its initial clearance', () => 
     publishWireEvent(client, 'device_registered', 'T1', {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
+    /* ADR-036 §3c: introduce the train with its known heading before routing. */
+    server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
 
     // Schedule [M1, M3]: brand-new train, no last_marker_id → scheduler
     // treats M1 as the spawn and the planner plans M1 → M2 → M3. Initial
@@ -155,6 +157,8 @@ describe('Server — gate clearance flow', () => {
       state: 'withholding',
       reason: 'crane busy',
     });
+    /* ADR-036 §3c: introduce the train at M1→M2 before routing. */
+    server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
 
     server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
@@ -253,6 +257,16 @@ describe('Server — operator commands on railway/operator/+', () => {
     publishWireEvent(client, 'device_registered', 'T1', {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
+    /* ADR-036 §3c: introduce via the operator MQTT topic before scheduling. */
+    client.publish(
+      'railway/operator/introduce_train',
+      new TextEncoder().encode(
+        JSON.stringify({
+          train_id: 'T1',
+          heading_edge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+        }),
+      ),
+    );
     // Publish the operator intent on the bus (the visualiser's path).
     client.publish(
       'railway/operator/assign_schedule',
@@ -306,6 +320,126 @@ describe('Server — operator commands on railway/operator/+', () => {
       new TextEncoder().encode(JSON.stringify({ foo: 'bar' })),
     );
     expect(true).toBe(true);
+  });
+
+  it('introduce_train with heading_edge introduces the train (§3c): it becomes routable', () => {
+    /* §3c path: operator publishes introduce_train with a heading_edge. The
+     * train must be introduced immediately — no introduce_train command to the
+     * device, no revoke_clearance; train_introduced IS published; and once
+     * introduced, assigning a schedule produces a grant_clearance. */
+    const { server, client } = makeServer();
+
+    /* Register tag bindings so the train can be routed. */
+    publishWireEvent(client, 'device_registered', 'GARAGE', {
+      capabilities: ['core.assigns_tags'],
+    });
+    for (const marker of ['M1', 'M2', 'M3', 'M4']) {
+      publishWireEvent(client, 'tag_assignment', 'GARAGE', {
+        tag_id: marker,
+        assigned_kind: 'marker',
+        target_id: marker,
+      });
+    }
+
+    publishWireEvent(client, 'device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+
+    /* Operator introduces via the MQTT operator topic with a heading_edge. */
+    client.publish(
+      'railway/operator/introduce_train',
+      new TextEncoder().encode(
+        JSON.stringify({
+          train_id: 'T1',
+          heading_edge: { from_marker_id: 'M1', to_marker_id: 'M2' },
+        }),
+      ),
+    );
+
+    /* No introduce_train command issued to the device (no roll). */
+    const introCmd = client.published
+      .filter((m) => m.topic === 'railway/commands/T1')
+      .map((m) => decode<{ command_type: string }>(m.payload))
+      .find((env) => env.command_type === 'introduce_train');
+    expect(introCmd).toBeUndefined();
+
+    /* No revoke_clearance (the train was stationary). */
+    const revokeCmd = client.published
+      .filter((m) => m.topic === 'railway/commands/T1')
+      .map((m) => decode<{ command_type: string }>(m.payload))
+      .find((env) => env.command_type === 'revoke_clearance');
+    expect(revokeCmd).toBeUndefined();
+
+    /* train_introduced event published so bus subscribers learn the vector. */
+    const trainIntroducedEvent = client.published
+      .filter((m) => m.topic === 'railway/events/train_introduced/server')
+      .map((m) =>
+        decode<{
+          event_type: string;
+          payload: { train_id: string; heading_edge: { from_marker_id: string } };
+        }>(m.payload),
+      )
+      .find((env) => env.event_type === 'train_introduced');
+    expect(trainIntroducedEvent).toBeDefined();
+    expect(trainIntroducedEvent?.payload.train_id).toBe('T1');
+    expect(trainIntroducedEvent?.payload.heading_edge.from_marker_id).toBe('M1');
+
+    /* Scheduler state: train is introduced and routable. */
+    expect(server.getScheduler().getTrainState('T1')?.introduced).toBe(true);
+
+    /* Assigning a schedule produces a clearance grant — the train is now routable. */
+    server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    const grant = client.published
+      .filter((m) => m.topic === 'railway/commands/T1')
+      .map((m) => decode<{ command_type: string }>(m.payload))
+      .find((env) => env.command_type === 'grant_clearance');
+    expect(grant).toBeDefined();
+  });
+
+  it('introduce_train without heading_edge sends introduce_train command to the device (§3a roll)', () => {
+    /* §3a path: no heading_edge supplied → scheduler sends the introduce_train
+     * command to the device to begin the two-marker roll. */
+    const { client } = makeServer();
+    publishWireEvent(client, 'device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+
+    client.publish(
+      'railway/operator/introduce_train',
+      new TextEncoder().encode(JSON.stringify({ train_id: 'T1' })),
+    );
+
+    const introCmd = client.published
+      .filter((m) => m.topic === 'railway/commands/T1')
+      .map((m) => decode<{ command_type: string }>(m.payload))
+      .find((env) => env.command_type === 'introduce_train');
+    expect(introCmd).toBeDefined();
+  });
+
+  it('introduce_train with a malformed heading_edge is silently ignored', () => {
+    /* Validates that the server-side guard rejects an ill-formed heading_edge. */
+    const { client } = makeServer();
+    publishWireEvent(client, 'device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+
+    client.publish(
+      'railway/operator/introduce_train',
+      new TextEncoder().encode(
+        JSON.stringify({
+          train_id: 'T1',
+          /* heading_edge present but missing required marker ID fields. */
+          heading_edge: { bad_field: 42 },
+        }),
+      ),
+    );
+
+    /* Neither a roll command nor an introduction occurred. */
+    const anyT1Cmd = client.published
+      .filter((m) => m.topic === 'railway/commands/T1')
+      .map((m) => decode<{ command_type: string }>(m.payload));
+    expect(anyT1Cmd).toHaveLength(0);
+    /* Train state unchanged — not introduced. */
   });
 });
 

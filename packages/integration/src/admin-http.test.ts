@@ -56,6 +56,8 @@ describe('Admin HTTP API', () => {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
+    /* ADR-036 §3c: introduce at M1→M2 before routing. */
+    harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
 
     const res = await post('/api/trains/T1/route', {
       route_id: 'route-1',
@@ -118,6 +120,9 @@ describe('Admin HTTP API', () => {
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
     await harness.testClient.waitForState('railway/state/devices/T2');
+    /* ADR-036 §3c: introduce both trains at M1→M2 before routing. */
+    harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
+    harness.server.introduceTrainWithVector('T2', { from_marker_id: 'M1', to_marker_id: 'M2' });
 
     harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
@@ -259,6 +264,8 @@ describe('Query HTTP API (ADR-020)', () => {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
+    /* ADR-036 §3c: introduce at M1→M2 before routing. */
+    harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
     harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
 
@@ -294,6 +301,8 @@ describe('Query HTTP API (ADR-020)', () => {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
+    /* ADR-036 §3c: introduce at M1→M2 before routing. */
+    harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
     harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
 

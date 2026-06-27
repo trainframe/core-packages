@@ -36,6 +36,8 @@ describe('Clearance flow through a real broker', () => {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
+    /* ADR-036 §3c: introduce with known heading before routing. */
+    harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
 
     harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
@@ -62,6 +64,8 @@ describe('Clearance flow through a real broker', () => {
     // assign time (not only on arrival at M2), so the withhold must be in effect
     // BEFORE we assign — wait for it to round-trip the broker to the server.
     await harness.testClient.waitForEvent('gate_state_changed', 'GATE-M3');
+    /* ADR-036 §3c: introduce with known heading before routing. */
+    harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
 
     harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance'); // initial M2 grant
@@ -96,6 +100,8 @@ describe('Clearance flow through a real broker', () => {
     // Order the withhold before the synchronous assign (the proactive horizon
     // attempts the gated edge eagerly at assign time, not only on arrival).
     await harness.testClient.waitForEvent('gate_state_changed', 'GATE-M3');
+    /* ADR-036 §3c: introduce with known heading before routing. */
+    harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
     harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
     await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M1' });
@@ -143,6 +149,8 @@ describe('Clearance flow through a real broker', () => {
     // Order the withhold before the synchronous assign (the proactive horizon
     // attempts the gated edge eagerly at assign time, not only on arrival).
     await harness.testClient.waitForEvent('gate_state_changed', 'GATE-M3');
+    /* ADR-036 §3c: introduce with known heading before routing. */
+    harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
     harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
     await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M1' });

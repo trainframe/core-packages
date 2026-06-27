@@ -62,6 +62,8 @@ describe('Topology violation handling through a real broker (ADR-019)', () => {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
     await tc.waitForState('railway/state/devices/T1');
+    /* ADR-036 §3c: introduce at M1→M2 before routing. */
+    harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
 
     // Bounded route M1→M3: the train is granted clearance and pulls away.
     harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
@@ -106,6 +108,8 @@ describe('Topology violation handling through a real broker (ADR-019)', () => {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
     await tc.waitForState('railway/state/devices/T1');
+    /* ADR-036 §3c: introduce at M1→M2 before routing. */
+    harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
 
     harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await tc.waitForCommand('T1', 'grant_clearance');

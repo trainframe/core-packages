@@ -2,6 +2,7 @@ import {
   BUILTIN_CAPABILITIES,
   type Capability,
   CapabilityRegistry,
+  type EdgeRef,
   LayoutState,
   Scheduler,
   type SchedulerEffect,
@@ -164,6 +165,35 @@ export class Server {
       this.revokeClearance(trainId);
       return;
     }
+    if (commandType === 'introduce_train') {
+      this.handleOperatorIntroduceTrain(obj);
+      return;
+    }
+  }
+
+  /**
+   * Dispatch for the `railway/operator/introduce_train` command (ADR-036).
+   * Extracted from `handleOperatorCommand` to keep that method's cognitive
+   * complexity within the Biome budget.
+   *
+   *   heading_edge PRESENT → §3c (operator-provided vector): introduces
+   *     immediately with the given vector; no roll; no `introduce_train`
+   *     command to the device.
+   *   heading_edge ABSENT  → §3a (roll): send `introduce_train` to the
+   *     device to begin the two-marker forward roll.
+   */
+  private handleOperatorIntroduceTrain(obj: Record<string, unknown>): void {
+    const trainId = obj.train_id;
+    if (typeof trainId !== 'string') return;
+    const headingEdge = obj.heading_edge;
+    if (headingEdge !== undefined) {
+      /* §3c: operator supplied a known vector — introduce directly. */
+      if (!isEdgeRef(headingEdge)) return;
+      this.introduceTrainWithVector(trainId, headingEdge);
+    } else {
+      /* §3a: no vector supplied — begin the two-marker roll. */
+      this.introduceTrain(trainId);
+    }
   }
 
   /**
@@ -189,6 +219,31 @@ export class Server {
    */
   revokeClearance(trainId: string): void {
     const effects = this.scheduler.revokeClearance(trainId);
+    this.dispatchEffects(effects);
+  }
+
+  /**
+   * ADR-036 §3a — begin the two-marker introduction roll for a placed train.
+   * Sends the `introduce_train` command to the device; the roll ends when the
+   * core has two distinct marker crossings and can resolve the heading. Mirrors
+   * `assignSchedule`: the scheduler decides, the server enacts.
+   * No-op if the train is unknown or already introduced.
+   */
+  introduceTrain(trainId: string): void {
+    const effects = this.scheduler.introduceTrain(trainId);
+    this.dispatchEffects(effects);
+  }
+
+  /**
+   * ADR-036 §3c — introduce a placed train with a known heading edge. The
+   * placer supplies the vector directly; no roll and no `introduce_train`
+   * command are emitted. `train_introduced` IS published so bus subscribers
+   * learn the resolved vector. Mirrors `assignSchedule`: the scheduler decides,
+   * the server enacts.
+   * No-op if the train is unknown or already introduced.
+   */
+  introduceTrainWithVector(trainId: string, headingEdge: EdgeRef): void {
+    const effects = this.scheduler.introduceTrainWithVector(trainId, headingEdge);
     this.dispatchEffects(effects);
   }
 
@@ -419,6 +474,16 @@ export class Server {
       payload,
     });
   }
+}
+
+/* Structural guard for an EdgeRef payload from an inbound operator command.
+ * Both marker IDs must be non-empty strings; we do NOT cross-reference the
+ * layout graph here — the scheduler rejects unknown markers at the resolution
+ * step, so a single validation point is enough. */
+function isEdgeRef(value: unknown): value is EdgeRef {
+  if (typeof value !== 'object' || value === null) return false;
+  const obj = value as Record<string, unknown>;
+  return typeof obj.from_marker_id === 'string' && typeof obj.to_marker_id === 'string';
 }
 
 function parseJsonEnvelope(payload: Uint8Array): IncomingEnvelope | null {

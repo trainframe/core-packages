@@ -47,12 +47,14 @@ const grantsFor = (trainId: string) =>
 describe('Block exclusivity: three trains queue through a single block', () => {
   it('T2 and T3 receive no clearance until T1 clears the entire M1→M2→M3 block chain', async () => {
     // Register all three trains in sequence. Each emits device_registered and
-    // waits for the retained device state before proceeding.
+    // waits for the retained device state before proceeding. Introduce each
+    // at M1→M2 (ADR-036 §3c) so the scheduler can route them.
     for (const id of ['T1', 'T2', 'T3']) {
       await harness.testClient.publishEvent('device_registered', id, {
         capabilities: ['core.controls_motion', 'core.accepts_route'],
       });
       await harness.testClient.waitForState(`railway/state/devices/${id}`);
+      harness.server.introduceTrainWithVector(id, { from_marker_id: 'M1', to_marker_id: 'M2' });
     }
 
     // Assign each train the same cyclic route: stops M1 and M3, which routes

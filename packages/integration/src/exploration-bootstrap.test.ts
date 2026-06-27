@@ -72,7 +72,9 @@ describe('Cold-start discovery via exploration (ADR-015)', () => {
   it('learns every edge of a fresh loop from one Learn-track press', () => {
     /* Place the loco on the ring at M1. Its sensor fires the marker it sits on on
      *  the first sample, giving LearnMode a train + first marker to latch onto. */
-    env.spawnTrain('T1', { atMarker: 'M1' });
+    /* ADR-036: no known heading yet — vector is established via the exploration
+     * roll (§3a) triggered by learn_track_start. introduced: false defers it. */
+    env.spawnTrain('T1', { atMarker: 'M1', introduced: false });
     env.advance(100);
 
     /* The deadlock precondition: markers known, not one edge. */

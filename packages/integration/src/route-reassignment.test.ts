@@ -55,6 +55,19 @@ describe('Mid-journey schedule reassignment replaces the prior plan', () => {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
+    /* ADR-036 §3c: introduce with the arrival heading M3→M1 (the train came
+     * around the M3 loop and is at the M1 junction). After introduction,
+     * last_marker_id is 'M3'. We immediately inject a tag_observed at M1 so
+     * the scheduler anchors the train AT M1 (last_marker_id = 'M1') while
+     * keeping current_edge = { M3→M1 } as the arrival heading. The planner
+     * then uses the "arrived" branch for both assigns:
+     *   first:  dijkstra(M1→M3, arrived-from M3) → M1→M2→M3  (M2 branch)
+     *   second: dijkstra(M1→M6, arrived-from M3) → M1→M4→M5→M6 (M4 branch)
+     * Neither result is a disallowed U-turn from the M3 arrival direction. */
+    harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M3', to_marker_id: 'M1' });
+    /* Advance last_marker_id to M1 synchronously before assigning the schedule
+     * so the planner sees the train AT M1, not mid-edge on M3→M1. */
+    harness.server.injectEvent('tag_observed', 'T1', { tag_id: 'M1' });
 
     // Original schedule: stops M1 and M3. Planner resolves M1→M2→M3.
     harness.server.assignSchedule('T1', 'route-original', ['M1', 'M3']);
@@ -108,6 +121,8 @@ describe('Mid-journey schedule reassignment replaces the prior plan', () => {
       capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
+    /* ADR-036 §3c: same arrival heading as the sibling test (M3→M1). */
+    harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M3', to_marker_id: 'M1' });
 
     // Assign original and wait for the initial clearance grant so the
     // scheduler has committed the M1→M2 edge to cleared_edges.

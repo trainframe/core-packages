@@ -56,6 +56,8 @@ describe('Switch-state edge filtering through a real broker', () => {
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
     await harness.testClient.waitForState('railway/state/devices/SW-M2');
+    /* ADR-036 §3c: introduce at M1→M2 before routing. */
+    harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
 
     await harness.testClient.publishEvent('switch_state_changed', 'SW-M2', {
       junction_marker_id: 'M2',
@@ -83,6 +85,8 @@ describe('Switch-state edge filtering through a real broker', () => {
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
     await harness.testClient.waitForState('railway/state/devices/SW-M2');
+    /* ADR-036 §3c: introduce at M1→M2 before routing. */
+    harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
 
     harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
@@ -115,6 +119,8 @@ describe('Switch-state edge filtering through a real broker', () => {
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
     await harness.testClient.waitForState('railway/state/devices/SW-M2');
+    /* ADR-036 §3c: introduce at M1→M2 before routing. */
+    harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
 
     harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
