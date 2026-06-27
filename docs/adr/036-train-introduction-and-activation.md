@@ -2,11 +2,25 @@
 
 ## Status
 
-Proposed — design agreed, ready to spec. Introduces a registered-but-not-yet-on-track
+Accepted — implemented (June 2026). Introduces a registered-but-not-yet-on-track
 train state, an operator-driven *introduction* at a chosen safe location, vector
-resolution by either a two-marker forward roll or a heading-providing zone, and
-the safety handling for the moment a newly-resolved vector lands a train in a
-block another train already holds.
+resolution by a two-marker forward roll (§3a), a heading-providing zone (§3b), an
+operator/placer-provided vector (§3c), or — established during implementation —
+**any two ordinary crossings** (exploration/learn driving establishes the vector
+just as the roll does), and the safety handling for the moment a newly-resolved
+vector lands a train in a block another train already holds.
+
+Delivered across protocol 0.15.0 (TCF epoch 7: `introduce_train`, `train_introduced`,
+`train_introduction_conflict`, `core.provides_train_heading`, `DeviceRetainedState.introduced`),
+the core scheduler (gating, the four resolution paths, §5 conflict handling), the
+simulator (introduce-roll, heading-providing railyard zone, placed-train auto-introduce),
+the server operator gesture, the visualiser garage (list trains awaiting introduction
++ introduce control + conflict banner), and a six-scenario integration suite driving
+all of §3–§5 through the real stack. Each layer was adversarially challenged; the
+six scenarios were verified to fail under their corresponding regressions. The
+garage flow is demonstrated live via a Playwright e2e against the real stack. The
+gating made train introduction mandatory, so every existing train-spawning
+scenario (tests + demos + sim-UI) was migrated to introduce its trains.
 
 Builds on [ADR-002](002-clearance-model.md) (clearance, not commands; default
 stopped/safe), [ADR-011](011-section-as-edge-plus-boundary-markers.md) (block
