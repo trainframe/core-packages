@@ -753,9 +753,16 @@ export class Scheduler {
       return this.handleIntroductionRollMarker(train, markerId);
     }
 
-    /* ADR-036: a not-yet-introduced train that is NOT rolling (no `introducing`)
-     * must not flow into normal transit/clearance logic — ignore the crossing. */
-    if (!train.introduced) return [];
+    /* A not-yet-introduced train that is NOT on an introduction roll still has
+     * its crossing OBSERVED here (topology validation, edge learning via
+     * `recordTraversal`, the `marker_traversed` emission, exploration
+     * continuation). This is required for learn-mode / discovery (ADR-014/015),
+     * where an exploring train is deliberately not-introduced yet must teach the
+     * graph as it rolls. ADR-036 gates ROUTING and CLEARANCE, not OBSERVATION:
+     * such a train has no `transit` (it is never planned — `planAndExecuteCurrentTransit`
+     * is gated on `introduced`), so `advanceTransitAndReplanIfReached` is a no-op,
+     * and `extendClearanceHorizon`/`retryBlockedClearances` early-return for a
+     * not-introduced train — so nothing here routes it or grants it clearance. */
 
     const previousMarker = train.last_marker_id;
 
@@ -2112,6 +2119,29 @@ export class Scheduler {
   }
 
   /**
+   * ADR-036 §3c — operator/placer-provided vector introduction. When whatever
+   * places a train already knows its facing (the simulator, a scene composer,
+   * or an operator who set the loco down a known way), the placer supplies the
+   * vector directly. No roll, no zone — the train is introduced immediately
+   * with the given heading edge.
+   *
+   * `headingEdge.from_marker_id` is where the train sits; `to_marker_id` is
+   * the direction it is committed to. Both markers must already exist in the
+   * layout; the caller is responsible for that precondition (the server's
+   * operator-command path checks this by virtue of passing an EdgeRef from a
+   * validated protocol envelope).
+   *
+   * No-op (`[]`) if the train is unknown or already introduced — idempotent,
+   * mirrors `introduceTrain`.
+   */
+  introduceTrainWithVector(trainId: string, headingEdge: EdgeRef): ReadonlyArray<SchedulerEffect> {
+    const train = this.trains.get(trainId);
+    if (!train) return [];
+    if (train.introduced) return [];
+    return this.resolveIntroduction(train, headingEdge.from_marker_id, headingEdge, 'operator');
+  }
+
+  /**
    * Handle a marker crossed during the two-marker introduction roll (ADR-036
    * §3a). On the first crossing: record the marker. On the second DISTINCT
    * crossing: resolve the heading, end the roll, emit `train_introduced`, and
@@ -2179,20 +2209,25 @@ export class Scheduler {
   }
 
   /**
-   * Shared resolution step for both introduction paths (roll §3a and zone §3b).
-   * Sets the train's position and heading, marks it introduced, updates retained
-   * state, then applies the ADR-036 §5 safety check before starting any pending
-   * schedule.
+   * Shared resolution step for all introduction paths (roll §3a, zone §3b,
+   * operator §3c). Sets the train's position and heading, marks it introduced,
+   * updates retained state, then applies the ADR-036 §5 safety check before
+   * starting any pending schedule.
    *
-   * `source` is used only to control which effects are emitted: the roll path
-   * ends with a `revoke_clearance` to stop forward motion; the zone path does
-   * not (the zone owns the release).
+   * `source` controls which wire effects are emitted:
+   *   'roll'     — sends `revoke_clearance` (ends the motion) and publishes
+   *                `train_introduced` (the resolved vector event).
+   *   'zone'     — neither: the zone device owns the release, and its OWN
+   *                `train_introduced` was the incoming trigger.
+   *   'operator' — publishes `train_introduced` (so subscribers learn the
+   *                resolved vector) but does NOT send `revoke_clearance`
+   *                (the train was never rolling; clearance was never granted).
    */
   private resolveIntroduction(
     train: TrainState,
     markerId: string,
     headingEdge: { from_marker_id: string; to_marker_id: string },
-    source: 'roll' | 'zone',
+    source: 'roll' | 'zone' | 'operator',
   ): ReadonlyArray<SchedulerEffect> {
     /* Commit the resolved vector. */
     train.current_edge = headingEdge;
@@ -2207,13 +2242,24 @@ export class Scheduler {
      * train on the wire, and publish the resolved vector as `train_introduced`.
      * The zone path needs neither — the zone device controls the train's motion
      * until it releases, and its OWN `train_introduced` was the incoming trigger
-     * (re-emitting would duplicate it). */
+     * (re-emitting would duplicate it).
+     * The operator path (§3c) publishes `train_introduced` so bus subscribers
+     * learn the resolved vector, but does NOT send `revoke_clearance` — the
+     * train was stationary and was never granted a roll clearance. */
     if (source === 'roll') {
       out.push(
         effects.sendCommand(train.train_id, 'revoke_clearance', {
           reason: 'introduction_complete',
           immediate: true,
         }),
+        effects.publishEvent('train_introduced', {
+          train_id: train.train_id,
+          marker_id: markerId,
+          heading_edge: headingEdge,
+        }),
+      );
+    } else if (source === 'operator') {
+      out.push(
         effects.publishEvent('train_introduced', {
           train_id: train.train_id,
           marker_id: markerId,

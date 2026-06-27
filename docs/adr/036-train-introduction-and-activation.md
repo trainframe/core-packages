@@ -65,7 +65,7 @@ The operator introduces a specific train when and where they choose. Nothing
 moves until they do — this stays within "default stopped/safe." Introduction
 begins vector resolution (§3); it does not, by itself, assign a destination.
 
-### 3. The vector resolves one of two ways
+### 3. The vector resolves one of three ways
 
 **(a) Two-marker forward roll (the general mechanism).** The train rolls
 *forward* — the only direction it can — at a gentle introduction speed, until it
@@ -83,6 +83,19 @@ window of blind motion on the layout. A railyard is the intended first claimant;
 the turntable — which already owns a train's orientation as a turnout — is a
 natural second. This is pure capability-based extension: the scheduler takes the
 zone's emitted vector when present and falls back to the roll (a) otherwise.
+
+**(c) Operator/placer-provided vector.** When whatever *places* a train already
+knows its facing — the simulator placing a body, a demo composing a scene, or an
+operator who set a loco down a known way in the UI — it introduces the train
+with that known vector directly, no roll and no zone. This is the
+"the placer knows, and tells the system" path: an operator gesture, not a device
+report, so it carries operator authority rather than the `provides_train_heading`
+capability gate. It is the ergonomic default for placed/simulated trains;
+real hardware with an unknown facing uses (a) or (b). The single operator gesture
+`introduce_train` carries an optional `heading_edge`: present → resolve directly
+(c); absent → begin the roll (a). Concretely it resolves the vector through the
+same core step (a)/(b) use, so §4 (pending-schedule auto-start) and §5 (conflict
+check) apply identically.
 
 ### 4. Vector-unknown trains are unroutable; schedules may still be queued
 

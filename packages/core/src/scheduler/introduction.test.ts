@@ -364,20 +364,35 @@ describe('ADR-036 — two-marker roll introduction (§3a)', () => {
     expect(findCommand(probe, 'grant_clearance', 'T2')).toBeDefined();
   });
 
-  it('a not-introducing, not-introduced train ignores tag_observed events entirely', () => {
-    /* A train that is registered but hasn't started the roll yet should not
-     * process marker crossings (no `introduceTrain` called). */
+  it('a not-introducing, not-introduced train OBSERVES a crossing but is never routed or cleared', () => {
+    /* ADR-036 gates ROUTING and CLEARANCE, not OBSERVATION. A not-yet-introduced
+     * train that is not on an introduction roll (e.g. an exploring/learn-mode
+     * train, ADR-014/015) still has its crossing observed — its position is
+     * tracked and edges are learned — but it must NOT be introduced, routed, or
+     * granted clearance off the back of that crossing. */
     const scheduler = makeScheduler();
     registerTrain(scheduler, 'T1');
+    /* A pending schedule is stored but, while not introduced, never planned. */
+    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
-    /* Observe a marker WITHOUT calling introduceTrain first. */
-    const effects = tagObserved(scheduler, 'T1', 'M1');
+    /* Observe two markers WITHOUT calling introduceTrain (an exploring roll). */
+    tagObserved(scheduler, 'T1', 'M1');
+    const effects = tagObserved(scheduler, 'T1', 'M2');
 
-    /* No introduction events, no routing. */
-    expect(findEvent(effects, 'train_introduced')).toBeUndefined();
+    /* OBSERVED: position advances, marker_traversed is emitted. */
+    expect(findEvent(effects, 'marker_traversed')).toBeDefined();
     const state = scheduler.getTrainState('T1');
+    expect(state?.last_marker_id).toBe('M2');
+
+    /* NOT introduced by ordinary crossings — introduction is an explicit gesture. */
+    expect(findEvent(effects, 'train_introduced')).toBeUndefined();
     expect(state?.introduced).toBeFalsy();
-    expect(state?.last_marker_id).toBeUndefined();
+
+    /* NOT routed and NOT cleared: no transit, no held blocks, no grant. */
+    expect(state?.transit).toBeUndefined();
+    expect(state?.cleared_edges).toHaveLength(0);
+    expect(findCommand(effects, 'grant_clearance', 'T1')).toBeUndefined();
+    expect(findCommand(effects, 'assign_route', 'T1')).toBeUndefined();
   });
 });
 
@@ -841,5 +856,165 @@ describe('ADR-036 §5 — resolution clear of peers (no escalation)', () => {
       (traversed?.payload as { inferred_edge?: { from_marker_id: string; to_marker_id: string } })
         .inferred_edge,
     ).toBeUndefined();
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/* ADR-036 §3c — operator/placer-provided vector (introduceTrainWithVector)   */
+/* -------------------------------------------------------------------------- */
+
+describe('ADR-036 §3c — operator-provided vector introduction (introduceTrainWithVector)', () => {
+  it('introduces a registered train immediately with the given heading, no roll, no revoke_clearance', () => {
+    /* The canonical §3c case: the placer knows the facing and supplies it
+     * directly. No introduce_train command is sent; no revoke_clearance fires;
+     * train_introduced IS published so bus subscribers learn the vector. */
+    const scheduler = makeScheduler();
+    registerTrain(scheduler, 'T1');
+
+    const effs = scheduler.introduceTrainWithVector('T1', {
+      from_marker_id: 'M1',
+      to_marker_id: 'M2',
+    });
+
+    /* No roll command or revoke. */
+    expect(findCommand(effs, 'introduce_train')).toBeUndefined();
+    expect(findCommand(effs, 'revoke_clearance')).toBeUndefined();
+
+    /* train_introduced published with correct payload. */
+    const introduced = findEvent(effs, 'train_introduced');
+    expect(introduced).toBeDefined();
+    const payload = introduced?.payload as {
+      train_id: string;
+      marker_id: string;
+      heading_edge: { from_marker_id: string; to_marker_id: string };
+    };
+    expect(payload.train_id).toBe('T1');
+    /* marker_id is set to headingEdge.from_marker_id (the train's position). */
+    expect(payload.marker_id).toBe('M1');
+    expect(payload.heading_edge).toEqual({ from_marker_id: 'M1', to_marker_id: 'M2' });
+
+    /* Retained device state carries introduced: true. */
+    const snap = findStateUpdate(effs, 'devices', 'T1');
+    expect(snap).toBeDefined();
+    expect((snap?.state as { introduced?: boolean }).introduced).toBe(true);
+
+    /* Train state reflects the committed vector. */
+    const state = scheduler.getTrainState('T1');
+    expect(state?.introduced).toBe(true);
+    expect(state?.introducing).toBeFalsy();
+    expect(state?.current_edge).toEqual({ from_marker_id: 'M1', to_marker_id: 'M2' });
+    expect(state?.last_marker_id).toBe('M1');
+  });
+
+  it('is a no-op for an unknown train', () => {
+    const scheduler = makeScheduler();
+    const effs = scheduler.introduceTrainWithVector('NOBODY', {
+      from_marker_id: 'M1',
+      to_marker_id: 'M2',
+    });
+    expect(effs).toHaveLength(0);
+  });
+
+  it('is a no-op for an already-introduced train (idempotent)', () => {
+    const scheduler = makeScheduler();
+    registerTrain(scheduler, 'T1');
+    /* First introduction via the roll path. */
+    rollIntroduce(scheduler, 'T1', 'M1', 'M2');
+
+    /* Second call with operator path must return []. */
+    const effs = scheduler.introduceTrainWithVector('T1', {
+      from_marker_id: 'M3',
+      to_marker_id: 'M4',
+    });
+    expect(effs).toHaveLength(0);
+
+    /* Heading unchanged from the roll introduction. */
+    expect(scheduler.getTrainState('T1')?.current_edge).toEqual({
+      from_marker_id: 'M1',
+      to_marker_id: 'M2',
+    });
+  });
+
+  it('pending schedule auto-starts the instant the operator vector resolves (§4)', () => {
+    /* Schedule assigned BEFORE introduction; train runs it when the operator
+     * supplies the vector — same §4 guarantee as the roll and zone paths. */
+    const scheduler = makeScheduler();
+    registerTrain(scheduler, 'T1');
+
+    /* Assign schedule while not yet introduced — stored but NOT planned. */
+    const assignEffects = scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+    expect(findCommand(assignEffects, 'grant_clearance')).toBeUndefined();
+    expect(findCommand(assignEffects, 'assign_route')).toBeUndefined();
+
+    /* Operator introduces with a known vector. */
+    const effs = scheduler.introduceTrainWithVector('T1', {
+      from_marker_id: 'M1',
+      to_marker_id: 'M2',
+    });
+
+    /* assign_route and clearance emitted — schedule auto-started. */
+    expect(findCommand(effs, 'assign_route', 'T1')).toBeDefined();
+    expect(findCommand(effs, 'grant_clearance', 'T1')).toBeDefined();
+
+    /* State: transit active, introduced. */
+    const state = scheduler.getTrainState('T1');
+    expect(state?.introduced).toBe(true);
+    expect(state?.transit).toBeDefined();
+  });
+
+  it('introduced train is routable by ordinary scheduling after operator vector introduction', () => {
+    /* Full end-to-end: introduce → assignSchedule → marker crossings. */
+    const scheduler = makeScheduler();
+    registerTrain(scheduler, 'T1');
+
+    scheduler.introduceTrainWithVector('T1', {
+      from_marker_id: 'M1',
+      to_marker_id: 'M2',
+    });
+
+    const schedEffects = scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
+
+    /* Ordinary routing: assign_route and clearance granted. */
+    expect(findCommand(schedEffects, 'assign_route', 'T1')).toBeDefined();
+    expect(findCommand(schedEffects, 'grant_clearance', 'T1')).toBeDefined();
+
+    /* Crossing a marker tops up the horizon (normal transit logic). */
+    const crossEffects = tagObserved(scheduler, 'T1', 'M2');
+    const hasEffect = crossEffects.some(
+      (e) =>
+        (e.kind === 'send_command' && e.command_type === 'grant_clearance') ||
+        (e.kind === 'update_state_snapshot' && e.entity_type === 'clearance'),
+    );
+    expect(hasEffect).toBe(true);
+  });
+
+  it('§5 conflict escalation applies to the operator path too (resolved into occupied block)', () => {
+    /* T2 holds M1→M2. Operator introduces T1 onto the same section → escalate. */
+    const scheduler = makeScheduler();
+
+    registerTrain(scheduler, 'T2');
+    scheduler.introduceTrain('T2');
+    tagObserved(scheduler, 'T2', 'M4');
+    tagObserved(scheduler, 'T2', 'M1');
+    scheduler.assignSchedule('T2', 'route-t2', ['M1', 'M3']);
+    const t2HoldsM1M2 = scheduler
+      .getTrainState('T2')
+      ?.cleared_edges.some((e) => e.from_marker_id === 'M1' && e.to_marker_id === 'M2');
+    expect(t2HoldsM1M2).toBe(true);
+
+    registerTrain(scheduler, 'T1');
+    const effs = scheduler.introduceTrainWithVector('T1', {
+      from_marker_id: 'M1',
+      to_marker_id: 'M2',
+    });
+
+    /* Conflict raised, no schedule start, no clearance for T1. */
+    expect(findEvent(effs, 'train_introduction_conflict')).toBeDefined();
+    expect(findCommand(effs, 'assign_route', 'T1')).toBeUndefined();
+    expect(findCommand(effs, 'grant_clearance', 'T1')).toBeUndefined();
+    const t1 = scheduler.getTrainState('T1');
+    expect(t1?.introduced).toBe(true);
+    expect(t1?.transit).toBeUndefined();
+    expect(t1?.cleared_edges).toHaveLength(0);
   });
 });
