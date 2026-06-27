@@ -159,6 +159,38 @@ const seedIdentityTags = (scheduler: Scheduler, markerIds: ReadonlyArray<string>
   }
 };
 
+/* ADR-036: resolve heading for a freshly-registered train by rolling it past two
+ * distinct markers, completing the introduction roll the scheduler now requires
+ * before any schedule or clearance is granted. */
+const introduceByRoll = (scheduler: Scheduler, trainId: string, m1: string, m2: string): void => {
+  scheduler.introduceTrain(trainId);
+  scheduler.handleEvent({
+    event_type: 'tag_observed',
+    device_id: trainId,
+    payload: { tag_id: m1 },
+  });
+  scheduler.handleEvent({
+    event_type: 'tag_observed',
+    device_id: trainId,
+    payload: { tag_id: m2 },
+  });
+};
+
+/* ADR-036: introduce a train, then release the block the introduction roll left
+ * it holding (resolved block, per §6) so a test can build a precise occupancy
+ * picture from a clean slate. Used by the manual-occupancy contention/tail tests,
+ * which assert exact `cleared_edges` and must not inherit the introduction hold.
+ * The train remains introduced and parked at `m2`. */
+const introduceAndRelease = (
+  scheduler: Scheduler,
+  trainId: string,
+  m1: string,
+  m2: string,
+): void => {
+  introduceByRoll(scheduler, trainId, m1, m2);
+  scheduler.revokeClearance(trainId);
+};
+
 /** Two edges conflict when they share any boundary marker (ADR-011). */
 const edgesShareMarker = (
   a: { from_marker_id: string; to_marker_id: string },
@@ -286,6 +318,7 @@ describe('Scheduler — route assignment and clearance extension', () => {
   it('grants initial clearance for the first edge of an assigned route', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
 
     // assignSchedule('T1', 'route-1', ['M1', 'M3']): train conceptually at M1,
     // planner computes M1→M2→M3.
@@ -308,6 +341,7 @@ describe('Scheduler — route assignment and clearance extension', () => {
     // genuinely tops it up by granting a fresh edge.
     const { scheduler } = setupSixLoop();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'N6', 'N1');
     // N1→…→N6 — a five-edge leg. With a 3-edge horizon, at assign T1 holds the
     // first three (limit lands at N4); N4→N5 and N5→N6 are NOT yet granted.
     scheduler.assignSchedule('T1', 'route-1', ['N1', 'N6']);
@@ -340,6 +374,7 @@ describe('Scheduler — route assignment and clearance extension', () => {
   it('grants the whole horizon up front on a clear route (proactive look-ahead)', () => {
     const { scheduler } = setupSixLoop();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'N6', 'N1');
     // A five-edge leg on a clear loop. The horizon grants exactly the first
     // three edges ahead at assign time — not just the first, and not the whole
     // leg — so the train pulls away with several blocks of room.
@@ -388,6 +423,7 @@ describe('Scheduler — learned-time-aware clearance horizon', () => {
   it('holds the 3-edge floor before any time is learned', () => {
     const { scheduler } = setupLearningSixLoop();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'N6', 'N1');
     // Cold layout, no learned times: the horizon must sit at exactly the floor.
     scheduler.assignSchedule('T1', 'route-1', ['N1', 'N6']);
     expect(scheduler.getTrainState('T1')?.cleared_edges).toHaveLength(3);
@@ -396,6 +432,7 @@ describe('Scheduler — learned-time-aware clearance horizon', () => {
   it('extends past the floor once short/fast edge times are learned', () => {
     const { scheduler, layout, cross } = setupLearningSixLoop();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'N6', 'N1');
     // Give it a schedule so it has a transit to walk, then drive it around the
     // ring teaching short/fast (1000 ms) edge times. Cross every marker so every
     // one of the six edges gets an EWMA, advancing the clock 1000 ms per edge —
@@ -453,6 +490,7 @@ describe('Scheduler — learned-time-aware clearance horizon', () => {
     const ring = ['E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7', 'E8'];
     seedIdentityTags(scheduler, ring);
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'E8', 'E1');
     scheduler.assignSchedule('T1', 'route-1', ['E1', 'E8']);
 
     /* Teach VERY fast edges (500 ms each). At 500 ms/edge the 6000 ms lead time
@@ -542,6 +580,8 @@ describe('Scheduler — section-as-edge-plus-boundary-markers (ADR-011)', () => 
     seedIdentityTags(scheduler, ['X', 'R_NE', 'R_SE', 'L_NW', 'L_SW']);
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
+    introduceByRoll(scheduler, 'T1', 'R_NE', 'R_SE');
+    introduceByRoll(scheduler, 'T2', 'L_NW', 'L_SW');
 
     // T1 wants `R_SE→X` then `X→L_NW` (a SE→NW transit). Grant the entering
     // edge via clearance_request — T1 holds R_SE→X, lock set {R_SE, X}.
@@ -575,6 +615,8 @@ describe('Scheduler — deadlock detection', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
+    introduceAndRelease(scheduler, 'T1', 'M4', 'M1');
+    introduceAndRelease(scheduler, 'T2', 'M2', 'M3');
 
     // Plant T1 mid-route: schedule M1→M3, traversing past M1 already, holding
     // M2→M3 (lock {M2, M3}).
@@ -722,6 +764,8 @@ describe('Scheduler — deadlock detection', () => {
     seedIdentityTags(scheduler, ['A', 'B', 'C']);
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
+    introduceAndRelease(scheduler, 'T1', 'C', 'A');
+    introduceAndRelease(scheduler, 'T2', 'B', 'C');
 
     // T1: schedule [A, C] (transit A→B→C). T1 spawns at A. Under the proactive
     // horizon it grants the whole two-edge leg up front: A→B then B→C, so T1
@@ -776,6 +820,7 @@ describe('Scheduler — gating', () => {
   it('withholds clearance when a gate is active at the next marker', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerGate(scheduler, 'GATE-M3');
 
     // Gate withholds at M3.
@@ -812,6 +857,7 @@ describe('Scheduler — gating', () => {
   it('grants the previously-withheld clearance when the gate releases', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerGate(scheduler, 'GATE-M3');
 
     scheduler.handleEvent({
@@ -849,6 +895,7 @@ describe('Scheduler — gating', () => {
 
 describe('Scheduler — zone admission (gates_zone, ADR-026)', () => {
   const advanceToM2 = (scheduler: Scheduler) => {
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     scheduler.handleEvent({
       event_type: 'tag_observed',
@@ -870,6 +917,7 @@ describe('Scheduler — zone admission (gates_zone, ADR-026)', () => {
   it('withholds clearance into a full zone (occupancy >= capacity)', () => {
     const { scheduler } = setup();
     registerReversibleTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerRailyard(scheduler, 'YARD-M3');
     setZoneState(scheduler, 'YARD-M3', 'M3', 2, 2); // full
 
@@ -882,6 +930,7 @@ describe('Scheduler — zone admission (gates_zone, ADR-026)', () => {
   it('admits the held train when a slot frees', () => {
     const { scheduler } = setup();
     registerReversibleTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerRailyard(scheduler, 'YARD-M3');
     setZoneState(scheduler, 'YARD-M3', 'M3', 2, 2);
     advanceToM2(scheduler); // held at M2
@@ -897,6 +946,7 @@ describe('Scheduler — zone admission (gates_zone, ADR-026)', () => {
   it('abstains (admits) when the zone has room', () => {
     const { scheduler } = setup();
     registerReversibleTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerRailyard(scheduler, 'YARD-M3');
     setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0); // empty
 
@@ -925,6 +975,7 @@ describe('Scheduler — zone admission (gates_zone, ADR-026)', () => {
   it('drops its admission gate when the zone device disconnects', () => {
     const { scheduler } = setup();
     registerReversibleTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerRailyard(scheduler, 'YARD-M3');
     setZoneState(scheduler, 'YARD-M3', 'M3', 1, 1); // full
     advanceToM2(scheduler); // held at M2
@@ -948,6 +999,7 @@ describe('Scheduler — zone admission (gates_zone, ADR-026)', () => {
 describe('Scheduler — zone interior handoff (ADR-027)', () => {
   /** Drive a reversible, admitted train M1→M2→M3 so it pulls into the M3 zone. */
   const enterZone = (scheduler: Scheduler, trainId: string) => {
+    introduceByRoll(scheduler, trainId, 'M4', 'M1');
     scheduler.assignSchedule(trainId, `r-${trainId}`, ['M1', 'M3']);
     for (const tag of ['M1', 'M2', 'M3']) {
       scheduler.handleEvent({
@@ -968,6 +1020,7 @@ describe('Scheduler — zone interior handoff (ADR-027)', () => {
   it('suspends an admitted reversible train at the zone boundary, freeing the throat', () => {
     const { scheduler } = setup();
     registerReversibleTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerRailyard(scheduler, 'YARD-M3');
     setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0); // room
 
@@ -982,6 +1035,7 @@ describe('Scheduler — zone interior handoff (ADR-027)', () => {
   it('reverse-gate refuses to route a non-reversible train into a zone', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1'); // no core.can_reverse
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerRailyard(scheduler, 'YARD-M3');
     setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0);
 
@@ -1004,6 +1058,7 @@ describe('Scheduler — zone interior handoff (ADR-027)', () => {
   it('reverse-gate does not gate a non-reversible train passing through the boundary', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1'); // no core.can_reverse
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerRailyard(scheduler, 'YARD-M3');
     setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0);
 
@@ -1028,6 +1083,7 @@ describe('Scheduler — zone interior handoff (ADR-027)', () => {
      * assign_route + grant, and the train is routing again off the throat. */
     const { scheduler } = setup();
     registerReversibleTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerRailyard(scheduler, 'YARD-M3');
     setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0);
 
@@ -1057,6 +1113,8 @@ describe('Scheduler — zone interior handoff (ADR-027)', () => {
     const { scheduler } = setup();
     registerReversibleTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
+    introduceByRoll(scheduler, 'T2', 'M3', 'M4');
     registerRailyard(scheduler, 'YARD-M3');
     setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0);
 
@@ -1086,6 +1144,7 @@ describe('Scheduler — zone interior handoff (ADR-027)', () => {
   it('rejects a release from a device that does not own the zone', () => {
     const { scheduler } = setup();
     registerReversibleTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerRailyard(scheduler, 'YARD-M3');
     registerGate(scheduler, 'IMPOSTER');
     setZoneState(scheduler, 'YARD-M3', 'M3', 2, 0);
@@ -1122,6 +1181,8 @@ describe('Scheduler — block exclusivity', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
+    introduceByRoll(scheduler, 'T2', 'M4', 'M1');
 
     // T1 takes the M1→M2 edge (as first leg of M1→M3 schedule).
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
@@ -1145,6 +1206,8 @@ describe('Scheduler — block exclusivity', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
+    introduceByRoll(scheduler, 'T2', 'M4', 'M1');
 
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     const t2Initial = scheduler.assignSchedule('T2', 'route-2', ['M1', 'M2']);
@@ -1186,6 +1249,8 @@ describe('Scheduler — block exclusivity', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
+    introduceByRoll(scheduler, 'T2', 'M4', 'M1');
 
     // T1 takes M1→M2 (with M2→M3 queued in the transit to M3), locking {M1,M2,M3}.
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
@@ -1232,6 +1297,8 @@ describe('Scheduler — clearance revocation', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
+    introduceByRoll(scheduler, 'T2', 'M4', 'M1');
 
     // T1 takes its whole two-edge leg up front (M1→M2, M2→M3) under the
     // proactive horizon.
@@ -1280,6 +1347,7 @@ describe('Scheduler — clearance revocation', () => {
   it('resets the clearance limit to the train`s last known marker', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     // T1 moves to M1, then M2 (and is granted M2→M3).
@@ -1307,6 +1375,7 @@ describe('Scheduler — device disconnect', () => {
   it('releases a gate`s withholds when the gating device disconnects and grants the previously-blocked clearance', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerGate(scheduler, 'GATE-M3');
 
     scheduler.handleEvent({
@@ -1346,6 +1415,8 @@ describe('Scheduler — device disconnect', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
     registerTrain(scheduler, 'T2');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
+    introduceByRoll(scheduler, 'T2', 'M4', 'M1');
 
     // T1 takes M1→M2.
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M2']);
@@ -1485,6 +1556,7 @@ describe('Scheduler — switch-state edge filtering', () => {
   it('withholds clearance across a junction when no switch position is known', () => {
     const { scheduler } = setupFigure8();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerSwitch(scheduler, 'SW-M2');
 
     // Planner picks M1→M2→M3 (cheaper than M1→M2→M5). Switch state unknown
@@ -1509,6 +1581,7 @@ describe('Scheduler — switch-state edge filtering', () => {
   it('grants clearance through the junction when the switch matches', () => {
     const { scheduler } = setupFigure8();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerSwitch(scheduler, 'SW-M2');
 
     scheduler.handleEvent({
@@ -1592,6 +1665,7 @@ describe('Scheduler — switch-state edge filtering', () => {
   it('grants the previously-withheld clearance once the switch confirms', () => {
     const { scheduler } = setupFigure8();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerSwitch(scheduler, 'SW-M2');
 
     // Planner picks M1→M2→M3. Switch unknown at assignment time so initial
@@ -1626,8 +1700,9 @@ describe('Scheduler — tag resolution', () => {
   it('resolves a marker tag and treats the reading train as having traversed it', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
-    // Single-stop-to-stop transit: M1→M2.
-    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M2']);
+    /* Introduce at M3→M4 so the first test crossing at M1 is not a re-read. */
+    introduceByRoll(scheduler, 'T1', 'M3', 'M4');
+    scheduler.assignSchedule('T1', 'route-1', ['M4', 'M2']); // M4 start, head to M2
 
     const effects = scheduler.handleEvent({
       event_type: 'tag_observed',
@@ -1643,27 +1718,33 @@ describe('Scheduler — tag resolution', () => {
     expect((traversed?.payload as { marker_id: string }).marker_id).toBe('M1');
   });
 
-  it('marker_traversed carries inferred_edge from the second traversal onward (ADR-016)', () => {
+  it('marker_traversed carries inferred_edge from each traversal onward (ADR-016)', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
+    /* Introduce at M4→M1 so last_marker='M1'. Every subsequent crossing carries inferred_edge. */
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
+    /* First crossing after introduction: M2. inferred_edge is M1→M2. */
     const firstEffects = scheduler.handleEvent({
       event_type: 'tag_observed',
       device_id: 'T1',
-      payload: { tag_id: 'M1' },
+      payload: { tag_id: 'M2' },
     });
     const first = firstEffects.find(
       (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
         e.kind === 'publish_event' && e.event_type === 'marker_traversed',
     );
-    /* No previous marker yet — the field must be absent, not null. */
-    expect(first?.payload).not.toHaveProperty('inferred_edge');
+    expect(
+      (first?.payload as { inferred_edge?: { from_marker_id: string; to_marker_id: string } })
+        .inferred_edge,
+    ).toEqual({ from_marker_id: 'M1', to_marker_id: 'M2' });
 
+    /* Second crossing: M3. inferred_edge is M2→M3. */
     const secondEffects = scheduler.handleEvent({
       event_type: 'tag_observed',
       device_id: 'T1',
-      payload: { tag_id: 'M2' },
+      payload: { tag_id: 'M3' },
     });
     const second = secondEffects.find(
       (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
@@ -1672,7 +1753,7 @@ describe('Scheduler — tag resolution', () => {
     expect(
       (second?.payload as { inferred_edge?: { from_marker_id: string; to_marker_id: string } })
         .inferred_edge,
-    ).toEqual({ from_marker_id: 'M1', to_marker_id: 'M2' });
+    ).toEqual({ from_marker_id: 'M2', to_marker_id: 'M3' });
   });
 
   it('derives a vehicle_identified event when a trackside reader sees a vehicle tag', () => {
@@ -1725,6 +1806,7 @@ describe('Scheduler — tag resolution', () => {
   it('a tag bound to a marker can then be observed by a train and is treated as that marker', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
 
     // The operator (via a garage device) binds a freshly-printed tag to M2.
     scheduler.handleEvent({
@@ -1798,6 +1880,7 @@ describe('Scheduler — discovery mode', () => {
   it('infers an edge when a train traverses two markers with no existing edge between them', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
 
     // Add a new marker on the side, no edge to it yet.
     scheduler.handleEvent({
@@ -1811,7 +1894,7 @@ describe('Scheduler — discovery mode', () => {
       },
     });
 
-    // Train at M1 (existing), then unexpectedly at M-OFF.
+    // Train at M1 (re-read after introduction), then unexpectedly at M-OFF.
     scheduler.handleEvent({
       event_type: 'tag_observed',
       device_id: 'T1',
@@ -1837,6 +1920,7 @@ describe('Scheduler — discovery mode', () => {
   it('confirms an inferred edge after the configured number of traversals', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     scheduler.handleEvent({
       event_type: 'tag_assignment',
       device_id: 'GARAGE',
@@ -1848,14 +1932,15 @@ describe('Scheduler — discovery mode', () => {
     });
 
     // Drive the train back and forth M1 ↔ M-OFF three times. The default
-    // threshold is 3 traversals of the M1→M-OFF edge.
+    // threshold is 3 traversals of the M1→M-OFF edge. Initial cross('M1')
+    // is a re-read (introduced there) but anchors last_marker at M1.
     const cross = (markerId: string) =>
       scheduler.handleEvent({
         event_type: 'tag_observed',
         device_id: 'T1',
         payload: { tag_id: markerId },
       });
-    cross('M1');
+    cross('M1'); // re-read — last_marker stays M1
     cross('M-OFF'); // traversal 1 (and infer)
     cross('M1');
     cross('M-OFF'); // traversal 2
@@ -1874,6 +1959,7 @@ describe('Scheduler — discovery mode', () => {
     const scheduler = new Scheduler(registry, layout, { now: () => 0 });
     seedIdentityTags(scheduler, SIMPLE_LOOP_MARKERS);
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
 
     scheduler.handleEvent({
       event_type: 'tag_assignment',
@@ -1883,12 +1969,12 @@ describe('Scheduler — discovery mode', () => {
     scheduler.handleEvent({
       event_type: 'tag_observed',
       device_id: 'T1',
-      payload: { tag_id: 'M1' },
+      payload: { tag_id: 'M1' }, // re-read
     });
     scheduler.handleEvent({
       event_type: 'tag_observed',
       device_id: 'T1',
-      payload: { tag_id: 'M-X' },
+      payload: { tag_id: 'M-X' }, // discovers M1→M-X, threshold=1, confirms immediately
     });
 
     const edge = layout.findEdge('M1', 'M-X');
@@ -1908,7 +1994,9 @@ describe('Scheduler — train-length-aware tail clearance', () => {
     // boundary and T2 is granted.
     const { scheduler } = setup();
     registerLongTrain(scheduler, 'T1', 150);
+    introduceAndRelease(scheduler, 'T1', 'M4', 'M1');
     registerTrain(scheduler, 'T2');
+    introduceAndRelease(scheduler, 'T2', 'M3', 'M4');
 
     // T1: M1→M2→M3.
     scheduler.assignSchedule('T1', 'r1', ['M1', 'M3']);
@@ -1916,9 +2004,14 @@ describe('Scheduler — train-length-aware tail clearance', () => {
     // T2: M4→M1. T2 starts at M4 (stops[0]), planner builds transit M4→M1.
     // M4→M1 shares M1 with T1's M1→M2 (ADR-011) so the initial grant is denied.
     const t2Initial = scheduler.assignSchedule('T2', 'r2', ['M4', 'M1']);
-    // Denied — T1 holds M1→M2 (shares M1 with M4→M1, ADR-011).
+    // Denied — T1 holds M1→M2 (shares M1 with M4→M1, ADR-011). Filter to T2's
+    // own grants: T2's assignment also runs retryBlockedClearances, which may
+    // (re-)grant unrelated edges to T1.
     expect(
-      t2Initial.find((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance'),
+      t2Initial.find(
+        (e) =>
+          e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+      ),
     ).toBeUndefined();
 
     // T1 head crosses M1 then M2.
@@ -2071,7 +2164,9 @@ describe('Scheduler — runtime train length changes (ADR-023)', () => {
     // tail out of M1→M2 — proving the walk re-derives against the new length.
     const { scheduler } = setup();
     registerLongTrain(scheduler, 'T1', 150);
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerTrain(scheduler, 'T2');
+    introduceByRoll(scheduler, 'T2', 'M3', 'M4');
     registerLengthReporter(scheduler, 'STATION-1');
 
     scheduler.assignSchedule('T1', 'r1', ['M1', 'M3']);
@@ -2080,7 +2175,7 @@ describe('Scheduler — runtime train length changes (ADR-023)', () => {
     scheduler.handleEvent({
       event_type: 'tag_observed',
       device_id: 'T1',
-      payload: { tag_id: 'M1' },
+      payload: { tag_id: 'M1' }, // re-read
     });
     scheduler.handleEvent({
       event_type: 'tag_observed',
@@ -2222,6 +2317,7 @@ describe('Scheduler — multi-edge tail release (ADR-012 refinement, ADR-016 ste
      * At d=50 (50+200=250 >= 250): P1→P2 (depth-3) releases. P2→P3, P3→P4 stay held. */
     const { scheduler } = setupFiveLoop();
     registerLongTrain(scheduler, 'T1', 250);
+    introduceByRoll(scheduler, 'T1', 'P5', 'P1');
     scheduler.assignSchedule('T1', 'r1', ['P1', 'P5']);
     crossFiveLoop(scheduler, 'T1', 'P1');
     crossFiveLoop(scheduler, 'T1', 'P2');
@@ -2265,6 +2361,7 @@ describe('Scheduler — multi-edge tail release (ADR-012 refinement, ADR-016 ste
      *   depth-1 P3→P4: 150 < 250         — NOT released. */
     const { scheduler } = setupFiveLoop();
     registerLongTrain(scheduler, 'T1', 250);
+    introduceByRoll(scheduler, 'T1', 'P5', 'P1');
     scheduler.assignSchedule('T1', 'r1', ['P1', 'P5']);
     crossFiveLoop(scheduler, 'T1', 'P1');
     crossFiveLoop(scheduler, 'T1', 'P2');
@@ -2307,7 +2404,9 @@ describe('Scheduler — multi-edge tail release (ADR-012 refinement, ADR-016 ste
      * d=150: both release, and P1→P2 is finally uncontested for T2. */
     const { scheduler } = setupFiveLoop();
     registerLongTrain(scheduler, 'T1', 250);
+    introduceByRoll(scheduler, 'T1', 'P5', 'P1');
     registerTrain(scheduler, 'T2');
+    introduceByRoll(scheduler, 'T2', 'P5', 'P1');
     scheduler.assignSchedule('T1', 'r1', ['P1', 'P5']);
 
     /* T2 wants P1→P2. T1 holds it (P1 and P2 shared), so the initial grant
@@ -2390,10 +2489,11 @@ describe('Scheduler — multi-edge tail release (ADR-012 refinement, ADR-016 ste
     seedIdentityTags(sched, ['Q1', 'Q2', 'Q3', 'Q4', 'Q5']);
 
     registerLongTrain(sched, 'T1', 50);
+    introduceByRoll(sched, 'T1', 'Q5', 'Q1');
     /* Schedule Q1→Q5: transit Q1→Q2→Q3→Q4→Q5 (4 edges). Head on Q4→Q5
      * (progress_index=3), forward edges = [Q4→Q5]. */
     sched.assignSchedule('T1', 'r1', ['Q1', 'Q5']);
-    sched.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'Q1' } });
+    sched.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'Q1' } }); // re-read
     sched.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'Q2' } });
     sched.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'Q3' } });
     sched.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'Q4' } });
@@ -2460,8 +2560,9 @@ describe('Scheduler — multi-edge tail release (ADR-012 refinement, ADR-016 ste
      *     current_edge (in forwardEdgeKeys). No other. chainEdge=undefined. break.
      * Nothing releases; the call returns normally. */
     registerLongTrain(sched, 'T1', 250);
+    introduceByRoll(sched, 'T1', 'R3', 'R1');
     sched.assignSchedule('T1', 'r1', ['R1', 'R3']);
-    sched.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'R1' } });
+    sched.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'R1' } }); // re-read
     sched.handleEvent({ event_type: 'tag_observed', device_id: 'T1', payload: { tag_id: 'R2' } });
 
     /* Inject R3→R1 into cleared_edges by having T1 hold it as a forward-horizon
@@ -2639,6 +2740,7 @@ describe('Scheduler — clearance state snapshots', () => {
   it('emits a clearance snapshot when a train is granted an edge', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
 
     const effects = scheduler.assignSchedule('T1', 'r1', ['M1', 'M3']);
 
@@ -2928,6 +3030,7 @@ describe('Scheduler — switch actuation for scheduled routes', () => {
   it('throws the switch to the required position and then grants (single train)', () => {
     const { scheduler } = setupDiverge();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'X', 'A1'); // discovers X→A1; last='A1'
 
     // T1: A1 -> J -> PM -> X. The junction edge J->PM needs 'main'; junction
     // position is initially unknown. Under the proactive horizon the look-ahead
@@ -2970,6 +3073,7 @@ describe('Scheduler — switch actuation for scheduled routes', () => {
     const scheduler = new Scheduler(registry, layout, { now: () => 0 });
     seedIdentityTags(scheduler, ['A1', 'A2', 'J', 'PM', 'PD', 'X', 'Y']);
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'X', 'A1'); // discovers X→A1; last='A1'
 
     const assigned = scheduler.assignSchedule('T1', 'route-1', ['A1', 'X']);
 
@@ -2993,7 +3097,9 @@ describe('Scheduler — switch actuation for scheduled routes', () => {
     // would oscillate the switch into deadlock. Edges are 200mm; length 100mm
     // < edge, satisfying the phase-2 single-edge-tail constraint.
     registerLongTrain(scheduler, 'T1', 100);
+    introduceByRoll(scheduler, 'T1', 'X', 'A1'); // discovers X→A1; last='A1'
     registerLongTrain(scheduler, 'T2', 100);
+    introduceByRoll(scheduler, 'T2', 'Y', 'A2'); // discovers Y→A2; last='A2'
 
     const allSets: Array<Extract<SchedulerEffect, { kind: 'send_command' }>> = [];
     const record = (effs: ReadonlyArray<SchedulerEffect>) => allSets.push(...findSetSwitch(effs));
@@ -3004,8 +3110,8 @@ describe('Scheduler — switch actuation for scheduled routes', () => {
 
     // Both trains advance to their junction approach. T1 grabs A1->J first;
     // that edge locks J (ADR-011), so T2's A2->J — which shares J — is denied.
-    record(observe(scheduler, 'T1', 'A1'));
-    record(observe(scheduler, 'T2', 'A2'));
+    record(observe(scheduler, 'T1', 'A1')); // re-read (introduced there)
+    record(observe(scheduler, 'T2', 'A2')); // re-read (introduced there)
 
     // T1 reaches J. Its tail still occupies A1->J (length-aware), so that hold
     // — and thus the lock on J — persists. The onward edge J->PM needs 'main';
@@ -3082,6 +3188,7 @@ describe('Scheduler — deterministic station dwell', () => {
     const scheduler = new Scheduler(registry, layout, { now: () => clock });
     seedIdentityTags(scheduler, SIMPLE_LOOP_MARKERS);
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
 
     // Three-stop loop: M1 -> M2 (stop) -> M4 (stop) -> back to M1. The train
     // starts at M1, heads to M2 first.
@@ -3153,6 +3260,7 @@ describe('Scheduler — conflict resolution policy (ADR-017)', () => {
     for (const t of setupOrder) {
       if (t.priority === undefined) registerTrain(scheduler, t.id);
       else registerTrainWithPriority(scheduler, t.id, t.priority);
+      introduceByRoll(scheduler, t.id, 'M4', 'M1');
     }
     registerGate(scheduler, 'GATE-M2');
     scheduler.handleEvent({
@@ -3244,7 +3352,9 @@ describe('Scheduler — conflict resolution policy (ADR-017)', () => {
     // entered, the yield can release it and the peer proceeds. (ADR-017 §3.)
     const scheduler = setupLoop6();
     registerLongTrain(scheduler, 'T1', 100);
+    introduceByRoll(scheduler, 'T1', 'D', 'E');
     registerLongTrain(scheduler, 'T2', 100);
+    introduceByRoll(scheduler, 'T2', 'A', 'B');
     const obs = (id: string, m: string) =>
       scheduler.handleEvent({ event_type: 'tag_observed', device_id: id, payload: { tag_id: m } });
 
@@ -3333,9 +3443,37 @@ describe('Scheduler — conflict resolution policy (ADR-017)', () => {
     });
     seedIdentityTags(scheduler, ['L1', 'L2', 'S1', 'SM', 'S2', 'R1', 'R2']);
     registerLongTrain(scheduler, 'T1', 100);
+    introduceByRoll(scheduler, 'T1', 'L1', 'L2');
     registerLongTrain(scheduler, 'T2', 100);
-    scheduler.assignSchedule('T1', 'r1', ['L1', 'R1']); // L->R across the single track
-    scheduler.assignSchedule('T2', 'r2', ['R1', 'L1']); // R->L across the single track
+    introduceByRoll(scheduler, 'T2', 'R1', 'R2');
+    /* Build the nose-to-nose standoff in two steps.
+     *
+     * Step 1: pre-grant T2's R2→S2 BEFORE T1's schedule so T1's horizon is
+     * blocked at SM→S2 (S2 shared with T2's R2→S2) and T1 only gets
+     * {L2→S1, S1→SM}.
+     *
+     * Step 2: assign both schedules (assignSchedule wipes cleared_edges, so
+     * the pre-grant above is consumed; T2's fresh horizon re-grants R2→S2
+     * from its transit and is then blocked at S2→SM by T1's S1→SM).
+     *
+     * Step 3: after assignSchedule, add R1→R2 to T2's cleared_edges via a
+     * second clearance_request (AFTER the wipe, so it survives). This gives
+     * T2 a covered tail behind R2: when reversed from S2 to R2 its 100mm body
+     * sits in R1→R2 (200mm), satisfying the ADR-022 length-safety check. */
+    scheduler.handleEvent({
+      event_type: 'clearance_request',
+      device_id: 'T2',
+      payload: { train_id: 'T2', next_edge: { from_marker_id: 'R2', to_marker_id: 'S2' } },
+    });
+    scheduler.assignSchedule('T1', 'r1', ['L2', 'R1']); // L->R; gets L2→S1, S1→SM (SM→S2 blocked by T2's R2→S2)
+    scheduler.assignSchedule('T2', 'r2', ['R2', 'L1']); // R->L; R2→S2 re-granted; S2→SM blocked by T1's S1→SM
+    /* Add the backward tail-cover edge R1→R2 AFTER the schedule so it is
+     * not wiped by assignSchedule's cleared_edges reset. */
+    scheduler.handleEvent({
+      event_type: 'clearance_request',
+      device_id: 'T2',
+      payload: { train_id: 'T2', next_edge: { from_marker_id: 'R1', to_marker_id: 'R2' } },
+    });
 
     const obs = (id: string, m: string) =>
       scheduler.handleEvent({
@@ -3343,11 +3481,11 @@ describe('Scheduler — conflict resolution policy (ADR-017)', () => {
         device_id: id,
         payload: { tag_id: m },
       });
-    obs('T2', 'R2');
-    obs('T2', 'S2'); // T2 occupies head block R2->S2, wants S2->SM
-    obs('T1', 'L2');
+    obs('T2', 'R2'); // re-read (introduced at R2)
+    obs('T2', 'S2'); // T2 crosses R2→S2; head at S2, holds {R1→R2 (tail), R2→S2}, wants S2→SM (blocked)
+    obs('T1', 'L2'); // re-read (introduced there)
     obs('T1', 'S1');
-    const last = obs('T1', 'SM'); // T1 occupies head block S1->SM, wants SM->S2
+    const last = obs('T1', 'SM'); // T1 crosses S1→SM; wants SM→S2 (blocked by T2's R2→S2) — deadlock
 
     /* The lowest-ranked train (T2) is granted REVERSE authority back to R2 — the
      * marker behind its head over track it holds (R2->S2) that no peer touches. */
@@ -3397,7 +3535,9 @@ describe('Scheduler — conflict resolution policy (ADR-017)', () => {
      * it doesn't need to. */
     const scheduler = setupLoop6();
     registerLongTrain(scheduler, 'T1', 100);
+    introduceByRoll(scheduler, 'T1', 'D', 'E');
     registerLongTrain(scheduler, 'T2', 100);
+    introduceByRoll(scheduler, 'T2', 'A', 'B');
     const obs = (id: string, m: string) =>
       scheduler.handleEvent({ event_type: 'tag_observed', device_id: id, payload: { tag_id: m } });
 
@@ -3483,9 +3623,19 @@ describe('Scheduler — conflict resolution policy (ADR-017)', () => {
     });
     seedIdentityTags(scheduler, ['L1', 'L2', 'S1', 'SM', 'S2', 'R1', 'R2']);
     registerLongTrain(scheduler, 'T1', 500);
+    introduceByRoll(scheduler, 'T1', 'L1', 'L2');
     registerLongTrain(scheduler, 'T2', 500);
-    scheduler.assignSchedule('T1', 'r1', ['L1', 'R1']);
-    scheduler.assignSchedule('T2', 'r2', ['R1', 'L1']);
+    introduceByRoll(scheduler, 'T2', 'R1', 'R2');
+    /* Pre-grant T2 R2→S2 before T1's schedule: locks S2, stops T1's horizon at S1→SM
+     * (SM→S2 denied). T2's schedule then finds S2→SM blocked by T1's S1→SM. Both
+     * sit in their head blocks — the true nose-to-nose standoff. */
+    scheduler.handleEvent({
+      event_type: 'clearance_request',
+      device_id: 'T2',
+      payload: { train_id: 'T2', next_edge: { from_marker_id: 'R2', to_marker_id: 'S2' } },
+    });
+    scheduler.assignSchedule('T1', 'r1', ['L2', 'R1']);
+    scheduler.assignSchedule('T2', 'r2', ['R2', 'L1']);
 
     const deadlockSnapshots: ReadonlyArray<string>[] = [];
     const collect = (r: ReadonlyArray<SchedulerEffect>) => {
@@ -3581,8 +3731,11 @@ describe('Scheduler — conflict resolution policy (ADR-017)', () => {
     });
     seedIdentityTags(scheduler, ['JA', 'JB', 'JC', 'MA', 'MB', 'MC', 'SA', 'SB', 'SC']);
     registerLongTrain(scheduler, 'T1', 100);
+    introduceByRoll(scheduler, 'T1', 'MB', 'SA'); // discovers MB->SA; last='SA'
     registerLongTrain(scheduler, 'T2', 100);
+    introduceByRoll(scheduler, 'T2', 'MC', 'SB'); // discovers MC->SB; last='SB'
     registerLongTrain(scheduler, 'T3', 100);
+    introduceByRoll(scheduler, 'T3', 'MA', 'SC'); // discovers MA->SC; last='SC'
 
     const obs = (id: string, m: string) => {
       const r = scheduler.handleEvent({
@@ -3691,12 +3844,20 @@ describe('Scheduler — conflict resolution policy (ADR-017)', () => {
     });
     seedIdentityTags(scheduler, ['L1', 'L2', 'S1', 'SM', 'S2', 'R1', 'R2']);
     registerLongTrain(scheduler, 'T1', 100);
+    introduceByRoll(scheduler, 'T1', 'L1', 'L2');
     registerLongTrain(scheduler, 'T2', 100);
-    scheduler.assignSchedule('T1', 'r1', ['L1', 'R1']);
-    /* T2's schedule STARTS at R2 (its anchor), so it holds nothing behind R2 -
-     * R1->R2 is not on its route and is never granted to it. Reversing to R2
-     * therefore retains nothing, and the length-aware body sweeps into the
-     * untracked R1->R2. */
+    introduceByRoll(scheduler, 'T2', 'R1', 'R2');
+    /* Pre-grant T2 R2→S2 before T1's schedule: same nose-to-nose standoff as the
+     * resolvable-reverse test. T2's schedule starts at R2 so R1→R2 is never on its
+     * route — after the reverse T2's 100mm body sweeps into untracked R1→R2. The
+     * resolver refuses T2 (body uncovered) and instead reverses T1 (whose L2→S1
+     * tail covers its 100mm body behind S1). */
+    scheduler.handleEvent({
+      event_type: 'clearance_request',
+      device_id: 'T2',
+      payload: { train_id: 'T2', next_edge: { from_marker_id: 'R2', to_marker_id: 'S2' } },
+    });
+    scheduler.assignSchedule('T1', 'r1', ['L2', 'R1']);
     scheduler.assignSchedule('T2', 'r2', ['R2', 'L1']);
 
     const deadlockSnapshots: ReadonlyArray<string>[] = [];
@@ -3716,9 +3877,9 @@ describe('Scheduler — conflict resolution policy (ADR-017)', () => {
           payload: { tag_id: m },
         }),
       );
-    obs('T2', 'R2');
+    obs('T2', 'R2'); // re-read (introduced there)
     obs('T2', 'S2'); // T2 occupies head block R2->S2, wants S2->SM
-    obs('T1', 'L2');
+    obs('T1', 'L2'); // re-read (introduced there)
     obs('T1', 'S1');
     const last = obs('T1', 'SM'); // T1 occupies head block S1->SM, wants SM->S2
 
@@ -3787,6 +3948,7 @@ describe('Scheduler — topology violation handling (ADR-019)', () => {
   it('(a) holds a bounded-route train that reports an unreachable marker, marks the region occupied, emits topology_violation, and learns no phantom edge', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     // Bounded route M1→M2→M3: T1 is conceptually at M1 with a transit + clearance.
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     expect(scheduler.getTrainState('T1')?.transit).toBeDefined();
@@ -3841,6 +4003,7 @@ describe('Scheduler — topology violation handling (ADR-019)', () => {
     // second train routed across M4→M1 (which touches both held markers) is
     // denied — proving the uncertain region protects neighbours.
     registerTrain(scheduler, 'T2');
+    introduceByRoll(scheduler, 'T2', 'M3', 'M4');
     scheduler.assignSchedule('T2', 'route-2', ['M4', 'M1']);
     expect(scheduler.getTrainState('T2')?.cleared_edges).toEqual([]);
   });
@@ -3848,6 +4011,7 @@ describe('Scheduler — topology violation handling (ADR-019)', () => {
   it('(a-bis) an orphan reported marker (no incident edges) yields suspected_cause "unknown"', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
     // Bind a tag to a brand-new marker that the graph knows but that has no
@@ -3874,13 +4038,12 @@ describe('Scheduler — topology violation handling (ADR-019)', () => {
   it('(b) the SAME unreachable adjacency is LEARNED, not flagged, when the train is in OPEN mode (no bounded route)', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
-    // No assignSchedule: the train has no transit. This is OPEN mode — the same
-    // state an exploring (ADR-015) / track-learn (ADR-014) train sits in, since
-    // begin_exploration is issued straight to the device and never sets transit.
+    /* Introduce at M3→M4: last='M4'. No assignSchedule (OPEN mode). */
+    introduceByRoll(scheduler, 'T1', 'M3', 'M4');
 
-    // Anchor at M1, then report M4 (no edge M1→M4 in the graph).
+    // Anchor at M1 (M4→M1 is an existing edge — normal traversal).
     observe(scheduler, 'T1', 'M1');
-    const effects = observe(scheduler, 'T1', 'M4');
+    const effects = observe(scheduler, 'T1', 'M4'); // M1→M4 unknown → discovered
 
     // Discovery fires: the edge IS learned, exactly as ADR-009 always did.
     expect(scheduler.getLayout().findEdge('M1', 'M4')).toBeDefined();
@@ -3896,6 +4059,7 @@ describe('Scheduler — topology violation handling (ADR-019)', () => {
   it('(c-reanchor) recovery via re-anchor releases the hold, learns nothing, and resumes scheduled operation', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     observe(scheduler, 'T1', 'M4'); // violation → held
     expect(scheduler.getTrainState('T1')?.block_reason).toBe('unknown_topology');
@@ -3924,6 +4088,7 @@ describe('Scheduler — topology violation handling (ADR-019)', () => {
   it('(c-confirm) recovery via confirm-new-track learns the edge (the ADR-014 bridge) and resumes', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     observe(scheduler, 'T1', 'M4'); // violation → held
 
@@ -4006,7 +4171,11 @@ describe('Scheduler — topology violation handling (ADR-019)', () => {
      * train the yield would pick as victim). Both length-aware so they retain
      * their tail blocks. */
     registerLongTrain(scheduler, 'T-peer', 100);
+    /* Introduce T-peer near X by discovering a synthetic start edge M→X. */
+    introduceByRoll(scheduler, 'T-peer', 'M', 'X');
     registerLongTrain(scheduler, 'T-held', 100);
+    /* Introduce T-held near P by discovering a synthetic start edge M→P. */
+    introduceByRoll(scheduler, 'T-held', 'M', 'P');
 
     /* T-peer routes X->Q->M. It is granted X->Q within the horizon, then on
      * observing Q its head sits at Q holding X->Q, wanting Q->M — DENIED by the
@@ -4078,6 +4247,7 @@ describe('Scheduler — topology violation handling (ADR-019)', () => {
   it('clears the hold reason when an operator reassigns or revokes a held train (no stale block_reason on a moving train)', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     observe(scheduler, 'T1', 'M4'); // violation → held
     expect(scheduler.getTrainState('T1')?.block_reason).toBe('unknown_topology');
@@ -4132,9 +4302,9 @@ describe("Scheduler — directional seed from the train's reported heading", () 
   it('routes the way the parked train faces, not the 180° shortcut', () => {
     const scheduler = setupBidi();
     registerTrain(scheduler, 'T1');
-    // The train reports it is parked on M1→M2 (head at M1, facing M2). That
-    // report IS its heading — the scheduler adopts it as the seed direction.
-    sendTrainStatus(scheduler, 'T1', { from_marker_id: 'M1', to_marker_id: 'M2' }, 0);
+    /* Introduce at M4→M1: heading is M4→M1, last marker is M1. From M1, the
+     * only forward direction is M1→M2 (M1→M4 would be a 180° U-turn). */
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M4']);
     // The long way round, because the one-hop M1→M4 would be a U-turn.
     expect(scheduler.getTrainState('T1')?.transit?.edges).toEqual([
@@ -4144,20 +4314,23 @@ describe("Scheduler — directional seed from the train's reported heading", () 
     ]);
   });
 
-  it('without a reported heading, a parked train takes the shortest path', () => {
+  it('when introduced heading forward, a parked train takes the shortest forward path', () => {
     const scheduler = setupBidi();
     registerTrain(scheduler, 'T1');
-    // No train_status → no facing known → shortest path, the one-hop back-edge.
-    scheduler.assignSchedule('T1', 'route-1', ['M1', 'M4']);
+    /* Introduce at M3→M4: heading is M3→M4, last marker is M4. From M4, the
+     * forward direction is M4→M1 — the one-hop shortest path, not a U-turn. */
+    introduceByRoll(scheduler, 'T1', 'M3', 'M4');
+    scheduler.assignSchedule('T1', 'route-1', ['M4', 'M1']);
     expect(scheduler.getTrainState('T1')?.transit?.edges).toEqual([
-      { from_marker_id: 'M1', to_marker_id: 'M4' },
+      { from_marker_id: 'M4', to_marker_id: 'M1' },
     ]);
   });
 
   it('does not override a heading already established by a running route', () => {
     const scheduler = setupBidi();
     registerTrain(scheduler, 'T1');
-    sendTrainStatus(scheduler, 'T1', { from_marker_id: 'M1', to_marker_id: 'M2' }, 0);
+    /* Introduce at M4→M1: heading M4→M1, last marker M1. */
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     // A later status reporting a DIFFERENT edge must not retro-seed; the route
     // is already committed forward and current_edge is driven by traversal.

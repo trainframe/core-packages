@@ -89,6 +89,9 @@ interface DeviceRecord {
   capabilities: ReadonlyArray<string>;
   /** Per-capability state: capability_id -> opaque state value. */
   capability_state: Map<string, unknown>;
+  /** Operator-authored presentation fields from registration (0.12.0). */
+  name?: string | undefined;
+  livery?: string | undefined;
 }
 
 /**
@@ -244,6 +247,8 @@ export class Scheduler {
         return this.handleZoneStateChanged(event);
       case 'zone_train_released':
         return this.handleZoneTrainReleased(event.device_id, event.payload);
+      case 'train_introduced':
+        return this.handleTrainIntroducedEvent(event.device_id, event.payload);
       default:
         return this.dispatchToCapabilities(event);
     }
@@ -276,11 +281,14 @@ export class Scheduler {
       }
     }
 
-    this.devices.set(deviceId, {
+    const deviceRecord: DeviceRecord = {
       device_id: deviceId,
       capabilities,
       capability_state: capabilityState,
-    });
+    };
+    if (reg.name !== undefined) deviceRecord.name = reg.name;
+    if (reg.livery !== undefined) deviceRecord.livery = reg.livery;
+    this.devices.set(deviceId, deviceRecord);
 
     if (capabilities.includes('core.controls_motion')) {
       this.initTrainState(deviceId, reg);
@@ -738,6 +746,17 @@ export class Scheduler {
     // reports until the owning device releases it.
     if (train.in_zone !== undefined) return [];
 
+    /* ADR-036 introduction roll: a not-yet-introduced train that is currently
+     * rolling for vector resolution. Intercept BEFORE normal transit/discovery
+     * logic so its crossings are never treated as routed-transit progress. */
+    if (!train.introduced && train.introducing) {
+      return this.handleIntroductionRollMarker(train, markerId);
+    }
+
+    /* ADR-036: a not-yet-introduced train that is NOT rolling (no `introducing`)
+     * must not flow into normal transit/clearance logic — ignore the crossing. */
+    if (!train.introduced) return [];
+
     const previousMarker = train.last_marker_id;
 
     /* ADR-019 position validation, BEFORE we advance `last_marker_id`, release
@@ -1065,6 +1084,11 @@ export class Scheduler {
    * until `switch_state_changed` → `retryBlockedClearances` resumes the walk.
    */
   private extendClearanceHorizon(train: TrainState): ReadonlyArray<SchedulerEffect> {
+    /* ADR-036 defence-in-depth: never extend clearance for a not-yet-introduced
+     * train. It has no resolved vector and must not be granted any onward block.
+     * This is normally unreachable (such a train has no `transit`), but the
+     * explicit guard makes the invariant local rather than transitive. */
+    if (!train.introduced) return [];
     if (!train.transit) return [];
     const out: SchedulerEffect[] = [];
     let granted = 0;
@@ -1146,6 +1170,10 @@ export class Scheduler {
 
     const train = this.trains.get(train_id);
     if (!train) return [];
+
+    /* ADR-036: a not-yet-introduced train has no known vector — never grant it
+     * clearance, even if it (erroneously) sends a clearance_request. */
+    if (!train.introduced) return [];
 
     return this.tryGrantClearance(train, next_edge);
   }
@@ -2058,6 +2086,271 @@ export class Scheduler {
     return out;
   }
 
+  // ---------- train introduction (ADR-036) ----------
+
+  /**
+   * Begin vector resolution for a registered-but-not-introduced train. The
+   * operator calls this when they have placed a loco at a known-safe location.
+   * This emits `introduce_train` to the train (authorising the bounded
+   * introduction roll) and sets `introducing = true`. No-op when the train is
+   * unknown or already introduced.
+   *
+   * Returns effects (empty on no-op). Mirrors the shape of `assignSchedule`.
+   */
+  introduceTrain(trainId: string): ReadonlyArray<SchedulerEffect> {
+    const train = this.trains.get(trainId);
+    if (!train) return [];
+    if (train.introduced) return [];
+    /* Already mid-roll: a second call must not restart the roll or re-send the
+     * command (which would re-arm the device while it is already rolling). */
+    if (train.introducing) return [];
+
+    train.introducing = true;
+    train.introduction_first_marker_id = undefined;
+
+    return [effects.sendCommand(trainId, 'introduce_train', {})];
+  }
+
+  /**
+   * Handle a marker crossed during the two-marker introduction roll (ADR-036
+   * §3a). On the first crossing: record the marker. On the second DISTINCT
+   * crossing: resolve the heading, end the roll, emit `train_introduced`, and
+   * run resolution (schedule start / conflict check).
+   *
+   * Re-reading the same marker (the train hasn't moved) is ignored — we wait for
+   * a genuinely distinct second marker.
+   */
+  private handleIntroductionRollMarker(
+    train: TrainState,
+    markerId: string,
+  ): ReadonlyArray<SchedulerEffect> {
+    if (!train.introduction_first_marker_id) {
+      /* First crossing of the roll — anchor the origin marker. */
+      train.introduction_first_marker_id = markerId;
+      return [];
+    }
+
+    /* Re-read of the same marker: the train hasn't moved yet — ignore. */
+    if (train.introduction_first_marker_id === markerId) return [];
+
+    /* Second distinct crossing — heading resolved. */
+    const headingEdge = {
+      from_marker_id: train.introduction_first_marker_id,
+      to_marker_id: markerId,
+    };
+    return this.resolveIntroduction(train, markerId, headingEdge, 'roll');
+  }
+
+  /**
+   * Handle an inbound `train_introduced` event emitted by a
+   * `core.provides_train_heading` zone before it releases the train (ADR-036
+   * §3b). Honoured ONLY when the emitting device declared that capability — a
+   * device without it cannot hijack a train's vector. If the named train exists
+   * and is not yet introduced, resolve its vector from the event payload.
+   *
+   * Idempotent: if the train is already introduced, this is a no-op — so the
+   * core's OWN roll-path emission echoing back onto the bus does nothing (and it
+   * is harmless that the echo is dropped on the authority check too, since the
+   * roll path set the train's state directly before publishing).
+   */
+  private handleTrainIntroducedEvent(
+    deviceId: string,
+    payload: unknown,
+  ): ReadonlyArray<SchedulerEffect> {
+    /* Producer-authority gate (mirrors `core.assigns_tags`/`core.reports_length`):
+     * only a device that declared `core.provides_train_heading` may supply a
+     * train's vector. */
+    const device = this.devices.get(deviceId);
+    if (!device?.capabilities.includes('core.provides_train_heading')) return [];
+
+    const { train_id, marker_id, heading_edge } = payload as {
+      train_id: string;
+      marker_id: string;
+      heading_edge: { from_marker_id: string; to_marker_id: string };
+    };
+
+    const train = this.trains.get(train_id);
+    if (!train) return [];
+
+    /* Idempotent: already introduced (e.g. our own emission echoing back). */
+    if (train.introduced) return [];
+
+    return this.resolveIntroduction(train, marker_id, heading_edge, 'zone');
+  }
+
+  /**
+   * Shared resolution step for both introduction paths (roll §3a and zone §3b).
+   * Sets the train's position and heading, marks it introduced, updates retained
+   * state, then applies the ADR-036 §5 safety check before starting any pending
+   * schedule.
+   *
+   * `source` is used only to control which effects are emitted: the roll path
+   * ends with a `revoke_clearance` to stop forward motion; the zone path does
+   * not (the zone owns the release).
+   */
+  private resolveIntroduction(
+    train: TrainState,
+    markerId: string,
+    headingEdge: { from_marker_id: string; to_marker_id: string },
+    source: 'roll' | 'zone',
+  ): ReadonlyArray<SchedulerEffect> {
+    /* Commit the resolved vector. */
+    train.current_edge = headingEdge;
+    train.last_marker_id = markerId;
+    train.introduced = true;
+    train.introducing = undefined;
+    train.introduction_first_marker_id = undefined;
+
+    const out: SchedulerEffect[] = [];
+
+    /* The roll path owns the release (ADR-036 §3a): end the roll by stopping the
+     * train on the wire, and publish the resolved vector as `train_introduced`.
+     * The zone path needs neither — the zone device controls the train's motion
+     * until it releases, and its OWN `train_introduced` was the incoming trigger
+     * (re-emitting would duplicate it). */
+    if (source === 'roll') {
+      out.push(
+        effects.sendCommand(train.train_id, 'revoke_clearance', {
+          reason: 'introduction_complete',
+          immediate: true,
+        }),
+        effects.publishEvent('train_introduced', {
+          train_id: train.train_id,
+          marker_id: markerId,
+          heading_edge: headingEdge,
+        }),
+      );
+    }
+
+    /* Update the retained device state to carry `introduced: true`. */
+    out.push(this.deviceStateEffect(train.train_id));
+
+    /* ADR-036 §5 conflict check: is the resolved block co-occupied by an active
+     * peer (same section, or head-on)? See `findIntroductionConflict`. Mere
+     * adjacency (a peer in the block ahead) is NOT a conflict — that is the
+     * resolvable trailing-follow, handled by ordinary block exclusivity below. */
+    const conflictingTrain = this.findIntroductionConflict(train, headingEdge);
+    if (conflictingTrain !== undefined) {
+      /* Unresolvable overlap — escalate. Train stays stopped, holds no block (the
+       * peer already occupies the contested section), and starts no schedule
+       * until the operator moves a train. */
+      out.push(
+        effects.publishEvent('train_introduction_conflict', {
+          train_id: train.train_id,
+          conflicting_train_id: conflictingTrain.train_id,
+          block_edge: headingEdge,
+          reason: 'resolved vector co-occupies a block held by another train',
+        }),
+      );
+      return out;
+    }
+
+    /* No co-occupation. What protects the resolved block from a peer differs by
+     * whether a schedule is waiting:
+     *
+     *  - PENDING SCHEDULE → start it now. `planAndExecuteCurrentTransit` plans
+     *    the leg and grants the first horizon, which establishes occupancy from
+     *    the PLANNED edges and is released normally as the train drives. We must
+     *    NOT seed `headingEdge` here: it is the block BEHIND the head (the train
+     *    already crossed `headingEdge.to_marker_id` to resolve), so the point-train
+     *    release rule — which drops a held edge only when the train re-crosses
+     *    that edge's END marker — would never release it. Since this path does not
+     *    wipe `cleared_edges` (unlike `assignSchedule`), a seeded `headingEdge`
+     *    would orphan and permanently lock the introduction section. The planned
+     *    grant alone is the correct, self-releasing occupancy.
+     *
+     *  - NO SCHEDULE (idle introduced train) → seed `headingEdge` as occupancy so
+     *    a peer approaching the introduction point is excluded under block
+     *    exclusivity (ADR-011, Scenario 6). The train holds this block without
+     *    onward motion clearance (the roll path already sent `revoke_clearance`);
+     *    it cannot orphan because `assignSchedule` wipes `cleared_edges` when a
+     *    schedule eventually arrives. */
+    if (train.schedule) {
+      out.push(...this.planAndExecuteCurrentTransit(train));
+    } else {
+      train.clearance_limit_marker_id = headingEdge.to_marker_id;
+      if (!train.cleared_edges.some((e) => edgesEqual(e, headingEdge))) {
+        train.cleared_edges = [...train.cleared_edges, headingEdge];
+      }
+      out.push(this.clearanceStateEffect(train));
+    }
+    out.push(...this.retryBlockedClearances());
+    return out;
+  }
+
+  /**
+   * ADR-036 §5 conflict detector — escalates ONLY on genuine CO-OCCUPATION. A
+   * conflict exists when a peer holds the SAME undirected section as the resolved
+   * `headingEdge` (BOTH boundary markers match, in either orientation): either
+   * the peer sits in the very block the introduced train resolved into, or it is
+   * head-on (the peer holds the reverse edge). Both are unresolvable overlaps the
+   * operator must clear by moving a train.
+   *
+   * Mere ADJACENCY — exactly one shared boundary marker (a peer holding the
+   * block AHEAD, e.g. peer on `M2→M3` while the train resolves onto `M1→M2`) — is
+   * NOT a conflict. That is the ordinary trailing-follow (ADR §5 resolvable
+   * case): the introduced train occupies its resolved block and simply waits for
+   * its onward grant under ordinary block exclusivity (`edgeConflictsWithAnotherTrain`)
+   * until the peer clears. Returning `undefined` here lets resolution fall through
+   * to `planAndExecuteCurrentTransit`/`retryBlockedClearances`, where that wait is
+   * handled with no new code.
+   *
+   * Returns the first co-occupying peer, or `undefined` if none.
+   */
+  private findIntroductionConflict(
+    train: TrainState,
+    headingEdge: { from_marker_id: string; to_marker_id: string },
+  ): TrainState | undefined {
+    for (const [otherId, other] of this.trains) {
+      if (otherId === train.train_id) continue;
+      /* Only active (introduced) trains can hold blocks. A not-yet-introduced
+       * peer has no cleared_edges that matter. */
+      if (!other.introduced) continue;
+      for (const held of other.cleared_edges) {
+        const sameSection =
+          held.from_marker_id === headingEdge.from_marker_id &&
+          held.to_marker_id === headingEdge.to_marker_id;
+        const headOn =
+          held.from_marker_id === headingEdge.to_marker_id &&
+          held.to_marker_id === headingEdge.from_marker_id;
+        if (sameSection || headOn) return other;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Build an `update_state_snapshot` effect for the retained device state of
+   * `deviceId`. This mirrors the payload built in `handleDeviceRegistered` but
+   * additionally carries `introduced: true` once a train's vector has resolved.
+   * Called from `resolveIntroduction` so the garage immediately sees the train
+   * as on-track. Name/livery are carried from the stored device record so the
+   * retained snapshot stays complete (late joiners see them as before).
+   */
+  private deviceStateEffect(deviceId: string): SchedulerEffect {
+    const device = this.devices.get(deviceId);
+    const train = this.trains.get(deviceId);
+    const capabilities = (device?.capabilities ?? []) as string[];
+    const state: {
+      capabilities: string[];
+      train_length_mm?: number;
+      name?: string;
+      livery?: string;
+      introduced?: boolean;
+    } = { capabilities };
+
+    if (train?.length_mm !== undefined && train.length_mm > 0) {
+      state.train_length_mm = train.length_mm;
+    }
+    if (device?.name !== undefined) state.name = device.name;
+    if (device?.livery !== undefined) state.livery = device.livery;
+    if (train?.introduced) {
+      state.introduced = true;
+    }
+
+    return effects.updateState('devices', deviceId, state);
+  }
+
   // ---------- schedule assignment (driven by external API, not events) ----------
 
   /**
@@ -2123,6 +2416,13 @@ export class Scheduler {
       current_stop_index: initialStopIndex,
     };
 
+    /* ADR-036: a not-yet-introduced train holds its schedule pending but is not
+     * planned or cleared — it has no known vector. The schedule is stored so it
+     * can auto-start the instant the vector resolves. */
+    if (!train.introduced) {
+      return [this.scheduleStateEffect(train)];
+    }
+
     return [this.scheduleStateEffect(train), ...this.planAndExecuteCurrentTransit(train)];
   }
 
@@ -2154,6 +2454,10 @@ export class Scheduler {
    * (every subsequent leg).
    */
   private planAndExecuteCurrentTransit(train: TrainState): ReadonlyArray<SchedulerEffect> {
+    /* ADR-036: a not-yet-introduced train has no known vector — never plan it.
+     * The schedule may already be stored (held pending); it starts the instant
+     * the vector resolves via resolveIntroduction(). */
+    if (!train.introduced) return [];
     if (!train.schedule || train.last_marker_id === undefined) return [];
     const targetStop = train.schedule.stops[train.schedule.current_stop_index];
     if (targetStop === undefined) return [];

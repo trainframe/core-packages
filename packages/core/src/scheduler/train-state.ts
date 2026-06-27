@@ -120,6 +120,29 @@ export interface TrainState {
    * `undefined` when the train is under normal core authority.
    */
   in_zone?: string | undefined;
+
+  /* ---- ADR-036 introduction lifecycle ---- */
+
+  /**
+   * `true` once this train's position and heading vector have resolved — it is
+   * on the track and routable. `undefined`/`false` for a registered-but-not-yet-
+   * introduced train: it is never granted clearance and never planned.
+   */
+  introduced?: boolean | undefined;
+
+  /**
+   * `true` while the two-marker introduction roll is in progress — between the
+   * `introduceTrain()` call and the second marker crossing that resolves the
+   * heading. Cleared on resolution. `undefined` when not in an introduction roll.
+   */
+  introducing?: boolean | undefined;
+
+  /**
+   * The first marker the train crossed DURING an introduction roll. Used to form
+   * the heading edge when the second marker is crossed. Cleared on resolution.
+   * `undefined` when not mid-roll or on the first crossing.
+   */
+  introduction_first_marker_id?: string | undefined;
 }
 
 export const initialTrainState = (

@@ -68,6 +68,14 @@ export const canReverseCapability = stubCapability(
     'trains that do not declare it.',
 );
 
+export const providesTrainHeadingCapability = stubCapability(
+  'core.provides_train_heading',
+  "A zone or device that supplies a train's heading on emergence (ADR-036 §3b). It " +
+    'emits a train_introduced event before releasing the train, so the core knows the ' +
+    'vector with no introduction roll. The scheduler honours train_introduced ONLY from ' +
+    'a device declaring this capability — a pure declaration, no hooks.',
+);
+
 export { gatesClearanceCapability };
 export { gatesZoneCapability };
 
@@ -88,4 +96,5 @@ export const BUILTIN_CAPABILITIES: ReadonlyArray<Capability<unknown>> = [
   gatesZoneCapability,
   reportsLengthCapability,
   canReverseCapability,
+  providesTrainHeadingCapability,
 ] as ReadonlyArray<Capability<unknown>>;
