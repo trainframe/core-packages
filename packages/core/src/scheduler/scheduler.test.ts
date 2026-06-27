@@ -1608,6 +1608,7 @@ describe('Scheduler — switch-state edge filtering', () => {
   it('denies clearance across a junction when the switch is in the wrong position', () => {
     const { scheduler } = setupFigure8();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerSwitch(scheduler, 'SW-M2');
 
     scheduler.handleEvent({
@@ -1636,6 +1637,7 @@ describe('Scheduler — switch-state edge filtering', () => {
   it('ignores unconfirmed switch changes for clearance decisions', () => {
     const { scheduler } = setupFigure8();
     registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
     registerSwitch(scheduler, 'SW-M2');
 
     scheduler.handleEvent({

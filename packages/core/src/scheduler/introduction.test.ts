@@ -364,35 +364,87 @@ describe('ADR-036 — two-marker roll introduction (§3a)', () => {
     expect(findCommand(probe, 'grant_clearance', 'T2')).toBeDefined();
   });
 
-  it('a not-introducing, not-introduced train OBSERVES a crossing but is never routed or cleared', () => {
-    /* ADR-036 gates ROUTING and CLEARANCE, not OBSERVATION. A not-yet-introduced
-     * train that is not on an introduction roll (e.g. an exploring/learn-mode
-     * train, ADR-014/015) still has its crossing observed — its position is
-     * tracked and edges are learned — but it must NOT be introduced, routed, or
-     * granted clearance off the back of that crossing. */
+  it('a SINGLE crossing observes but does NOT introduce, route, or clear (one marker is not a vector)', () => {
+    /* ADR-036: one marker says only "a train is here now" — it is not a heading.
+     * A not-introduced, not-introducing train's FIRST crossing is observed
+     * (position tracked, marker_traversed emitted, edges learned) but must NOT
+     * introduce, route, or clear it: a vector needs TWO consecutive crossings. */
     const scheduler = makeScheduler();
     registerTrain(scheduler, 'T1');
     /* A pending schedule is stored but, while not introduced, never planned. */
     scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
 
-    /* Observe two markers WITHOUT calling introduceTrain (an exploring roll). */
-    tagObserved(scheduler, 'T1', 'M1');
-    const effects = tagObserved(scheduler, 'T1', 'M2');
+    /* A single observed crossing (no introduceTrain, no prior marker). */
+    const effects = tagObserved(scheduler, 'T1', 'M1');
 
-    /* OBSERVED: position advances, marker_traversed is emitted. */
+    /* OBSERVED: position advances, marker_traversed emitted. */
     expect(findEvent(effects, 'marker_traversed')).toBeDefined();
     const state = scheduler.getTrainState('T1');
-    expect(state?.last_marker_id).toBe('M2');
+    expect(state?.last_marker_id).toBe('M1');
 
-    /* NOT introduced by ordinary crossings — introduction is an explicit gesture. */
+    /* NOT introduced on one crossing; NOT routed; NOT cleared. */
     expect(findEvent(effects, 'train_introduced')).toBeUndefined();
     expect(state?.introduced).toBeFalsy();
-
-    /* NOT routed and NOT cleared: no transit, no held blocks, no grant. */
     expect(state?.transit).toBeUndefined();
     expect(state?.cleared_edges).toHaveLength(0);
     expect(findCommand(effects, 'grant_clearance', 'T1')).toBeUndefined();
     expect(findCommand(effects, 'assign_route', 'T1')).toBeUndefined();
+  });
+
+  it('AUTO-INTRODUCE on two ordinary crossings (discovery/exploration path): vector established by driving, not a roll gesture', () => {
+    /* ADR-036: a vector is established by ANY two consecutive crossings. A train
+     * driven by exploration/learn (not the §3a introduce gesture) becomes
+     * introduced on its SECOND valid traversal — covering the toy-table workflow
+     * (drive with begin_exploration → schedule). The train is MOVING, so it is NOT
+     * stopped (no revoke_clearance) and seeds NO occupancy. */
+    const scheduler = makeScheduler();
+    registerTrain(scheduler, 'T1');
+
+    /* First crossing: observed, not yet introduced. */
+    tagObserved(scheduler, 'T1', 'M1');
+    expect(scheduler.getTrainState('T1')?.introduced).toBeFalsy();
+
+    /* Second consecutive crossing M1→M2: a real edge → AUTO-INTRODUCE. */
+    const effects = tagObserved(scheduler, 'T1', 'M2');
+
+    /* train_introduced emitted with the discovered heading edge. */
+    const introduced = findEvent(effects, 'train_introduced');
+    expect(introduced).toBeDefined();
+    expect((introduced?.payload as { heading_edge: unknown }).heading_edge).toEqual({
+      from_marker_id: 'M1',
+      to_marker_id: 'M2',
+    });
+
+    const state = scheduler.getTrainState('T1');
+    expect(state?.introduced).toBe(true);
+    expect(state?.current_edge).toEqual({ from_marker_id: 'M1', to_marker_id: 'M2' });
+    expect(state?.last_marker_id).toBe('M2');
+
+    /* MOVING train: NOT stopped, NO seeded occupancy. */
+    expect(findCommand(effects, 'revoke_clearance', 'T1')).toBeUndefined();
+    expect(state?.cleared_edges).toHaveLength(0);
+
+    /* Fires exactly once: a third crossing does not re-introduce. */
+    const third = tagObserved(scheduler, 'T1', 'M3');
+    expect(findEvent(third, 'train_introduced')).toBeUndefined();
+  });
+
+  it('auto-introduce on two ordinary crossings STARTS a pending schedule', () => {
+    /* The toy-table sequence: schedule assigned (held pending) while not
+     * introduced; the train is then driven across two markers and, on becoming
+     * introduced, its schedule auto-starts. */
+    const scheduler = makeScheduler();
+    registerTrain(scheduler, 'T1');
+    /* Pending schedule from M2 (where the train lands after the two crossings). */
+    scheduler.assignSchedule('T1', 'route-1', ['M2', 'M4']);
+
+    tagObserved(scheduler, 'T1', 'M1');
+    const effects = tagObserved(scheduler, 'T1', 'M2');
+
+    /* Introduced and the pending schedule auto-started. */
+    expect(scheduler.getTrainState('T1')?.introduced).toBe(true);
+    expect(findCommand(effects, 'assign_route', 'T1')).toBeDefined();
+    expect(scheduler.getTrainState('T1')?.transit).toBeDefined();
   });
 });
 

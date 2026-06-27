@@ -868,6 +868,29 @@ export class Scheduler {
       }),
     );
 
+    /* ADR-036: a vector is established by ANY two consecutive crossings, not only
+     * the §3a introduce-roll. A not-yet-introduced train that has just completed a
+     * VALID traversal (a real edge P→M — `previousMarker` defined and distinct, and
+     * not a topology violation, both already guaranteed at this point) is now known
+     * to be on P→M heading toward M, so AUTO-INTRODUCE it. This covers the toy-table
+     * / discovery workflow where a train is driven by `begin_exploration` (which
+     * discovers edges AND moves the train) before being scheduled. It fires exactly
+     * once: the next crossing sees `introduced === true`. The 'discovered' source
+     * neither stops the moving train nor seeds occupancy (see resolveIntroduction).
+     * It returns its own clearance/scheduling effects, so we skip the normal
+     * horizon top-up below when it fires. */
+    if (!train.introduced && !train.introducing && previousMarker && previousMarker !== markerId) {
+      out.push(
+        ...this.resolveIntroduction(
+          train,
+          markerId,
+          { from_marker_id: previousMarker, to_marker_id: markerId },
+          'discovered',
+        ),
+      );
+      return out;
+    }
+
     // If we've just completed the current transit and replanned to the next
     // stop, the replan emits its own initial grant + horizon — skip the
     // top-up pass on the *old* transit.
@@ -2209,25 +2232,34 @@ export class Scheduler {
   }
 
   /**
-   * Shared resolution step for all introduction paths (roll §3a, zone §3b,
-   * operator §3c). Sets the train's position and heading, marks it introduced,
-   * updates retained state, then applies the ADR-036 §5 safety check before
-   * starting any pending schedule.
+   * Shared resolution step for all introduction paths. Sets the train's position
+   * and heading, marks it introduced, updates retained state, then applies the
+   * ADR-036 §5 safety check before starting any pending schedule.
    *
-   * `source` controls which wire effects are emitted:
-   *   'roll'     — sends `revoke_clearance` (ends the motion) and publishes
-   *                `train_introduced` (the resolved vector event).
-   *   'zone'     — neither: the zone device owns the release, and its OWN
-   *                `train_introduced` was the incoming trigger.
-   *   'operator' — publishes `train_introduced` (so subscribers learn the
-   *                resolved vector) but does NOT send `revoke_clearance`
-   *                (the train was never rolling; clearance was never granted).
+   * `source` controls which wire effects are emitted and whether an idle train
+   * seeds occupancy:
+   *   'roll'       — sends `revoke_clearance` (ends the §3a roll) and publishes
+   *                  `train_introduced`. An idle (no-schedule) train seeds its
+   *                  resolved block as occupancy (it has STOPPED there).
+   *   'zone'       — neither command nor event: the zone device owns the release
+   *                  and its OWN `train_introduced` was the incoming trigger. An
+   *                  idle train seeds its resolved block (it rests at the throat).
+   *   'operator'   — publishes `train_introduced` but does NOT `revoke_clearance`
+   *                  (the train was stationary, never granted a roll clearance).
+   *                  An idle train seeds its resolved block.
+   *   'discovered' — the vector was established by ordinary MOVING traversal
+   *                  (exploration / learn driving), not a dedicated introduce
+   *                  gesture. Publishes `train_introduced` but NEITHER stops the
+   *                  train (it is moving on) NOR seeds occupancy: a moving train's
+   *                  block protection comes from its clearance GRANTS, not a seed,
+   *                  and seeding the behind-the-head edge would orphan exactly as
+   *                  the earlier auto-start bug. §5 + pending-schedule start still apply.
    */
   private resolveIntroduction(
     train: TrainState,
     markerId: string,
     headingEdge: { from_marker_id: string; to_marker_id: string },
-    source: 'roll' | 'zone' | 'operator',
+    source: 'roll' | 'zone' | 'operator' | 'discovered',
   ): ReadonlyArray<SchedulerEffect> {
     /* Commit the resolved vector. */
     train.current_edge = headingEdge;
@@ -2239,26 +2271,24 @@ export class Scheduler {
     const out: SchedulerEffect[] = [];
 
     /* The roll path owns the release (ADR-036 §3a): end the roll by stopping the
-     * train on the wire, and publish the resolved vector as `train_introduced`.
+     * train on the wire, AND publish the resolved vector as `train_introduced`.
      * The zone path needs neither — the zone device controls the train's motion
      * until it releases, and its OWN `train_introduced` was the incoming trigger
      * (re-emitting would duplicate it).
-     * The operator path (§3c) publishes `train_introduced` so bus subscribers
-     * learn the resolved vector, but does NOT send `revoke_clearance` — the
-     * train was stationary and was never granted a roll clearance. */
+     * The operator and discovered paths publish `train_introduced` so bus
+     * subscribers learn the resolved vector, but do NOT send `revoke_clearance`:
+     * the operator path's train was stationary (never granted a roll clearance),
+     * and the discovered path's train is MOVING (exploring / about to be
+     * scheduled) — there is nothing to stop. */
     if (source === 'roll') {
       out.push(
         effects.sendCommand(train.train_id, 'revoke_clearance', {
           reason: 'introduction_complete',
           immediate: true,
         }),
-        effects.publishEvent('train_introduced', {
-          train_id: train.train_id,
-          marker_id: markerId,
-          heading_edge: headingEdge,
-        }),
       );
-    } else if (source === 'operator') {
+    }
+    if (source !== 'zone') {
       out.push(
         effects.publishEvent('train_introduced', {
           train_id: train.train_id,
@@ -2292,7 +2322,7 @@ export class Scheduler {
     }
 
     /* No co-occupation. What protects the resolved block from a peer differs by
-     * whether a schedule is waiting:
+     * whether a schedule is waiting and whether the train is STOPPED or MOVING:
      *
      *  - PENDING SCHEDULE → start it now. `planAndExecuteCurrentTransit` plans
      *    the leg and grants the first horizon, which establishes occupancy from
@@ -2305,15 +2335,20 @@ export class Scheduler {
      *    would orphan and permanently lock the introduction section. The planned
      *    grant alone is the correct, self-releasing occupancy.
      *
-     *  - NO SCHEDULE (idle introduced train) → seed `headingEdge` as occupancy so
-     *    a peer approaching the introduction point is excluded under block
-     *    exclusivity (ADR-011, Scenario 6). The train holds this block without
-     *    onward motion clearance (the roll path already sent `revoke_clearance`);
-     *    it cannot orphan because `assignSchedule` wipes `cleared_edges` when a
-     *    schedule eventually arrives. */
+     *  - NO SCHEDULE, train STOPPED at the resolved point ('roll'/'zone'/'operator')
+     *    → seed `headingEdge` as occupancy so a peer approaching is excluded under
+     *    block exclusivity (ADR-011, Scenario 6). The train holds this block
+     *    without onward motion clearance; it cannot orphan because `assignSchedule`
+     *    wipes `cleared_edges` when a schedule eventually arrives.
+     *
+     *  - NO SCHEDULE, train MOVING ('discovered') → do NOT seed. The train is
+     *    rolling on (exploring); its block protection comes from its clearance
+     *    GRANTS, not a seed, and seeding the behind-the-head edge would orphan
+     *    exactly as the auto-start bug. It simply continues; a later schedule
+     *    routes it normally. */
     if (train.schedule) {
       out.push(...this.planAndExecuteCurrentTransit(train));
-    } else {
+    } else if (source !== 'discovered') {
       train.clearance_limit_marker_id = headingEdge.to_marker_id;
       if (!train.cleared_edges.some((e) => edgesEqual(e, headingEdge))) {
         train.cleared_edges = [...train.cleared_edges, headingEdge];
@@ -2437,11 +2472,6 @@ export class Scheduler {
       ];
     }
 
-    // Determine starting marker. The schedule's first stop is the
-    // conventional spawn point for a fresh train.
-    const startMarker = train.last_marker_id ?? stops[0];
-    if (startMarker === undefined) return [];
-    train.last_marker_id = startMarker;
     train.cleared_edges = [];
     train.transit = undefined;
     /* An explicit operator gesture (reassign) lifts any scheduler-owned hold:
@@ -2450,6 +2480,24 @@ export class Scheduler {
      * again (ADR-019). This is distinct from the train's own next traversal
      * report, which must NOT auto-clear the hold. */
     train.block_reason = undefined;
+
+    /* ADR-036: a not-yet-introduced train has NO known position — its
+     * `last_marker_id` must NOT be guessed from `stops[0]` (that is exactly the
+     * position-guess the ADR forbids, and it would make the train's first real
+     * crossing auto-introduce on a bogus heading). Store the schedule pending,
+     * pointer at the first stop, leaving position unset. When the vector resolves
+     * (roll / zone / operator / discovered) the planner picks the leg from the
+     * train's REAL resolved marker, and the schedule auto-starts then. */
+    if (!train.introduced) {
+      train.schedule = { route_id: routeId, stops, current_stop_index: 0 };
+      return [this.scheduleStateEffect(train)];
+    }
+
+    // Determine starting marker. The schedule's first stop is the
+    // conventional spawn point for a train already on the map.
+    const startMarker = train.last_marker_id ?? stops[0];
+    if (startMarker === undefined) return [];
+    train.last_marker_id = startMarker;
 
     // The schedule's pointer is "the stop we are heading to next."
     // Convention: if the train starts AT stops[0], the next target is
@@ -2461,13 +2509,6 @@ export class Scheduler {
       stops,
       current_stop_index: initialStopIndex,
     };
-
-    /* ADR-036: a not-yet-introduced train holds its schedule pending but is not
-     * planned or cleared — it has no known vector. The schedule is stored so it
-     * can auto-start the instant the vector resolves. */
-    if (!train.introduced) {
-      return [this.scheduleStateEffect(train)];
-    }
 
     return [this.scheduleStateEffect(train), ...this.planAndExecuteCurrentTransit(train)];
   }
