@@ -36,6 +36,11 @@ export interface RegisteredDevice {
   /** Operator-authored friendly name from the retained snapshot (0.12.0),
    *  present once the device has been commissioned. Presentation only. */
   readonly name?: string;
+  /** Present and `true` once the train's heading vector has resolved
+   *  (protocol 0.15.0, ADR-036). Absent (or false) for trains that have
+   *  registered but not yet introduced. Non-train devices never carry this
+   *  field. */
+  readonly introduced?: boolean;
 }
 
 export type RegisteredDevices = ReadonlyMap<string, RegisteredDevice>;
@@ -92,6 +97,7 @@ export class RegisteredDevicesView {
         existing &&
         capabilitiesEqual(existing.capabilities, parsed.capabilities) &&
         existing.train_length_mm === parsed.train_length_mm &&
+        existing.introduced === parsed.introduced &&
         existing.name === parsed.name
       ) {
         return;
@@ -104,6 +110,7 @@ export class RegisteredDevicesView {
           ? { train_length_mm: parsed.train_length_mm }
           : {}),
         ...(parsed.name !== undefined ? { name: parsed.name } : {}),
+        ...(parsed.introduced === true ? { introduced: true } : {}),
       };
       next.set(deviceId, device);
       this.state = next;
@@ -124,6 +131,7 @@ interface DecodedDevicePayload {
   readonly capabilities: ReadonlyArray<string>;
   readonly train_length_mm?: number;
   readonly name?: string;
+  readonly introduced?: boolean;
 }
 
 function decodeDevicePayload(payload: Uint8Array): DecodedDevicePayload | null {
@@ -153,9 +161,11 @@ function decodeDevicePayload(payload: Uint8Array): DecodedDevicePayload | null {
   const trainLengthMm =
     typeof rawLen === 'number' && Number.isFinite(rawLen) && rawLen > 0 ? rawLen : undefined;
   const name = typeof obj.name === 'string' && obj.name.length > 0 ? obj.name : undefined;
+  const introduced = obj.introduced === true ? true : undefined;
   return {
     capabilities: caps,
     ...(trainLengthMm !== undefined ? { train_length_mm: trainLengthMm } : {}),
     ...(name !== undefined ? { name } : {}),
+    ...(introduced !== undefined ? { introduced } : {}),
   };
 }

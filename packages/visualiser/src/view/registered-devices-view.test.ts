@@ -255,4 +255,63 @@ describe('RegisteredDevicesView (vanilla, no React)', () => {
     expect(listener.mock.calls.length).toBe(callsBefore);
     unsub();
   });
+
+  it('surfaces introduced:true when the snapshot carries introduced:true', () => {
+    const { client, view } = setup();
+    const unsub = view.subscribe(() => {});
+
+    client.deliver({
+      topic: 'railway/state/devices/T1',
+      payload: new TextEncoder().encode(
+        JSON.stringify({ capabilities: ['core.controls_motion'], introduced: true }),
+      ),
+    });
+
+    expect(view.getState().get('T1')?.introduced).toBe(true);
+    unsub();
+  });
+
+  it('omits introduced when the snapshot carries introduced:false or absent', () => {
+    const { client, view } = setup();
+    const unsub = view.subscribe(() => {});
+
+    /* absent */
+    client.deliver({
+      topic: 'railway/state/devices/T1',
+      payload: new TextEncoder().encode(JSON.stringify({ capabilities: ['core.controls_motion'] })),
+    });
+    /* explicit false */
+    client.deliver({
+      topic: 'railway/state/devices/T2',
+      payload: new TextEncoder().encode(
+        JSON.stringify({ capabilities: ['core.controls_motion'], introduced: false }),
+      ),
+    });
+
+    expect(view.getState().get('T1')?.introduced).toBeUndefined();
+    expect(view.getState().get('T2')?.introduced).toBeUndefined();
+    unsub();
+  });
+
+  it('notifies listener and updates state when only introduced changes', () => {
+    const { client, view } = setup();
+    const listener = vi.fn();
+    const unsub = view.subscribe(listener);
+
+    /* Initial — not yet introduced. */
+    deliverDevice(client, 'T1', ['core.controls_motion']);
+    const callsAfterFirst = listener.mock.calls.length;
+
+    /* Re-deliver with introduced:true added. */
+    client.deliver({
+      topic: 'railway/state/devices/T1',
+      payload: new TextEncoder().encode(
+        JSON.stringify({ capabilities: ['core.controls_motion'], introduced: true }),
+      ),
+    });
+
+    expect(listener.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+    expect(view.getState().get('T1')?.introduced).toBe(true);
+    unsub();
+  });
 });
