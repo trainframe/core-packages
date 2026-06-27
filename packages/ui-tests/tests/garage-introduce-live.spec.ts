@@ -1,3 +1,5 @@
+import { mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { expect, test } from '@playwright/test';
 import { MqttBrokerClient } from '@trainframe/simulator';
 import { openVisualiser, waitForVisualiserConnected } from '../src/playwright-helpers.js';
@@ -70,6 +72,15 @@ test.describe
       await expect(vis.getByTestId('garage-introduction')).toBeVisible({ timeout: 15_000 });
       await expect(vis.getByTestId('introduce-item-T-intro')).toBeVisible({ timeout: 15_000 });
 
+      /* Visual artifact of the LIVE garage flow: the "awaiting introduction" section
+       *  itself (scrolled into view), showing the train row + its Introduce button. */
+      const shotDir = resolve(import.meta.dirname, '..', 'screenshots');
+      mkdirSync(shotDir, { recursive: true });
+      await vis.getByTestId('garage-introduction').scrollIntoViewIfNeeded();
+      await vis.getByTestId('garage-introduction').screenshot({
+        path: resolve(shotDir, 'garage-awaiting-introduction.png'),
+      });
+
       /* 3. Confirm a train with introduced:true does NOT appear.
        *    Publish a second device that is already introduced. */
       retainedSnapshot(bus, 'T-done', { introduced: true });
@@ -106,6 +117,9 @@ test.describe
 
       /* If no trains remain in the list the section itself should vanish. */
       await expect(vis.getByTestId('garage-introduction')).toHaveCount(0);
+
+      /* Visual artifact after introduction: the row is gone (train is on the track). */
+      await vis.screenshot({ path: resolve(shotDir, 'garage-after-introduction.png') });
 
       bus.disconnect();
       await vis.context().close();
