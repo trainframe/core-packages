@@ -196,17 +196,21 @@ export function buildInterestingRailwayDemo(
 
   for (const t of TRAINS) seedTrain(world, scene, ml.markers, t);
 
-  const trains = TRAINS.map(
-    (t) =>
-      new ScheduledTrainDevice(t.id, {
-        platform: platformFactory(t.id),
-        motor: physicsMotorActuator(world, t.id),
-        sensor: physicsMarkerSensor(world, t.id, points),
-        layout,
-        lengthMm: 60 + t.cars * 68,
-        canReverse: true,
-      }),
-  );
+  /* Retain each train's platform so `start()` can publish the ADR-036
+   * introduction gesture after `train.start()` delivers `device_registered`. */
+  const trainPlatforms = TRAINS.map((t) => platformFactory(t.id));
+  const trains = TRAINS.map((t, i) => {
+    const platform = trainPlatforms[i];
+    if (platform === undefined) throw new Error('unreachable');
+    return new ScheduledTrainDevice(t.id, {
+      platform,
+      motor: physicsMotorActuator(world, t.id),
+      sensor: physicsMarkerSensor(world, t.id, points),
+      layout,
+      lengthMm: 60 + t.cars * 68,
+      canReverse: true,
+    });
+  });
 
   /* One SwitchDevice per running-line junction (the two satellite diverts + the yard
    *  divert) — the scheduler throws these to route a train onto a satellite loop or
@@ -257,6 +261,25 @@ export function buildInterestingRailwayDemo(
     motorFor: (id) => physicsMotorActuator(world, id),
   });
 
+  /* ADR-036 §3c: publish introduce_train with the known heading vector (first
+   * outgoing layout edge from the train's home stop) right after registration.
+   * `publishOnTopic` is available on `mqttPlatform`-backed platforms; absent on
+   * `inProcessPlatform` (focused unit tests without a scheduler). */
+  function publishIntro(platform: PlatformProvider, trainId: string, homeStop: string): void {
+    const outgoing = layout.edges.find((e) => e.from_marker_id === homeStop);
+    if (outgoing === undefined) return;
+    platform.publishOnTopic?.(
+      'railway/operator/introduce_train',
+      JSON.stringify({
+        train_id: trainId,
+        heading_edge: {
+          from_marker_id: outgoing.from_marker_id,
+          to_marker_id: outgoing.to_marker_id,
+        },
+      }),
+    );
+  }
+
   let started = false;
   return {
     scene,
@@ -272,7 +295,15 @@ export function buildInterestingRailwayDemo(
       started = true;
       yard.start();
       for (const sw of switches) sw.start();
-      for (const train of trains) train.start();
+      for (let i = 0; i < trains.length; i++) {
+        const train = trains[i];
+        const platform = trainPlatforms[i];
+        const trainDef = TRAINS[i];
+        if (train === undefined || platform === undefined || trainDef === undefined) continue;
+        train.start();
+        const homeStop = trainDef.stops[0];
+        if (homeStop !== undefined) publishIntro(platform, trainDef.id, homeStop);
+      }
     },
     stop(): void {
       started = false;

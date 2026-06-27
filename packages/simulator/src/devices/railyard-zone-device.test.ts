@@ -1,5 +1,6 @@
 import type { CoreEvent } from '@trainframe/protocol';
 import { describe, expect, it } from 'vitest';
+import { RAILYARD_MARKERS } from '../physics/railyard-markers.js';
 import { buildFullRailyardScene } from '../physics/railyard-pieces.js';
 import { PhysicsWorld } from '../physics/world.js';
 import { physicsMotorActuator } from '../sim/motor-actuator.js';
@@ -89,6 +90,9 @@ function setup() {
   const device = new RailyardZoneDevice('YARD-1', {
     platform: inProcessPlatform(bus, 'YARD-1'),
     throatMarker: scene.throatMarker,
+    /* The exit marker is the marker on the running line immediately after the
+     * throat: trains leaving the zone traverse throat → east. */
+    exitMarker: RAILYARD_MARKERS.east,
     ownedMarkerIds,
     capacity: 2,
     throat: physicsSwitchActuator(world, scene.yard.throatSwitch),
@@ -134,6 +138,15 @@ describe('RailyardZoneDevice — gates_zone + owned-marker declaration + reverse
     expect(typesOf(s.events)).toContain('zone_state_changed');
   });
 
+  it('declares core.provides_train_heading in both manifest and device_registered (ADR-036)', () => {
+    const s = setup();
+    s.device.start();
+    const reg = s.events.find((e) => e.event_type === 'device_registered');
+    expect(reg).toBeDefined();
+    const caps = (reg?.payload as { capabilities: string[] }).capabilities;
+    expect(caps).toContain('core.provides_train_heading');
+  });
+
   it('admits, reverse-in services, and releases a visiting train', () => {
     const s = setup();
     s.device.start();
@@ -152,5 +165,48 @@ describe('RailyardZoneDevice — gates_zone + owned-marker declaration + reverse
     expect(c1?.segment?.startsWith('Y-slot')).toBe(true);
     /* Occupancy returned to zero after release. */
     expect(s.device.occupancy).toBe(0);
+  });
+
+  it('emits train_introduced before zone_train_released on release (ADR-036 §3b)', () => {
+    const s = setup();
+    s.device.start();
+    const DT = 1 / 60;
+    for (let i = 0; i < 60 * 60; i++) {
+      s.world.step(DT);
+      s.device.step(DT);
+    }
+    const types = typesOf(s.events);
+    const introIdx = types.indexOf('train_introduced');
+    const relIdx = types.indexOf('zone_train_released');
+    expect(introIdx).toBeGreaterThanOrEqual(0);
+    expect(relIdx).toBeGreaterThanOrEqual(0);
+    /* The heading must be published BEFORE the train is handed back to core. */
+    expect(introIdx).toBeLessThan(relIdx);
+  });
+
+  it('train_introduced carries the correct train_id, marker_id, and heading_edge (ADR-036 §3b)', () => {
+    const s = setup();
+    s.device.start();
+    const DT = 1 / 60;
+    for (let i = 0; i < 60 * 60; i++) {
+      s.world.step(DT);
+      s.device.step(DT);
+    }
+    const intro = s.events.find((e) => e.event_type === 'train_introduced');
+    expect(intro).toBeDefined();
+    const payload = intro?.payload as {
+      train_id: string;
+      marker_id: string;
+      heading_edge: { from_marker_id: string; to_marker_id: string };
+    };
+    /* The released train is the visitor. */
+    expect(payload.train_id).toBe('V');
+    /* The position is the zone's throat marker. */
+    expect(payload.marker_id).toBe(s.scene.throatMarker);
+    /* The heading edge is the throat → east running-line edge. */
+    expect(payload.heading_edge).toEqual({
+      from_marker_id: s.scene.throatMarker,
+      to_marker_id: RAILYARD_MARKERS.east,
+    });
   });
 });

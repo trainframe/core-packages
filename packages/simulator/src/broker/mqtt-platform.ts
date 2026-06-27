@@ -119,6 +119,12 @@ export function mqttPlatform(
         if (command !== undefined) handler(command);
       });
     },
+
+    publishOnTopic(topic: string, payload: string): void {
+      /* Used by demo composition roots to publish operator gestures
+       * (e.g. `railway/operator/introduce_train`) over the existing connection. */
+      client.publish(topic, textEncoder.encode(payload));
+    },
   };
 }
 

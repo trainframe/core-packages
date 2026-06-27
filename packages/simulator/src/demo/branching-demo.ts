@@ -257,12 +257,27 @@ function seedSpares(world: PhysicsWorld, scene: BranchingScene): void {
   world.couple('spare0', 'spare1');
 }
 
+/** Options for {@link buildBranchingDemo}. */
+export interface BranchingDemoOptions {
+  /**
+   * Optional: publish an operator gesture on behalf of the placer (ADR-036 §3c).
+   * When supplied, `start()` calls this once per train AFTER it has registered,
+   * so a wired server can introduce each train with its known heading vector.
+   * Signature matches `railway/operator/introduce_train` payload shape:
+   * `{ train_id, heading_edge: { from_marker_id, to_marker_id } }`.
+   */
+  readonly publishOperator?: (payload: Readonly<Record<string, unknown>>) => void;
+}
+
 /**
  * Build the branching demo. The caller supplies a `platformFactory` binding each
  * device id to its transport. Geometry/topology is fixed (pure); only the device
  * transport varies between the gate, the render script, and the browser.
  */
-export function buildBranchingDemo(platformFactory: PlatformFactory): BranchingDemo {
+export function buildBranchingDemo(
+  platformFactory: PlatformFactory,
+  options?: BranchingDemoOptions,
+): BranchingDemo {
   const scene = buildBranchingScene(SLOT_COUNT);
   const layout = sceneToLayout(scene, 'branching');
   const world = new PhysicsWorld(scene.net);
@@ -271,9 +286,15 @@ export function buildBranchingDemo(platformFactory: PlatformFactory): BranchingD
   for (const t of TRAINS) seedTrainBody(world, scene, t);
   seedSpares(world, scene);
 
-  const trains = TRAINS.map((t) => {
+  /* Retain each train's platform so `start()` can publish the ADR-036
+   * introduction gesture after `train.start()` has delivered `device_registered`
+   * to the broker — by which point the server is ready to receive it. */
+  const trainPlatforms = TRAINS.map((t) => platformFactory(t.id));
+  const trains = TRAINS.map((t, i) => {
+    const platform = trainPlatforms[i];
+    if (platform === undefined) throw new Error('unreachable');
     const device = new ScheduledTrainDevice(t.id, {
-      platform: platformFactory(t.id),
+      platform,
       motor: physicsMotorActuator(world, t.id),
       sensor: physicsMarkerSensor(world, t.id, points),
       layout,
@@ -314,6 +335,25 @@ export function buildBranchingDemo(platformFactory: PlatformFactory): BranchingD
 
   const routes = DEMO_ROUTES;
 
+  /* ADR-036 §3c: publish introduce_train with the known heading vector (first
+   * outgoing layout edge from the train's home stop) right after registration. */
+  function publishIntro(platform: PlatformProvider, trainId: string, homeStop: string): void {
+    const outgoing = layout.edges.find((e) => e.from_marker_id === homeStop);
+    if (outgoing === undefined) return;
+    const payload = {
+      train_id: trainId,
+      heading_edge: {
+        from_marker_id: outgoing.from_marker_id,
+        to_marker_id: outgoing.to_marker_id,
+      },
+    };
+    if (options?.publishOperator !== undefined) {
+      options.publishOperator(payload);
+    } else {
+      platform.publishOnTopic?.('railway/operator/introduce_train', JSON.stringify(payload));
+    }
+  }
+
   let started = false;
   return {
     scene,
@@ -328,7 +368,14 @@ export function buildBranchingDemo(platformFactory: PlatformFactory): BranchingD
       started = true;
       yard.start();
       spur.start();
-      for (const train of trains) train.start();
+      for (let i = 0; i < trains.length; i++) {
+        const train = trains[i];
+        const platform = trainPlatforms[i];
+        const trainDef = TRAINS[i];
+        if (train === undefined || platform === undefined || trainDef === undefined) continue;
+        train.start();
+        publishIntro(platform, trainDef.id, trainDef.homeStop);
+      }
     },
     stop(): void {
       started = false;

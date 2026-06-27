@@ -27,6 +27,7 @@ import {
   type DeviceManifest,
   type GrantClearance,
   type GrantReverse,
+  type IntroduceTrain,
   type Layout,
   PROTOCOL_VERSION,
   type SetTargetSpeed,
@@ -52,6 +53,7 @@ export interface TrainDriveState {
   readonly speedScale: number;
   readonly reversing: boolean;
   readonly exploring: boolean;
+  readonly introducing: boolean;
 }
 
 export interface ScheduledTrainDeps {
@@ -81,6 +83,14 @@ export interface ScheduledTrainDeps {
 /** Default dead-reckoning speed (mm/s) — the device's assumed running pace. */
 const DEFAULT_NOMINAL_SPEED = 220;
 
+/** Full speed scale — the running default and what an introduction roll restores
+ *  to once the core ends it (the scheduler never sends `set_target_speed`). */
+const FULL_SPEED_SCALE = 1;
+
+/** Introduction-roll speed scale (ADR-036 §3a): slow enough to stay within the
+ *  expected two-marker zone, not so slow the sensor misses the crossing. */
+const INTRODUCTION_ROLL_SPEED_SCALE = 0.3;
+
 export class ScheduledTrainDevice {
   private readonly id: string;
   private readonly d: ScheduledTrainDeps;
@@ -99,7 +109,7 @@ export class ScheduledTrainDevice {
   /** Motion the device is currently commanding. */
   private intent: Motion = 'stopped';
   /** Speed scale [0,1] from `set_target_speed` (default full). */
-  private speedScale = 1;
+  private speedScale = FULL_SPEED_SCALE;
   /** Whether the current clearance is a reverse grant (bounded backing up). */
   private reversing = false;
   /** Cold-start discovery (ADR-015): driving forward across markers with no route
@@ -108,6 +118,13 @@ export class ScheduledTrainDevice {
    *  device picks no edges — the physical switches route it; the sensor reports
    *  whatever marker it actually crosses. */
   private exploring = false;
+  /* Introduction roll (ADR-036 §3a): on `introduce_train`, the train rolls
+   * forward gently until the core ends the roll via `revoke_clearance` or
+   * `emergency_stop` after the heading is resolved. The core owns the release —
+   * the device never self-terminates the roll. Like exploration but at a reduced
+   * speed so the loco travels only a short distance while the core reads its
+   * tag_observed crossings. */
+  private introducing = false;
   /** Power state. A powered-OFF loco is inert in place: it commands its motor
    *  stopped, then falls SILENT (no `train_status`, no marker reports, ignores
    *  commands) WITHOUT disconnecting — so the scheduler, hearing silence rather
@@ -138,6 +155,11 @@ export class ScheduledTrainDevice {
   /** Whether the loco has power (for tests/inspection). */
   get isPowered(): boolean {
     return this.powered;
+  }
+
+  /** Whether the loco is currently in its introduction roll (for tests/inspection). */
+  get isIntroducing(): boolean {
+    return this.introducing;
   }
 
   /**
@@ -202,6 +224,7 @@ export class ScheduledTrainDevice {
       speedScale: this.speedScale,
       reversing: this.reversing,
       exploring: this.exploring,
+      introducing: this.introducing,
     };
   }
 
@@ -215,6 +238,7 @@ export class ScheduledTrainDevice {
     this.speedScale = state.speedScale;
     this.reversing = state.reversing;
     this.exploring = state.exploring;
+    this.introducing = state.introducing;
     /* `drive` re-asserts the motion intent through the (new world's) motor. */
     this.drive(state.intent);
   }
@@ -237,7 +261,7 @@ export class ScheduledTrainDevice {
       if (this.distance < 0) this.distance = 0;
       this.clampToEdgeLength();
     }
-    if (this.route.length > 0 || this.exploring) this.publishStatus();
+    if (this.route.length > 0 || this.exploring || this.introducing) this.publishStatus();
   }
 
   // ---- command handling -------------------------------------------------
@@ -255,6 +279,10 @@ export class ScheduledTrainDevice {
       this.onGrantClearance(grant.payload.limit_marker_id);
       return;
     }
+    if (narrow<IntroduceTrain>(command, 'introduce_train') !== undefined) {
+      this.onIntroduceTrain();
+      return;
+    }
     if (command.command_type === 'revoke_clearance') {
       this.onRevoke();
       return;
@@ -266,6 +294,7 @@ export class ScheduledTrainDevice {
     }
     if (command.command_type === 'emergency_stop') {
       this.exploring = false;
+      this.endIntroductionRoll();
       this.drive('stopped');
       this.limitMarker = undefined;
       return;
@@ -283,6 +312,7 @@ export class ScheduledTrainDevice {
    *  motion — the train waits for clearance. */
   private onAssignRoute(command: AssignRoute): void {
     this.exploring = false;
+    this.endIntroductionRoll();
     this.route = command.payload.edges;
     this.progress = 0;
     this.distance = 0;
@@ -307,6 +337,7 @@ export class ScheduledTrainDevice {
 
   private onRevoke(): void {
     this.exploring = false;
+    this.endIntroductionRoll();
     this.drive('stopped');
     this.limitMarker = undefined;
   }
@@ -322,6 +353,32 @@ export class ScheduledTrainDevice {
     this.reversing = false;
     this.limitMarker = undefined;
     this.drive('forward');
+  }
+
+  /** Introduction roll (ADR-036 §3a): shed any prior state and drive forward at
+   *  reduced speed so the core can observe two marker crossings and resolve the
+   *  heading. The roll is open-ended — the CORE owns the release and sends
+   *  `revoke_clearance` once the heading is known; the device never self-stops. */
+  private onIntroduceTrain(): void {
+    this.introducing = true;
+    this.exploring = false;
+    this.route = [];
+    this.progress = 0;
+    this.distance = 0;
+    this.reversing = false;
+    this.limitMarker = undefined;
+    this.speedScale = INTRODUCTION_ROLL_SPEED_SCALE;
+    this.drive('forward');
+  }
+
+  /** End the introduction roll: clear the roll flag AND restore full speed. The
+   *  roll throttled `speedScale` to a fraction (ADR-036 §3a); the scheduler never
+   *  sends `set_target_speed`, so without this the train would run at the roll
+   *  pace forever once its pending schedule starts. Called from every site that
+   *  ends the roll — `revoke_clearance`, `emergency_stop`, `assign_route`. */
+  private endIntroductionRoll(): void {
+    this.introducing = false;
+    this.speedScale = FULL_SPEED_SCALE;
   }
 
   /** The ONLY path to reverse: bounded by the granted limit + edges. Ignored if

@@ -194,6 +194,17 @@ function beginExploration(): CoreCommand {
   };
 }
 
+function introduceTrain(reason?: string): CoreCommand {
+  return {
+    command_id: UUID,
+    device_id: 'T1',
+    timestamp_server: TS,
+    command_type: 'introduce_train',
+    protocol_version: VERSION,
+    payload: reason !== undefined ? { reason } : {},
+  };
+}
+
 const ROUTE = [
   { from_marker_id: 'M-A', to_marker_id: 'M-B' },
   { from_marker_id: 'M-B', to_marker_id: 'M-C' },
@@ -445,5 +456,99 @@ describe('ScheduledTrainDevice — speed + lifecycle', () => {
       .map((e) => (e.payload as { direction: string }).direction);
     expect(bReads).toContain('forward');
     expect(bReads).toContain('reverse');
+  });
+});
+
+describe('ScheduledTrainDevice — introduction roll (ADR-036 §3a)', () => {
+  it('introduce_train starts a gentle forward roll and sets isIntroducing', () => {
+    const r = rig();
+    r.send(introduceTrain());
+    expect(r.device.motion).toBe('forward');
+    expect(r.device.isIntroducing).toBe(true);
+  });
+
+  it('introduce_train with a reason payload also starts the roll', () => {
+    const r = rig();
+    r.send(introduceTrain('operator placed loco at yard exit'));
+    expect(r.device.motion).toBe('forward');
+    expect(r.device.isIntroducing).toBe(true);
+  });
+
+  it('emits tag_observed crossings while rolling during introduction', () => {
+    const r = rig();
+    r.send(introduceTrain());
+    /* Run far enough to reach B (500mm). The sensor fires tag_observed at each
+     * marker — the core watches these crossings to resolve the heading. */
+    r.run(160);
+    const tags = tagsObserved(r.events);
+    expect(tags).toContain('M-B');
+  });
+
+  it('does not self-stop at markers during introduction — the core owns the release', () => {
+    const r = rig();
+    r.send(introduceTrain());
+    /* Run past B without any revoke: the train must keep rolling (no limit). */
+    r.run(140);
+    /* Past B but no clearance limit, so it should still be forward. */
+    expect(r.device.motion).toBe('forward');
+  });
+
+  it('revoke_clearance stops the introduction roll (the core resolves the heading)', () => {
+    const r = rig();
+    r.send(introduceTrain());
+    r.run(10);
+    r.send(revokeClearance());
+    expect(r.device.motion).toBe('stopped');
+    expect(r.device.isIntroducing).toBe(false);
+  });
+
+  it('emergency_stop ends the introduction roll', () => {
+    const r = rig();
+    r.send(introduceTrain());
+    r.run(5);
+    r.send(emergencyStop());
+    expect(r.device.motion).toBe('stopped');
+    expect(r.device.isIntroducing).toBe(false);
+  });
+
+  it('emits train_status heartbeats during the introduction roll', () => {
+    const r = rig();
+    r.send(introduceTrain());
+    r.run(5);
+    expect(r.events.filter((e) => e.event_type === 'train_status').length).toBeGreaterThan(0);
+  });
+
+  it('assign_route ends the introduction roll (a scheduled run supersedes introduction)', () => {
+    const r = rig();
+    r.send(introduceTrain());
+    r.run(5);
+    r.send(assignRoute(ROUTE));
+    expect(r.device.motion).toBe('stopped');
+    expect(r.device.isIntroducing).toBe(false);
+  });
+
+  it('restores FULL speed after the roll ends (revoke → assign_route → grant), not the throttled roll pace', () => {
+    const r = rig();
+    /* The roll throttles to a fraction; observe it on the wire while rolling. */
+    r.send(introduceTrain());
+    r.run(5);
+    const rolling = r.events.filter((e) => e.event_type === 'train_status').at(-1)?.payload as {
+      speed_normalised: number;
+    };
+    expect(rolling.speed_normalised).toBeCloseTo(0.3);
+
+    /* The core resolves the heading, ends the roll, then the pending schedule
+     * runs (assign_route + grant_clearance). The scheduler NEVER sends
+     * set_target_speed, so the device must restore full speed itself — otherwise
+     * the train runs at the roll pace forever. */
+    r.send(revokeClearance());
+    r.send(assignRoute(ROUTE));
+    r.send(grantClearance('M-C'));
+    r.run(5);
+
+    const running = r.events.filter((e) => e.event_type === 'train_status').at(-1)?.payload as {
+      speed_normalised: number;
+    };
+    expect(running.speed_normalised).toBeCloseTo(1);
   });
 });

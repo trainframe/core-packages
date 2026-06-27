@@ -68,6 +68,14 @@ export interface PlatformProvider {
    * teardown.
    */
   commission?(spec: CommissionSpec): () => void;
+  /**
+   * Publish a raw message on an arbitrary topic — used by demo composition roots
+   * to send operator gestures (e.g. `railway/operator/introduce_train`) over the
+   * same broker connection the device already holds. OPTIONAL: absent on
+   * `inProcessPlatform` (the in-process bus routes only per-device events and has
+   * no operator topic concept).
+   */
+  publishOnTopic?(topic: string, payload: string): void;
 }
 
 /**

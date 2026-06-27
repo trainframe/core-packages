@@ -19,7 +19,12 @@
  *
  * Tick-driven over a virtual clock; pure (no DOM, no Date.now, no Math.random).
  */
-import { type CoreEvent, type DeviceManifest, PROTOCOL_VERSION } from '@trainframe/protocol';
+import {
+  type CoreEvent,
+  type DeviceManifest,
+  PROTOCOL_VERSION,
+  type TrainIntroduced,
+} from '@trainframe/protocol';
 import { Crane, type CraneBounds } from './crane.js';
 import { LadderYardController, type Sighting, type SlotGeom } from './ladder-yard-controller.js';
 import type { MotorActuator } from './motor-actuator.js';
@@ -40,6 +45,11 @@ export interface RailyardZoneDeps {
   readonly platform: PlatformProvider;
   /** The zone boundary marker (the throat — the gates_zone admission point). */
   readonly throatMarker: string;
+  /** The next marker on the running line after the throat: the `to_marker_id` of
+   *  the directed edge a released train traverses exiting the zone. Required to
+   *  construct the `heading_edge` in the `train_introduced` event (ADR-036 §3b).
+   *  Provided by the composition root, which knows the marker topology. */
+  readonly exitMarker: string;
   /** The interior markers + switches the frame owns (ADR-034). The composition root
    *  computes this from the yard's footprint; core only records it. */
   readonly ownedMarkerIds: readonly string[];
@@ -135,7 +145,7 @@ export class RailyardZoneDevice {
       protocol_version: PROTOCOL_VERSION,
       display_name: 'Railyard',
       description: 'A capacity-limited opaque reverse-in shunting yard gating its throat.',
-      capabilities: ['core.gates_zone', 'core.reports_length'],
+      capabilities: ['core.gates_zone', 'core.reports_length', 'core.provides_train_heading'],
     };
   }
 
@@ -149,7 +159,7 @@ export class RailyardZoneDevice {
       event_type: 'device_registered',
       protocol_version: PROTOCOL_VERSION,
       payload: {
-        capabilities: ['core.gates_zone', 'core.reports_length'],
+        capabilities: ['core.gates_zone', 'core.reports_length', 'core.provides_train_heading'],
         device_kind_hint: 'railyard',
         owned_marker_ids: [...this.d.ownedMarkerIds],
       },
@@ -205,11 +215,14 @@ export class RailyardZoneDevice {
     if (active.controller.currentPhase === 'done') this.release(active);
   }
 
-  /** Release a serviced train to core: emit `zone_train_released` (+ a length
+  /** Release a serviced train to core: emit `train_introduced` (ADR-036 §3b —
+   *  the zone is `provides_train_heading`, so it hands over the vector BEFORE
+   *  releasing the train to open track), then `zone_train_released` (+ a length
    *  reconcile for the shed cut), drop the slot, restore the throat to the running
    *  line, and re-announce occupancy so the next queued train is admitted. */
   private release(resident: Resident): void {
     resident.released = true;
+    this.d.platform.publish(this.trainIntroducedEvent(resident.trainId));
     this.d.platform.publish(this.releasedEvent(resident.trainId));
     this.d.platform.publish(this.lengthChanged(resident.trainId));
     const idx = this.residents.indexOf(resident);
@@ -218,6 +231,32 @@ export class RailyardZoneDevice {
     this.d.throat.set(this.d.thruPos);
     for (const sw of this.d.ladder) sw.set(this.d.ladderThruPos);
     this.announce();
+  }
+
+  /* Emit the train's resolved position + heading BEFORE releasing it to open
+   * track (ADR-036 §3b). The zone is `core.provides_train_heading`: it knows the
+   * exit direction because the train always leaves via the throat → exit edge.
+   * Publishing this event FIRST means core has the vector the instant the train
+   * reaches open track — no blind motion on the layout. */
+  private trainIntroducedEvent(trainId: string): CoreEvent {
+    /* `TrainIntroduced` is a member of `CoreEvent`; the plain object literal
+     * satisfies it, so the cast is sound. Confined here, named, not sprinkled. */
+    const event: TrainIntroduced = {
+      event_id: this.nextId(),
+      device_id: this.deviceId,
+      timestamp_device: EVENT_TIMESTAMP,
+      event_type: 'train_introduced',
+      protocol_version: PROTOCOL_VERSION,
+      payload: {
+        train_id: trainId,
+        marker_id: this.d.throatMarker,
+        heading_edge: {
+          from_marker_id: this.d.throatMarker,
+          to_marker_id: this.d.exitMarker,
+        },
+      },
+    };
+    return event as unknown as CoreEvent;
   }
 
   private releasedEvent(trainId: string): CoreEvent {

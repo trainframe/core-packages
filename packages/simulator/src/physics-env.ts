@@ -1,3 +1,4 @@
+import type { EdgeRef } from '@trainframe/core';
 /**
  * Physics test environment — the replacement for the old `startTestEnvironment`
  * (which drove the deleted virtual-device sim). It wires a REAL `@trainframe/server`
@@ -127,6 +128,20 @@ export interface SpawnTrainOptions {
   readonly lengthMm?: number;
   /** Body top speed (mm/s) in the world. Default 400. */
   readonly maxSpeed?: number;
+  /**
+   * Whether to introduce the train immediately after spawning (ADR-036 §3c).
+   * Default TRUE. Set false only for tests that explicitly exercise the
+   * un-introduced / introduction-roll behaviour.
+   */
+  readonly introduced?: boolean;
+  /**
+   * Explicit heading edge for introduction (ADR-036 §3c). When `introduced`
+   * is true (the default) and this is omitted, the heading is derived
+   * geometrically from the layout: the outgoing edge whose neighbour bearing
+   * best matches the body's facing direction. If derivation is ambiguous,
+   * an error is thrown directing the caller to supply an explicit headingEdge.
+   */
+  readonly headingEdge?: EdgeRef;
 }
 
 export interface SpawnGateOptions {
@@ -169,6 +184,12 @@ export interface PhysicsEnv {
   spawnGate(deviceId: string, options: SpawnGateOptions): GateDevice;
   spawnSwitch(deviceId: string, options: SpawnSwitchOptions): SwitchDevice;
   assignSchedule(trainId: string, stops: readonly string[], routeId?: string): void;
+  /**
+   * Introduce a train that was spawned with `introduced: false`, or re-introduce
+   * a train at a known vector. With `headingEdge` → operator-vector path (ADR-036
+   * §3c); without → two-marker forward roll (§3a).
+   */
+  introduceTrain(trainId: string, headingEdge?: EdgeRef): void;
   /** Advance the world + every device + the scheduler clock in lockstep by `ms`. */
   advance(ms: number): void;
   /** Commands the scheduler sent to `deviceId`, in order. */
@@ -257,12 +278,13 @@ export function startPhysicsEnv(scene: PhysicsScene): PhysicsEnv {
     spawnTrain(trainId, options) {
       const atMarker = options?.atMarker ?? scene.layout.markers[0]?.id;
       const start = atMarker === undefined ? undefined : markerById.get(atMarker);
+      const facing = options?.facing ?? 1;
       world.addBody({
         id: trainId,
         kind: 'loco',
         segment: options?.segment ?? 'main',
         railPos: options?.railPos ?? start?.x ?? 0,
-        facing: options?.facing ?? 1,
+        facing,
         maxSpeed: options?.maxSpeed ?? 400,
       });
       const device = new ScheduledTrainDevice(trainId, {
@@ -284,6 +306,16 @@ export function startPhysicsEnv(scene: PhysicsScene): PhysicsEnv {
       device.start();
       trains.push(device);
       teardown.push(() => device.stop());
+
+      /* ADR-036 §3c: introduce the train immediately after registration (default).
+       * The in-memory bus dispatches synchronously, so `device.start()` above has
+       * already delivered `device_registered` to the server. Passing the known
+       * vector skips the two-marker roll entirely — the placer knows the facing. */
+      const headingEdge = resolveIntroductionEdge(scene, world, trainId, options, atMarker);
+      if (headingEdge !== undefined) {
+        server.introduceTrainWithVector(trainId, headingEdge);
+      }
+
       return device;
     },
     spawnGate(deviceId, options) {
@@ -316,6 +348,13 @@ export function startPhysicsEnv(scene: PhysicsScene): PhysicsEnv {
     assignSchedule(trainId, stops, routeId) {
       server.assignSchedule(trainId, routeId ?? `route-${trainId}-${clockMs}`, [...stops]);
     },
+    introduceTrain(trainId, headingEdge) {
+      if (headingEdge !== undefined) {
+        server.introduceTrainWithVector(trainId, headingEdge);
+      } else {
+        server.introduceTrain(trainId);
+      }
+    },
     advance(ms) {
       const ticks = Math.max(1, Math.round(ms / (DT * 1000)));
       for (let i = 0; i < ticks; i++) {
@@ -335,6 +374,103 @@ export function startPhysicsEnv(scene: PhysicsScene): PhysicsEnv {
       server.stop();
     },
   };
+}
+
+/* Resolve the heading edge for introduction after spawning. Returns undefined if
+ * the train should not be introduced immediately (introduced === false or no
+ * atMarker is available). Extracted from `spawnTrain` to stay under the cognitive
+ * complexity ceiling. */
+function resolveIntroductionEdge(
+  scene: PhysicsScene,
+  world: PhysicsWorld,
+  trainId: string,
+  options: SpawnTrainOptions | undefined,
+  atMarker: string | undefined,
+): EdgeRef | undefined {
+  if (options?.introduced === false) return undefined;
+  if (atMarker === undefined) return undefined;
+  if (options?.headingEdge !== undefined) return options.headingEdge;
+  const bodyRotation = world.bodies().find((b) => b.id === trainId)?.rotationDeg ?? 0;
+  return deriveHeadingEdge(scene, atMarker, bodyRotation);
+}
+
+/* Computes the facing unit vector, then finds the outgoing edge whose neighbour
+ * bearing produces the largest dot product with it. Returns the best edge and
+ * its dot product so the caller can reject non-positive values. Extracted from
+ * `deriveHeadingEdge` to keep that function's cognitive complexity below the
+ * lint ceiling. */
+function pickBestEdgeByBearing(
+  outgoing: ReadonlyArray<{ from_marker_id: string; to_marker_id: string }>,
+  fromMarker: MarkerPoint,
+  facingDeg: number,
+  scene: PhysicsScene,
+): { bestEdge: { from_marker_id: string; to_marker_id: string } | undefined; bestDot: number } {
+  const facingRad = (facingDeg * Math.PI) / 180;
+  const fx = Math.cos(facingRad);
+  const fy = Math.sin(facingRad);
+
+  let bestEdge: { from_marker_id: string; to_marker_id: string } | undefined;
+  let bestDot = Number.NEGATIVE_INFINITY;
+
+  for (const edge of outgoing) {
+    const toMarker = scene.markers.find((m) => m.id === edge.to_marker_id);
+    if (toMarker === undefined) continue;
+    const dx = toMarker.x - fromMarker.x;
+    const dy = toMarker.y - fromMarker.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < 1) continue; /* Skip coincident markers. */
+    const dot = (dx / dist) * fx + (dy / dist) * fy;
+    if (dot > bestDot) {
+      bestDot = dot;
+      bestEdge = edge;
+    }
+  }
+
+  return { bestEdge, bestDot };
+}
+
+/**
+ * Derive the heading edge for a train placed at `atMarker` facing `facingDeg`
+ * degrees (world-space: 0 = +x/east, 90 = +y; on the screen the +y axis points
+ * down, so 90° renders as south). Picks the outgoing layout edge whose neighbour
+ * marker bearing best matches the body's heading direction.
+ *
+ * The chosen edge — whether `atMarker` has one outgoing edge or several — must be
+ * clearly FORWARD: its bearing within 90° of `facingDeg` (dot product > 0). A
+ * body placed facing AWAY from its only edge (e.g. `facing:-1` at a terminus) is
+ * therefore rejected, not introduced on a reversed heading. When no outgoing edge
+ * is forward (all behind/perpendicular, or the marker is absent from the scene
+ * geometry), the caller must supply an explicit `headingEdge` — the escape hatch
+ * for any spawn whose body rotation does not align with the straight-line bearing
+ * to its neighbour (a curved-rail tangent, say).
+ */
+function deriveHeadingEdge(scene: PhysicsScene, atMarker: string, facingDeg: number): EdgeRef {
+  const outgoing = scene.layout.edges.filter((e) => e.from_marker_id === atMarker);
+  if (outgoing.length === 0) {
+    throw new Error(
+      `physics-env: marker ${atMarker} has no outgoing layout edges — cannot derive heading. Pass an explicit headingEdge.`,
+    );
+  }
+
+  const fromMarker = scene.markers.find((m) => m.id === atMarker);
+  if (fromMarker === undefined) {
+    throw new Error(
+      `physics-env: marker ${atMarker} not in scene.markers — cannot derive heading. Pass an explicit headingEdge.`,
+    );
+  }
+
+  /* Pick by bearing relative to the body's facing — for both the single-edge and
+   *  multi-edge cases, so a body facing AWAY from its only edge is rejected. */
+  const { bestEdge, bestDot } = pickBestEdgeByBearing(outgoing, fromMarker, facingDeg, scene);
+
+  /* Require the best match to be clearly forward (dot > 0 means < 90° off-heading). */
+  if (bestEdge === undefined || bestDot <= 0) {
+    throw new Error(
+      `physics-env: heading derivation for marker ${atMarker} is ambiguous — no outgoing edge is within 90° of the body's facing ${facingDeg}°. Pass an explicit headingEdge.`,
+    );
+  }
+
+  return { from_marker_id: bestEdge.from_marker_id, to_marker_id: bestEdge.to_marker_id };
 }
 
 function seedIdentityTags(
