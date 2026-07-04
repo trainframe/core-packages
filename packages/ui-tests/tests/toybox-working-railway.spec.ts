@@ -117,7 +117,19 @@ test.describe
       // ── Two trains at the WEST end, on s0 and s1. ─────────────────────────────
       const t0 = await pieceTransform(sim, s0);
       const t1 = await pieceTransform(sim, s1);
-      const train1Piece = await placePieceOnToyTable(sim, { type: 'train', xMm: t1.x, yMm: t1.y });
+      // Both trains must run EAST (toward the station + railyard). A freshly
+      // dropped train faces whichever way the nearest-start-edge selector picks,
+      // and on this line the two drop points resolve to OPPOSITE default headings
+      // (the eastern drop faces west, back down the line). Rotate the eastern
+      // train 180° so both locos point east — the orientation a real operator
+      // gives locos meant to run that way — instead of the lead facing its
+      // follower and stalling nose-to-nose.
+      const train1Piece = await placePieceOnToyTable(sim, {
+        type: 'train',
+        xMm: t1.x,
+        yMm: t1.y,
+        rotateSteps: 4,
+      });
       const train2Piece = await placePieceOnToyTable(sim, { type: 'train', xMm: t0.x, yMm: t0.y });
       await scanPiece(sim, train1Piece);
       await scanPiece(sim, train2Piece);
