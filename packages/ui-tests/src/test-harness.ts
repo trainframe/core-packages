@@ -13,6 +13,7 @@ import {
   MqttBrokerClient as SimBrokerClient,
   SwitchDevice,
   buildBranchingScene,
+  deriveHeadingEdge,
   mqttPlatform,
   physicsMarkerSensor,
   physicsMotorActuator,
@@ -111,6 +112,17 @@ export interface SpawnTrainOptions {
   readonly facing?: 1 | -1;
   /** Physical nose-to-tail length (mm). Default 120. */
   readonly lengthMm?: number;
+  /**
+   * Whether to introduce the train immediately after spawning (ADR-036 §3c —
+   * the placer knows the facing, so it hands the vector straight to the core).
+   * Default `true`. Pass `false` to spawn a not-yet-introduced train that must
+   * be brought on via the two-marker roll or an exploration drive.
+   */
+  readonly introduced?: boolean;
+  /** Explicit heading edge for introduction (ADR-036 §3c). Overrides the edge
+   *  derived from the body's facing; also taken from `startEdge` when that is
+   *  supplied. Needed when the rail tangent at the marker is curved. */
+  readonly headingEdge?: { readonly from_marker_id: string; readonly to_marker_id: string };
 }
 
 export interface UiHarness {
@@ -259,6 +271,37 @@ export async function startUiHarness(opts: UiHarnessOptions): Promise<UiHarness>
       device.start();
       trains.push(device);
       teardown.push(() => device.stop());
+
+      /* ADR-036 §3c: introduce the placed train immediately (default) — a placer
+       * that sets a body down knows which way it faces, so it hands the vector
+       * straight over and skips the two-marker roll. Without this the gated
+       * scheduler treats the train as off-the-map and never routes it.
+       *
+       * This is published as the real operator gesture on the SAME broker client
+       * the device registered on — NOT a direct `server.introduceTrainWithVector`
+       * call. `device.start()` above published `device_registered` synchronously on
+       * `simClient`; over this real (async) broker the server has not yet processed
+       * it, so a direct introduce call would race the registration and silently
+       * no-op on the still-unknown train. Queuing the gesture behind the
+       * registration on the same client guarantees the server sees the train
+       * registered first. `introduced: false` opts out (roll/exploration path). */
+      if (options?.introduced !== false) {
+        const headingEdge =
+          options?.headingEdge ??
+          options?.startEdge ??
+          deriveHeadingEdge(
+            uiScene.layout.edges,
+            uiScene.points,
+            atMarker,
+            world.bodies().find((b) => b.id === deviceId)?.rotationDeg ?? 0,
+          );
+        simClient.publish(
+          'railway/operator/introduce_train',
+          new TextEncoder().encode(
+            JSON.stringify({ train_id: deviceId, heading_edge: headingEdge }),
+          ),
+        );
+      }
     },
     advance(ms: number) {
       if (world === undefined) return;

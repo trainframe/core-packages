@@ -23,7 +23,7 @@ export { physicsMotorActuator } from './sim/motor-actuator.js';
 export { physicsSwitchActuator } from './sim/switch-actuator.js';
 
 /* The physics test harness (replacement for the deleted `startTestEnvironment`). */
-export { startPhysicsEnv, straightLoop } from './physics-env.js';
+export { deriveHeadingEdge, startPhysicsEnv, straightLoop } from './physics-env.js';
 export type {
   LoopMarker,
   PhysicsEnv,

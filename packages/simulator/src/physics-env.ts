@@ -391,7 +391,7 @@ function resolveIntroductionEdge(
   if (atMarker === undefined) return undefined;
   if (options?.headingEdge !== undefined) return options.headingEdge;
   const bodyRotation = world.bodies().find((b) => b.id === trainId)?.rotationDeg ?? 0;
-  return deriveHeadingEdge(scene, atMarker, bodyRotation);
+  return deriveHeadingEdge(scene.layout.edges, scene.markers, atMarker, bodyRotation);
 }
 
 /* Computes the facing unit vector, then finds the outgoing edge whose neighbour
@@ -403,7 +403,7 @@ function pickBestEdgeByBearing(
   outgoing: ReadonlyArray<{ from_marker_id: string; to_marker_id: string }>,
   fromMarker: MarkerPoint,
   facingDeg: number,
-  scene: PhysicsScene,
+  markerPoints: readonly MarkerPoint[],
 ): { bestEdge: { from_marker_id: string; to_marker_id: string } | undefined; bestDot: number } {
   const facingRad = (facingDeg * Math.PI) / 180;
   const fx = Math.cos(facingRad);
@@ -413,7 +413,7 @@ function pickBestEdgeByBearing(
   let bestDot = Number.NEGATIVE_INFINITY;
 
   for (const edge of outgoing) {
-    const toMarker = scene.markers.find((m) => m.id === edge.to_marker_id);
+    const toMarker = markerPoints.find((m) => m.id === edge.to_marker_id);
     if (toMarker === undefined) continue;
     const dx = toMarker.x - fromMarker.x;
     const dy = toMarker.y - fromMarker.y;
@@ -443,30 +443,45 @@ function pickBestEdgeByBearing(
  * geometry), the caller must supply an explicit `headingEdge` — the escape hatch
  * for any spawn whose body rotation does not align with the straight-line bearing
  * to its neighbour (a curved-rail tangent, say).
+ *
+ * Takes the layout `edges` and the world `markerPoints` directly (rather than a
+ * whole `PhysicsScene`) so both this package's `physics-env` and the ui-tests
+ * harness — which hold the same geometry in differently-named fields — can share
+ * one derivation.
  */
-function deriveHeadingEdge(scene: PhysicsScene, atMarker: string, facingDeg: number): EdgeRef {
-  const outgoing = scene.layout.edges.filter((e) => e.from_marker_id === atMarker);
+export function deriveHeadingEdge(
+  edges: ReadonlyArray<{ from_marker_id: string; to_marker_id: string }>,
+  markerPoints: readonly MarkerPoint[],
+  atMarker: string,
+  facingDeg: number,
+): EdgeRef {
+  const outgoing = edges.filter((e) => e.from_marker_id === atMarker);
   if (outgoing.length === 0) {
     throw new Error(
-      `physics-env: marker ${atMarker} has no outgoing layout edges — cannot derive heading. Pass an explicit headingEdge.`,
+      `deriveHeadingEdge: marker ${atMarker} has no outgoing layout edges — cannot derive heading. Pass an explicit headingEdge.`,
     );
   }
 
-  const fromMarker = scene.markers.find((m) => m.id === atMarker);
+  const fromMarker = markerPoints.find((m) => m.id === atMarker);
   if (fromMarker === undefined) {
     throw new Error(
-      `physics-env: marker ${atMarker} not in scene.markers — cannot derive heading. Pass an explicit headingEdge.`,
+      `deriveHeadingEdge: marker ${atMarker} not in the scene geometry — cannot derive heading. Pass an explicit headingEdge.`,
     );
   }
 
   /* Pick by bearing relative to the body's facing — for both the single-edge and
    *  multi-edge cases, so a body facing AWAY from its only edge is rejected. */
-  const { bestEdge, bestDot } = pickBestEdgeByBearing(outgoing, fromMarker, facingDeg, scene);
+  const { bestEdge, bestDot } = pickBestEdgeByBearing(
+    outgoing,
+    fromMarker,
+    facingDeg,
+    markerPoints,
+  );
 
   /* Require the best match to be clearly forward (dot > 0 means < 90° off-heading). */
   if (bestEdge === undefined || bestDot <= 0) {
     throw new Error(
-      `physics-env: heading derivation for marker ${atMarker} is ambiguous — no outgoing edge is within 90° of the body's facing ${facingDeg}°. Pass an explicit headingEdge.`,
+      `deriveHeadingEdge: heading derivation for marker ${atMarker} is ambiguous — no outgoing edge is within 90° of the body's facing ${facingDeg}°. Pass an explicit headingEdge.`,
     );
   }
 
