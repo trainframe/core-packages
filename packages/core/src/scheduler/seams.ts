@@ -1,3 +1,5 @@
+import type { SchedulerEffect } from './effects.js';
+
 /**
  * Single ownership of a piece of track (ADR-034). A marker under a
  * `core.gates_zone` frame cannot be actuated by a switch device, and a junction a
@@ -9,4 +11,9 @@ export interface MarkerOwnership {
   zoneOwnerOf(markerId: string): string | undefined;
   /** The switch device paired to `markerId` as its junction, if any. */
   switchOwnerOf(markerId: string): string | undefined;
+}
+
+/** Where a train's resolved marker read goes once identity has authorised it. */
+export interface MarkerCrossings {
+  handleTrainCrossing(trainId: string, markerId: string): ReadonlyArray<SchedulerEffect>;
 }
