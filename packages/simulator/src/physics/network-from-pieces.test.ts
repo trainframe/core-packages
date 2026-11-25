@@ -249,15 +249,13 @@ describe('compileNetwork — a physics network from free-placed pieces', () => {
     expect(compiled.net.segments()).toHaveLength(16);
   });
 
-  it('skips a turntable (deferred) as a recorded gap rather than throwing or emitting a wrong network', () => {
+  it('compiles a lone turntable as a single deck rail', () => {
     const pieces: readonly TrackPiece[] = [
       { id: 'tt', type: 'turntable', position: { x: 0, y: 0 }, rotationDeg: 0, tagged: false },
     ];
     const compiled = compileNetwork(pieces);
-    /* No segment for the turntable (left as a non-routing gap), and it is RECORDED —
-     * never thrown, so one unsupported piece can't crash a whole operator layout. */
-    expect(compiled.net.segments()).toHaveLength(0);
-    expect(compiled.contradictions.some((c) => c.includes('turntable'))).toBe(true);
+    expect(compiled.net.segments()).toHaveLength(1);
+    expect(compiled.contradictions).toEqual([]);
   });
 
   it('compiles multiple disconnected components', () => {

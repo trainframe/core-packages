@@ -1,3 +1,4 @@
+import type { TurntableExit } from '../devices/turntable-actuator.js';
 /**
  * Compile a set of FREE-PLACED track pieces (`track/pieces.ts`) into a physics
  * `RailNetwork` — the GEOMETRY sibling of `track/layout-from-pieces.ts`'s logical
@@ -47,10 +48,12 @@
  *      a body reaching it stops — no special wiring beyond linking its one joint. Device
  *      pieces contribute no track and are skipped. Disconnected components all compile.
  *
- * DEFERRED (documented, not half-implemented): `turntable` (an N-way rotating junction
- * whose deck angle, not a static branch, picks the exit, with facing-flip transitions).
- * It is SKIPPED (left as a non-routing gap, recorded in `contradictions`) rather than
- * throwing — one unsupported piece must not crash a whole layout — see `isDeferred`. NOTE on
+ * A `turntable` is a junction with N legs and ONE shared rail: its DECK (`placedDeckRail`) runs
+ * from the trunk rim through the pit centre and out to the rim at the live deck angle, so it
+ * joins whichever radial road the bridge is aligned to. Every joint it exposes is gated by a
+ * switch position (`stub-a`..`stub-c` on the piece's marker id), so the deck links only once the
+ * actuator has SEATED on a road. Its angle is a `DeckAngleHolder` the caller drives.
+ * NOTE on
  * bridges: a grade-separated self-crossing (a satellite loop ramping over the main on a
  * height layer, as in `interesting-layout.ts`) is NOT a special case here — the crossing
  * pieces are on different layers and share NO joint, so they never cluster; the ramps are
@@ -65,10 +68,17 @@ import {
   collectEndpoints,
   switchStateForEndpoint,
 } from '../track/layout-from-pieces.js';
-import { type TrackPiece, getEndpoints, isDevicePiece } from '../track/pieces.js';
+import {
+  TURNTABLE_POSITIONS,
+  type TrackPiece,
+  getEndpoints,
+  isDevicePiece,
+} from '../track/pieces.js';
 import { type NetLink, type RailNetwork, buildNetwork } from './network.js';
 import type { SegEndpoints } from './piece-network.js';
 import { type Rail, railOfPiece } from './rail.js';
+import { placedDeckRail } from './turntable-deck.js';
+import type { DeckAngleHolder } from './turntable.js';
 
 /** The compiled physics network plus the bookkeeping a renderer / marker pass
  *  needs: each segment's world endpoints and which segment(s) each piece made. */
@@ -83,6 +93,12 @@ export interface CompiledNetwork {
    *  rail both directions) — a real topology error. Empty on a valid layout; the
    *  rest of the network is still compiled around them. */
   readonly contradictions: readonly string[];
+  /** piece.id → the live deck angle (world degrees) of each turntable. The deck rail
+   *  reads it on every pose query; it starts aligned to the first road. */
+  readonly deckAngles: Map<string, DeckAngleHolder>;
+  /** piece.id → the roads a turntable's deck can align to (switch position and the
+   *  world angle the bridge points at it), ready for a `TurntableActuator`. */
+  readonly turntableExits: Map<string, readonly TurntableExit[]>;
 }
 
 /** The marker / switch id for a piece — identical to `layout-from-pieces`'
@@ -99,15 +115,6 @@ function thruSegId(piece: TrackPiece): string {
 }
 function branchSegId(piece: TrackPiece): string {
   return `S-${piece.id}-b`;
-}
-
-/** Whether a piece type's faithful free-placed compilation is DEFERRED (turntable —
- *  an N-way rotating junction; multi-deck bridges are handled by layer separation,
- *  not here). A deferred piece is SKIPPED — left as a non-routing gap and recorded
- *  in the result's `contradictions` — rather than throwing, so one unsupported piece
- *  can never crash a whole layout (a real operator table may carry one). */
-function isDeferred(piece: TrackPiece): boolean {
-  return piece.type === 'turntable';
 }
 
 /** A non-device piece with its world endpoints and the index into the piece array
@@ -275,19 +282,16 @@ class NetworkCompiler {
   /* Piece ids whose orientation the layout forced both ways — a real topology error
    * (a non-orientable joint). Recorded, not thrown: the rest still compiles. */
   private readonly contradictions: string[] = [];
+  private readonly deckAngles = new Map<string, DeckAngleHolder>();
+  private readonly turntableExits = new Map<string, readonly TurntableExit[]>();
 
   constructor(pieces: readonly TrackPiece[]) {
     this.adjacency = buildAdjacency(pieces).adjacency;
-    /* Only non-device, non-deferred pieces are routable topology (devices ride the
-     * track — `compileLayout` skips them too; deferred pieces like a turntable are
-     * left as a recorded gap, never thrown, so one can't crash a whole layout). */
+    /* Only non-device pieces are routable topology (devices ride the track —
+     * `compileLayout` skips them too). */
     for (let i = 0; i < pieces.length; i++) {
       const piece = pieces[i];
       if (piece === undefined || isDevicePiece(piece.type)) continue;
-      if (isDeferred(piece)) {
-        this.contradictions.push(`deferred: ${piece.type} (${piece.id}) left as a non-routing gap`);
-        continue;
-      }
       const eps = getEndpoints(piece).map((e) => ({ x: e.x, y: e.y, layer: e.layer }));
       if (eps.length === 0) continue;
       const node: PieceNode = { idx: i, piece, endpoints: eps };
@@ -304,11 +308,18 @@ class NetworkCompiler {
       geom: this.geom,
       segmentsForPiece: this.segmentsForPiece,
       contradictions: this.contradictions,
+      deckAngles: this.deckAngles,
+      turntableExits: this.turntableExits,
     };
   }
 
+  /** A piece with a trunk endpoint 0 and switch-selected legs: a junction or a turntable. */
   private isJunction(node: PieceNode): boolean {
-    return node.piece.type === 'junction';
+    return node.piece.type === 'junction' || node.piece.type === 'turntable';
+  }
+
+  private isTurntable(node: PieceNode): boolean {
+    return node.piece.type === 'turntable';
   }
 
   private thruSegId(node: PieceNode): string {
@@ -337,11 +348,37 @@ class NetworkCompiler {
     if (this.placed.has(node.idx)) return;
     this.placed.add(node.idx);
     this.junctionTrunk.set(node.idx, trunkRole);
+    if (this.isTurntable(node)) {
+      this.placeTurntable(node, trunkRole);
+      return;
+    }
     const [thruA, thruB, branchA, branchB] =
       trunkRole === 'start' ? ([0, 1, 0, 2] as const) : ([1, 0, 2, 0] as const);
     this.emitRail(thruSegId(node.piece), railOfPiece(node.piece, thruA, thruB));
     this.emitRail(branchSegId(node.piece), railOfPiece(node.piece, branchA, branchB));
     this.segmentsForPiece.set(node.piece.id, [thruSegId(node.piece), branchSegId(node.piece)]);
+  }
+
+  /** Emit a turntable's single deck rail. The trunk rim is the deck's fixed end; a
+   *  merging orientation (trunk a rail-END) runs the same span reversed. */
+  private placeTurntable(node: PieceNode, trunkRole: EndRole): void {
+    const [trunk, ...legs] = node.endpoints;
+    if (trunk === undefined) return;
+    const centre = node.piece.position;
+    const angle: DeckAngleHolder = { deg: 0 };
+    const exits: TurntableExit[] = [];
+    legs.forEach((leg, i) => {
+      const position = TURNTABLE_POSITIONS[i];
+      if (position === undefined) return;
+      const angleDeg = (Math.atan2(leg.y - centre.y, leg.x - centre.x) * 180) / Math.PI;
+      exits.push({ position, angleDeg });
+    });
+    angle.deg = exits[0]?.angleDeg ?? 0;
+    this.deckAngles.set(node.piece.id, angle);
+    this.turntableExits.set(node.piece.id, exits);
+    const id = thruSegId(node.piece);
+    this.emitRail(id, placedDeckRail({ trunk, centre }, angle, trunkRole === 'end'));
+    this.segmentsForPiece.set(node.piece.id, [id]);
   }
 
   private emitRail(id: string, rail: Rail): void {
@@ -486,10 +523,14 @@ class NetworkCompiler {
       const trunk = this.junctionTrunk.get(node.idx);
       if (trunk === undefined) return [];
       const leg: EndRole = trunk === 'start' ? 'end' : 'start';
+      const legCount = node.endpoints.length - 1;
       return [
         { pieceIdx: node.idx, endpointIdx: 0, role: trunk },
-        { pieceIdx: node.idx, endpointIdx: 1, role: leg },
-        { pieceIdx: node.idx, endpointIdx: 2, role: leg },
+        ...Array.from({ length: legCount }, (_, i) => ({
+          pieceIdx: node.idx,
+          endpointIdx: i + 1,
+          role: leg,
+        })),
       ];
     }
     const o = this.orientation.get(node.idx);
@@ -523,6 +564,7 @@ class NetworkCompiler {
    *  meet exactly one external rail each, so no selection happens there — they are
    *  plain. */
   private junctionRoleAt(node: PieceNode, endpointIdx: number): ReadonlyArray<RailEnd> {
+    if (this.isTurntable(node)) return this.turntableRoleAt(node, endpointIdx);
     const trunkRole = this.junctionTrunk.get(node.idx) ?? 'start';
     if (endpointIdx === 0) {
       const sw = markerIdForPiece(node.piece);
@@ -544,6 +586,26 @@ class NetworkCompiler {
     const legRole: EndRole = trunkRole === 'start' ? 'end' : 'start';
     const seg = endpointIdx === 1 ? thruSegId(node.piece) : branchSegId(node.piece);
     return [{ seg, role: legRole }];
+  }
+
+  /** The deck's rail end at a turntable endpoint. The trunk exposes the deck once per
+   *  road, each gated by that road's position, so a train is held at the approach
+   *  until the bridge has seated; each road joint is gated by its own position. */
+  private turntableRoleAt(node: PieceNode, endpointIdx: number): ReadonlyArray<RailEnd> {
+    const trunkRole = this.junctionTrunk.get(node.idx) ?? 'start';
+    const seg = thruSegId(node.piece);
+    const sw = markerIdForPiece(node.piece);
+    if (endpointIdx === 0) {
+      return TURNTABLE_POSITIONS.slice(0, node.endpoints.length - 1).map((position) => ({
+        seg,
+        role: trunkRole,
+        gate: { switchId: sw, position },
+      }));
+    }
+    const position = TURNTABLE_POSITIONS[endpointIdx - 1];
+    const role: EndRole = trunkRole === 'start' ? 'end' : 'start';
+    if (position === undefined) return [{ seg, role }];
+    return [{ seg, role, gate: { switchId: sw, position } }];
   }
 
   /** A leg-rail as exposed at the trunk: its trunk role plus the switch gate that
@@ -623,8 +685,7 @@ class NetworkCompiler {
 
 /**
  * Compile free-placed track pieces into a physics `RailNetwork`. See the file
- * header for the orientation algorithm. Device pieces are skipped; turntables and
- * turntables are deferred (skipped as a recorded gap, not thrown). Pure geometry/topology.
+ * header for the orientation algorithm. Device pieces are skipped. Pure geometry/topology.
  */
 export function compileNetwork(pieces: readonly TrackPiece[]): CompiledNetwork {
   return new NetworkCompiler(pieces).compile();

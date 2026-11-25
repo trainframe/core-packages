@@ -1965,13 +1965,7 @@ describe('ToyTable — Experiments tray', () => {
     }
   });
 
-  /* TODO(B): turntables are not yet supported by the ADR-030 free-placed network
-   *  compiler (`compileNetwork` throws "use PieceNetworkBuilder for turntable
-   *  scenes" on any turntable piece), so a live turntable currently crashes the
-   *  toy-table world build. Re-enable these two once `network-from-pieces`
-   *  compiles a turntable as an N-way rotating junction. The renderer + the spin
-   *  handler are already on the new `switchPosition`/`setSwitch` hardware API. */
-  it.skip('scanning a turntable binds a junction marker and registers a SWITCH- motor for it', async () => {
+  it('scanning a turntable binds a junction marker and registers a SWITCH- motor for it', async () => {
     const { client } = renderToyTable();
     const pieceId = await placeArmedPiece('turntable');
     dropPieceOnScanBox(screen.getByTestId('scan-box'), pieceId);
@@ -2025,8 +2019,7 @@ describe('ToyTable — Experiments tray', () => {
     ).toBe('granting');
   });
 
-  // TODO(B): blocked on turntable support in `network-from-pieces` (see above).
-  it.skip('Spin deck swings the turntable bridge to the next stub and confirms it on the bus', async () => {
+  it('Spin deck swings the turntable bridge to the next stub and confirms it on the bus', async () => {
     const user = userEvent.setup();
     const { client } = renderToyTable();
     const pieceId = await placeArmedPiece('turntable');
