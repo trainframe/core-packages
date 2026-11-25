@@ -71,6 +71,14 @@ export const CLEARANCE_LEAD_TIME_MS = 6_000;
  */
 export const CLEARANCE_HORIZON_MAX_EDGES = 6;
 
+/**
+ * How long (injected-clock ms) a `set_switch_position` may go unconfirmed before
+ * the scheduler sends it again. A lost or ignored command would otherwise leave
+ * a train waiting at the junction forever, because the actuation is sent only
+ * once per requested position. Point motors confirm well inside this.
+ */
+export const SWITCH_ACTUATION_TIMEOUT_MS = 3_000;
+
 export interface SchedulerOptions {
   /**
    * Monotonic clock callback in ms, used to time the station dwell. REQUIRED:
@@ -145,6 +153,12 @@ export class Scheduler {
    */
   private readonly requestedSwitchPositions = new Map<string, string>();
   /**
+   * When each still-unconfirmed `set_switch_position` was sent (junction marker
+   * id → injected-clock ms). Cleared on a confirmed `switch_state_changed`; an
+   * entry older than `SWITCH_ACTUATION_TIMEOUT_MS` is re-sent on the next retry.
+   */
+  private readonly unconfirmedSwitchRequests = new Map<string, number>();
+  /**
    * Zone boundary marker id → owning `core.gates_zone` device id (ADR-027).
    * Populated from `zone_state_changed`. Lets the scheduler recognise a zone
    * boundary so it can suspend a train that pulls in (entry) and gate admission
@@ -213,6 +227,7 @@ export class Scheduler {
     this.tags.clear();
     this.currentDeadlock = [];
     this.requestedSwitchPositions.clear();
+    this.unconfirmedSwitchRequests.clear();
     this.zoneBoundaries.clear();
     this.zoneOwnedMarkers.clear();
     this.nextRegistrationSeq = 0;
@@ -234,13 +249,18 @@ export class Scheduler {
       case 'tag_observed':
         return this.handleTagObserved(event.device_id, event.payload);
       case 'clearance_request':
-        return this.handleClearanceRequest(event.payload);
+        return this.handleClearanceRequest(event.device_id, event.payload);
       case 'switch_state_changed':
         return this.handleSwitchStateChanged(event.payload);
       case 'tag_assignment':
         return this.handleTagAssignment(event.device_id, event.payload);
       case 'train_status':
-        return this.handleTrainStatus(event.payload);
+        /* A train waiting at a junction keeps reporting status: that is what
+         * gives an unanswered switch command its chance to be re-sent. */
+        return [
+          ...this.handleTrainStatus(event.device_id, event.payload),
+          ...(this.anySwitchRequestOverdue() ? this.retryBlockedClearances() : []),
+        ];
       case 'train_length_changed':
         return this.handleTrainLengthChanged(event.device_id, event.payload);
       case 'zone_state_changed':
@@ -442,6 +462,7 @@ export class Scheduler {
       out.push(...this.translateIntents(result.intents, deviceId));
     }
 
+    out.push(...this.forgetDeviceTrackAuthority(deviceId));
     this.devices.delete(deviceId);
     /*
      * Tombstone the retained device registration. Without this the broker keeps
@@ -468,6 +489,56 @@ export class Scheduler {
     return out;
   }
 
+  /**
+   * Drop what a departing device controlled on the track: the interior markers
+   * a zone owned (ADR-034), the zone boundaries it gated (ADR-027) and the
+   * junctions a switch device actuated, along with any switch position we had
+   * asked it for, so a replacement device is asked afresh and nothing is sent to
+   * the dead one. A train suspended inside a vanished zone has no known position
+   * any more (the zone held it in its opaque interior), so it goes back off the
+   * map (ADR-036) and must be introduced again before it is routed.
+   */
+  private forgetDeviceTrackAuthority(deviceId: string): ReadonlyArray<SchedulerEffect> {
+    for (const [markerId, owner] of [...this.zoneOwnedMarkers]) {
+      if (owner === deviceId) this.zoneOwnedMarkers.delete(markerId);
+    }
+    for (const junctionMarkerId of this.layout.forgetSwitchDevice(deviceId)) {
+      this.requestedSwitchPositions.delete(junctionMarkerId);
+      this.unconfirmedSwitchRequests.delete(junctionMarkerId);
+    }
+    const out: SchedulerEffect[] = [];
+    for (const [boundaryMarkerId, owner] of [...this.zoneBoundaries]) {
+      if (owner !== deviceId) continue;
+      this.zoneBoundaries.delete(boundaryMarkerId);
+      for (const train of this.trains.values()) {
+        if (train.in_zone === boundaryMarkerId) {
+          out.push(...this.takeOffMapAfterZoneLoss(train, deviceId));
+        }
+      }
+    }
+    return out;
+  }
+
+  private takeOffMapAfterZoneLoss(
+    train: TrainState,
+    zoneDeviceId: string,
+  ): ReadonlyArray<SchedulerEffect> {
+    train.in_zone = undefined;
+    train.introduced = undefined;
+    train.last_marker_id = undefined;
+    train.current_edge = undefined;
+    train.zone_entry_edge = undefined;
+    train.transit = undefined;
+    train.dwell_until = undefined;
+    return [
+      effects.publishEvent('anomaly', {
+        severity: 'warning',
+        description: `Zone device ${zoneDeviceId} disconnected with train ${train.train_id} inside; its position is unknown and it must be introduced again`,
+      }),
+      this.deviceStateEffect(train.train_id),
+    ];
+  }
+
   // ---------- tag observed → marker traversed ----------
 
   private handleTagObserved(deviceId: string, payload: unknown): ReadonlyArray<SchedulerEffect> {
@@ -490,7 +561,7 @@ export class Scheduler {
     // reading vehicle tags identify vehicles. Each case derives a different
     // event from the same raw tag_observed.
     if (binding.kind === 'marker' && device.capabilities.includes('core.controls_motion')) {
-      return this.handleTrainAtMarker(deviceId, binding.target_id);
+      return this.handleTrainCrossing(deviceId, binding.target_id);
     }
 
     if (binding.kind === 'vehicle') {
@@ -731,6 +802,45 @@ export class Scheduler {
       return this.advanceScheduleAndReplan(train);
     }
     return [...this.retryBlockedClearances()];
+  }
+
+  /**
+   * Route a train's marker crossing. While it is backing up under a reverse
+   * grant, a crossing on the vacated path is a reverse crossing. Any other
+   * marker means the reverse is over (the train stopped short and moved on), so
+   * it is handled as an ordinary crossing.
+   */
+  private handleTrainCrossing(trainId: string, markerId: string): ReadonlyArray<SchedulerEffect> {
+    const train = this.trains.get(trainId);
+    if (train?.reversing?.path_marker_ids.includes(markerId)) {
+      return this.handleReverseCrossing(train, markerId);
+    }
+    if (train) train.reversing = undefined;
+    return this.handleTrainAtMarker(trainId, markerId);
+  }
+
+  /**
+   * A crossing made while the train is backing up under a `grant_reverse`
+   * (ADR-022). Only its position moves: a backward crossing is not a forward
+   * traversal of any edge, so it neither learns or confirms an edge, nor
+   * advances the transit, nor releases a block (the tail it backs onto is still
+   * occupied), nor counts as a topology violation. Reaching the reverse target
+   * ends the reverse.
+   */
+  private handleReverseCrossing(
+    train: TrainState,
+    markerId: string,
+  ): ReadonlyArray<SchedulerEffect> {
+    train.last_marker_id = markerId;
+    if (train.reversing?.target_marker_id === markerId) train.reversing = undefined;
+    return [
+      effects.publishEvent('marker_traversed', {
+        train_id: train.train_id,
+        marker_id: markerId,
+        direction: 'reverse',
+        in_discovery_mode: false,
+      }),
+    ];
   }
 
   /**
@@ -1185,8 +1295,28 @@ export class Scheduler {
 
   // ---------- clearance request handling ----------
 
-  private handleClearanceRequest(payload: unknown): ReadonlyArray<SchedulerEffect> {
+  /**
+   * A train asks for clearance onto `next_edge`. Only the train itself may ask
+   * (the sending device must be the named train), and only for an edge on its
+   * planned route ahead of it. The route is granted IN ORDER up to that edge,
+   * stopping at the first edge that cannot be granted, so a request can never
+   * open clearance across a gap the horizon walk refused (block exclusivity, a
+   * gate, or a switch still moving).
+   */
+  private handleClearanceRequest(
+    deviceId: string,
+    payload: unknown,
+  ): ReadonlyArray<SchedulerEffect> {
     const { train_id, next_edge } = payload as { train_id: string; next_edge: EdgeRef };
+
+    if (deviceId !== train_id) {
+      return [
+        effects.publishEvent('anomaly', {
+          severity: 'warning',
+          description: `clearance_request for ${train_id} sent by another device (${deviceId}); ignored`,
+        }),
+      ];
+    }
 
     const missing = this.unknownMarkersInEdges([next_edge]);
     if (missing.length > 0) {
@@ -1205,7 +1335,46 @@ export class Scheduler {
      * clearance, even if it (erroneously) sends a clearance_request. */
     if (!train.introduced) return [];
 
-    return this.tryGrantClearance(train, next_edge);
+    const requestedIndex = this.routeIndexAhead(train, next_edge);
+    if (requestedIndex === undefined) {
+      return [
+        effects.publishEvent('anomaly', {
+          severity: 'warning',
+          description: `clearance_request from ${train_id} for ${next_edge.from_marker_id}->${next_edge.to_marker_id}, which is not on its route ahead; ignored`,
+        }),
+      ];
+    }
+    return this.grantRouteUpTo(train, requestedIndex);
+  }
+
+  /** Index of `edge` in the train's transit at or after its progress point, or
+   *  `undefined` when the edge is not on the route ahead of it. */
+  private routeIndexAhead(train: TrainState, edge: EdgeRef): number | undefined {
+    if (!train.transit) return undefined;
+    const { edges, progress_index } = train.transit;
+    for (let i = progress_index; i < edges.length; i++) {
+      const candidate = edges[i];
+      if (candidate && edgesEqual(candidate, edge)) return i;
+    }
+    return undefined;
+  }
+
+  /** Grant the train's route edges in order from its progress point through
+   *  `lastIndex`, skipping those already held and stopping at the first refusal. */
+  private grantRouteUpTo(train: TrainState, lastIndex: number): ReadonlyArray<SchedulerEffect> {
+    if (!train.transit) return [];
+    const out: SchedulerEffect[] = [];
+    for (let i = train.transit.progress_index; i <= lastIndex; i++) {
+      const edge = train.transit.edges[i];
+      if (!edge) break;
+      if (train.cleared_edges.some((e) => edgesEqual(e, edge))) continue;
+      const granted = this.tryGrantClearance(train, edge);
+      out.push(...granted);
+      if (!granted.some((e) => e.kind === 'send_command' && e.command_type === 'grant_clearance')) {
+        break;
+      }
+    }
+    return out;
   }
 
   /**
@@ -1238,6 +1407,7 @@ export class Scheduler {
    * and gives one-block separation on a straight loop — all from one rule.
    */
   private tryGrantClearance(train: TrainState, nextEdge: EdgeRef): ReadonlyArray<SchedulerEffect> {
+    if (train.operator_hold) return [];
     // Conflict check FIRST (ADR-011 block exclusivity). This ordering is the
     // invariant that prevents two trains fighting over one switch: a train
     // only reaches the actuation branch once it has exclusive claim to the
@@ -1275,15 +1445,36 @@ export class Scheduler {
     const switchDeviceId = this.layout.switchDeviceForMarker(edge.from_marker_id);
     if (switchDeviceId === undefined) return [];
 
-    if (this.requestedSwitchPositions.get(edge.from_marker_id) === required) return [];
+    const junction = edge.from_marker_id;
+    const alreadyRequested = this.requestedSwitchPositions.get(junction) === required;
+    if (alreadyRequested && !this.switchRequestOverdue(junction)) return [];
 
-    this.requestedSwitchPositions.set(edge.from_marker_id, required);
+    this.requestedSwitchPositions.set(junction, required);
+    this.unconfirmedSwitchRequests.set(junction, this.now());
+    const command = effects.sendCommand(switchDeviceId, 'set_switch_position', {
+      junction_marker_id: junction,
+      position: required,
+    });
+    if (!alreadyRequested) return [command];
     return [
-      effects.sendCommand(switchDeviceId, 'set_switch_position', {
-        junction_marker_id: edge.from_marker_id,
-        position: required,
+      effects.publishEvent('anomaly', {
+        severity: 'info',
+        description: `Switch ${switchDeviceId} did not confirm ${junction} -> ${required} within ${SWITCH_ACTUATION_TIMEOUT_MS}ms; sending again`,
       }),
+      command,
     ];
+  }
+
+  private switchRequestOverdue(junctionMarkerId: string): boolean {
+    const sentAt = this.unconfirmedSwitchRequests.get(junctionMarkerId);
+    return sentAt !== undefined && this.now() - sentAt >= SWITCH_ACTUATION_TIMEOUT_MS;
+  }
+
+  private anySwitchRequestOverdue(): boolean {
+    for (const junctionMarkerId of this.unconfirmedSwitchRequests.keys()) {
+      if (this.switchRequestOverdue(junctionMarkerId)) return true;
+    }
+    return false;
   }
 
   /**
@@ -1403,6 +1594,7 @@ export class Scheduler {
       // landed on the one we requested, this is a no-op that keeps the
       // idempotency guard accurate.
       this.requestedSwitchPositions.set(junction_marker_id, position);
+      this.unconfirmedSwitchRequests.delete(junction_marker_id);
       out.push(...this.retryBlockedClearances());
     }
     return out;
@@ -1431,13 +1623,19 @@ export class Scheduler {
    *
    * Point trains (length_mm undefined or 0) release on `marker_traversed`
    * (handleTrainAtMarker) and are unaffected by this method.
+   *
+   * Ignored unless the sending device is the train it describes.
    */
-  private handleTrainStatus(payload: unknown): ReadonlyArray<SchedulerEffect> {
+  private handleTrainStatus(deviceId: string, payload: unknown): ReadonlyArray<SchedulerEffect> {
     const { train_id, current_edge, estimated_distance_from_edge_start_mm } = payload as {
       train_id: string;
       current_edge?: { from_marker_id: string; to_marker_id: string } | undefined;
       estimated_distance_from_edge_start_mm?: number | undefined;
     };
+
+    /* Only a train reports its own status: a status naming another train could
+     * seed its heading or release its tail blocks. */
+    if (deviceId !== train_id) return [];
 
     const train = this.trains.get(train_id);
     if (!train) return [];
@@ -1967,6 +2165,11 @@ export class Scheduler {
     );
     victim.last_marker_id = plan.targetMarkerId;
     victim.clearance_limit_marker_id = plan.targetMarkerId;
+    this.rewindTransitForReverse(victim, plan.releasedEdges);
+    victim.reversing = {
+      target_marker_id: plan.targetMarkerId,
+      path_marker_ids: plan.releasedEdges.flatMap((e) => [e.from_marker_id, e.to_marker_id]),
+    };
 
     const out: SchedulerEffect[] = [
       effects.sendCommand(victim.train_id, 'grant_reverse', {
@@ -1978,6 +2181,29 @@ export class Scheduler {
     ];
     out.push(...this.retryBlockedClearances(new Set([victim.train_id])));
     return out;
+  }
+
+  /**
+   * After a reverse the train's head is back at the target marker, so the blocks
+   * it vacated are AHEAD of it again. Put them back at the front of its transit
+   * (in driving order) and point its heading at the first of them: the horizon
+   * then grants from the head outward, and the train can never be cleared onto
+   * track beyond the vacated blocks while it still has to drive back over them.
+   * `vacatedHeadFirst` is the reverse plan's released run, head block first.
+   */
+  private rewindTransitForReverse(
+    train: TrainState,
+    vacatedHeadFirst: ReadonlyArray<EdgeRef>,
+  ): void {
+    const vacated = [...vacatedHeadFirst].reverse();
+    const firstVacated = vacated[0];
+    if (firstVacated === undefined) return;
+    train.current_edge = firstVacated;
+    if (!train.transit) return;
+    train.transit = {
+      edges: [...vacated, ...train.transit.edges.slice(train.transit.progress_index)],
+      progress_index: 0,
+    };
   }
 
   /**
@@ -2261,12 +2487,22 @@ export class Scheduler {
     headingEdge: { from_marker_id: string; to_marker_id: string },
     source: 'roll' | 'zone' | 'operator' | 'discovered',
   ): ReadonlyArray<SchedulerEffect> {
-    /* Commit the resolved vector. */
+    train.introducing = undefined;
+    train.introduction_first_marker_id = undefined;
+
+    /* ADR-036 §5 conflict check, BEFORE the vector is committed: is the train
+     * resolving into a block an active peer occupies? See `findIntroductionConflict`. */
+    const conflictingTrain = this.findIntroductionConflict(train, markerId, headingEdge);
+    if (conflictingTrain !== undefined) {
+      return this.refuseConflictingIntroduction(train, conflictingTrain, headingEdge, source);
+    }
+
+    /* Commit the resolved vector. Any block held from an earlier refused
+     * introduction is stale: the train has a fresh, safe vector now. */
     train.current_edge = headingEdge;
     train.last_marker_id = markerId;
     train.introduced = true;
-    train.introducing = undefined;
-    train.introduction_first_marker_id = undefined;
+    train.cleared_edges = [];
 
     const out: SchedulerEffect[] = [];
 
@@ -2300,26 +2536,6 @@ export class Scheduler {
 
     /* Update the retained device state to carry `introduced: true`. */
     out.push(this.deviceStateEffect(train.train_id));
-
-    /* ADR-036 §5 conflict check: is the resolved block co-occupied by an active
-     * peer (same section, or head-on)? See `findIntroductionConflict`. Mere
-     * adjacency (a peer in the block ahead) is NOT a conflict — that is the
-     * resolvable trailing-follow, handled by ordinary block exclusivity below. */
-    const conflictingTrain = this.findIntroductionConflict(train, headingEdge);
-    if (conflictingTrain !== undefined) {
-      /* Unresolvable overlap — escalate. Train stays stopped, holds no block (the
-       * peer already occupies the contested section), and starts no schedule
-       * until the operator moves a train. */
-      out.push(
-        effects.publishEvent('train_introduction_conflict', {
-          train_id: train.train_id,
-          conflicting_train_id: conflictingTrain.train_id,
-          block_edge: headingEdge,
-          reason: 'resolved vector co-occupies a block held by another train',
-        }),
-      );
-      return out;
-    }
 
     /* No co-occupation. What protects the resolved block from a peer differs by
      * whether a schedule is waiting and whether the train is STOPPED or MOVING:
@@ -2360,33 +2576,68 @@ export class Scheduler {
   }
 
   /**
-   * ADR-036 §5 conflict detector — escalates ONLY on genuine CO-OCCUPATION. A
-   * conflict exists when a peer holds the SAME undirected section as the resolved
-   * `headingEdge` (BOTH boundary markers match, in either orientation): either
-   * the peer sits in the very block the introduced train resolved into, or it is
-   * head-on (the peer holds the reverse edge). Both are unresolvable overlaps the
-   * operator must clear by moving a train.
+   * ADR-036 §5 refusal of an unsafe vector. The train resolved into a block a
+   * peer occupies, so the resolution is not accepted: the train stays off the
+   * map (not introduced, no position committed, so the operator can introduce
+   * it again once a train has been moved) and its pending schedule does not
+   * start. It is still physically on the track, so its resolved block is held
+   * as occupancy: block exclusivity keeps every other train out of it even after
+   * the peer drives away. A rolling or exploring train is told to stop; a zone
+   * owns its own train's motion and a placed train is already stationary.
+   */
+  private refuseConflictingIntroduction(
+    train: TrainState,
+    conflictingTrain: TrainState,
+    headingEdge: EdgeRef,
+    source: 'roll' | 'zone' | 'operator' | 'discovered',
+  ): ReadonlyArray<SchedulerEffect> {
+    train.cleared_edges = [headingEdge];
+    const out: SchedulerEffect[] = [];
+    if (source === 'roll' || source === 'discovered') {
+      out.push(
+        effects.sendCommand(train.train_id, 'revoke_clearance', {
+          reason: 'introduction_conflict',
+          immediate: true,
+        }),
+      );
+    }
+    out.push(
+      effects.publishEvent('train_introduction_conflict', {
+        train_id: train.train_id,
+        conflicting_train_id: conflictingTrain.train_id,
+        block_edge: headingEdge,
+        reason: 'resolved vector co-occupies a block held by another train',
+      }),
+      this.clearanceStateEffect(train),
+    );
+    return out;
+  }
+
+  /**
+   * ADR-036 §5 conflict detector. The train sits at `markerId` having resolved
+   * onto `headingEdge`. A peer's held edge makes that unsafe when it is:
    *
-   * Mere ADJACENCY — exactly one shared boundary marker (a peer holding the
-   * block AHEAD, e.g. peer on `M2→M3` while the train resolves onto `M1→M2`) — is
-   * NOT a conflict. That is the ordinary trailing-follow (ADR §5 resolvable
-   * case): the introduced train occupies its resolved block and simply waits for
-   * its onward grant under ordinary block exclusivity (`edgeConflictsWithAnotherTrain`)
-   * until the peer clears. Returning `undefined` here lets resolution fall through
-   * to `planAndExecuteCurrentTransit`/`retryBlockedClearances`, where that wait is
-   * handled with no new code.
+   *  - the SAME undirected section (either orientation): co-occupation or head-on;
+   *  - running INTO `markerId`: the peer's clearance ends exactly where the
+   *    introduced train is standing, so under ADR-011 block exclusivity the two
+   *    sections share that boundary marker with the peer approaching it.
    *
-   * Returns the first co-occupying peer, or `undefined` if none.
+   * A peer edge that LEAVES `markerId`, or touches the other end of the resolved
+   * block, is the resolvable trailing case (ADR §5 Scenario 4): one train simply
+   * follows the other and ordinary block exclusivity holds the one behind.
+   *
+   * Every peer counts, introduced or not: a train whose own introduction was
+   * refused still holds its resolved block as occupancy.
+   *
+   * Returns the first conflicting peer, or `undefined` if none.
    */
   private findIntroductionConflict(
     train: TrainState,
-    headingEdge: { from_marker_id: string; to_marker_id: string },
+    markerId: string,
+    headingEdge: EdgeRef,
   ): TrainState | undefined {
     for (const [otherId, other] of this.trains) {
       if (otherId === train.train_id) continue;
-      /* Only active (introduced) trains can hold blocks. A not-yet-introduced
-       * peer has no cleared_edges that matter. */
-      if (!other.introduced) continue;
       for (const held of other.cleared_edges) {
         const sameSection =
           held.from_marker_id === headingEdge.from_marker_id &&
@@ -2394,7 +2645,8 @@ export class Scheduler {
         const headOn =
           held.from_marker_id === headingEdge.to_marker_id &&
           held.to_marker_id === headingEdge.from_marker_id;
-        if (sameSection || headOn) return other;
+        const approachingTrain = held.to_marker_id === markerId;
+        if (sameSection || headOn || approachingTrain) return other;
       }
     }
     return undefined;
@@ -2478,8 +2730,10 @@ export class Scheduler {
      * the train is being given fresh intent, so a stale `unknown_topology` flag
      * must not ride the retained clearance state once it is cleared and moving
      * again (ADR-019). This is distinct from the train's own next traversal
-     * report, which must NOT auto-clear the hold. */
+     * report, which must NOT auto-clear the hold. The same gesture lifts an
+     * operator revoke: a new schedule is the operator releasing the stop. */
     train.block_reason = undefined;
+    train.operator_hold = undefined;
 
     /* ADR-036: a not-yet-introduced train has NO known position — its
      * `last_marker_id` must NOT be guessed from `stops[0]` (that is exactly the
@@ -2643,6 +2897,9 @@ export class Scheduler {
    * extension attempt has to start from there. If the train has never moved,
    * the existing limit (set by `assignSchedule`) is left in place.
    *
+   * The stop sticks: `operator_hold` makes every later grant attempt refuse
+   * this train until the operator assigns it a fresh schedule.
+   *
    * No-op if the train isn't registered.
    */
   revokeClearance(trainId: string): ReadonlyArray<SchedulerEffect> {
@@ -2650,6 +2907,7 @@ export class Scheduler {
     if (!train) return [];
 
     train.cleared_edges = [];
+    train.operator_hold = true;
     if (train.last_marker_id !== undefined) {
       train.clearance_limit_marker_id = train.last_marker_id;
     }

@@ -1,6 +1,6 @@
 import type { Layout } from '@trainframe/protocol';
 import { AdminHttpServer } from '@trainframe/server';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type Harness, startHarness } from './harness.js';
 
 const SIMPLE_LOOP: Layout = {
@@ -120,9 +120,16 @@ describe('Admin HTTP API', () => {
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
     await harness.testClient.waitForState('railway/state/devices/T2');
-    /* ADR-036 §3c: introduce both trains at M1→M2 before routing. */
+    /* ADR-036 §3c: introduce both trains at M1→M2 before routing, releasing
+     * each idle introduction block so the second placement is a contender
+     * rather than an ADR-036 §5 introduction conflict. */
     harness.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
+    harness.server.revokeClearance('T1');
     harness.server.introduceTrainWithVector('T2', { from_marker_id: 'M1', to_marker_id: 'M2' });
+    harness.server.revokeClearance('T2');
+    const revokesFor = (id: string) =>
+      harness.testClient.commandsFor(id).filter((c) => c.command_type === 'revoke_clearance');
+    await harness.testClient.waitForCommand('T1', 'revoke_clearance');
 
     harness.server.assignSchedule('T1', 'route-1', ['M1', 'M3']);
     await harness.testClient.waitForCommand('T1', 'grant_clearance');
@@ -134,6 +141,7 @@ describe('Admin HTTP API', () => {
       .filter((c) => c.command_type === 'grant_clearance');
     expect(t2GrantsBefore).toHaveLength(0);
 
+    const t1RevokesBefore = revokesFor('T1').length;
     const res = await post('/api/trains/T1/revoke_clearance', {});
     expect(res.status).toBe(204);
 
@@ -144,9 +152,8 @@ describe('Admin HTTP API', () => {
     const t2State = harness.server.getScheduler().getTrainState('T2');
     expect(t2State?.cleared_edges).toEqual([{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
 
-    // T1 receives the revoke_clearance command on the wire.
-    const revoke = await harness.testClient.waitForCommand('T1', 'revoke_clearance');
-    expect(revoke.command_type).toBe('revoke_clearance');
+    // T1 receives the operator's revoke_clearance command on the wire.
+    await vi.waitFor(() => expect(revokesFor('T1').length).toBe(t1RevokesBefore + 1));
 
     // T2 receives the previously-blocked grant_clearance.
     const t2Grant = await harness.testClient.waitForCommand('T2', 'grant_clearance');

@@ -354,14 +354,14 @@ describe('ADR-036 — two-marker roll introduction (§3a)', () => {
      * forever. It must be GRANTED. */
     registerTrain(scheduler, 'T2');
     rollIntroduce(scheduler, 'T2', 'M2', 'M3'); /* T2 introduced elsewhere, idle hold on M2→M3 */
-    scheduler.revokeClearance('T2'); /* clear that idle hold so it doesn't confound the probe */
-    const probe = scheduler.handleEvent({
-      event_type: 'clearance_request',
-      device_id: 'T2',
-      payload: { train_id: 'T2', next_edge: { from_marker_id: 'M1', to_marker_id: 'M2' } },
-    });
+    /* Route T2 M3→M4→M1→M2 (the schedule replaces its idle hold). Its horizon
+     * reaches through the introduction section. */
+    scheduler.assignSchedule('T2', 'route-t2', ['M3', 'M2']);
     /* The introduction section is FREE — T2 is granted clearance through it. */
-    expect(findCommand(probe, 'grant_clearance', 'T2')).toBeDefined();
+    const t2HoldsIntroSection = scheduler
+      .getTrainState('T2')
+      ?.cleared_edges.some((e) => e.from_marker_id === 'M1' && e.to_marker_id === 'M2');
+    expect(t2HoldsIntroSection).toBe(true);
   });
 
   it('a SINGLE crossing observes but does NOT introduce, route, or clear (one marker is not a vector)', () => {
@@ -613,12 +613,13 @@ describe('ADR-036 §5 — resolution into an occupied block (conflict escalation
     expect(findCommand(effects, 'assign_route', 'T1')).toBeUndefined();
     expect(findCommand(effects, 'grant_clearance', 'T1')).toBeUndefined();
 
-    /* T1 IS marked introduced (it resolved its vector) but holds no block and
-     * has no transit — it is stopped pending operator action. */
+    /* The unsafe vector is refused: T1 stays off the map (not introduced, no
+     * transit) pending operator action, but it holds its resolved block as
+     * occupancy so block exclusivity still keeps other trains out of it. */
     const t1 = scheduler.getTrainState('T1');
-    expect(t1?.introduced).toBe(true);
+    expect(t1?.introduced).toBeFalsy();
     expect(t1?.transit).toBeUndefined();
-    expect(t1?.cleared_edges).toHaveLength(0);
+    expect(t1?.cleared_edges).toEqual([{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
   });
 
   it('HEAD-ON: resolving onto the REVERSE of a peer-held edge escalates', () => {
@@ -692,8 +693,9 @@ describe('ADR-036 §5 — resolution into an occupied block (conflict escalation
     expect(findCommand(resolutionEffects, 'assign_route', 'T1')).toBeUndefined();
     expect(findCommand(resolutionEffects, 'grant_clearance', 'T1')).toBeUndefined();
     const t1 = scheduler.getTrainState('T1');
+    expect(t1?.introduced).toBeFalsy();
     expect(t1?.transit).toBeUndefined();
-    expect(t1?.cleared_edges).toHaveLength(0);
+    expect(t1?.cleared_edges).toEqual([{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
   });
 });
 
@@ -825,17 +827,14 @@ describe('ADR-036 §5 — resolution clear of peers (no escalation)', () => {
       ?.cleared_edges.some((e) => e.from_marker_id === 'M1' && e.to_marker_id === 'M2');
     expect(t1HoldsM1M2).toBe(true);
 
-    /* T2: an active peer approaching M1. It requests M4→M1 (shares M1 with T1's
-     * held M1→M2) — block exclusivity must DENY it. */
+    /* T2: an active peer approaching M1. Its route starts with M4→M1 (shares M1
+     * with T1's held M1→M2) — block exclusivity must DENY it. */
     registerTrain(scheduler, 'T2');
     scheduler.introduceTrain('T2');
     tagObserved(scheduler, 'T2', 'M3');
     tagObserved(scheduler, 'T2', 'M4');
-    const probe = scheduler.handleEvent({
-      event_type: 'clearance_request',
-      device_id: 'T2',
-      payload: { train_id: 'T2', next_edge: { from_marker_id: 'M4', to_marker_id: 'M1' } },
-    });
+    const probe = scheduler.assignSchedule('T2', 'route-t2', ['M4', 'M2']);
+    expect(findCommand(probe, 'assign_route', 'T2')).toBeDefined();
     expect(findCommand(probe, 'grant_clearance', 'T2')).toBeUndefined();
   });
 
@@ -1065,8 +1064,8 @@ describe('ADR-036 §3c — operator-provided vector introduction (introduceTrain
     expect(findCommand(effs, 'assign_route', 'T1')).toBeUndefined();
     expect(findCommand(effs, 'grant_clearance', 'T1')).toBeUndefined();
     const t1 = scheduler.getTrainState('T1');
-    expect(t1?.introduced).toBe(true);
+    expect(t1?.introduced).toBeFalsy();
     expect(t1?.transit).toBeUndefined();
-    expect(t1?.cleared_edges).toHaveLength(0);
+    expect(t1?.cleared_edges).toEqual([{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
   });
 });

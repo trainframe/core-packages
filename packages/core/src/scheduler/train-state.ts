@@ -79,8 +79,16 @@ export interface TrainState {
    */
   block_reason?: 'unknown_topology' | undefined;
 
+  /**
+   * `true` after an operator `revokeClearance`: the scheduler grants this train
+   * nothing until the operator gives it fresh intent (a new schedule). Without
+   * it the next unrelated event's retry pass would re-grant the very blocks the
+   * operator just took away. Internal only, never published.
+   */
+  operator_hold?: boolean | undefined;
+
   /** Last marker the train was observed to traverse. */
-  last_marker_id?: string;
+  last_marker_id?: string | undefined;
 
   /** The edge the train is currently on, derived from last marker + transit. */
   current_edge?: EdgeRef | undefined;
@@ -120,6 +128,19 @@ export interface TrainState {
    * `undefined` when the train is under normal core authority.
    */
   in_zone?: string | undefined;
+
+  /**
+   * Set while the train backs up under a `grant_reverse` (ADR-022): the marker
+   * it is reversing to and the markers of the blocks it is backing over. Its
+   * crossings of those markers are reverse crossings, not forward traversals.
+   * Cleared when it reaches the target or crosses any other marker.
+   */
+  reversing?:
+    | {
+        readonly target_marker_id: string;
+        readonly path_marker_ids: ReadonlyArray<string>;
+      }
+    | undefined;
 
   /* ---- ADR-036 introduction lifecycle ---- */
 

@@ -9,6 +9,7 @@ import {
 } from '@trainframe/core';
 import { type Layout, PROTOCOL_VERSION } from '@trainframe/protocol';
 import type { BrokerClient } from './broker/client.js';
+import { coreEventPayloadProblem } from './inbound-validation.js';
 import { LearnMode, type LearnModeStateSnapshot } from './learn-mode.js';
 
 export interface ServerOptions {
@@ -385,12 +386,26 @@ export class Server {
     const envelope = parseJsonEnvelope(payload);
     if (envelope === null) return;
 
-    const device_id =
-      typeof envelope.device_id === 'string' ? envelope.device_id : device_id_from_topic;
+    /* The topic names the sender: devices publish on their own topic, so a body
+     * claiming a different device is not trusted. */
+    const device_id = device_id_from_topic;
     // Skip events the server itself emitted to avoid feedback loops.
     if (device_id === 'server') return;
+    if (typeof envelope.device_id === 'string' && envelope.device_id !== device_id) {
+      this.rejectInbound(
+        event_type,
+        device_id,
+        `body names device ${envelope.device_id}, topic names ${device_id}`,
+      );
+      return;
+    }
 
     const event_payload = envelope.payload ?? envelope;
+    const problem = coreEventPayloadProblem(event_type, event_payload);
+    if (problem !== undefined) {
+      this.rejectInbound(event_type, device_id, problem);
+      return;
+    }
     const effects = this.scheduler.handleEvent({
       event_type,
       device_id,
@@ -401,6 +416,20 @@ export class Server {
     // by the scheduler during `handleEvent`. Forward *after* dispatch so the
     // graph is fresh.
     this.learnMode.onEvent(event_type, device_id, event_payload);
+  }
+
+  /** Drop an inbound event the scheduler must not see, and say why on the bus. */
+  private rejectInbound(eventType: string, deviceId: string, reason: string): void {
+    this.dispatchEffects([
+      {
+        kind: 'publish_event',
+        event_type: 'anomaly',
+        payload: {
+          severity: 'warning',
+          description: `Rejected ${eventType} from ${deviceId}: ${reason}`,
+        },
+      },
+    ]);
   }
 
   private dispatchEffects(effects: ReadonlyArray<SchedulerEffect>): void {

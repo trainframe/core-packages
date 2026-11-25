@@ -601,3 +601,72 @@ function countCommands(
     }
   }).length;
 }
+
+describe('Server — inbound event validation', () => {
+  const routedTrain = () => {
+    const made = makeServer();
+    publishWireEvent(made.client, 'device_registered', 'GARAGE', {
+      capabilities: ['core.assigns_tags'],
+    });
+    for (const id of ['M1', 'M2', 'M3', 'M4']) {
+      publishWireEvent(made.client, 'tag_assignment', 'GARAGE', {
+        tag_id: id,
+        assigned_kind: 'marker',
+        target_id: id,
+      });
+    }
+    publishWireEvent(made.client, 'device_registered', 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+    });
+    made.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
+    made.server.revokeClearance('T1');
+    return made;
+  };
+
+  it('drops a clearance_request with no next_edge without throwing, and keeps serving', () => {
+    const { client } = routedTrain();
+
+    expect(() =>
+      publishWireEvent(client, 'clearance_request', 'T1', { train_id: 'T1' }),
+    ).not.toThrow();
+
+    const anomaly = client.published.find((m) => m.topic === 'railway/events/anomaly/server');
+    expect(anomaly).toBeDefined();
+    publishWireEvent(client, 'tag_observed', 'T1', { tag_id: 'M2' });
+    expect(client.published.some((m) => m.topic === 'railway/events/marker_traversed/server')).toBe(
+      true,
+    );
+  });
+
+  it('takes the sending device from the topic, not the message body', () => {
+    const { client } = routedTrain();
+
+    /* Published on GARAGE's topic, but the body claims to come from T1. */
+    client.publish(
+      'railway/events/tag_observed/GARAGE',
+      new TextEncoder().encode(
+        JSON.stringify({
+          event_id: 'e1',
+          device_id: 'T1',
+          timestamp_device: '2026-05-06T12:00:00Z',
+          event_type: 'tag_observed',
+          protocol_version: PROTOCOL_VERSION,
+          payload: { tag_id: 'M2' },
+        }),
+      ),
+    );
+
+    expect(client.published.some((m) => m.topic === 'railway/events/marker_traversed/server')).toBe(
+      false,
+    );
+  });
+
+  it('still validates the rest of a device_registered payload', () => {
+    const { client } = makeServer();
+
+    publishWireEvent(client, 'device_registered', 'T9', { capabilities: 'core.controls_motion' });
+
+    expect(client.published.some((m) => m.topic === 'railway/state/devices/T9')).toBe(false);
+    expect(client.published.some((m) => m.topic === 'railway/events/anomaly/server')).toBe(true);
+  });
+});

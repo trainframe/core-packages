@@ -216,6 +216,20 @@ export class LayoutState {
   }
 
   /**
+   * Drop every junction pairing held by `deviceId` (the device has gone) and
+   * return the junction markers it controlled. The junctions themselves and
+   * their last known positions stay: the track is still there.
+   */
+  forgetSwitchDevice(deviceId: string): ReadonlyArray<string> {
+    const released: string[] = [];
+    for (const [junctionMarkerId, owner] of this.switchDeviceByMarker) {
+      if (owner === deviceId) released.push(junctionMarkerId);
+    }
+    for (const junctionMarkerId of released) this.switchDeviceByMarker.delete(junctionMarkerId);
+    return released;
+  }
+
+  /**
    * Return the switch device id that controls the given junction marker, or
    * `undefined` if no device has declared itself as the controller. Used by
    * LearnMode to address `set_switch_position` commands to the real device

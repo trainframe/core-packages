@@ -57,7 +57,9 @@ describe('train power model — inert-in-place, block held on silence', () => {
     env.assignSchedule('A', ['P1', 'P8']);
     // Run A until it is moving DEEP inside a block (well past the block's entry
     // marker), so the follower — held at that entry marker — stalls a clear gap
-    // behind it rather than coasting into contact.
+    // behind it rather than coasting into contact. A must be past P2 so its tail
+    // has left P1->P2: placing B at P1 while A still holds that block would be an
+    // ADR-036 section 5 introduction conflict, not a follower.
     let guard = 0;
     while (guard++ < 200) {
       env.advance(200);
@@ -65,6 +67,7 @@ describe('train power model — inert-in-place, block held on silence', () => {
       const intoBlock = x % SPACING;
       if (
         (bodyOf('A')?.speed ?? 0) > 0 &&
+        x > SPACING &&
         intoBlock > 0.55 * SPACING &&
         intoBlock < 0.9 * SPACING
       ) {
