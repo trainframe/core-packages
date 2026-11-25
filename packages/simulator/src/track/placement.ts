@@ -64,7 +64,7 @@ export interface Placement {
 
 /* Minimal geometry a world-space endpoint must carry. Sufficient for distance
  * and layer tests (e.g. bestEndpointPair) that do not need piece identity. */
-interface WorldPoint {
+export interface WorldPoint {
   readonly x: number;
   readonly y: number;
   readonly outgoingAngleDeg: number;
@@ -76,7 +76,7 @@ interface WorldPoint {
 
 /* Full world-space endpoint: geometry plus the owning piece's ID. Required by
  * isCoincidentWithAnother, which must skip a piece's own sibling endpoints. */
-interface WorldEndpoint extends WorldPoint {
+export interface WorldEndpoint extends WorldPoint {
   /** ID of the piece that owns this endpoint. Used to avoid treating a piece's
    * own sibling endpoints as blocking occupancy — otherwise a piece shorter than
    * SNAP_DISTANCE marks its own ends as closed. */
@@ -132,8 +132,11 @@ function isCoincidentWithAnother(ep: WorldEndpoint, all: ReadonlyArray<WorldEndp
  * can attach to. Device pieces (train/gate/carriage) have no endpoints and so
  * contribute nothing here.
  */
-function openEndpoints(pieces: ReadonlyArray<TrackPiece>): WorldEndpoint[] {
-  const all = allEndpoints(pieces);
+export function openEndpoints(
+  pieces: ReadonlyArray<TrackPiece>,
+  excludePieceId?: string,
+): WorldEndpoint[] {
+  const all = allEndpoints(pieces.filter((p) => p.id !== excludePieceId));
   return all.filter((ep) => !isCoincidentWithAnother(ep, all));
 }
 

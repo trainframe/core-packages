@@ -55,7 +55,7 @@ vi.mock('@trainframe/simulator/track/loops.js', async (importOriginal) => {
 });
 
 import { solveClose } from '@trainframe/simulator/track/flex-solver.js';
-import { ToyTable, newLoopCenterline } from './ToyTable.js';
+import { ToyTable } from './ToyTable.js';
 
 /* ---------------------------------------------------------------------------
  * Helpers
@@ -100,8 +100,7 @@ function mockCanvasRect(): () => void {
 }
 
 /* Place a track piece at the given client-px position via the snap-then-place
-   setup hook (the retired toybox-drop behaviour: computePlacement onto a nearby
-   open end → placePiece). Builds connected chains exactly as the old drop did.
+   setup hook (computePlacement onto a nearby open end → placePiece).
    Returns the new piece's data-piece-id. */
 function placePieceAt(
   _canvas: Element,

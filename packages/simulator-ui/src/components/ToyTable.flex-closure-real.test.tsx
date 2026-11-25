@@ -50,9 +50,8 @@ function mockCanvasRect(): () => void {
 }
 
 /* Drop a toybox piece of `type` at client (cx, cy) via the snap-then-place setup
-   hook — the retired toybox-drop behaviour (computePlacement onto a nearby open
-   end → placePiece), threading the configured straight length so a variant snaps
-   flush. Builds connected chains exactly as the old drop did. */
+   hook (computePlacement onto a nearby open end → placePiece), threading the
+   configured straight length so a variant snaps flush. */
 function dropAt(_canvas: Element, type: TrackPiece['type'], cx: number, cy: number): void {
   act(() => {
     window.__tfDropPiece?.(type, cx / SCALE, cy / SCALE);

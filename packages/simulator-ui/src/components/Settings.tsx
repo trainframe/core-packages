@@ -19,11 +19,8 @@ interface SettingsProps {
  * Playwright's role-based selectors resolve. The `broker-error-feedback`
  * spec clicks the cog to open the panel before filling the URL input.
  *
- * Re-adds a settings surface that was retired alongside the old
- * SimControls/LayoutConfig developer panel (see App.tsx). That retirement
- * was correct — the scheduling controls don't belong here. The settings
- * surface does: the operator-facing "broker URL is wrong, fix it" need
- * exists regardless of architecture.
+ * The operator-facing "broker URL is wrong, fix it" surface. Scheduling
+ * controls do not belong here.
  */
 export function Settings({ initialUrl }: SettingsProps) {
   const { client, status, error } = useBroker();

@@ -4,9 +4,7 @@
  * only thing a loco device ever commands. The physics (collisions, coupling,
  * derail, run-off) is emergent; nothing here is hand-animated.
  *
- * Pure data + a tiny placement turtle, DOM-free. The view (`PhysicsScenarioView`)
- * builds the rail + world from a scenario and renders it; the harness records a
- * video and asserts the resulting body fates.
+ * Pure data + a tiny placement turtle, DOM-free.
  */
 
 import {

@@ -1,9 +1,9 @@
 import type { BrokerClient } from '@trainframe/simulator/broker/client.js';
 import { encodeDeviceEvent } from '@trainframe/simulator/broker/encode-event.js';
 import { buildBridgeDemo } from '@trainframe/simulator/demo/bridge-demo.js';
-import { buildRailyardDemo } from '@trainframe/simulator/demo/railyard-demo.js';
 import type { BodyPose } from '@trainframe/simulator/physics/observation.js';
 import { nearestStartEdge } from '@trainframe/simulator/sim/nearest-edge.js';
+import { detectLoopClosure, newLoopCenterline } from '@trainframe/simulator/track/closure.js';
 import { type WorldPosition, computeTrainTrails } from '@trainframe/simulator/track/coupling.js';
 import { composeEdgePath, pieceIdFromMarkerId } from '@trainframe/simulator/track/edge-path.js';
 import {
@@ -21,12 +21,7 @@ import {
   jointKey,
 } from '@trainframe/simulator/track/flex.js';
 import { SNAP_DISTANCE, compileLayout } from '@trainframe/simulator/track/layout-from-pieces.js';
-import {
-  type JointId,
-  buildJoints,
-  connectedComponents,
-  findLoops,
-} from '@trainframe/simulator/track/loops.js';
+import { type JointId, findLoops } from '@trainframe/simulator/track/loops.js';
 import { normalizeJointGaps } from '@trainframe/simulator/track/normalize.js';
 import { detectSameLayerOverlaps, pierSuppressed } from '@trainframe/simulator/track/overlap.js';
 import {
@@ -950,15 +945,9 @@ declare global {
     /** DEV-only seed hook: stages the two-train bridge demo on the table.
      * Registered behind `import.meta.env.DEV`; absent in production builds. */
     __tfLoadBridgeDemo?: (() => void) | undefined;
-    /** DEV-only seed hook: stages the multi-train railyard railyard demo on the
-     * table. Registered behind `import.meta.env.DEV`; absent in production. */
-    __tfLoadRailyardDemo?: (() => void) | undefined;
-    /** DEV-only: frame the whole live layout in the viewport (for demo capture).
-     * Registered behind `import.meta.env.DEV`; absent in production builds. */
-    __tfFitView?: (() => void) | undefined;
     /** DEV-only seed hook: replace the table's pieces with an exact set (used by
-     * the connection regression test + the replay/fuzz video harness to stage a
-     * precise chain such as the logged 7-curve arc). Registered behind
+     * the connection regression test to stage a precise chain such as the
+     * logged 7-curve arc). Registered behind
      * `import.meta.env.DEV`; absent in production builds. */
     __tfLoadPieces?: ((pieces: ReadonlyArray<TrackPiece>) => void) | undefined;
     /** DEV-only: ADD one piece at an EXACT pose (no snap, no bounds clamp) via the
@@ -982,14 +971,8 @@ declare global {
     __tfDropPiece?:
       | ((type: TrackPieceType, xMm: number, yMm: number, lengthMm?: number) => string | undefined)
       | undefined;
-    /** DEV-only: the authoritative-connection metrics for the CURRENTLY RENDERED
-     * (effective) geometry — components, loop count, and the largest joint
-     * deviation from the 45° grid. The adversarial harness reads these per drag
-     * frame to compare rendered geometry against the geometric joint graph.
-     * Registered behind `import.meta.env.DEV`; absent in production. */
-    __tfConnectivity?: (() => { components: number; loops: number; maxDev: number }) | undefined;
-    /** DEV-only: current depth of the track-edit undo stack. The adversarial
-     * harness reads it to confirm an edit pushed an entry and an undo popped it.
+    /** DEV-only: current depth of the track-edit undo stack. Tests read it
+     * to confirm an edit pushed an entry and an undo popped it.
      * Registered behind `import.meta.env.DEV`; absent in production. */
     __tfUndoDepth?: (() => number) | undefined;
     /** DEV-only: a running log of any detected "vanish" — a RENDERED piece going
@@ -1243,7 +1226,7 @@ function effectiveAngleOf(
  * CLOSEST to a neighbour's open end. For a piece dragged fresh FROM THE TRAY,
  * that closest-end rule can reverse a curve (its exit end snaps instead of its
  * entry), so the rail does not continue — a curved loop built by dragging never
- * closes. A fresh tray piece therefore orients like the retired click-place:
+ * closes. A fresh tray piece therefore orients so its entry end continues the rail:
  * `computePlacement` snaps its ENTRY endpoint onto the nearest open end,
  * continuing the rail. Only when it actually connects — otherwise fall back to
  * `computeMovePlacement` so an in-flight R/F rotation in free space is kept.
@@ -1562,55 +1545,9 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     };
   }, [client, clearUndo]);
 
-  // DEV-only: stage the multi-train railyard railyard demo — a main loop with the
-  // yard hung off it as a junction branch, trains each with a coloured rake, and
-  // purple spares in the yard. Marks every piece live and scans it onto the bus
-  // (like the scan-box) so an external server resolves the trains' marker
-  // observations and can schedule them. The orchestrator
-  // (scripts/railyard-demo-server) then assigns each train a cyclic schedule.
-  //
-  // Consists + yard spares are now seeded by the PHYSICS hardware itself from
-  // piece proximity (each loco's rake from `computeTrainTrails`; the gantry's
-  // spares from carriage pieces parked over its discovered footprint), so this
-  // hook only stages the pieces + commissions them on the bus. We still poll for
-  // demo-readiness (the expected loco bodies present + the yard's occupancy
-  // defined) so the screenshot harness can wait on a settled world.
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    window.__tfLoadRailyardDemo = () => {
-      const demo = buildRailyardDemo();
-      clearUndo();
-      setPieces(demo.pieces);
-      setLiveIds(new Set(demo.liveIds));
-      let garage = garageRegisteredRef.current;
-      for (const piece of demo.pieces) {
-        if (scanPiece(client, piece, garage)) garage = true;
-      }
-      garageRegisteredRef.current = garage;
-
-      /* Poll until every train's loco body has spawned. Bounded so a failed
-         stage doesn't poll forever. TODO(B): the exact by-id consist/spare
-         seeding the legacy sim did is gone — proximity seeding can merge
-         adjacent rakes if the stations sit too close, and the yard's stabled
-         spares now come from carriage pieces parked over the gantry's
-         discovered footprint; the physics discovered-slot yard is the
-         replacement once that path lands. */
-      const awaitReady = (attempt: number): void => {
-        const hw = hardwareRef.current;
-        const bodyIds = new Set(hw?.bodies().map((b) => b.id) ?? []);
-        const ready = hw !== null && demo.trains.every((t) => bodyIds.has(t.deviceId));
-        if (!ready && attempt < 50) setTimeout(() => awaitReady(attempt + 1), 100);
-      };
-      awaitReady(0);
-    };
-    return () => {
-      window.__tfLoadRailyardDemo = undefined;
-    };
-  }, [client, hardwareRef, clearUndo]);
-
   // DEV-only: stage an exact set of pieces (no bus side effects). The connection
-  // regression test and the replay/fuzz video harness use this to put the logged
-  // 7-curve arc on the table verbatim, then drive a drag. Cleared on unmount.
+  // regression test uses this to put the logged 7-curve arc on the table
+  // verbatim, then drive a drag. Cleared on unmount.
   useEffect(() => {
     if (!import.meta.env.DEV) return;
     window.__tfLoadPieces = (next) => {
@@ -1618,28 +1555,11 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
       setPieces([...next]);
       setSelectedId(null);
     };
-    /* Undo-stack depth, for the adversarial harness to confirm an edit pushed an
-       entry and an undo popped it (the operation engaged, not vacuous). */
+    /* Undo-stack depth, so tests can confirm an edit pushed an entry and an
+       undo popped it. */
     window.__tfUndoDepth = () => undoStackRef.current.length;
-    /* Authoritative-connection metrics for the rendered (effective) geometry, so
-       the adversarial harness can check rendered == geometric joint graph. */
-    window.__tfConnectivity = () => {
-      const eff = asTrackPieces(
-        applyFlex(piecesRef.current, flexRef.current, flexAnchorRef.current ?? undefined),
-      );
-      let maxDev = 0;
-      for (const j of buildJoints(eff)) {
-        const a = eff.find((p) => p.id === j.a.pieceId);
-        const b = eff.find((p) => p.id === j.b.pieceId);
-        if (a === undefined || b === undefined) continue;
-        const rel = b.rotationDeg - a.rotationDeg;
-        maxDev = Math.max(maxDev, Math.abs(rel - Math.round(rel / 45) * 45));
-      }
-      return { components: connectedComponents(eff).length, loops: findLoops(eff).length, maxDev };
-    };
     return () => {
       window.__tfLoadPieces = undefined;
-      window.__tfConnectivity = undefined;
       window.__tfUndoDepth = undefined;
     };
   }, [clearUndo]);
@@ -1746,11 +1666,10 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
     if (!import.meta.env.DEV) return;
     window.__tfPlacePiece = (type, xMm, yMm, rotationDeg) =>
       placePiece(xMm, yMm, type, rotationDeg);
-    /* The old toybox HTML5-drop path's snap-then-place, exposed for tests that
-       build connected chains: identical to the retired handleDrop (computePlacement
-       onto a nearby open end → placePiece), minus the user-facing DnD wiring. */
+    /* Snap-then-place (computePlacement onto a nearby open end → placePiece),
+       exposed for tests that build connected chains. */
     window.__tfDropPiece = (type, xMm, yMm, lengthMm) => {
-      /* Thread the configured straight length (as handleDrop did) so a variant
+      /* Thread the configured straight length so a variant
          straight snaps flush — placePiece stamps the same length on the piece. */
       const len = lengthMm ?? (type === 'straight' ? armedStraightLength : undefined);
       const placement = computePlacement(
@@ -2491,7 +2410,7 @@ function ToyboxGroup({
 interface ToyboxButtonProps {
   readonly type: TrackPieceType;
   /** True when this tile's variant-options fan is open (the only "selected"
-   *  state a tile has — there is no arm-for-click-placement any more). */
+   *  state a tile has). */
   readonly open: boolean;
   /** Chosen-variant preview props so the tile shows the piece as configured. */
   readonly variantProps: { lengthMm?: number; colorId?: CarriageColorId; frameMm?: number };
@@ -2947,199 +2866,6 @@ interface TableProps {
   readonly waveOverlay: ReactNode;
 }
 
-/* Endpoint reference carrying the owning piece ID (for coincidence checks). */
-interface TaggedEndpoint {
-  readonly x: number;
-  readonly y: number;
-  readonly outgoingAngleDeg: number;
-  readonly layer: number;
-  readonly pieceId: string;
-}
-
-/*
- * Open endpoints on pieces other than `excludePieceId`. "Open" = not coincident
- * (within SNAP_DISTANCE) with any endpoint from a DIFFERENT piece in the list.
- * Coincident endpoints are already joined; only open ones are closure targets.
- */
-function openEndpointsOf(
-  trackPieces: ReadonlyArray<TrackPiece>,
-  excludePieceId: string,
-): ReadonlyArray<TaggedEndpoint> {
-  const others = trackPieces.filter((p) => p.id !== excludePieceId);
-  const all: TaggedEndpoint[] = others.flatMap((p) =>
-    getEndpoints(p).map((ep) => ({ ...ep, pieceId: p.id })),
-  );
-  return all.filter(
-    (candidate) =>
-      !all.some(
-        (other) =>
-          other !== candidate &&
-          other.pieceId !== candidate.pieceId &&
-          Math.hypot(other.x - candidate.x, other.y - candidate.y) <= SNAP_DISTANCE,
-      ),
-  );
-}
-
-/**
- * Try to close a loop: find the dragged piece's free endpoint in its current
- * effective pose, check if any open endpoint on another piece is within
- * CONNECT_CAPTURE_MM, and if so run solveClose. Returns the feasible result or
- * null. Pure — no React state, no refs.
- */
-function detectLoopClosure(
-  trackPieces: ReadonlyArray<TrackPiece>,
-  pieceId: string,
-  flex: FlexState,
-  anchorId: string,
-): ClosureResult | null {
-  const poses = effectivePoses(trackPieces, flex, anchorId);
-  const draggedPiece = trackPieces.find((p) => p.id === pieceId);
-  const anchorPose = poses.get(anchorId);
-  const draggedPose = poses.get(pieceId);
-  if (draggedPiece === undefined || anchorPose === undefined || draggedPose === undefined) {
-    return null;
-  }
-
-  /* The dragged piece's OPEN endpoint (the one a closure snaps onto) — its
-     pose under the current flex. Uses the same open-endpoint rule the solver
-     uses so the closure target and the followed handle agree (the old
-     farthest-from-anchor rule mispicked for a near-closed loop, where the free
-     end is physically near the anchor). */
-  const freeIdx = freeEndpointIndex(trackPieces, pieceId);
-  const freeEp = getEndpointsAt(draggedPiece, draggedPose)[freeIdx];
-  if (freeEp === undefined) return null;
-
-  const open = openEndpointsOf(trackPieces, pieceId);
-  let closureTarget: TaggedEndpoint | undefined;
-  let closureTargetDist = CONNECT_CAPTURE_MM;
-  for (const candidate of open) {
-    const d = Math.hypot(candidate.x - freeEp.x, candidate.y - freeEp.y);
-    if (d < closureTargetDist) {
-      closureTargetDist = d;
-      closureTarget = candidate;
-    }
-  }
-  if (closureTarget === undefined) return null;
-
-  const result = solveClose(trackPieces, pieceId, freeIdx, closureTarget);
-  return result.feasible ? result : null;
-}
-
-/* Samples per half-path when building a loop's rail centreline for the wave. */
-const WAVE_SAMPLES_PER_HALF = 8;
-
-/* Returns the {entry, exit} endpoint indices for `pieceId` at position `i` in the loop. */
-function entryExitEps(
-  pieceId: string,
-  i: number,
-  joints: ReadonlyArray<JointId>,
-  n: number,
-): { entry: number; exit: number } | undefined {
-  const exitJoint = joints[i];
-  const entryJoint = joints[(i - 1 + n) % n];
-  if (exitJoint === undefined || entryJoint === undefined) return undefined;
-  const exit = exitJoint.a.pieceId === pieceId ? exitJoint.a.endpointIdx : exitJoint.b.endpointIdx;
-  const entry =
-    entryJoint.b.pieceId === pieceId ? entryJoint.b.endpointIdx : entryJoint.a.endpointIdx;
-  return { entry, exit };
-}
-
-/* Sample a CentreLinePath from the far endpoint inward (skipping outermost to deduplicate joints). */
-function sampleEntryHalf(
-  path: CentreLinePath,
-  halfCount: number,
-  out: Array<{ x: number; y: number }>,
-): void {
-  for (let s = halfCount - 1; s >= 0; s--) {
-    const p = path.at((s / halfCount) * path.length);
-    out.push({ x: p.x, y: p.y });
-  }
-}
-
-/* Sample a CentreLinePath outward from the centre (skipping centre to deduplicate within piece). */
-function sampleExitHalf(
-  path: CentreLinePath,
-  halfCount: number,
-  out: Array<{ x: number; y: number }>,
-): void {
-  for (let s = 1; s <= halfCount; s++) {
-    const p = path.at((s / halfCount) * path.length);
-    out.push({ x: p.x, y: p.y });
-  }
-}
-
-/* Append the contiguous centreline points for one piece in the loop traversal. */
-function sampleLoopPiece(
-  piece: TrackPiece,
-  pose: { x: number; y: number; rotationDeg: number },
-  entryEp: number,
-  exitEp: number,
-  out: Array<{ x: number; y: number }>,
-): void {
-  const entryPath = getCentreLinePathAt(piece, pose, entryEp);
-  if (entryPath !== undefined) sampleEntryHalf(entryPath, WAVE_SAMPLES_PER_HALF, out);
-  const exitPath = getCentreLinePathAt(piece, pose, exitEp);
-  if (exitPath !== undefined) sampleExitHalf(exitPath, WAVE_SAMPLES_PER_HALF, out);
-}
-
-/**
- * Compute the ordered rail-centreline world points for a loop that appears
- * after applying `closureFlex` to `restPieces` but was not present before.
- *
- * Returns the points for the FIRST newly-closed loop found (in practice
- * exactly one loop closes per drop), or null when no new loop is detected.
- *
- * The traversal uses the loop's joints to determine which endpoint of each
- * piece is the entry and which is the exit, so consecutive half-paths always
- * share their meeting endpoint and the polyline is continuous (no jumps at
- * joints). Duplicate vertices at joints are dropped (i < n on the entry half).
- *
- * Pure: no I/O, no side effects.
- */
-export function newLoopCenterline(
-  restPieces: ReadonlyArray<TrackPiece>,
-  closureFlex: FlexState,
-  draggedPieceId: string,
-  anchorId?: string,
-): ReadonlyArray<{ readonly x: number; readonly y: number }> | null {
-  /* Bake under the SAME anchor `handleClosureCommit` commits with, so the wave
-     centreline is computed over EXACTLY the closed geometry that gets stored.
-     With a mismatched (default) anchor the forward kinematics can leave the
-     closing joint a hair beyond SNAP_DISTANCE for some solved flexes, so
-     `findLoops` misses the cycle and the wave silently never fires (seen on
-     jerky closing drags). Passing the anchor keeps them in lock-step. */
-  const afterEffective = applyFlex(restPieces, closureFlex, anchorId);
-  const afterPieces = asTrackPieces(afterEffective);
-  /* Find the cycle that contains the dragged piece in the committed effective
-     geometry. We do NOT diff against rest-pose topology — clustering already
-     decided connectivity there, so the before/after sets are identical for any
-     closure whose gap is within SNAP_DISTANCE_MM. Fire on commit, not on diff. */
-  const newLoop = findLoops(afterPieces).find((loop) => loop.pieceIds.includes(draggedPieceId));
-  if (newLoop === undefined) return null;
-
-  const poseMap = new Map<string, { x: number; y: number; rotationDeg: number }>();
-  for (const ep of afterEffective) {
-    poseMap.set(ep.id, { x: ep.position.x, y: ep.position.y, rotationDeg: ep.rotationDeg });
-  }
-
-  const { pieceIds, joints } = newLoop;
-  const n = pieceIds.length;
-  const points: Array<{ x: number; y: number }> = [];
-
-  for (let i = 0; i < n; i++) {
-    const pieceId = pieceIds[i];
-    if (pieceId === undefined) continue;
-    const piece = afterPieces.find((p) => p.id === pieceId);
-    const pose = poseMap.get(pieceId);
-    if (piece === undefined || pose === undefined) continue;
-    const eps = entryExitEps(pieceId, i, joints, n);
-    if (eps === undefined) continue;
-    sampleLoopPiece(piece, pose, eps.entry, eps.exit, points);
-  }
-
-  return points.length >= 2 ? points : null;
-}
-
 /** Mutable-ref shape (only `.current` is read), kept local so the hook needn't
  *  import React's RefObject just for typing. */
 interface Ref<T> {
@@ -3175,8 +2901,7 @@ interface ToyboxDragDeps {
  * piece (one undo snapshot) and let it follow the cursor + snap-preview. R/F
  * orient it in flight via the existing selected-piece keybindings. On release
  * over the table, commit (snap, no extra undo); released off-table, cancel
- * (delete). A press without a drag onto the table places nothing — the tile's
- * onClick still arms the type, preserving the click-to-arm path.
+ * (delete). A press without a drag onto the table places nothing.
  *
  * Refs (not values) are read inside the listeners so a single grab keeps one
  * stable set of handlers for its whole lifetime — no stale closures, no mid-drag
@@ -3216,7 +2941,7 @@ function useToyboxDrag({
       const rest = restPiecesRef.current;
       const moving = rest.find((p) => p.id === id);
       if (moving === undefined) return;
-      // fromTray: orient like the click-place (entry endpoint continues the rail)
+      // fromTray: orient so the entry endpoint continues the rail
       // so a dragged curve continues the arc — see placeFromCursor.
       const placement = placeFromCursor(
         moving,
@@ -3326,48 +3051,6 @@ function Table({
     ro.observe(svg);
     return () => ro.disconnect();
   }, []);
-
-  /* DEV-only: frame the whole live layout in view. Used by the demo capture
-     harness after `__tfLoadRailyardDemo()` so a large layout is actually visible
-     (the toy-table otherwise keeps the operator's pan/zoom). Pure geometry: the
-     bounding box of every piece's endpoints, padded, fitted to the canvas box. */
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    window.__tfFitView = () => {
-      const xs: number[] = [];
-      const ys: number[] = [];
-      for (const p of pieces) {
-        xs.push(p.position.x);
-        ys.push(p.position.y);
-        for (const e of getEndpoints(asTrackPiece(p))) {
-          xs.push(e.x);
-          ys.push(e.y);
-        }
-      }
-      if (xs.length === 0) return;
-      const pad = 160;
-      const minX = Math.min(...xs);
-      const maxX = Math.max(...xs);
-      const minY = Math.min(...ys);
-      const maxY = Math.max(...ys);
-      const bw = maxX - minX + 2 * pad;
-      const bh = maxY - minY + 2 * pad;
-      const zoom = Math.min(
-        MAX_ZOOM,
-        Math.max(MIN_ZOOM, Math.min(CANVAS_W_MM / bw, (CANVAS_W_MM * boxAspect) / bh)),
-      );
-      const visW = CANVAS_W_MM / zoom;
-      const visH = visW * boxAspect;
-      setViewport({
-        x: (minX + maxX) / 2 - visW / 2,
-        y: (minY + maxY) / 2 - visH / 2,
-        zoom,
-      });
-    };
-    return () => {
-      window.__tfFitView = undefined;
-    };
-  }, [pieces, boxAspect]);
 
   /* Closure flash: the piece ID whose free endpoint is currently within reach
      of an open endpoint AND solveClose returned feasible. Null when no closure
@@ -4263,7 +3946,7 @@ function PieceRenderer({
   // layered on top — a glow not a stroke, so a multi-plank piece (junction,
   // crossing) never shows a seam where its sub-paths meet.
   const filter = pieceFilter(invalidOverlap, selected);
-  // A placed piece is always grab-draggable now (no arm-for-click-place mode).
+  // A placed piece is always grab-draggable.
   const cursorStyle = 'grab';
   // A device that is not under power dims to read as inert / off-bus.
   const dim = isDevice && !powered ? 0.5 : 1;

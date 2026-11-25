@@ -10,7 +10,7 @@ import { computePlacement } from './placement.js';
  * the existing flex-invariant property test never exercises. Build a chain, flex
  * + BAKE its open end (drifting the rest frame off-grid as the toy table does),
  * then snap a NEW piece onto that baked end via the real placement path — exactly
- * like ToyTable.handleDrop. Assert NOTHING goes non-finite or flies off-canvas:
+ * like the toy table's drop path. Assert NOTHING goes non-finite or flies off-canvas:
  * not the anchor, not a piece far down the line, not the newly-added piece.
  *
  * Brute-forces the geometry deterministically (seeded, no Math.random) across
@@ -105,7 +105,7 @@ function flexBakeEnd(
 }
 
 /* Snap a new piece onto the (baked, off-grid) open end via the real placement
-   path — ToyTable.handleDrop. Returns the chain with the piece appended. */
+   path, as the toy table's drop does. Returns the chain with the piece appended. */
 function snapAddOntoEnd(pieces: TrackPiece[], rand: () => number, round: number): TrackPiece[] {
   const openEnd = getEndpoints(pieces[pieces.length - 1] as TrackPiece)[1];
   if (openEnd === undefined) throw new Error('unreachable');
