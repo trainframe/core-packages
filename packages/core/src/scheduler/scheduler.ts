@@ -3,6 +3,7 @@ import { DeviceTable, readRegistration } from './devices.js';
 import { type SchedulerEffect, effects, grantClearancePayload } from './effects.js';
 import type { LayoutState } from './layout-state.js';
 import { planTransit } from './planner.js';
+import { SwitchControl } from './switches.js';
 import { TagRegistry } from './tag-registry.js';
 import { TrainRoster, compareTrains } from './train-roster.js';
 import type { TrainState } from './train-state.js';
@@ -72,13 +73,7 @@ export const CLEARANCE_LEAD_TIME_MS = 6_000;
  */
 export const CLEARANCE_HORIZON_MAX_EDGES = 6;
 
-/**
- * How long (injected-clock ms) a `set_switch_position` may go unconfirmed before
- * the scheduler sends it again. A lost or ignored command would otherwise leave
- * a train waiting at the junction forever, because the actuation is sent only
- * once per requested position. Point motors confirm well inside this.
- */
-export const SWITCH_ACTUATION_TIMEOUT_MS = 3_000;
+export { SWITCH_ACTUATION_TIMEOUT_MS } from './switches.js';
 
 export interface SchedulerOptions {
   /**
@@ -96,6 +91,7 @@ export interface SchedulerOptions {
  */
 export class Scheduler {
   private readonly devices: DeviceTable;
+  private readonly switches: SwitchControl;
   private readonly trains = new TrainRoster();
   private readonly tags = new TagRegistry();
   /**
@@ -105,21 +101,6 @@ export class Scheduler {
    * actually changes — not on every event.
    */
   private currentDeadlock: ReadonlyArray<string> = [];
-  /**
-   * Per-junction switch position we have most recently *requested* via a
-   * `set_switch_position` command (junction marker id → requested position).
-   * Used for actuation idempotency: `retryBlockedClearances` fires on many
-   * events, so we must issue the command only when the required position
-   * differs from what we've already asked for — never once per retry while
-   * the switch is mid-move. Synced to reality on confirmed `switch_state_changed`.
-   */
-  private readonly requestedSwitchPositions = new Map<string, string>();
-  /**
-   * When each still-unconfirmed `set_switch_position` was sent (junction marker
-   * id → injected-clock ms). Cleared on a confirmed `switch_state_changed`; an
-   * entry older than `SWITCH_ACTUATION_TIMEOUT_MS` is re-sent on the next retry.
-   */
-  private readonly unconfirmedSwitchRequests = new Map<string, number>();
   /**
    * Zone boundary marker id → owning `core.gates_zone` device id (ADR-027).
    * Populated from `zone_state_changed`. Lets the scheduler recognise a zone
@@ -145,6 +126,11 @@ export class Scheduler {
   ) {
     this.now = options.now;
     this.devices = new DeviceTable(registry);
+    this.switches = new SwitchControl(
+      layout,
+      { zoneOwnerOf: (markerId) => this.zoneOwnedMarkers.get(markerId) },
+      this.now,
+    );
   }
 
   /** Read-only view of the tag registry, exposed for the visualiser/tests. */
@@ -181,8 +167,7 @@ export class Scheduler {
     this.devices.clear();
     this.tags.clear();
     this.currentDeadlock = [];
-    this.requestedSwitchPositions.clear();
-    this.unconfirmedSwitchRequests.clear();
+    this.switches.reset();
     this.zoneBoundaries.clear();
     this.zoneOwnedMarkers.clear();
     this.layout.reset();
@@ -213,7 +198,7 @@ export class Scheduler {
          * gives an unanswered switch command its chance to be re-sent. */
         return [
           ...this.handleTrainStatus(event.device_id, event.payload),
-          ...(this.anySwitchRequestOverdue() ? this.retryBlockedClearances() : []),
+          ...(this.switches.anyRequestOverdue() ? this.retryBlockedClearances() : []),
         ];
       case 'train_length_changed':
         return this.handleTrainLengthChanged(event.device_id, event.payload);
@@ -250,7 +235,7 @@ export class Scheduler {
     }
     if (capabilities.includes('core.controls_switch')) {
       ownership.push(
-        ...this.maybeRecordSwitchPairing(deviceId, reg.controls_marker_id, reg.valid_positions),
+        ...this.switches.recordPairing(deviceId, reg.controls_marker_id, reg.valid_positions),
       );
     }
 
@@ -269,38 +254,6 @@ export class Scheduler {
     if (reg.name !== undefined) deviceState.name = reg.name;
     if (reg.livery !== undefined) deviceState.livery = reg.livery;
     return [...ownership, effects.updateState('devices', deviceId, deviceState)];
-  }
-
-  /**
-   * Record the junction marker → switch device pairing when a device declares
-   * `core.controls_switch` with a `controls_marker_id` field. The field is
-   * optional and non-breaking for devices that omit it. A marker a `core.gates_zone`
-   * frame already owns (ADR-034) is NOT routable from outside: the pairing is
-   * refused and an anomaly raised, so nothing fights the frame for a switch under it.
-   */
-  private maybeRecordSwitchPairing(
-    deviceId: string,
-    controlsMarkerId: string | undefined,
-    validPositions: ReadonlyArray<string> | undefined,
-  ): ReadonlyArray<SchedulerEffect> {
-    if (controlsMarkerId === undefined) return [];
-    const owner = this.zoneOwnedMarkers.get(controlsMarkerId);
-    if (owner !== undefined && owner !== deviceId) {
-      return [
-        effects.publishEvent('anomaly', {
-          severity: 'warning',
-          description: `Device ${deviceId} cannot control marker ${controlsMarkerId}: it is owned by zone device ${owner}`,
-        }),
-      ];
-    }
-    this.layout.recordSwitchPairing(deviceId, controlsMarkerId);
-    /* ADR-035: a switch declaring its positions IS the discovery-mode evidence
-       that its marker is a junction with those legs. Without this, discovery
-       never populates `junctionMarkerIds()` and LearnMode cannot survey it. */
-    if (validPositions !== undefined && validPositions.length > 0) {
-      this.layout.recordJunction(controlsMarkerId, validPositions);
-    }
-    return [];
   }
 
   /**
@@ -401,10 +354,7 @@ export class Scheduler {
     for (const [markerId, owner] of [...this.zoneOwnedMarkers]) {
       if (owner === deviceId) this.zoneOwnedMarkers.delete(markerId);
     }
-    for (const junctionMarkerId of this.layout.forgetSwitchDevice(deviceId)) {
-      this.requestedSwitchPositions.delete(junctionMarkerId);
-      this.unconfirmedSwitchRequests.delete(junctionMarkerId);
-    }
+    this.switches.forgetDevice(deviceId);
     const out: SchedulerEffect[] = [];
     for (const [boundaryMarkerId, owner] of [...this.zoneBoundaries]) {
       if (owner !== deviceId) continue;
@@ -840,7 +790,7 @@ export class Scheduler {
     //
     // SWITCHED-JUNCTION SAFETY: continuous junction protection across a switch
     // handover relies on this tail-occupancy deferral. When a train must cross
-    // a junction it doesn't yet have the right points for, `maybeActuateSwitch`
+    // a junction it doesn't yet have the right points for, `SwitchControl.actuate`
     // only *requests* the switch and withholds clearance — the train does not
     // yet hold the onward edge. For a length-aware train the approach edge stays
     // held (its tail still occupies it), so the junction marker remains locked
@@ -1326,79 +1276,10 @@ export class Scheduler {
     // junction's section, so it cannot flip the points out from under a peer
     // that already holds the junction.
     if (this.trains.edgeConflictsWithAnotherTrain(train.train_id, nextEdge)) return [];
-    if (this.edgeRequiresMismatchedSwitch(nextEdge)) return this.maybeActuateSwitch(nextEdge);
+    if (this.switches.edgeRequiresMismatchedSwitch(nextEdge))
+      return this.switches.actuate(nextEdge);
     if (this.anyCapabilityDeniesClearance(train, nextEdge)) return [];
     return this.grantClearance(train, nextEdge);
-  }
-
-  /**
-   * The edge needs the junction in a position it isn't confirmed to be in.
-   * If a switch device is paired to the junction, throw it — emit a single
-   * `set_switch_position` command toward the edge's required position — and
-   * still WITHHOLD clearance (return only the command, no grant). When the
-   * switch confirms, `handleSwitchStateChanged` → `setSwitchPosition` →
-   * `retryBlockedClearances` re-runs `tryGrantClearance`, the position now
-   * matches, and clearance is granted.
-   *
-   * Idempotency: we send only when the required position differs from the one
-   * we've already requested for this junction (`requestedSwitchPositions`).
-   * `retryBlockedClearances` fires on many events; without this guard the
-   * command would re-issue on every retry while the switch is mid-move.
-   *
-   * If no switch device is paired, withhold as before (empty list) — the
-   * junction's position must be changed by some other agent (operator, learn
-   * mode) before the train can proceed.
-   */
-  private maybeActuateSwitch(edge: EdgeRef): ReadonlyArray<SchedulerEffect> {
-    const layoutEdge = this.layout.findEdge(edge.from_marker_id, edge.to_marker_id);
-    const required = layoutEdge?.requires_switch_state;
-    if (!required) return [];
-
-    const switchDeviceId = this.layout.switchDeviceForMarker(edge.from_marker_id);
-    if (switchDeviceId === undefined) return [];
-
-    const junction = edge.from_marker_id;
-    const alreadyRequested = this.requestedSwitchPositions.get(junction) === required;
-    if (alreadyRequested && !this.switchRequestOverdue(junction)) return [];
-
-    this.requestedSwitchPositions.set(junction, required);
-    this.unconfirmedSwitchRequests.set(junction, this.now());
-    const command = effects.sendCommand(switchDeviceId, 'set_switch_position', {
-      junction_marker_id: junction,
-      position: required,
-    });
-    if (!alreadyRequested) return [command];
-    return [
-      effects.publishEvent('anomaly', {
-        severity: 'info',
-        description: `Switch ${switchDeviceId} did not confirm ${junction} -> ${required} within ${SWITCH_ACTUATION_TIMEOUT_MS}ms; sending again`,
-      }),
-      command,
-    ];
-  }
-
-  private switchRequestOverdue(junctionMarkerId: string): boolean {
-    const sentAt = this.unconfirmedSwitchRequests.get(junctionMarkerId);
-    return sentAt !== undefined && this.now() - sentAt >= SWITCH_ACTUATION_TIMEOUT_MS;
-  }
-
-  private anySwitchRequestOverdue(): boolean {
-    for (const junctionMarkerId of this.unconfirmedSwitchRequests.keys()) {
-      if (this.switchRequestOverdue(junctionMarkerId)) return true;
-    }
-    return false;
-  }
-
-  /**
-   * Edge filtering by switch state. If the edge declares a
-   * `requires_switch_state`, the junction's current position must match.
-   * Unknown position counts as a mismatch (default-safe).
-   */
-  private edgeRequiresMismatchedSwitch(edge: EdgeRef): boolean {
-    const layoutEdge = this.layout.findEdge(edge.from_marker_id, edge.to_marker_id);
-    const required = layoutEdge?.requires_switch_state;
-    if (!required) return false;
-    return this.layout.getSwitchPosition(edge.from_marker_id) !== required;
   }
 
   private anyCapabilityDeniesClearance(train: TrainState, nextEdge: EdgeRef): boolean {
@@ -1449,35 +1330,9 @@ export class Scheduler {
   // ---------- switch state ----------
 
   private handleSwitchStateChanged(payload: unknown): ReadonlyArray<SchedulerEffect> {
-    const { junction_marker_id, position, confirmed } = payload as {
-      junction_marker_id: string;
-      position: string;
-      confirmed: boolean;
-    };
-
-    if (!this.layout.hasMarker(junction_marker_id)) {
-      return [
-        effects.publishEvent('anomaly', {
-          severity: 'warning',
-          description: `switch_state_changed references unknown junction marker: ${junction_marker_id}`,
-        }),
-      ];
-    }
-
-    const out: SchedulerEffect[] = [
-      effects.updateState('switches', junction_marker_id, { position, confirmed }),
-    ];
-    if (confirmed) {
-      this.layout.setSwitchPosition(junction_marker_id, position);
-      // Sync our requested-position view to reality. If the switch landed on a
-      // position we didn't request, the next retry is free to re-actuate; if it
-      // landed on the one we requested, this is a no-op that keeps the
-      // idempotency guard accurate.
-      this.requestedSwitchPositions.set(junction_marker_id, position);
-      this.unconfirmedSwitchRequests.delete(junction_marker_id);
-      out.push(...this.retryBlockedClearances());
-    }
-    return out;
+    const result = this.switches.handleStateChanged(payload);
+    if (!result.confirmed) return result.effects;
+    return [...result.effects, ...this.retryBlockedClearances()];
   }
 
   // ---------- train_status → tail-clearance release ----------
