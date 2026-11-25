@@ -400,8 +400,10 @@ export class ScheduledTrainDevice {
     const edge = this.currentEdge;
     if (edge !== undefined && markerId === edge.to_marker_id) {
       this.advanceEdge();
-    } else if (edge !== undefined && markerId === edge.from_marker_id) {
-      /* Re-fix odometry at the edge's own start (e.g. just departed). */
+    } else if (edge === undefined || markerId === edge.from_marker_id) {
+      /* Re-fix odometry at a marker: the edge's own start (just departed), or
+       * any marker while there is no route (exploring), so `distance` is always
+       * how far the head is past the last marker it crossed. */
       this.distance = 0;
     }
     if (this.limitMarker !== undefined && markerId === this.limitMarker) {

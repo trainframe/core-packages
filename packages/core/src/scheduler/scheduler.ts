@@ -441,13 +441,19 @@ export class Scheduler {
     // only *requests* the switch and withholds clearance, so the approach edge
     // stays held (the tail still occupies it), the junction marker remains
     // locked under block exclusivity and no peer can grab a conflicting branch.
+    //
+    // The edge just crossed holds the tail whether or not it was granted (an
+    // exploring train, or one that moved on from its standing block). Recording
+    // it keeps the held edges one connected chain behind the head, which is what
+    // lets tail release walk back and free every earlier block.
+    const tracedTraversal = this.holdTraversedEdge(train, previousMarker, markerId);
 
     // Discovery: when a train moves from one marker to another, either
     // confirm an existing edge (inferred or not) or learn a new one.
     // The `in_discovery_mode` flag on marker_traversed reflects whether
     // the edge we just crossed is still inferred after this traversal.
     const out: SchedulerEffect[] = [];
-    if (leftStandingBlock) {
+    if (leftStandingBlock || tracedTraversal) {
       out.push(clearanceStateEffect(train));
     }
     const { effects: discoveryEffects, inDiscoveryMode } = this.recordTraversalAndDiscovery(
@@ -518,6 +524,25 @@ export class Scheduler {
   }
 
   /**
+   * Add the edge a train has just crossed to its held edges when it is not
+   * already held and no peer holds it. Returns whether anything was added.
+   */
+  private holdTraversedEdge(
+    train: TrainState,
+    previousMarker: string | undefined,
+    markerId: string,
+  ): boolean {
+    if (previousMarker === undefined || previousMarker === markerId) return false;
+    const crossed = { from_marker_id: previousMarker, to_marker_id: markerId };
+    if (train.cleared_edges.some((e) => edgesEqual(e, crossed))) return false;
+    /* Held edges stay exclusive: a train that drove into a peer's block is not
+     * given that block too. */
+    if (this.trains.edgeConflictsWithAnotherTrain(train.train_id, crossed)) return false;
+    train.cleared_edges = [...train.cleared_edges, crossed];
+    return true;
+  }
+
+  /**
    * Handle a `train_status` event. The head crossing a boundary marker is not sufficient to
    * release the section behind it — the tail must also have cleared. This
    * method walks backward through `cleared_edges` to find every held edge
@@ -574,10 +599,21 @@ export class Scheduler {
     const afterDwell = this.schedules.resumeIfDwellElapsed(train);
     if (afterDwell) return afterDwell;
 
-    // We need both the current edge and a distance reading.
-    if (!current_edge || estimated_distance_from_edge_start_mm === undefined) return [];
+    if (estimated_distance_from_edge_start_mm === undefined) return [];
 
-    if (!this.clearance.releaseTail(train, current_edge, estimated_distance_from_edge_start_mm)) {
+    /* A train with no route reports no edge (it is exploring): its head is
+     * `distance` past the last marker it crossed, on an edge not yet known. */
+    const boundaryMarkerId = current_edge?.from_marker_id ?? train.last_marker_id;
+    if (boundaryMarkerId === undefined) return [];
+
+    if (
+      !this.clearance.releaseTail(
+        train,
+        boundaryMarkerId,
+        current_edge,
+        estimated_distance_from_edge_start_mm,
+      )
+    ) {
       return [];
     }
     return [clearanceStateEffect(train), ...this.retryBlockedClearances()];

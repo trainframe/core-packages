@@ -98,3 +98,38 @@ describe('Cold-start discovery via exploration (ADR-015)', () => {
     expect(commands.filter((c) => c.command_type === 'assign_route')).toHaveLength(0);
   });
 });
+
+describe('A train that moves on without a grant', () => {
+  it('frees the block an exploring train stood in once its tail has passed', () => {
+    /* Introduced and routed, but held at its standing block by a gate, then set
+     * rolling by an open exploration clearance: it moves on without a grant. */
+    env.shutdown();
+    env = startPhysicsEnv(
+      straightLoop(
+        [
+          { id: 'M1', kind: 'block_boundary' },
+          { id: 'M2', kind: 'block_boundary' },
+          { id: 'M3', kind: 'block_boundary' },
+          { id: 'M4', kind: 'block_boundary' },
+        ],
+        { spacingMm: 200, name: 'ring' },
+      ),
+    );
+    const gate = env.spawnGate('GATE-A', { markers: ['M3'] });
+    gate.hold('M3', 'closed');
+    env.spawnTrain('T1', { atMarker: 'M1' });
+    env.assignSchedule('T1', ['M1', 'M4']);
+    env.advance(200);
+    env.server.publishCommand('T1', 'begin_exploration', { reason: 'test' });
+    env.advance(3000);
+
+    /* Mid-lap, 120 mm long on 200 mm edges: its tail is only ever in the edge its
+     * head is on, so no block behind it may still be held. */
+    const train = env.server.getScheduler().getTrainState('T1');
+    const held = [
+      ...(train?.standing_edge ? [train.standing_edge] : []),
+      ...(train?.cleared_edges ?? []),
+    ];
+    expect(held.length).toBeLessThanOrEqual(1);
+  });
+});

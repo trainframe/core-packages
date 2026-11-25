@@ -337,15 +337,22 @@ export class ClearanceControl {
 
   /**
    * Release every held edge the tail of a length-aware train has left behind,
-   * given the edge its head is on and how far along it the head is. Returns
-   * whether anything was released.
+   * given the marker its head last crossed, how far past it the head is and, when
+   * the train follows a route, the edge its head is on. Returns whether anything
+   * was released.
    */
   releaseTail(
     train: TrainState,
-    currentEdge: { from_marker_id: string; to_marker_id: string },
+    boundaryMarkerId: string,
+    currentEdge: { from_marker_id: string; to_marker_id: string } | undefined,
     distanceMm: number,
   ): boolean {
-    const edgesToRelease = this.collectTailReleases(train, currentEdge, distanceMm);
+    const edgesToRelease = this.collectTailReleases(
+      train,
+      boundaryMarkerId,
+      currentEdge,
+      distanceMm,
+    );
     if (edgesToRelease.length === 0) return false;
     train.cleared_edges = train.cleared_edges.filter(
       (e) => !edgesToRelease.some((r) => edgesEqual(r, e)),
@@ -370,7 +377,8 @@ export class ClearanceControl {
    */
   private collectTailReleases(
     train: TrainState,
-    currentEdge: { from_marker_id: string; to_marker_id: string },
+    boundaryMarkerId: string,
+    currentEdge: { from_marker_id: string; to_marker_id: string } | undefined,
     distanceMm: number,
   ): ReadonlyArray<EdgeRef> {
     const lengthMm = train.length_mm;
@@ -378,7 +386,7 @@ export class ClearanceControl {
     const forwardEdgeKeys = this.buildForwardEdgeKeys(train, currentEdge);
 
     const visitedMarkers = new Set<string>();
-    let boundaryMarker = currentEdge.from_marker_id;
+    let boundaryMarker = boundaryMarkerId;
     let cumulative = distanceMm;
 
     for (let depth = 0; depth < train.cleared_edges.length; depth++) {
@@ -417,10 +425,10 @@ export class ClearanceControl {
    */
   private buildForwardEdgeKeys(
     train: TrainState,
-    currentEdge: { from_marker_id: string; to_marker_id: string },
+    currentEdge: { from_marker_id: string; to_marker_id: string } | undefined,
   ): ReadonlySet<string> {
     const keys = new Set<string>();
-    keys.add(`${currentEdge.from_marker_id}->${currentEdge.to_marker_id}`);
+    if (currentEdge) keys.add(`${currentEdge.from_marker_id}->${currentEdge.to_marker_id}`);
     if (!train.transit) return keys;
     for (let i = train.transit.progress_index; i < train.transit.edges.length; i++) {
       const fe = train.transit.edges[i];

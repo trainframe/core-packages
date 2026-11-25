@@ -2269,6 +2269,43 @@ describe('Scheduler — train-length-aware tail clearance', () => {
   });
 });
 
+describe('Scheduler — a train that drives on without a grant', () => {
+  const crossMarker = (scheduler: Scheduler, markerId: string) =>
+    scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T1',
+      payload: { tag_id: markerId },
+    });
+
+  it('holds each edge it crosses until its tail has passed, then frees it from a status with no edge', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    introduceByRoll(scheduler, 'T1', 'M1', 'M2');
+    scheduler.revokeClearance('T1');
+
+    crossMarker(scheduler, 'M3');
+    crossMarker(scheduler, 'M4');
+    const held = () =>
+      (scheduler.getTrainState('T1')?.cleared_edges ?? []).map(
+        (e) => `${e.from_marker_id}->${e.to_marker_id}`,
+      );
+    expect(held()).toEqual(['M2->M3', 'M3->M4']);
+
+    /* No current_edge: the train follows no route. Its head is 0 mm past M4, so
+     * the 150 mm tail is still in M3->M4 and has left M2->M3. */
+    scheduler.handleEvent({
+      event_type: 'train_status',
+      device_id: 'T1',
+      payload: {
+        train_id: 'T1',
+        estimated_distance_from_edge_start_mm: 0,
+        speed_normalised: 0,
+      },
+    });
+    expect(held()).toEqual(['M3->M4']);
+  });
+});
+
 describe('Scheduler — runtime train length changes (ADR-023)', () => {
   it('re-derives tail occupancy against a runtime-reported shorter length', () => {
     // T1 is 150 mm; at distance=100 into M2→M3 its tail still sits in M1→M2, so

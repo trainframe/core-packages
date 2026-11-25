@@ -38,7 +38,7 @@ Coverage floor: 95 lines, 95 statements, 95 functions, 87 branches.
 | Schedules and transit | shipped | Sparse stop lists, cyclic schedules, zone resume (ADR-028) |
 | Operator revoke and introduction conflicts | shipped | An operator revoke holds the train stopped until it is given a new schedule. An introduction that would resolve into a block a peer occupies is refused and the block stays held (`train_introduction_conflict`) |
 | Device removal and reverse | shipped | `device_disconnected` clears the device's zone and switch state. A reverse re-queues the blocks the train vacated |
-| Clearance | shipped | Block exclusivity (ADR-011), tail release by train length (ADR-012, ADR-016), horizon of `CLEARANCE_HORIZON_EDGES` (3), switch-state filtering, switch actuation for routes, revocation |
+| Clearance | shipped | Block exclusivity (ADR-011), tail release by train length (ADR-012, ADR-016; every edge a train crosses is held until its tail leaves, granted or not, and a status with no edge measures from the last marker), horizon of `CLEARANCE_HORIZON_EDGES` (3), switch-state filtering, switch actuation for routes, revocation |
 | Station dwell | partial | `STATION_DWELL_MS` (2500) is a constant in `scheduler.ts`, not a capability or per-stop setting |
 | Conflict resolution and deadlock yield (ADR-017) | shipped | Total order: priority, registration order, train id |
 | Multi-gate semantics (ADR-018) | shipped | Veto on any deny; no aggregated block-reason view |
@@ -146,7 +146,6 @@ The toy table: a virtual Brio table the operator builds on. Runs the physics wor
 
 - Server learn mode sends `set_switch_position` directly instead of asking through the `core.controls_switch` hooks
 - `core.displays_aspect` is reserved: `set_aspect` and `aspect_changed` are schema-only and nothing uses them
-- A train that moves on without a grant (an exploring train leaving its standing block) keeps that block in its held tail, and the tail-release walk cannot free it because the edge it actually crossed is not in `cleared_edges`. It stays held until the train is reset or forgotten
 - Station dwell is a scheduler constant, not a capability
 - No fault, mishap or sensor-noise injection in the physics world
 - No broker authentication and no vendor custom-event dispatch
