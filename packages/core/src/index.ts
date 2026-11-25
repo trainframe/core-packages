@@ -1,10 +1,13 @@
 export type {
+  ActuationClock,
+  ActuationRequest,
   Capability,
   CapabilityHooks,
   CapabilityHookResult,
   CapabilityEventContext,
   ClearanceConsultation,
   ClearanceVote,
+  LayoutIntent,
   SchedulerIntent,
   RegisteredCapability,
 } from './capability.js';
@@ -21,6 +24,7 @@ export {
   controlsMotionCapability,
   acceptsRouteCapability,
   controlsSwitchCapability,
+  SWITCH_ACTUATION_TIMEOUT_MS,
   displaysAspectCapability,
   assignsTagsCapability,
 } from './builtins/index.js';

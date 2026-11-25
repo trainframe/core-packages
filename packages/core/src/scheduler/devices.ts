@@ -1,4 +1,9 @@
-import type { ClearanceConsultation, SchedulerIntent } from '../capability.js';
+import type {
+  ActuationRequest,
+  ClearanceConsultation,
+  LayoutIntent,
+  SchedulerIntent,
+} from '../capability.js';
 import type { CapabilityRegistry } from '../registry.js';
 import { type SchedulerEffect, effects } from './effects.js';
 import type { TrainState } from './train-state.js';
@@ -26,11 +31,6 @@ export interface DeviceRegistrationView {
   readonly capabilities: string[];
   readonly train_length_mm?: number;
   readonly priority?: number;
-  /** The junction marker a `core.controls_switch` device actuates (0.12.0). */
-  readonly controls_marker_id?: string;
-  /** The selectable switch positions a `core.controls_switch` device declares
-   *  (0.13.0, ADR-035). Discovery materialises a junction with these legs. */
-  readonly valid_positions?: string[];
   /** The interior markers a `core.gates_zone` device owns (ADR-034). */
   readonly owned_marker_ids?: unknown;
   /** Operator-authored presentation fields (0.12.0); echoed into retained state. */
@@ -42,6 +42,12 @@ export function readRegistration(payload: unknown): DeviceRegistrationView {
   return (payload ?? {}) as DeviceRegistrationView;
 }
 
+/** Where the intents that change the layout go; the rest become effects here. */
+export type LayoutIntentSink = (
+  intent: LayoutIntent,
+  sourceDeviceId: string,
+) => ReadonlyArray<SchedulerEffect>;
+
 /**
  * The connected devices, their declared capabilities and each capability's
  * opaque state. Capability hooks run only through here, so this is the one
@@ -50,7 +56,10 @@ export function readRegistration(payload: unknown): DeviceRegistrationView {
 export class DeviceTable {
   private readonly devices = new Map<string, DeviceRecord>();
 
-  constructor(private readonly registry: CapabilityRegistry) {}
+  constructor(
+    private readonly registry: CapabilityRegistry,
+    private readonly applyLayoutIntent: LayoutIntentSink,
+  ) {}
 
   get(deviceId: string): DeviceRecord | undefined {
     return this.devices.get(deviceId);
@@ -108,7 +117,7 @@ export class DeviceTable {
       const oldState = device.capability_state.get(capId);
       const result = cap.invokeOnDeviceDisconnect(oldState);
       device.capability_state.set(capId, result.newState);
-      out.push(...translateIntents(result.intents, device.device_id));
+      out.push(...this.translateIntents(result.intents, device.device_id));
     }
     return out;
   }
@@ -136,9 +145,40 @@ export class DeviceTable {
       });
 
       device.capability_state.set(capId, result.newState);
-      out.push(...translateIntents(result.intents, event.device_id));
+      out.push(...this.translateIntents(result.intents, event.device_id));
     }
     return out;
+  }
+
+  /**
+   * Ask each capability of the device bound to `request.junction_marker_id` to
+   * move the points. Empty when the device is gone.
+   */
+  requestActuation(request: ActuationRequest): SchedulerEffect[] {
+    const device = this.devices.get(request.device_id);
+    if (!device) return [];
+    const out: SchedulerEffect[] = [];
+    for (const capId of device.capabilities) {
+      const cap = this.registry.get(capId);
+      if (!cap) continue;
+      const result = cap.invokeOnActuationRequest(device.capability_state.get(capId), request);
+      device.capability_state.set(capId, result.newState);
+      out.push(...this.translateIntents(result.intents, device.device_id));
+    }
+    return out;
+  }
+
+  /** True if any capability of any device has an actuation overdue at `nowMs`. */
+  anyActuationOverdue(nowMs: number): boolean {
+    for (const device of this.devices.values()) {
+      for (const capId of device.capabilities) {
+        const cap = this.registry.get(capId);
+        if (!cap) continue;
+        const state = device.capability_state.get(capId);
+        if (cap.invokeIsActuationOverdue(state, { now_ms: nowMs })) return true;
+      }
+    }
+    return false;
   }
 
   /** True if any capability of any device votes to deny `request` (ADR-018 veto). */
@@ -190,33 +230,37 @@ export class DeviceTable {
   clear(): void {
     this.devices.clear();
   }
-}
 
-function translateIntents(
-  intents: ReadonlyArray<SchedulerIntent>,
-  sourceDeviceId: string,
-): SchedulerEffect[] {
-  const out: SchedulerEffect[] = [];
-  for (const intent of intents) {
-    switch (intent.kind) {
-      case 'send_command':
-        out.push(effects.sendCommand(intent.device_id, intent.command_type, intent.payload));
-        break;
-      case 'emit_anomaly':
-        out.push(
-          effects.publishEvent('anomaly', {
-            severity: intent.severity,
-            description: intent.description,
-            context: { source_device_id: sourceDeviceId },
-          }),
-        );
-        break;
-      // withhold/release intents are state-only; the scheduler reads the
-      // capability state directly during clearance consultation.
-      case 'withhold_clearance_at_marker':
-      case 'release_clearance_at_marker':
-        break;
+  private translateIntents(
+    intents: ReadonlyArray<SchedulerIntent>,
+    sourceDeviceId: string,
+  ): SchedulerEffect[] {
+    const out: SchedulerEffect[] = [];
+    for (const intent of intents) {
+      switch (intent.kind) {
+        case 'send_command':
+          out.push(effects.sendCommand(intent.device_id, intent.command_type, intent.payload));
+          break;
+        case 'emit_anomaly':
+          out.push(
+            effects.publishEvent('anomaly', {
+              severity: intent.severity,
+              description: intent.description,
+              context: { source_device_id: sourceDeviceId },
+            }),
+          );
+          break;
+        case 'bind_junction':
+        case 'report_switch_position':
+          out.push(...this.applyLayoutIntent(intent, sourceDeviceId));
+          break;
+        // withhold/release intents are state-only; the scheduler reads the
+        // capability state directly during clearance consultation.
+        case 'withhold_clearance_at_marker':
+        case 'release_clearance_at_marker':
+          break;
+      }
     }
+    return out;
   }
-  return out;
 }

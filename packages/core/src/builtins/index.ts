@@ -7,6 +7,7 @@
 
 import { Type } from '@sinclair/typebox';
 import type { Capability } from '../capability.js';
+import { SWITCH_ACTUATION_TIMEOUT_MS, controlsSwitchCapability } from './controls-switch.js';
 import { gatesClearanceCapability } from './gates-clearance.js';
 import { gatesZoneCapability } from './gates-zone.js';
 
@@ -60,11 +61,6 @@ export const acceptsRouteCapability = declarationCapability(
   'route assignment (assign_route is sent and a transit started)',
 );
 
-export const controlsSwitchCapability = stubCapability(
-  'core.controls_switch',
-  'A device that controls a junction switch position.',
-);
-
 export const displaysAspectCapability = stubCapability(
   'core.displays_aspect',
   'A device that displays a current aspect (signal, departure board, etc.).',
@@ -94,6 +90,7 @@ export const providesTrainHeadingCapability = declarationCapability(
   'train_introduced',
 );
 
+export { controlsSwitchCapability, SWITCH_ACTUATION_TIMEOUT_MS };
 export { gatesClearanceCapability };
 export { gatesZoneCapability };
 

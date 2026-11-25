@@ -54,6 +54,39 @@ export interface CapabilityHooks<State> {
   ) => ClearanceVote;
 
   readonly onDeviceDisconnect?: (state: State) => CapabilityHookResult<State>;
+
+  /**
+   * The scheduler needs the junction this device is bound to (see the
+   * `bind_junction` intent) set to `position` before a train may cross it. The
+   * hook decides whether to command the hardware now: it is asked again on
+   * every clearance retry while the train waits, so it should stay quiet while
+   * an earlier request is still in flight.
+   */
+  readonly onActuationRequest?: (
+    state: State,
+    request: ActuationRequest,
+  ) => CapabilityHookResult<State>;
+
+  /**
+   * True when a request this device accepted has gone unanswered long enough to
+   * be sent again. Polled whenever a train reports its status; a true answer
+   * makes the scheduler retry blocked clearances, which re-asks
+   * `onActuationRequest`.
+   */
+  readonly isActuationOverdue?: (state: State, query: ActuationClock) => boolean;
+}
+
+/** The scheduler's injected clock, never the wall clock. */
+export interface ActuationClock {
+  readonly now_ms: number;
+}
+
+export interface ActuationRequest extends ActuationClock {
+  /** The device the request is for: the one bound to the junction. */
+  readonly device_id: string;
+  readonly junction_marker_id: string;
+  /** The `requires_switch_state` of the edge the waiting train needs next. */
+  readonly position: string;
 }
 
 export interface CapabilityEventContext {
@@ -72,7 +105,35 @@ export type SchedulerIntent =
   | { kind: 'send_command'; device_id: string; command_type: string; payload: unknown }
   | { kind: 'withhold_clearance_at_marker'; marker_id: string; reason: string }
   | { kind: 'release_clearance_at_marker'; marker_id: string }
-  | { kind: 'emit_anomaly'; severity: 'info' | 'warning' | 'error'; description: string };
+  | { kind: 'emit_anomaly'; severity: 'info' | 'warning' | 'error'; description: string }
+  /**
+   * Bind the emitting device to a junction, so the scheduler asks it (through
+   * `onActuationRequest`) to move those points. `valid_positions` records the
+   * marker as a junction with those legs. Refused with an anomaly when a
+   * `core.gates_zone` frame already owns the marker.
+   */
+  | {
+      kind: 'bind_junction';
+      junction_marker_id: string;
+      valid_positions?: ReadonlyArray<string> | undefined;
+    }
+  /**
+   * The points at a junction are reported at `position`. Published as retained
+   * switch state either way; a confirmed position becomes the layout's and
+   * releases trains that were waiting for it.
+   */
+  | {
+      kind: 'report_switch_position';
+      junction_marker_id: string;
+      position: string;
+      confirmed: boolean;
+    };
+
+/** The intents the scheduler applies to the layout rather than passing to the platform. */
+export type LayoutIntent = Extract<
+  SchedulerIntent,
+  { kind: 'bind_junction' | 'report_switch_position' }
+>;
 
 export interface ClearanceConsultation {
   readonly train_id: string;
@@ -120,6 +181,13 @@ export interface RegisteredCapability {
     newState: unknown;
     intents: ReadonlyArray<SchedulerIntent>;
   };
+
+  invokeOnActuationRequest(
+    state: unknown,
+    request: ActuationRequest,
+  ): { newState: unknown; intents: ReadonlyArray<SchedulerIntent> };
+
+  invokeIsActuationOverdue(state: unknown, query: ActuationClock): boolean;
 }
 
 /**
@@ -160,6 +228,17 @@ export function wrap<State>(cap: Capability<State>): RegisteredCapability {
       if (!hook) return { newState: state, intents: [] };
       const result = hook(state as State);
       return { newState: result.newState, intents: result.intents };
+    },
+
+    invokeOnActuationRequest(state, request) {
+      const hook = cap.hooks.onActuationRequest;
+      if (!hook) return { newState: state, intents: [] };
+      const result = hook(state as State, request);
+      return { newState: result.newState, intents: result.intents };
+    },
+
+    invokeIsActuationOverdue(state, query) {
+      return cap.hooks.isActuationOverdue?.(state as State, query) ?? false;
     },
   };
 }

@@ -62,15 +62,17 @@ export class Scheduler {
     options: SchedulerOptions,
   ) {
     const now = options.now;
-    this.devices = new DeviceTable(registry);
+    this.devices = new DeviceTable(registry, (intent, deviceId) =>
+      this.switches.applyIntent(intent, deviceId),
+    );
     const ownership: MarkerOwnership = {
       zoneOwnerOf: (markerId) => this.zones.ownerOf(markerId),
       switchOwnerOf: (markerId) => layout.switchDeviceForMarker(markerId),
     };
-    this.switches = new SwitchControl(layout, ownership, now);
     const retry: ClearanceRetry = {
       retryBlockedClearances: (skip) => this.retryBlockedClearances(skip),
     };
+    this.switches = new SwitchControl(layout, this.devices, ownership, retry, now);
     this.clearance = new ClearanceControl(layout, this.trains, this.switches, this.devices);
     this.zones = new ZoneAuthority(this.devices, this.trains, ownership, retry, {
       advanceScheduleAndReplan: (train) => this.schedules.advanceScheduleAndReplan(train),
@@ -124,7 +126,6 @@ export class Scheduler {
     this.devices.clear();
     this.identity.reset();
     this.deadlock.reset();
-    this.switches.reset();
     this.zones.reset();
     this.layout.reset();
   }
@@ -144,7 +145,7 @@ export class Scheduler {
       case 'clearance_request':
         return this.clearance.handleClearanceRequest(event.device_id, event.payload);
       case 'switch_state_changed':
-        return this.handleSwitchStateChanged(event.payload);
+        return this.dispatchWithoutRetry(event);
       case 'tag_assignment':
         return this.identity.handleTagAssignment(event.device_id, event.payload);
       case 'train_status':
@@ -185,11 +186,15 @@ export class Scheduler {
     if (capabilities.includes('core.gates_zone')) {
       ownership.push(...this.zones.recordOwnership(deviceId, reg.owned_marker_ids));
     }
-    if (capabilities.includes('core.controls_switch')) {
-      ownership.push(
-        ...this.switches.recordPairing(deviceId, reg.controls_marker_id, reg.valid_positions),
-      );
-    }
+    /* Capabilities see their device's registration once the scheduler has
+       recorded it; this is where an actuator binds its junction. */
+    ownership.push(
+      ...this.dispatchWithoutRetry({
+        event_type: 'device_registered',
+        device_id: deviceId,
+        payload,
+      }),
+    );
 
     /* Retained device state. Carries operator-authored name/livery (0.12.0) so a
        display joining after commissioning sees them — they are presentation only,
@@ -510,12 +515,6 @@ export class Scheduler {
     return out;
   }
 
-  private handleSwitchStateChanged(payload: unknown): ReadonlyArray<SchedulerEffect> {
-    const result = this.switches.handleStateChanged(payload);
-    if (!result.confirmed) return result.effects;
-    return [...result.effects, ...this.retryBlockedClearances()];
-  }
-
   /**
    * Handle a `train_status` event from a length-aware train. For trains with
    * `length_mm > 0`, the head crossing a boundary marker is not sufficient to
@@ -633,6 +632,19 @@ export class Scheduler {
     const device = this.devices.get(event.device_id);
     if (!device) return [];
     return [...this.devices.dispatchEvent(device, event), ...this.retryBlockedClearances()];
+  }
+
+  /**
+   * Hand an event to the sending device's capabilities, leaving any clearance
+   * retry to the intents they return (a confirmed switch position retries).
+   */
+  private dispatchWithoutRetry(event: {
+    event_type: string;
+    device_id: string;
+    payload: unknown;
+  }): ReadonlyArray<SchedulerEffect> {
+    const device = this.devices.get(event.device_id);
+    return device ? this.devices.dispatchEvent(device, event) : [];
   }
 
   /**

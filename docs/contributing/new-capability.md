@@ -24,7 +24,7 @@ Capabilities are values, not classes. They are pure data plus pure functions. No
 Before writing code, decide:
 
 - **What does this capability let a device do?** One sentence. If it takes more, it's probably two capabilities.
-- **What hooks does it need?** Most capabilities use `onEvent` (to update state in response to events) and `onClearanceConsultation` (to vote on clearance grants). New hook surface is a protocol change requiring discussion.
+- **What hooks does it need?** Most capabilities use `onEvent` (to update state in response to events) and `onClearanceConsultation` (to vote on clearance grants). A device that moves the points at a junction uses the actuator hooks (see [Actuating a junction](#actuating-a-junction)). New hook surface is a protocol change requiring discussion.
 - **What state per device?** As small as possible. State is per-device and persists across events.
 - **What custom events and commands?** Define these in TypeBox schemas; the platform validates them at the broker boundary.
 
@@ -70,6 +70,31 @@ export const myCapability: Capability<State> = {
 ```
 
 The hooks are pure functions. They receive state and context, return new state and intents. The scheduler invokes them; you never call them directly.
+
+`onEvent` receives every event the device sends that the scheduler hands on, plus the device's own `device_registered` once the scheduler has recorded it. Return the state unchanged for any event type you don't recognise.
+
+### Intents
+
+A hook's intents are how it asks the scheduler to act:
+
+| Intent | Effect |
+|---|---|
+| `send_command { device_id, command_type, payload }` | The command is sent to the device |
+| `emit_anomaly { severity, description }` | An `anomaly` event, with `context.source_device_id` set to your device |
+| `withhold_clearance_at_marker`, `release_clearance_at_marker` | Nothing directly; express a withhold by denying in `onClearanceConsultation` |
+| `bind_junction { junction_marker_id, valid_positions? }` | Your device becomes the one asked to move that junction. Refused with an anomaly if a `core.gates_zone` frame owns the marker |
+| `report_switch_position { junction_marker_id, position, confirmed }` | Published as retained switch state; a confirmed position becomes the layout's and releases trains waiting for it |
+
+### Actuating a junction
+
+`core.controls_switch` is built on these hooks, and a satellite actuator (a turntable, a traverser) uses the same ones:
+
+1. In `onEvent`, on `device_registered`, return `bind_junction` for the junction your device serves. Read the junction from your own registration fields or fix it in the capability
+2. Implement `onActuationRequest(state, { device_id, junction_marker_id, position, now_ms })`. The scheduler calls it when a train needs the junction at `position` (the edge's `requires_switch_state`) and again on every clearance retry while the train waits, so send your command once and record that you did. Keep `now_ms` in state if you want to re-send after a timeout
+3. Implement `isActuationOverdue(state, { now_ms })` if you re-send. The scheduler asks it whenever a train reports its status; answering true makes it retry the waiting train, which calls `onActuationRequest` again
+4. When your hardware confirms, have `onEvent` return `report_switch_position` with `confirmed: true`
+
+`now_ms` is the scheduler's injected clock. Never read `Date.now` in a hook. See [ADR-037](../adr/037-actuator-hooks.md) for why the surface is split this way, and `packages/core/src/scheduler/actuator-hooks.test.ts` for a complete turntable driven through the real scheduler.
 
 ## Step 3: Test
 
