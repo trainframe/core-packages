@@ -59,6 +59,7 @@ describe('Topology violation handling through a real broker (ADR-019)', () => {
   it('holds a bounded-route train that reports an unreachable marker: it is stopped on the wire, flagged, and the region is locked', async () => {
     const tc = harness.testClient;
     await tc.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await tc.waitForState('railway/state/devices/T1');
@@ -105,6 +106,7 @@ describe('Topology violation handling through a real broker (ADR-019)', () => {
   it('recovery via re-anchor lifts the hold and resumes scheduled operation without learning the phantom edge', async () => {
     const tc = harness.testClient;
     await tc.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await tc.waitForState('railway/state/devices/T1');

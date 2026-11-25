@@ -51,6 +51,7 @@ export class AdminHttpServer {
     if (this.httpServer) throw new Error('AdminHttpServer.listen called twice');
     this.server.injectEvent('device_registered', this.adminDeviceId, {
       capabilities: ['core.assigns_tags'],
+      device_kind_hint: 'tag-garage',
     });
     const httpServer = createServer((req, res) => this.handle(req, res));
     this.httpServer = httpServer;

@@ -79,6 +79,7 @@ describe('AdminHttpServer — DELETE /api/trains/:id', () => {
   it('forgets a known train and returns 200 {deleted}', async () => {
     const { client, baseUrl } = harness;
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion'],
     });
 
@@ -99,6 +100,7 @@ describe('AdminHttpServer — DELETE /api/trains/:id', () => {
   it('decodes percent-encoded train ids', async () => {
     const { client, baseUrl } = harness;
     publishWireEvent(client, 'device_registered', 'T 1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion'],
     });
 
@@ -165,6 +167,7 @@ describe('AdminHttpServer — POST /api/maintenance/reset', () => {
   it('blank-slates server state so the scheduler forgets registered trains', async () => {
     const { client, baseUrl, server } = harness;
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion'],
     });
     expect(server.getScheduler().getTrainIds()).toContain('T1');

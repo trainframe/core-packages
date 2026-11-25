@@ -107,7 +107,7 @@ railway/state/{entity_type}/{entity_id}       # retained state messages
 railway/discovery/register                    # device registration handshake
 ```
 
-The server validates every core event payload against its schema (`packages/server/src/inbound-validation.ts`) and takes the sender from the `{device_id}` topic segment, not from the envelope. `device_registered` may omit `device_kind_hint`, which the scheduler never reads. Events use the `event_type` segment so consumers can subscribe selectively (the visualiser subscribes `railway/events/#`, the scheduler subscribes only to events it cares about). Retained state messages mean a fresh subscriber gets current train positions, switch states, and clearance grants without replaying history.
+The server validates every core event payload against its schema (`packages/server/src/inbound-validation.ts`) and takes the sender from the `{device_id}` topic segment, not from the envelope. A payload missing a required field, such as `device_kind_hint` on `device_registered`, is rejected with an anomaly. Events use the `event_type` segment so consumers can subscribe selectively (the visualiser subscribes `railway/events/#`, the scheduler subscribes only to events it cares about). Retained state messages mean a fresh subscriber gets current train positions, switch states, and clearance grants without replaying history.
 
 **Retained device state (0.4.0):** `railway/state/devices/{device_id}` carries the registered device snapshot:
 

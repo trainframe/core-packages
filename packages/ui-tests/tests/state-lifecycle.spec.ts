@@ -61,9 +61,11 @@ test.describe('state lifecycle: delete, prune, blank slate', () => {
 
     /* Register two train devices so the DevicesPanel populates. */
     harness.server.injectEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     harness.server.injectEvent('device_registered', 'T2', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
 

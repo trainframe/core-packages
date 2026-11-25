@@ -64,6 +64,7 @@ test.describe
 
       // A roadside reader sees an unknown tag — the affordance surfaces.
       harness.server.injectEvent('device_registered', 'READER-1', {
+        device_kind_hint: 'vehicle-reader',
         capabilities: ['core.identifies_vehicles'],
       });
       harness.server.injectEvent('tag_observed', 'READER-1', { tag_id: 'TAG-MYSTERY' });
@@ -81,6 +82,7 @@ test.describe
       // Now a train sees TAG-MYSTERY. The scheduler resolves it to M2 and
       // emits `marker_traversed`, which the visualiser snaps T1 onto.
       harness.server.injectEvent('device_registered', 'T1', {
+        device_kind_hint: 'scheduled-loco',
         capabilities: [
           'core.controls_motion',
           'core.reports_marker_traversal',

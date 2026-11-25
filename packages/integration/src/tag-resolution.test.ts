@@ -63,6 +63,7 @@ describe('ADR-007: runtime tag→marker resolution over the wire', () => {
     // nothing like the marker ids they identify. This is the real-hardware
     // case the registry exists for.
     await publishWire('device_registered', 'GARAGE', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     await harness.testClient.waitForState('railway/state/devices/GARAGE');
@@ -80,6 +81,7 @@ describe('ADR-007: runtime tag→marker resolution over the wire', () => {
     await harness.testClient.waitForState('railway/state/tags/RFID-BB02');
 
     await publishWire('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
@@ -114,6 +116,7 @@ describe('ADR-007: runtime tag→marker resolution over the wire', () => {
 
   it('emits an info anomaly for an observed tag with no registry binding (unknown tag still anomalies)', async () => {
     await publishWire('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');

@@ -67,6 +67,7 @@ test.describe('Visualiser: operator assigns a previously-unknown tag', () => {
     // Register a fake reader device first so the scheduler routes its
     // tag_observed properly.
     harness.server.injectEvent('device_registered', 'READER-1', {
+      device_kind_hint: 'vehicle-reader',
       capabilities: ['core.identifies_vehicles'],
     });
     harness.server.injectEvent('tag_observed', 'READER-1', { tag_id: 'TAG-MYSTERY' });
@@ -99,6 +100,7 @@ test.describe('Visualiser: operator assigns a previously-unknown tag', () => {
     await page.waitForTimeout(300);
 
     harness.server.injectEvent('device_registered', 'GARAGE-1', {
+      device_kind_hint: 'vehicle-reader',
       capabilities: ['core.identifies_vehicles'],
     });
     harness.server.injectEvent('tag_observed', 'GARAGE-1', { tag_id: 'TAG-TRAIN-1' });

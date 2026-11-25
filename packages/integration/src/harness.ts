@@ -149,6 +149,7 @@ export class TestClient {
   async seedIdentityTags(markerIds: ReadonlyArray<string>): Promise<void> {
     await this.publishEvent('device_registered', 'GARAGE', {
       capabilities: ['core.assigns_tags'],
+      device_kind_hint: 'tag-garage',
     });
     await this.waitForState('railway/state/devices/GARAGE');
     for (const id of markerIds) {

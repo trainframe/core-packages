@@ -82,6 +82,7 @@ test.describe('Discovery mode: visualiser grows as the operator scans pieces', (
     // Start with no markers (server is in discovery mode). Inject an unknown tag
     // via a reader device — the visualiser surfaces the assign-tag affordance.
     harness.server.injectEvent('device_registered', 'READER', {
+      device_kind_hint: 'vehicle-reader',
       capabilities: ['core.identifies_vehicles'],
     });
     harness.server.injectEvent('tag_observed', 'READER', { tag_id: 'M-DISCOVERED' });
@@ -124,6 +125,7 @@ test.describe('Discovery mode: visualiser grows as the operator scans pieces', (
   }) => {
     // Bind two markers via the GARAGE device (same path as a real scan).
     harness.server.injectEvent('device_registered', 'GARAGE', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     harness.server.injectEvent('tag_assignment', 'GARAGE', {
@@ -145,6 +147,7 @@ test.describe('Discovery mode: visualiser grows as the operator scans pieces', (
     // Register a train and inject consecutive tag_observed events so the
     // server infers the M-A → M-B edge from the traversal.
     harness.server.injectEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     harness.server.injectEvent('tag_observed', 'T1', { tag_id: 'M-A' });

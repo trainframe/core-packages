@@ -352,7 +352,12 @@ function seedIdentityTags(
     description: 'Mints identity tag assignments for the harness layout.',
     capabilities: ['core.assigns_tags'],
   });
-  garage.publish(tagEvent('device_registered', { capabilities: ['core.assigns_tags'] }));
+  garage.publish(
+    tagEvent('device_registered', {
+      capabilities: ['core.assigns_tags'],
+      device_kind_hint: 'tag-garage',
+    }),
+  );
   for (const id of markerIds) {
     garage.publish(
       tagEvent('tag_assignment', { tag_id: id, assigned_kind: 'marker', target_id: id }),

@@ -1,4 +1,4 @@
-import { FormatRegistry, type TObject, type TSchema, Type } from '@sinclair/typebox';
+import { FormatRegistry, type TObject, type TSchema } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 import { CORE_EVENT_SCHEMAS } from '@trainframe/protocol';
 
@@ -20,24 +20,10 @@ if (!FormatRegistry.Has('date-time')) {
 
 const EVENT_SCHEMAS: Readonly<Record<string, TObject>> = CORE_EVENT_SCHEMAS;
 
-/*
- * Required payload fields the server tolerates being absent, per event type.
- * Live producers (the toy table's locos, gates and switches, the GARAGE tag
- * assigner, the demo scripts) register without `device_kind_hint`, and the
- * scheduler never reads it; rejecting them would silently drop every toy-table
- * device. Remove an entry once its producers send the field.
- */
-const TOLERATED_ABSENT: Readonly<Record<string, ReadonlyArray<string>>> = {
-  device_registered: ['device_kind_hint'],
-};
-
 const PAYLOAD_SCHEMAS: ReadonlyMap<string, TSchema> = new Map(
   Object.entries(EVENT_SCHEMAS).flatMap(([eventType, envelope]) => {
     const payload = envelope.properties.payload;
-    if (payload === undefined) return [];
-    const tolerated = TOLERATED_ABSENT[eventType];
-    const schema = tolerated === undefined ? payload : Type.Omit(payload, [...tolerated]);
-    return [[eventType, schema] as const];
+    return payload === undefined ? [] : [[eventType, payload] as const];
   }),
 );
 

@@ -4327,6 +4327,7 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
           'core.accepts_route',
           'core.can_reverse',
         ],
+        device_kind_hint: 'scheduled-loco',
         train_length_mm: TRAIN_LENGTH_MM,
       },
       wallClockEnvelopeSource,
@@ -4341,6 +4342,7 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
       device_id,
       {
         capabilities: ['core.gates_clearance'],
+        device_kind_hint: 'clearance-gate',
       },
       wallClockEnvelopeSource,
     );
@@ -4361,6 +4363,7 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
       device_id,
       {
         capabilities: ['core.gates_zone', 'core.reports_length'],
+        device_kind_hint: 'railyard',
       },
       wallClockEnvelopeSource,
     );
@@ -4374,6 +4377,7 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
       GARAGE_DEVICE_ID,
       {
         capabilities: ['core.assigns_tags'],
+        device_kind_hint: 'tag-garage',
       },
       wallClockEnvelopeSource,
     );
@@ -4404,6 +4408,7 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
       `${companion.prefix}${piece.id}`,
       {
         capabilities: [...companion.capabilities],
+        device_kind_hint: companion.kind,
         ...(companion.controlsMarker === true ? { controls_marker_id: markerId } : {}),
       },
       wallClockEnvelopeSource,
@@ -4429,17 +4434,37 @@ const TRACK_COMPANION_DEVICES: Partial<
     {
       readonly prefix: string;
       readonly capabilities: ReadonlyArray<string>;
+      /** The `device_kind_hint` the companion registers with. */
+      readonly kind: string;
       /** Declare `controls_marker_id` (switch motors only). */
       readonly controlsMarker?: boolean;
     }
   >
 > = {
-  junction: { prefix: 'SWITCH-', capabilities: ['core.controls_switch'], controlsMarker: true },
-  turntable: { prefix: 'SWITCH-', capabilities: ['core.controls_switch'], controlsMarker: true },
+  junction: {
+    prefix: 'SWITCH-',
+    capabilities: ['core.controls_switch'],
+    kind: 'mainline-switch',
+    controlsMarker: true,
+  },
+  turntable: {
+    prefix: 'SWITCH-',
+    capabilities: ['core.controls_switch'],
+    kind: 'turntable-switch',
+    controlsMarker: true,
+  },
   // Experimental 001: the authority to assert a train_length_mm (ADR-023).
-  'vision-station': { prefix: 'VLS-', capabilities: ['core.reports_length'] },
+  'vision-station': {
+    prefix: 'VLS-',
+    capabilities: ['core.reports_length'],
+    kind: 'vision-station',
+  },
   // Experimental 003: pin a dwelling train during a lift — never a dwell timer.
-  'crane-station': { prefix: 'CRANE-', capabilities: ['core.gates_clearance'] },
+  'crane-station': {
+    prefix: 'CRANE-',
+    capabilities: ['core.gates_clearance'],
+    kind: 'crane-station',
+  },
   // Experimental 005: clearance as physical track availability — span up ⇒ withhold.
-  'lift-bridge': { prefix: 'BRIDGE-', capabilities: ['core.gates_clearance'] },
+  'lift-bridge': { prefix: 'BRIDGE-', capabilities: ['core.gates_clearance'], kind: 'lift-bridge' },
 };

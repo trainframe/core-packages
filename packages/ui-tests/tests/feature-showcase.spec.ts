@@ -90,6 +90,7 @@ test.describe
 
       // Register garage + bind identity tags so tag_observed resolves.
       harness.server.injectEvent('device_registered', 'GARAGE', {
+        device_kind_hint: 'tag-garage',
         capabilities: ['core.assigns_tags'],
       });
       for (const id of ['M1', 'M2', 'M3', 'M4']) {
@@ -100,6 +101,7 @@ test.describe
         });
       }
       harness.server.injectEvent('device_registered', 'T1', {
+        device_kind_hint: 'scheduled-loco',
         capabilities: [
           'core.controls_motion',
           'core.reports_marker_traversal',
@@ -126,6 +128,7 @@ test.describe
       // capture we publish it directly via a Node mqtt client so the
       // visualiser sees a mid-edge position.
       harness.server.injectEvent('device_registered', 'T1', {
+        device_kind_hint: 'scheduled-loco',
         capabilities: [
           'core.controls_motion',
           'core.reports_marker_traversal',
@@ -169,6 +172,7 @@ test.describe
       await settle(page);
 
       harness.server.injectEvent('device_registered', 'READER', {
+        device_kind_hint: 'vehicle-reader',
         capabilities: ['core.identifies_vehicles'],
       });
       harness.server.injectEvent('tag_observed', 'READER', { tag_id: 'TAG-MYSTERY-001' });
@@ -196,6 +200,7 @@ test.describe
       });
 
       harness.server.injectEvent('device_registered', 'GARAGE', {
+        device_kind_hint: 'tag-garage',
         capabilities: ['core.assigns_tags'],
       });
       harness.server.injectEvent('tag_assignment', 'GARAGE', {
@@ -229,6 +234,7 @@ test.describe
         target_id: 'M1',
       });
       harness.server.injectEvent('device_registered', 'T1', {
+        device_kind_hint: 'scheduled-loco',
         capabilities: [
           'core.controls_motion',
           'core.reports_marker_traversal',

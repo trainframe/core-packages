@@ -30,6 +30,7 @@ const publishWire = (event_type: string, device_id: string, payload: unknown) =>
 describe('Discovery mode: operator + train collaborate to learn a graph', () => {
   it('Given the operator binds a new tag to a new marker, the layout gains the marker via retained state', async () => {
     await publishWire('device_registered', 'GARAGE', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     await harness.testClient.waitForState('railway/state/devices/GARAGE');
@@ -64,9 +65,11 @@ describe('Discovery mode: operator + train collaborate to learn a graph', () => 
     // Wire up: garage, train, and an extra marker M2 known to the
     // operator but with no edge to M1.
     await publishWire('device_registered', 'GARAGE', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     await publishWire('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await publishWire('tag_assignment', 'GARAGE', {

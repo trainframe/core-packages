@@ -52,6 +52,7 @@ const assignRouteCommandsFor = (trainId: string) =>
 describe('Mid-journey schedule reassignment replaces the prior plan', () => {
   it('a second assignSchedule issues an assign_route for the new edges only', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
@@ -118,6 +119,7 @@ describe('Mid-journey schedule reassignment replaces the prior plan', () => {
 
   it('reassignment releases cleared_edges from the old plan', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');

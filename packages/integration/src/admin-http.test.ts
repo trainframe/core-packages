@@ -53,6 +53,7 @@ describe('Admin HTTP API', () => {
 
   it('POST /api/trains/:id/route assigns a route and the train receives grant_clearance on the wire', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
@@ -71,6 +72,7 @@ describe('Admin HTTP API', () => {
 
   it('POST /api/gates/:id/hold publishes a hold_gate command on the wire', async () => {
     await harness.testClient.publishEvent('device_registered', 'GATE-1', {
+      device_kind_hint: 'clearance-gate',
       capabilities: ['core.gates_clearance'],
     });
     await harness.testClient.waitForState('railway/state/devices/GATE-1');
@@ -113,9 +115,11 @@ describe('Admin HTTP API', () => {
     // blocked. Operator revokes T1's clearance; T2 must then receive a grant
     // for the same edge, and T1's scheduler-side cleared_edges must be empty.
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.publishEvent('device_registered', 'T2', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
@@ -162,6 +166,7 @@ describe('Admin HTTP API', () => {
 
   it('GET /api/state returns scheduler state (deprecated alias)', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
@@ -226,6 +231,7 @@ describe('Query HTTP API (ADR-020)', () => {
   it('GET /api/query/traversal-times surfaces a learned estimate once an edge is run', async () => {
     await harness.testClient.seedIdentityTags(['M1', 'M2', 'M3']);
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
@@ -268,6 +274,7 @@ describe('Query HTTP API (ADR-020)', () => {
 
   it('GET /api/query/trains lists all train states', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
@@ -288,6 +295,7 @@ describe('Query HTTP API (ADR-020)', () => {
 
   it('GET /api/query/trains/:id returns one train, 404 for unknown', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
@@ -305,6 +313,7 @@ describe('Query HTTP API (ADR-020)', () => {
 
   it('GET /api/query/clearances reports who holds what', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');

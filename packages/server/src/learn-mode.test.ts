@@ -180,9 +180,11 @@ describe('LearnMode — drives a registered train', () => {
   it('drives a registered-but-not-yet-seen train immediately so it can find its first marker', () => {
     const { client } = makeServer(SIMPLE_LOOP);
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     for (const m of ['M1', 'M2', 'M3', 'M4']) {
@@ -233,9 +235,11 @@ describe('LearnMode — bootstraps discovery from an empty graph', () => {
     };
     const { client } = makeServer(EMPTY_GRAPH);
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     publishWireEvent(client, 'tag_assignment', 'GARAGE', {
@@ -255,9 +259,11 @@ describe('LearnMode — explores without re-issuing commands per marker', () => 
   it('grants exploration once and learns edges from the reported traversals', () => {
     const { client } = makeServer(SIMPLE_LOOP);
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     for (const m of ['M1', 'M2', 'M3', 'M4']) {
@@ -285,9 +291,11 @@ describe('LearnMode — completes after a full loop', () => {
   it('transitions to complete when the train returns to its start marker with no unexplored edges', () => {
     const { client } = makeServer(SIMPLE_LOOP);
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     for (const m of ['M1', 'M2', 'M3', 'M4']) {
@@ -311,9 +319,11 @@ describe('LearnMode — hits a terminus and pauses', () => {
   it('transitions to paused_terminus and stops issuing commands', () => {
     const { client } = makeServer(TERMINUS_LAYOUT);
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     for (const m of ['M1', 'M2', 'M3']) {
@@ -346,6 +356,7 @@ describe('LearnMode — learn_track_stop returns to idle', () => {
   it('clears local state and publishes idle', () => {
     const { client } = makeServer(SIMPLE_LOOP);
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     publishOperatorCommand(client, 'learn_track_start', {});
@@ -356,9 +367,11 @@ describe('LearnMode — learn_track_stop returns to idle', () => {
   it('releases a driving train so it halts (revokes its exploration clearance)', () => {
     const { client } = makeServer(SIMPLE_LOOP);
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     for (const m of ['M1', 'M2', 'M3', 'M4']) {
@@ -395,9 +408,11 @@ describe('LearnMode — junctions under exploration', () => {
   it('throws a junction toward an untraversed leg (still self-driving, never routed or reversed)', () => {
     const { client } = makeServer(JUNCTION_LAYOUT);
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     for (const m of ['M1', 'JCT', 'MAIN', 'DIV']) {
@@ -408,6 +423,7 @@ describe('LearnMode — junctions under exploration', () => {
       });
     }
     publishWireEvent(client, 'device_registered', 'SWITCH-JCT', {
+      device_kind_hint: 'mainline-switch',
       capabilities: ['core.controls_switch'],
       controls_marker_id: 'JCT',
     });
@@ -433,9 +449,11 @@ describe('LearnMode — junctions under exploration', () => {
   it('surveys BOTH legs of a junction on a branched loop, then completes', () => {
     const { client } = makeServer(BRANCHED_LOOP);
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     for (const m of ['M1', 'JCT', 'MA', 'MB']) {
@@ -446,6 +464,7 @@ describe('LearnMode — junctions under exploration', () => {
       });
     }
     publishWireEvent(client, 'device_registered', 'SWITCH-JCT', {
+      device_kind_hint: 'mainline-switch',
       capabilities: ['core.controls_switch'],
       controls_marker_id: 'JCT',
     });
@@ -480,9 +499,11 @@ describe('LearnMode — start named train', () => {
   it('drives the specifically requested train when train_id is supplied', () => {
     const { client } = makeServer(SIMPLE_LOOP);
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     publishWireEvent(client, 'device_registered', 'T2', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     publishOperatorCommand(client, 'learn_track_start', { train_id: 'T2' });
@@ -494,6 +515,7 @@ describe('LearnMode — observability hook', () => {
   it('getLearnMode returns the active train id while learning', () => {
     const { server, client } = makeServer(SIMPLE_LOOP);
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     expect(server.getLearnMode().isActive()).toBe(false);

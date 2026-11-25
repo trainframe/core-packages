@@ -110,6 +110,7 @@ describe('Server — registers a train and grants its initial clearance', () => 
     const { server, client } = makeServer();
 
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     /* ADR-036 §3c: introduce the train with its known heading before routing. */
@@ -137,12 +138,15 @@ describe('Server — gate clearance flow', () => {
     const { server, client } = makeServer();
 
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     publishWireEvent(client, 'device_registered', 'GATE-M3', {
+      device_kind_hint: 'clearance-gate',
       capabilities: ['core.gates_clearance'],
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     for (const marker of ['M1', 'M2', 'M3', 'M4']) {
@@ -183,6 +187,7 @@ describe('Server — defensive parsing', () => {
   it('drops messages with malformed JSON', () => {
     const { server, client } = makeServer();
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     client.publish('railway/events/tag_observed/T1', new TextEncoder().encode('not-json-at-all'));
@@ -212,6 +217,7 @@ describe('Server — admin injection points', () => {
     // An unprivileged device tries to bind a tag and is ignored: nothing
     // retained on the tag's state topic.
     publishWireEvent(client, 'device_registered', 'IMPOSTOR', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     publishWireEvent(client, 'tag_assignment', 'IMPOSTOR', {
@@ -225,6 +231,7 @@ describe('Server — admin injection points', () => {
     // That same device can now bind TAG-Y, and the binding becomes visible
     // to the rest of the bus as retained state.
     server.injectEvent('device_registered', 'ADMIN', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     publishWireEvent(client, 'tag_assignment', 'ADMIN', {
@@ -255,6 +262,7 @@ describe('Server — operator commands on railway/operator/+', () => {
     const { client } = makeServer();
     // Register T1 so the scheduler knows about it.
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     /* ADR-036 §3c: introduce via the operator MQTT topic before scheduling. */
@@ -285,6 +293,7 @@ describe('Server — operator commands on railway/operator/+', () => {
   it('routes revoke_clearance to Server.revokeClearance and emits the revoke command', () => {
     const { client } = makeServer();
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     // First give T1 something to revoke.
@@ -331,6 +340,7 @@ describe('Server — operator commands on railway/operator/+', () => {
 
     /* Register tag bindings so the train can be routed. */
     publishWireEvent(client, 'device_registered', 'GARAGE', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     for (const marker of ['M1', 'M2', 'M3', 'M4']) {
@@ -342,6 +352,7 @@ describe('Server — operator commands on railway/operator/+', () => {
     }
 
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
 
@@ -401,6 +412,7 @@ describe('Server — operator commands on railway/operator/+', () => {
      * command to the device to begin the two-marker roll. */
     const { client } = makeServer();
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
 
@@ -420,6 +432,7 @@ describe('Server — operator commands on railway/operator/+', () => {
     /* Validates that the server-side guard rejects an ill-formed heading_edge. */
     const { client } = makeServer();
     publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
 
@@ -446,7 +459,10 @@ describe('Server — operator commands on railway/operator/+', () => {
 describe('device disconnect clears retained device registration', () => {
   it('tombstones railway/state/devices/<id> so the train does not resurrect', () => {
     const { client } = makeServer();
-    publishWireEvent(client, 'device_registered', 'T1', { capabilities: ['core.controls_motion'] });
+    publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
+      capabilities: ['core.controls_motion'],
+    });
 
     /* Sanity: the device is registered as a non-empty retained snapshot. */
     const registered = client.retained.get('railway/state/devices/T1');
@@ -469,7 +485,10 @@ describe('device disconnect clears retained device registration', () => {
 describe('scheduler reset clears all in-memory state', () => {
   it('forgets trains and learned layout', () => {
     const { server, client } = makeServer();
-    publishWireEvent(client, 'device_registered', 'T1', { capabilities: ['core.controls_motion'] });
+    publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
+      capabilities: ['core.controls_motion'],
+    });
     expect(server.getScheduler().getTrainIds()).toContain('T1');
 
     server.getScheduler().reset();
@@ -557,7 +576,10 @@ describe('Server.reset blank-slates server and broker', () => {
 describe('Server.deleteTrain', () => {
   it('forgets a known train and reports success; 404s an unknown one', () => {
     const { server, client } = makeServer();
-    publishWireEvent(client, 'device_registered', 'T1', { capabilities: ['core.controls_motion'] });
+    publishWireEvent(client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
+      capabilities: ['core.controls_motion'],
+    });
 
     expect(server.deleteTrain('NOPE')).toBe(false);
     expect(server.deleteTrain('T1')).toBe(true);
@@ -606,6 +628,7 @@ describe('Server — inbound event validation', () => {
   const routedTrain = () => {
     const made = makeServer();
     publishWireEvent(made.client, 'device_registered', 'GARAGE', {
+      device_kind_hint: 'tag-garage',
       capabilities: ['core.assigns_tags'],
     });
     for (const id of ['M1', 'M2', 'M3', 'M4']) {
@@ -616,6 +639,7 @@ describe('Server — inbound event validation', () => {
       });
     }
     publishWireEvent(made.client, 'device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     made.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
@@ -664,7 +688,21 @@ describe('Server — inbound event validation', () => {
   it('still validates the rest of a device_registered payload', () => {
     const { client } = makeServer();
 
-    publishWireEvent(client, 'device_registered', 'T9', { capabilities: 'core.controls_motion' });
+    publishWireEvent(client, 'device_registered', 'T9', {
+      device_kind_hint: 'scheduled-loco',
+      capabilities: 'core.controls_motion',
+    });
+
+    expect(client.published.some((m) => m.topic === 'railway/state/devices/T9')).toBe(false);
+    expect(client.published.some((m) => m.topic === 'railway/events/anomaly/server')).toBe(true);
+  });
+
+  it('rejects a device_registered without device_kind_hint with an anomaly', () => {
+    const { client } = makeServer();
+
+    publishWireEvent(client, 'device_registered', 'T9', {
+      capabilities: ['core.controls_motion'],
+    });
 
     expect(client.published.some((m) => m.topic === 'railway/state/devices/T9')).toBe(false);
     expect(client.published.some((m) => m.topic === 'railway/events/anomaly/server')).toBe(true);

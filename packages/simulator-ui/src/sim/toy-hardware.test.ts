@@ -1004,7 +1004,7 @@ function seedTagsAsScanFlow(
     bus,
     'device_registered',
     'GARAGE',
-    { capabilities: ['core.assigns_tags'] },
+    { device_kind_hint: 'tag-garage', capabilities: ['core.assigns_tags'] },
     id,
     nowIso,
   );

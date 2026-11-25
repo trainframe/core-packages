@@ -33,6 +33,7 @@ afterEach(async () => {
 describe('Clearance flow through a real broker', () => {
   it('Given a registered train, when the operator assigns a route, the train is permitted to advance as far as M2', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
@@ -48,9 +49,11 @@ describe('Clearance flow through a real broker', () => {
 
   it('Given a gate withholds M3, when the train reports passing M2 it receives no further clearance', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.publishEvent('device_registered', 'GATE-M3', {
+      device_kind_hint: 'clearance-gate',
       capabilities: ['core.gates_clearance'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
@@ -86,9 +89,11 @@ describe('Clearance flow through a real broker', () => {
 
   it('When the gate releases, the train sees the previously-withheld clearance arrive', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.publishEvent('device_registered', 'GATE-M3', {
+      device_kind_hint: 'clearance-gate',
       capabilities: ['core.gates_clearance'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
@@ -135,9 +140,11 @@ describe('Clearance flow through a real broker', () => {
 
   it('When a withholding gate disconnects, the train sees the previously-blocked clearance arrive', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.publishEvent('device_registered', 'GATE-M3', {
+      device_kind_hint: 'clearance-gate',
       capabilities: ['core.gates_clearance'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');

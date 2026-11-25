@@ -245,7 +245,7 @@ describe('Scenario 4 — zone-provided heading (§3b)', () => {
      */
     env.client.publish(
       'railway/events/device_registered/PLAIN-DEVICE',
-      encode({ capabilities: [] }),
+      encode({ capabilities: [], device_kind_hint: 'plain-device' }),
     );
     env.client.publish(
       'railway/events/train_introduced/PLAIN-DEVICE',
@@ -266,7 +266,7 @@ describe('Scenario 4 — zone-provided heading (§3b)', () => {
     /* Register a heading-capable zone device and emit train_introduced. */
     env.client.publish(
       'railway/events/device_registered/YARD-ZONE',
-      encode({ capabilities: ['core.provides_train_heading'] }),
+      encode({ capabilities: ['core.provides_train_heading'], device_kind_hint: 'railyard' }),
     );
     env.client.publish(
       'railway/events/train_introduced/YARD-ZONE',

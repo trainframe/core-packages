@@ -49,9 +49,11 @@ const grantsFor = (trainId: string) =>
 describe('Switch-state edge filtering through a real broker', () => {
   it('Given the switch is misaligned, when the train reaches the junction it gets no further clearance', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.publishEvent('device_registered', 'SW-M2', {
+      device_kind_hint: 'mainline-switch',
       capabilities: ['core.controls_switch'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
@@ -78,9 +80,11 @@ describe('Switch-state edge filtering through a real broker', () => {
 
   it('When the switch confirms a matching position, the previously-withheld clearance arrives', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.publishEvent('device_registered', 'SW-M2', {
+      device_kind_hint: 'mainline-switch',
       capabilities: ['core.controls_switch'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
@@ -112,9 +116,11 @@ describe('Switch-state edge filtering through a real broker', () => {
 
   it('Unconfirmed switch reports do not unblock clearance', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
+      device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.publishEvent('device_registered', 'SW-M2', {
+      device_kind_hint: 'mainline-switch',
       capabilities: ['core.controls_switch'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
