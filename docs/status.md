@@ -57,7 +57,7 @@ Coverage floor: 75 lines, 65 branches, 65 functions.
 | Area | Status | Notes |
 | --- | :---: | --- |
 | `Server` composition (broker client, scheduler, effects) | shipped | `server.ts`; injectable clock and id source |
-| Inbound validation | shipped | `inbound-validation.ts`: core events are checked against `CORE_EVENT_SCHEMAS` before the scheduler sees them, and the sender is taken from the topic, not the envelope. `device_registered` may omit `device_kind_hint` (`TOLERATED_ABSENT`) because live producers do not send it |
+| Inbound validation | shipped | `inbound-validation.ts`: core events are checked against `CORE_EVENT_SCHEMAS` before the scheduler sees them, and the sender is taken from the topic, not the envelope. Every producer sends `device_kind_hint`, and a `device_registered` without it is rejected with an anomaly |
 | Broker clients | shipped | `broker/mqtt-client.ts` (MQTT 3.1.1), `broker/in-memory-client.ts` |
 | Retained state publication | shipped | Layout, devices, clearance, schedule, tags, switches, deadlock |
 | Operator MQTT topics | shipped | `railway/operator/{assign_schedule,revoke_clearance,introduce_train}` |
