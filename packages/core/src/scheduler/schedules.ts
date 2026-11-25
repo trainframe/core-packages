@@ -33,8 +33,6 @@ export class ScheduleRunner {
     private readonly now: () => number,
   ) {}
 
-  // ---------- schedule assignment (driven by external API, not events) ----------
-
   /**
    * Assign a *schedule* — the operator-facing intent for a train. The
    * schedule is an ordered list of stops (marker IDs); the planner computes

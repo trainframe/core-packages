@@ -20,8 +20,6 @@ export class TrainIntroduction {
     private readonly schedules: TransitPlanning,
   ) {}
 
-  // ---------- train introduction (ADR-036) ----------
-
   /**
    * Begin vector resolution for a registered-but-not-introduced train. The
    * operator calls this when they have placed a loco at a known-safe location.
@@ -149,8 +147,8 @@ export class TrainIntroduction {
    *                  gesture. Publishes `train_introduced` but NEITHER stops the
    *                  train (it is moving on) NOR seeds occupancy: a moving train's
    *                  block protection comes from its clearance GRANTS, not a seed,
-   *                  and seeding the behind-the-head edge would orphan exactly as
-   *                  the earlier auto-start bug. §5 + pending-schedule start still apply.
+   *                  and a seeded behind-the-head edge would never be released.
+   *                  §5 + pending-schedule start still apply.
    */
   resolve(
     train: TrainState,
@@ -230,9 +228,8 @@ export class TrainIntroduction {
      *
      *  - NO SCHEDULE, train MOVING ('discovered') → do NOT seed. The train is
      *    rolling on (exploring); its block protection comes from its clearance
-     *    GRANTS, not a seed, and seeding the behind-the-head edge would orphan
-     *    exactly as the auto-start bug. It simply continues; a later schedule
-     *    routes it normally. */
+     *    GRANTS, not a seed, and a seeded behind-the-head edge would orphan.
+     *    It simply continues; a later schedule routes it normally. */
     if (train.schedule) {
       out.push(...this.schedules.planAndExecuteCurrentTransit(train));
     } else if (source !== 'discovered') {

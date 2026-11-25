@@ -53,7 +53,7 @@ export const CLEARANCE_HORIZON_EDGES = 3;
  * enough lead time in a single block, so the horizon does not over-extend there.
  *
  * Set to 6000 ms: comfortably above the simulator's per-edge transit on the demo
- * loops at the floor of 3 edges (so short layouts behave exactly as before until
+ * loops at the floor of 3 edges (so short layouts stay at the floor until
  * learning kicks in), while bounded by the edge ceiling so it can never
  * over-lock.
  */
@@ -103,8 +103,8 @@ export class ClearanceControl {
    * covers the lead time, so the horizon stays at the floor. Edges with NO
    * learned time yet are treated as covering the full lead time (a conservative
    * default — we never speculatively over-extend into territory whose transit we
-   * have not measured), so an un-learned layout behaves exactly like the old
-   * fixed-floor horizon until trains have actually run and learned the timings.
+   * have not measured), so an un-learned layout holds a fixed-floor horizon
+   * until trains have actually run and learned the timings.
    *
    * Counting rule: edges already in `cleared_edges` count toward the horizon
    * (they're clearance the train still holds ahead of it) but are skipped, not
@@ -175,7 +175,7 @@ export class ClearanceControl {
    * blocks. On a cold layout every edge is un-learned and so counted at the full
    * `CLEARANCE_LEAD_TIME_MS` (see `extendHorizon`), so the lead-time
    * target is met the moment the floor is reached and the horizon stops exactly
-   * there — identical to the old fixed-count behaviour.
+   * there.
    *
    * Ceiling: always satisfied at `CLEARANCE_HORIZON_MAX_EDGES` edges, regardless
    * of accumulated time — the over-lock guard.

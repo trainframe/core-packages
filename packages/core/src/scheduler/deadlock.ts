@@ -69,7 +69,7 @@ export class DeadlockResolver {
        * Try REVERSE authority (ADR-022) — back the lowest-ranked train that has
        * a safe retreat out of the occupied block so the peer can proceed. If no
        * cycle member can safely reverse, this returns null and the deadlock is
-       * reported unchanged, exactly as before. */
+       * reported unchanged. */
       const reversed = this.tryReverseToBreakStandoff(cycle);
       if (reversed) return reversed;
     }

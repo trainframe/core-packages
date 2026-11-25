@@ -32,7 +32,7 @@ export class TopologyGuard {
    * never has a `transit`, so it is in OPEN mode (`false`) and an unexplained
    * adjacency is the discovery signal, not a violation. The coarse global
    * `--discovery` layout is the degenerate case: no routes assigned ⇒ every
-   * train open ⇒ behaviour unchanged.
+   * train open.
    */
   private isExpecting(train: TrainState): boolean {
     return train.transit !== undefined;

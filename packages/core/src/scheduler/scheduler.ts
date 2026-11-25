@@ -36,7 +36,13 @@ export interface SchedulerOptions {
 
 /**
  * The scheduler. Stateful, but the state is fully observable and all
- * mutations happen through `handleEvent`.
+ * mutations happen through `handleEvent` and the operator actions below.
+ *
+ * It routes each event to the feature module that owns it and runs the marker
+ * crossing pipeline that composes them. Each module owns its own state; the
+ * train roster and device table are the shared views they read, and the
+ * interfaces in `seams.ts` are the only ways one module calls back into
+ * another.
  */
 export class Scheduler {
   private readonly devices: DeviceTable;
@@ -91,8 +97,6 @@ export class Scheduler {
     return this.identity.getTagRegistry();
   }
 
-  // ---------- public observers (for testing and the visualiser) ----------
-
   getTrainState(trainId: string): TrainState | undefined {
     return this.trains.get(trainId);
   }
@@ -124,8 +128,6 @@ export class Scheduler {
     this.zones.reset();
     this.layout.reset();
   }
-
-  // ---------- event entry point ----------
 
   handleEvent(event: {
     event_type: string;
@@ -164,8 +166,6 @@ export class Scheduler {
         return this.dispatchToCapabilities(event);
     }
   }
-
-  // ---------- device registration ----------
 
   private handleDeviceRegistered(
     deviceId: string,
@@ -214,8 +214,6 @@ export class Scheduler {
     return this.zones.ownerOf(markerId);
   }
 
-  // ---------- device disconnect ----------
-
   private handleDeviceDisconnect(deviceId: string): ReadonlyArray<SchedulerEffect> {
     return this.forgetDevice(deviceId);
   }
@@ -260,12 +258,10 @@ export class Scheduler {
     return out;
   }
 
-  // ---------- zone interior handoff (ADR-027) ----------
-
   /**
    * Record the zone's boundary marker so the scheduler can recognise it (for
    * entry suspension and the reverse-admission gate), then dispatch to the
-   * `core.gates_zone` capability as before so admission is unchanged.
+   * `core.gates_zone` capability, whose hook decides admission.
    */
   private handleZoneStateChanged(event: {
     event_type: string;
@@ -278,8 +274,7 @@ export class Scheduler {
 
   /**
    * Record a marker-to-marker traversal (confirming or learning the edge,
-   * ADR-009) and report whether the crossed edge is still inferred. Extracted
-   * from `handleTrainAtMarker` to keep that method within the complexity budget.
+   * ADR-009) and report whether the crossed edge is still inferred.
    */
   private recordTraversalAndDiscovery(
     previousMarker: string | undefined,
@@ -364,20 +359,20 @@ export class Scheduler {
      * continuation). This is required for learn-mode / discovery (ADR-014/015),
      * where an exploring train is deliberately not-introduced yet must teach the
      * graph as it rolls. ADR-036 gates ROUTING and CLEARANCE, not OBSERVATION:
-     * such a train has no `transit` (it is never planned — `ScheduleRunner.planAndExecuteCurrentTransit`
-     * is gated on `introduced`), so `ScheduleRunner.advanceTransit` is a no-op,
-     * and `ClearanceControl.extendHorizon`/`retryBlockedClearances` early-return for a
-     * not-introduced train — so nothing here routes it or grants it clearance. */
+     * such a train has no `transit` (planning is gated on `introduced`), so
+     * `ScheduleRunner.advanceTransit` is a no-op, and the clearance horizon
+     * early-returns for a not-introduced train, so nothing here routes it or
+     * grants it clearance. */
 
     const previousMarker = train.last_marker_id;
 
     /* ADR-019 position validation, BEFORE we advance `last_marker_id`, release
-     * any block, or call `recordTraversal` (all of which today implicitly trust
-     * the report). P = previousMarker (last certain position), M = markerId.
+     * any block, or call `recordTraversal` (all of which trust the report).
+     * P = previousMarker (last certain position), M = markerId.
      *   1. P undefined            → first report, nothing to validate; anchor M.
      *   2. M == P                 → re-read of the current marker; fall through
      *                               (advanceTransit is a no-op, no traversal).
-     *   3. edge P→M exists        → normal traversal; proceed as today.
+     *   3. edge P→M exists        → normal traversal.
      *   4. edge P→M absent, OPEN  → discovery: recordTraversal learns it (ADR-009).
      *   5. edge P→M absent, EXPECTING (bounded route+clearance) → topology
      *      violation: do NOT learn, hold, flag. Early return — `last_marker_id`
@@ -481,9 +476,9 @@ export class Scheduler {
      * / discovery workflow where a train is driven by `begin_exploration` (which
      * discovers edges AND moves the train) before being scheduled. It fires exactly
      * once: the next crossing sees `introduced === true`. The 'discovered' source
-     * neither stops the moving train nor seeds occupancy (see `TrainIntroduction.resolve`).
-     * It returns its own clearance/scheduling effects, so we skip the normal
-     * horizon top-up below when it fires. */
+     * neither stops the moving train nor seeds occupancy (see
+     * `TrainIntroduction.resolve`). It returns its own clearance/scheduling
+     * effects, so we skip the normal horizon top-up below when it fires. */
     if (!train.introduced && !train.introducing && previousMarker && previousMarker !== markerId) {
       out.push(
         ...this.introduction.resolve(
@@ -515,15 +510,11 @@ export class Scheduler {
     return out;
   }
 
-  // ---------- switch state ----------
-
   private handleSwitchStateChanged(payload: unknown): ReadonlyArray<SchedulerEffect> {
     const result = this.switches.handleStateChanged(payload);
     if (!result.confirmed) return result.effects;
     return [...result.effects, ...this.retryBlockedClearances()];
   }
-
-  // ---------- train_status → tail-clearance release ----------
 
   /**
    * Handle a `train_status` event from a length-aware train. For trains with
@@ -616,8 +607,7 @@ export class Scheduler {
     /* Iterate in the explicit total order (ADR-017 §2), NOT Map-insertion
      * order. When several trains contend for one free section in this pass the
      * highest-ranked reaches the clearance grant first and takes it; ADR-011's
-     * conflict check then denies the rest. The grant mechanism is unchanged —
-     * only the order of consideration is now a named policy. */
+     * conflict check then denies the rest. */
     for (const train of this.trains.ordered()) {
       if (skipTrainIds?.has(train.train_id)) continue;
       // Re-run the full horizon walk per train, not just the single next edge:
@@ -628,8 +618,6 @@ export class Scheduler {
     out.push(...this.deadlock.resolveOrEmitState(skipTrainIds));
     return out;
   }
-
-  // ---------- generic capability dispatch ----------
 
   /**
    * Events not handled directly by the scheduler are dispatched to any
