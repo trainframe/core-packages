@@ -246,9 +246,9 @@ export class TrainIntroduction {
    * peer occupies, so the resolution is not accepted: the train stays off the
    * map (not introduced, no position committed, so the operator can introduce
    * it again once a train has been moved) and its pending schedule does not
-   * start. It is still physically on the track, so its resolved block is held
-   * as occupancy: block exclusivity keeps every other train out of it even after
-   * the peer drives away. A rolling or exploring train is told to stop; a zone
+   * start. It is still physically on the track, so its resolved block is its
+   * standing block: block exclusivity keeps every other train out of it even
+   * after the peer drives away or the train is given a schedule. A rolling or exploring train is told to stop; a zone
    * owns its own train's motion and a placed train is already stationary.
    */
   private refuseConflictingIntroduction(
@@ -257,7 +257,8 @@ export class TrainIntroduction {
     headingEdge: EdgeRef,
     source: 'roll' | 'zone' | 'operator' | 'discovered',
   ): ReadonlyArray<SchedulerEffect> {
-    train.cleared_edges = [headingEdge];
+    train.cleared_edges = [];
+    train.standing_edge = headingEdge;
     const out: SchedulerEffect[] = [];
     if (source === 'roll' || source === 'discovered') {
       out.push(

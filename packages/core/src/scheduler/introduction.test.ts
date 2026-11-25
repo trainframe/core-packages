@@ -622,7 +622,10 @@ describe('ADR-036 §5 — resolution into an occupied block (conflict escalation
     const t1 = scheduler.getTrainState('T1');
     expect(t1?.introduced).toBeFalsy();
     expect(t1?.transit).toBeUndefined();
-    expect(t1?.cleared_edges).toEqual([{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+    expect(findStateUpdate(effects, 'clearance', 'T1')?.state).toEqual({
+      train_id: 'T1',
+      cleared_edges: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
+    });
   });
 
   it('HEAD-ON: resolving onto the REVERSE of a peer-held edge escalates', () => {
@@ -698,7 +701,10 @@ describe('ADR-036 §5 — resolution into an occupied block (conflict escalation
     const t1 = scheduler.getTrainState('T1');
     expect(t1?.introduced).toBeFalsy();
     expect(t1?.transit).toBeUndefined();
-    expect(t1?.cleared_edges).toEqual([{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+    expect(findStateUpdate(resolutionEffects, 'clearance', 'T1')?.state).toEqual({
+      train_id: 'T1',
+      cleared_edges: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
+    });
   });
 });
 
@@ -1067,7 +1073,10 @@ describe('ADR-036 §3c — operator-provided vector introduction (introduceTrain
     const t1 = scheduler.getTrainState('T1');
     expect(t1?.introduced).toBeFalsy();
     expect(t1?.transit).toBeUndefined();
-    expect(t1?.cleared_edges).toEqual([{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+    expect(findStateUpdate(effs, 'clearance', 'T1')?.state).toEqual({
+      train_id: 'T1',
+      cleared_edges: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
+    });
   });
 });
 
@@ -1303,5 +1312,29 @@ describe('a waiting introduced train is protected by the block it stands in', ()
     });
     const t3Effects = approachFromBehind(scheduler);
     expect(grantedEdges(t3Effects, 'T3')).toEqual(['M7->M8', 'M8->M1', 'M1->M2']);
+  });
+});
+
+describe('a train whose introduction was refused keeps its block', () => {
+  it('a schedule given to the refused train does not open its block to a third train', () => {
+    const scheduler = makeScheduler(EIGHT_LOOP);
+    registerTrain(scheduler, 'T2');
+    rollIntroduce(scheduler, 'T2', 'M8', 'M1');
+    scheduler.assignSchedule('T2', 'route-t2', ['M1', 'M4']);
+
+    registerTrain(scheduler, 'T1');
+    const refusal = scheduler.introduceTrainWithVector('T1', {
+      from_marker_id: 'M1',
+      to_marker_id: 'M2',
+    });
+    expect(findEvent(refusal, 'train_introduction_conflict')).toBeDefined();
+    scheduler.assignSchedule('T1', 'route-t1', ['M1', 'M5']);
+
+    tagObserved(scheduler, 'T2', 'M2');
+    tagObserved(scheduler, 'T2', 'M3');
+    tagObserved(scheduler, 'T2', 'M4');
+    const t3Effects = approachFromBehind(scheduler);
+
+    expect(grantedEdges(t3Effects, 'T3')).toEqual(['M7->M8']);
   });
 });

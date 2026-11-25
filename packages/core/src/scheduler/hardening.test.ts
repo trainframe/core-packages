@@ -160,10 +160,15 @@ describe('introduction conflict leaves the train visible to block exclusivity', 
   });
 
   it('holds the contested block so a third train stays out after the peer releases it', () => {
-    const { scheduler } = conflictedSetup();
-    expect(scheduler.getTrainState('T2')?.cleared_edges).toEqual([
-      { from_marker_id: 'M4', to_marker_id: 'M1' },
-    ]);
+    const { scheduler, effs } = conflictedSetup();
+    const published = effs.find(
+      (e) =>
+        e.kind === 'update_state_snapshot' && e.entity_type === 'clearance' && e.entity_id === 'T2',
+    );
+    expect(published?.kind === 'update_state_snapshot' && published.state).toEqual({
+      train_id: 'T2',
+      cleared_edges: [{ from_marker_id: 'M4', to_marker_id: 'M1' }],
+    });
 
     registerTrain(scheduler, 'T3');
     rollIntroduce(scheduler, 'T3', 'M2', 'M3');
