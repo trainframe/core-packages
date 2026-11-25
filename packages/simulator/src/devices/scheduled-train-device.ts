@@ -467,8 +467,13 @@ export class ScheduledTrainDevice {
       display_name: `Loco ${this.id}`,
       description: 'A scheduler-driven locomotive.',
       capabilities: this.d.canReverse
-        ? ['core.controls_motion', 'core.can_reverse']
-        : ['core.controls_motion'],
+        ? [
+            'core.controls_motion',
+            'core.reports_marker_traversal',
+            'core.accepts_route',
+            'core.can_reverse',
+          ]
+        : ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     };
   }
 

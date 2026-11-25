@@ -45,14 +45,19 @@ const registerTrain = (scheduler: Scheduler, trainId: string) =>
   scheduler.handleEvent({
     event_type: 'device_registered',
     device_id: trainId,
-    payload: { capabilities: ['core.controls_motion', 'core.accepts_route'] },
+    payload: {
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+    },
   });
 
 const registerTrainWithPriority = (scheduler: Scheduler, trainId: string, priority: number) =>
   scheduler.handleEvent({
     event_type: 'device_registered',
     device_id: trainId,
-    payload: { capabilities: ['core.controls_motion', 'core.accepts_route'], priority },
+    payload: {
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      priority,
+    },
   });
 
 const registerLongTrain = (scheduler: Scheduler, trainId: string, lengthMm: number) =>
@@ -60,7 +65,7 @@ const registerLongTrain = (scheduler: Scheduler, trainId: string, lengthMm: numb
     event_type: 'device_registered',
     device_id: trainId,
     payload: {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
       train_length_mm: lengthMm,
     },
   });
@@ -70,7 +75,12 @@ const registerReversibleTrain = (scheduler: Scheduler, trainId: string) =>
     event_type: 'device_registered',
     device_id: trainId,
     payload: {
-      capabilities: ['core.controls_motion', 'core.accepts_route', 'core.can_reverse'],
+      capabilities: [
+        'core.controls_motion',
+        'core.reports_marker_traversal',
+        'core.accepts_route',
+        'core.can_reverse',
+      ],
     },
   });
 
@@ -1836,6 +1846,92 @@ describe('Scheduler — tag resolution', () => {
     expect((traversed?.payload as { marker_id: string }).marker_id).toBe('M2');
   });
 
+  it('refuses to start a transit for a train that did not declare core.accepts_route', () => {
+    const { scheduler } = setup();
+    scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'T-DEAF',
+      payload: { capabilities: ['core.controls_motion', 'core.reports_marker_traversal'] },
+    });
+    introduceByRoll(scheduler, 'T-DEAF', 'M3', 'M4');
+
+    const effects = scheduler.assignSchedule('T-DEAF', 'route-1', ['M4', 'M2']);
+
+    expect(effects.some((e) => e.kind === 'publish_event' && e.event_type === 'anomaly')).toBe(
+      true,
+    );
+    expect(
+      effects.some((e) => e.kind === 'send_command' && e.command_type === 'assign_route'),
+    ).toBe(false);
+  });
+
+  it('drops a marker read from a device that did not declare core.reports_marker_traversal', () => {
+    const { scheduler } = setup();
+    scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'T-MUTE',
+      payload: { capabilities: ['core.controls_motion', 'core.accepts_route'] },
+    });
+    scheduler.introduceTrain('T-MUTE');
+
+    const effects = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'T-MUTE',
+      payload: { tag_id: 'M1' },
+    });
+
+    expect(effects.some((e) => e.kind === 'publish_event' && e.event_type === 'anomaly')).toBe(
+      true,
+    );
+    expect(
+      effects.some((e) => e.kind === 'publish_event' && e.event_type === 'marker_traversed'),
+    ).toBe(false);
+  });
+
+  it('raises no anomaly for a trackside marker reader that declares core.reports_marker_traversal', () => {
+    const { scheduler } = setup();
+    scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'BEACON-1',
+      payload: { capabilities: ['core.reports_marker_traversal'] },
+    });
+
+    const effects = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'BEACON-1',
+      payload: { tag_id: 'M1' },
+    });
+
+    expect(effects).toEqual([]);
+  });
+
+  it('drops a vehicle read from a device that did not declare core.identifies_vehicles', () => {
+    const { scheduler } = setup();
+    scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'BEACON-1',
+      payload: { capabilities: ['core.reports_marker_traversal'] },
+    });
+    scheduler.handleEvent({
+      event_type: 'tag_assignment',
+      device_id: 'GARAGE',
+      payload: { tag_id: 'TAG-T1', assigned_kind: 'vehicle', target_id: 'T1' },
+    });
+
+    const effects = scheduler.handleEvent({
+      event_type: 'tag_observed',
+      device_id: 'BEACON-1',
+      payload: { tag_id: 'TAG-T1' },
+    });
+
+    expect(effects.some((e) => e.kind === 'publish_event' && e.event_type === 'anomaly')).toBe(
+      true,
+    );
+    expect(
+      effects.some((e) => e.kind === 'publish_event' && e.event_type === 'vehicle_identified'),
+    ).toBe(false);
+  });
+
   it('rejects tag_assignment from a device that did not declare core.assigns_tags', () => {
     const { scheduler } = setup();
     registerTrain(scheduler, 'IMPOSTOR');
@@ -2118,7 +2214,11 @@ describe('Scheduler — train-length-aware tail clearance', () => {
       event_type: 'device_registered',
       device_id: 'T1',
       payload: {
-        capabilities: ['core.controls_motion', 'core.accepts_route'],
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+        ],
         train_length_mm: 0,
       },
     });
@@ -2630,7 +2730,11 @@ describe('Scheduler — retained device state', () => {
       event_type: 'device_registered',
       device_id: 'T1',
       payload: {
-        capabilities: ['core.controls_motion', 'core.accepts_route'],
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+        ],
         train_length_mm: 0,
       },
     });
@@ -2832,7 +2936,14 @@ describe('Scheduler — presentation fields never change scheduling (commissioni
     scheduler.handleEvent({
       event_type: 'device_registered',
       device_id: 'T1',
-      payload: { capabilities: ['core.controls_motion', 'core.accepts_route'], ...extra },
+      payload: {
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+        ],
+        ...extra,
+      },
     });
     return scheduler.assignSchedule('T1', 'route-1', ['M1', 'M3']);
   };
@@ -2850,7 +2961,11 @@ describe('Scheduler — presentation fields never change scheduling (commissioni
       event_type: 'device_registered',
       device_id: 'T1',
       payload: {
-        capabilities: ['core.controls_motion', 'core.accepts_route'],
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+        ],
         name: 'Rocket',
         livery: 'crimson',
       },

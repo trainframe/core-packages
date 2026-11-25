@@ -74,7 +74,9 @@ const registerTrain = (scheduler: Scheduler, trainId: string) =>
   scheduler.handleEvent({
     event_type: 'device_registered',
     device_id: trainId,
-    payload: { capabilities: ['core.controls_motion', 'core.accepts_route'] },
+    payload: {
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+    },
   });
 
 const tagObserved = (scheduler: Scheduler, trainId: string, markerId: string) =>

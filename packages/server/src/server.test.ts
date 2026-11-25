@@ -83,7 +83,7 @@ describe('Server — commissioned profile durability (0.12.0)', () => {
     // Commissioning: the device (re-)announces itself with the operator-authored
     // name + livery, exactly as the visualiser's CommissioningView republishes.
     publishWireEvent(client, 'device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
       device_kind_hint: 'train',
       name: 'Flying Scotsman',
       livery: 'apple-green',
@@ -110,7 +110,7 @@ describe('Server — registers a train and grants its initial clearance', () => 
     const { server, client } = makeServer();
 
     publishWireEvent(client, 'device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     /* ADR-036 §3c: introduce the train with its known heading before routing. */
     server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
@@ -137,7 +137,7 @@ describe('Server — gate clearance flow', () => {
     const { server, client } = makeServer();
 
     publishWireEvent(client, 'device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     publishWireEvent(client, 'device_registered', 'GATE-M3', {
       capabilities: ['core.gates_clearance'],
@@ -183,7 +183,7 @@ describe('Server — defensive parsing', () => {
   it('drops messages with malformed JSON', () => {
     const { server, client } = makeServer();
     publishWireEvent(client, 'device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     client.publish('railway/events/tag_observed/T1', new TextEncoder().encode('not-json-at-all'));
     expect(() => server.assignSchedule('T1', 'r', [])).not.toThrow();
@@ -212,7 +212,7 @@ describe('Server — admin injection points', () => {
     // An unprivileged device tries to bind a tag and is ignored: nothing
     // retained on the tag's state topic.
     publishWireEvent(client, 'device_registered', 'IMPOSTOR', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     publishWireEvent(client, 'tag_assignment', 'IMPOSTOR', {
       tag_id: 'TAG-X',
@@ -255,7 +255,7 @@ describe('Server — operator commands on railway/operator/+', () => {
     const { client } = makeServer();
     // Register T1 so the scheduler knows about it.
     publishWireEvent(client, 'device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     /* ADR-036 §3c: introduce via the operator MQTT topic before scheduling. */
     client.publish(
@@ -285,7 +285,7 @@ describe('Server — operator commands on railway/operator/+', () => {
   it('routes revoke_clearance to Server.revokeClearance and emits the revoke command', () => {
     const { client } = makeServer();
     publishWireEvent(client, 'device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     // First give T1 something to revoke.
     client.publish(
@@ -342,7 +342,7 @@ describe('Server — operator commands on railway/operator/+', () => {
     }
 
     publishWireEvent(client, 'device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
 
     /* Operator introduces via the MQTT operator topic with a heading_edge. */
@@ -401,7 +401,7 @@ describe('Server — operator commands on railway/operator/+', () => {
      * command to the device to begin the two-marker roll. */
     const { client } = makeServer();
     publishWireEvent(client, 'device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
 
     client.publish(
@@ -420,7 +420,7 @@ describe('Server — operator commands on railway/operator/+', () => {
     /* Validates that the server-side guard rejects an ill-formed heading_edge. */
     const { client } = makeServer();
     publishWireEvent(client, 'device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
 
     client.publish(
@@ -616,7 +616,7 @@ describe('Server — inbound event validation', () => {
       });
     }
     publishWireEvent(made.client, 'device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     made.server.introduceTrainWithVector('T1', { from_marker_id: 'M1', to_marker_id: 'M2' });
     made.server.revokeClearance('T1');

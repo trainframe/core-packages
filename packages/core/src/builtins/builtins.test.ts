@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { TagRegistry } from '../scheduler/tag-registry.js';
-import { gatesClearanceCapability, gatesZoneCapability } from './index.js';
+import {
+  BUILTIN_CAPABILITIES,
+  controlsMotionCapability,
+  declarationCapability,
+  gatesClearanceCapability,
+  gatesZoneCapability,
+} from './index.js';
 
 describe('gates_clearance hooks', () => {
   const event = (payload: Record<string, unknown>, event_type = 'gate_state_changed') => ({
@@ -56,5 +62,35 @@ describe('gates_zone capability', () => {
   it('has a stable id and fresh initial state per device', () => {
     expect(gatesZoneCapability.id).toBe('core.gates_zone');
     expect(gatesZoneCapability.initialState('d1')).not.toBe(gatesZoneCapability.initialState('d2'));
+  });
+});
+
+describe('declaration capabilities', () => {
+  it('states what the scheduler enforces and carries no hooks', () => {
+    const cap = declarationCapability('x.marks', 'Marks a thing.', 'marking');
+    expect(cap.hooks).toEqual({});
+    expect(cap.description).toBe(
+      'Marks a thing. The scheduler enforces marking only for devices that declare this.',
+    );
+  });
+
+  it.each([
+    'core.identifies_vehicles',
+    'core.reports_marker_traversal',
+    'core.controls_motion',
+    'core.accepts_route',
+    'core.assigns_tags',
+    'core.reports_length',
+    'core.can_reverse',
+    'core.provides_train_heading',
+  ])('%s states its enforcement contract', (id) => {
+    const cap = BUILTIN_CAPABILITIES.find((c) => c.id === id);
+    expect(cap?.description).toContain('The scheduler enforces');
+    expect(cap?.description).toContain('only for devices that declare this');
+  });
+
+  it('describes controls_motion as marking a train, not accepting commands', () => {
+    expect(controlsMotionCapability.description).not.toMatch(/accepts motion commands/);
+    expect(controlsMotionCapability.description).toMatch(/train/);
   });
 });

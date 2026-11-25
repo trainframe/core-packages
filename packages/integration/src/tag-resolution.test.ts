@@ -80,7 +80,7 @@ describe('ADR-007: runtime tag→marker resolution over the wire', () => {
     await harness.testClient.waitForState('railway/state/tags/RFID-BB02');
 
     await publishWire('device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
 
@@ -114,7 +114,7 @@ describe('ADR-007: runtime tag→marker resolution over the wire', () => {
 
   it('emits an info anomaly for an observed tag with no registry binding (unknown tag still anomalies)', async () => {
     await publishWire('device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
 

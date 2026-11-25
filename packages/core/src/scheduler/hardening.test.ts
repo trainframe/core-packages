@@ -49,7 +49,9 @@ const registerTrain = (scheduler: Scheduler, trainId: string): void => {
   scheduler.handleEvent({
     event_type: 'device_registered',
     device_id: trainId,
-    payload: { capabilities: ['core.controls_motion', 'core.accepts_route'] },
+    payload: {
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+    },
   });
 };
 
@@ -292,7 +294,11 @@ describe('clearance_request and train_status authority', () => {
       event_type: 'device_registered',
       device_id: 'T1',
       payload: {
-        capabilities: ['core.controls_motion', 'core.accepts_route'],
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+        ],
         train_length_mm: 150,
       },
     });
@@ -366,7 +372,14 @@ describe('a forgotten device drops its zone and switch bookkeeping', () => {
     scheduler.handleEvent({
       event_type: 'device_registered',
       device_id: 'T1',
-      payload: { capabilities: ['core.controls_motion', 'core.accepts_route', 'core.can_reverse'] },
+      payload: {
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+          'core.can_reverse',
+        ],
+      },
     });
     rollIntroduce(scheduler, 'T1', 'M4', 'M1');
     registerZone(scheduler, 'Z');
@@ -493,7 +506,12 @@ describe('a reversed train', () => {
       event_type: 'device_registered',
       device_id: trainId,
       payload: {
-        capabilities: ['core.controls_motion', 'core.accepts_route', 'core.can_reverse'],
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+          'core.can_reverse',
+        ],
         train_length_mm: 100,
       },
     });

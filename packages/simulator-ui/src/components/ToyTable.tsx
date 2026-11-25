@@ -4321,7 +4321,12 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
         // `core.can_reverse` so the train may be admitted into a railyard zone
         // (ADR-027 — the interior is worked by shunting). Toy locos can be pushed,
         // so every toy-table train declares it.
-        capabilities: ['core.controls_motion', 'core.accepts_route', 'core.can_reverse'],
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+          'core.can_reverse',
+        ],
         train_length_mm: TRAIN_LENGTH_MM,
       },
       wallClockEnvelopeSource,

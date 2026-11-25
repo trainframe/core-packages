@@ -45,7 +45,7 @@ test.describe('visualiser surfaces train battery + error_state', () => {
     await expect(vis.locator('[data-marker-id="M1"]')).toBeVisible();
 
     harness.server.injectEvent('device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
 
     const client = mqtt.connect(harness.brokerWsUrl, { protocolVersion: 4 });

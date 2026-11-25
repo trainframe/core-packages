@@ -52,7 +52,7 @@ const assignRouteCommandsFor = (trainId: string) =>
 describe('Mid-journey schedule reassignment replaces the prior plan', () => {
   it('a second assignSchedule issues an assign_route for the new edges only', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
     /* ADR-036 §3c: introduce with the arrival heading M3→M1 (the train came
@@ -118,7 +118,7 @@ describe('Mid-journey schedule reassignment replaces the prior plan', () => {
 
   it('reassignment releases cleared_edges from the old plan', async () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
     /* ADR-036 §3c: same arrival heading as the sibling test (M3→M1). */

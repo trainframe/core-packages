@@ -67,7 +67,7 @@ describe('Discovery mode: operator + train collaborate to learn a graph', () => 
       capabilities: ['core.assigns_tags'],
     });
     await publishWire('device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     await publishWire('tag_assignment', 'GARAGE', {
       tag_id: 'M1',

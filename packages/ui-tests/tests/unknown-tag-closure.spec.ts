@@ -81,7 +81,11 @@ test.describe
       // Now a train sees TAG-MYSTERY. The scheduler resolves it to M2 and
       // emits `marker_traversed`, which the visualiser snaps T1 onto.
       harness.server.injectEvent('device_registered', 'T1', {
-        capabilities: ['core.controls_motion', 'core.accepts_route'],
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+        ],
       });
       harness.server.injectEvent('tag_observed', 'T1', { tag_id: 'TAG-MYSTERY' });
 

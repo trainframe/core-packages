@@ -34,7 +34,11 @@ function retainedSnapshot(
     `railway/state/devices/${deviceId}`,
     new TextEncoder().encode(
       JSON.stringify({
-        capabilities: ['core.controls_motion', 'core.accepts_route'],
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+        ],
         ...extra,
       }),
     ),

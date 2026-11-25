@@ -145,7 +145,7 @@ test.describe('Discovery mode: visualiser grows as the operator scans pieces', (
     // Register a train and inject consecutive tag_observed events so the
     // server infers the M-A → M-B edge from the traversal.
     harness.server.injectEvent('device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     harness.server.injectEvent('tag_observed', 'T1', { tag_id: 'M-A' });
     harness.server.injectEvent('tag_observed', 'T1', { tag_id: 'M-B' });

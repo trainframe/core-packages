@@ -53,7 +53,11 @@ describe('Block exclusivity: three trains queue through a single block', () => {
     // is an ADR-036 §5 introduction conflict instead of a queued train.
     for (const id of ['T1', 'T2', 'T3']) {
       await harness.testClient.publishEvent('device_registered', id, {
-        capabilities: ['core.controls_motion', 'core.accepts_route'],
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+        ],
       });
       await harness.testClient.waitForState(`railway/state/devices/${id}`);
       harness.server.introduceTrainWithVector(id, { from_marker_id: 'M1', to_marker_id: 'M2' });

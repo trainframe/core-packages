@@ -557,26 +557,39 @@ export class Scheduler {
     const device = this.devices.get(deviceId);
     if (!device) return [];
 
-    // Trains reading their own readers traverse markers. Trackside detectors
-    // reading vehicle tags identify vehicles. Each case derives a different
-    // event from the same raw tag_observed.
-    if (binding.kind === 'marker' && device.capabilities.includes('core.controls_motion')) {
-      return this.handleTrainCrossing(deviceId, binding.target_id);
+    // Each kind of read is honoured only from a device that declared the
+    // matching capability, so a detector cannot move a train by being mistaken
+    // for its reader.
+    if (binding.kind === 'marker') {
+      if (!device.capabilities.includes('core.reports_marker_traversal')) {
+        return [this.undeclaredReadAnomaly(deviceId, 'core.reports_marker_traversal', tag_id)];
+      }
+      // A trackside reader has no train state to advance, so its read ends here.
+      return device.capabilities.includes('core.controls_motion')
+        ? this.handleTrainCrossing(deviceId, binding.target_id)
+        : [];
     }
 
-    if (binding.kind === 'vehicle') {
-      return [
-        effects.publishEvent('vehicle_identified', {
-          vehicle_id: binding.target_id,
-          context_device_id: deviceId,
-        }),
-      ];
+    if (!device.capabilities.includes('core.identifies_vehicles')) {
+      return [this.undeclaredReadAnomaly(deviceId, 'core.identifies_vehicles', tag_id)];
     }
+    return [
+      effects.publishEvent('vehicle_identified', {
+        vehicle_id: binding.target_id,
+        context_device_id: deviceId,
+      }),
+    ];
+  }
 
-    // Marker tag read by a non-train device. The protocol's marker_traversed
-    // event requires a train_id, so there's no derived event we can publish
-    // here without a registered vehicle context.
-    return [];
+  private undeclaredReadAnomaly(
+    deviceId: string,
+    capabilityId: string,
+    tagId: string,
+  ): SchedulerEffect {
+    return effects.publishEvent('anomaly', {
+      severity: 'warning',
+      description: `Device ${deviceId} reported tag ${tagId} without declaring ${capabilityId}; ignoring the read`,
+    });
   }
 
   /**
@@ -2800,6 +2813,14 @@ export class Scheduler {
      * the vector resolves via resolveIntroduction(). */
     if (!train.introduced) return [];
     if (!train.schedule || train.last_marker_id === undefined) return [];
+    if (!this.devices.get(train.train_id)?.capabilities.includes('core.accepts_route')) {
+      return [
+        effects.publishEvent('anomaly', {
+          severity: 'warning',
+          description: `Train ${train.train_id} cannot be sent route ${train.schedule.route_id} without core.accepts_route`,
+        }),
+      ];
+    }
     const targetStop = train.schedule.stops[train.schedule.current_stop_index];
     if (targetStop === undefined) return [];
 

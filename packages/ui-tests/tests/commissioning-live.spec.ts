@@ -60,7 +60,11 @@ test.describe
       bus.publish(
         'railway/events/device_registered/T-loco',
         deviceRegistered('T-loco', {
-          capabilities: ['core.controls_motion', 'core.accepts_route'],
+          capabilities: [
+            'core.controls_motion',
+            'core.reports_marker_traversal',
+            'core.accepts_route',
+          ],
           device_kind_hint: 'train',
         }),
       );

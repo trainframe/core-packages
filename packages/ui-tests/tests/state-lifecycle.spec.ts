@@ -61,10 +61,10 @@ test.describe('state lifecycle: delete, prune, blank slate', () => {
 
     /* Register two train devices so the DevicesPanel populates. */
     harness.server.injectEvent('device_registered', 'T1', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
     harness.server.injectEvent('device_registered', 'T2', {
-      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
     });
 
     const trainsGroup = vis.getByTestId('devices-trains-group');

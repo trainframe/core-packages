@@ -14,6 +14,7 @@ export { CapabilityRegistry } from './registry.js';
 
 export {
   BUILTIN_CAPABILITIES,
+  declarationCapability,
   gatesClearanceCapability,
   identifiesVehiclesCapability,
   reportsMarkerTraversalCapability,

@@ -45,7 +45,11 @@ describe('RegisteredDevicesView (vanilla, no React)', () => {
     const listener = vi.fn();
     const unsub = view.subscribe(listener);
 
-    deliverDevice(client, 'T1', ['core.controls_motion', 'core.accepts_route']);
+    deliverDevice(client, 'T1', [
+      'core.controls_motion',
+      'core.reports_marker_traversal',
+      'core.accepts_route',
+    ]);
     deliverDevice(client, 'GATE-M3', ['core.gates_clearance']);
 
     expect(view.getState().size).toBe(2);

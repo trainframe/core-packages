@@ -585,6 +585,7 @@ describe('ToyTable — scan and power', () => {
     // zone (ADR-027 — its interior is worked by shunting).
     expect(payload.capabilities).toEqual([
       'core.controls_motion',
+      'core.reports_marker_traversal',
       'core.accepts_route',
       'core.can_reverse',
     ]);

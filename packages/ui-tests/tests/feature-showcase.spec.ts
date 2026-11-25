@@ -100,7 +100,11 @@ test.describe
         });
       }
       harness.server.injectEvent('device_registered', 'T1', {
-        capabilities: ['core.controls_motion', 'core.accepts_route'],
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+        ],
       });
       harness.server.injectEvent('tag_observed', 'T1', { tag_id: 'M2' });
 
@@ -122,7 +126,11 @@ test.describe
       // capture we publish it directly via a Node mqtt client so the
       // visualiser sees a mid-edge position.
       harness.server.injectEvent('device_registered', 'T1', {
-        capabilities: ['core.controls_motion', 'core.accepts_route'],
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+        ],
       });
       const client = mqtt.connect(harness.brokerWsUrl, { protocolVersion: 4 });
       await new Promise<void>((res) => client.on('connect', () => res()));
@@ -221,7 +229,11 @@ test.describe
         target_id: 'M1',
       });
       harness.server.injectEvent('device_registered', 'T1', {
-        capabilities: ['core.controls_motion', 'core.accepts_route'],
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+        ],
       });
       harness.server.injectEvent('tag_observed', 'T1', { tag_id: 'M1' });
       harness.server.injectEvent('tag_observed', 'T1', { tag_id: 'M-DISCOVERED' });
