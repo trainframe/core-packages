@@ -4,8 +4,9 @@ import { type SchedulerEffect, effects, grantClearancePayload } from './effects.
 import type { LayoutState } from './layout-state.js';
 import { planTransit } from './planner.js';
 import { TagRegistry } from './tag-registry.js';
-import { type TrainState, initialTrainState } from './train-state.js';
-import { type EdgeRef, edgesEqual } from './types.js';
+import { TrainRoster, compareTrains } from './train-roster.js';
+import type { TrainState } from './train-state.js';
+import { type EdgeRef, anyEdgeSharesMarker, edgeSharesMarker, edgesEqual } from './types.js';
 
 /**
  * Deterministic dwell at a scheduled stop, in milliseconds. When a train
@@ -134,7 +135,7 @@ function readRegistration(payload: unknown): DeviceRegistrationView {
  */
 export class Scheduler {
   private readonly devices = new Map<string, DeviceRecord>();
-  private readonly trains = new Map<string, TrainState>();
+  private readonly trains = new TrainRoster();
   private readonly tags = new TagRegistry();
   /**
    * The set of trains currently part of a detected waits-for cycle (sorted,
@@ -174,14 +175,6 @@ export class Scheduler {
    * marker a frame owns.
    */
   private readonly zoneOwnedMarkers = new Map<string, string>();
-  /**
-   * Monotonic counter handed to each train the first time it registers, the
-   * source of the FIFO-by-arrival floor in the total order over trains
-   * (ADR-017). Increments per fresh registration; re-registration of an
-   * already-known train does NOT consume a number, so arrival order is stable
-   * across reconnects. Deterministic by construction — no clock, no RNG.
-   */
-  private nextRegistrationSeq = 0;
   private readonly now: () => number;
 
   constructor(
@@ -204,7 +197,7 @@ export class Scheduler {
   }
 
   getTrainIds(): ReadonlyArray<string> {
-    return [...this.trains.keys()];
+    return this.trains.ids();
   }
 
   getDeviceCapabilityState(deviceId: string, capabilityId: string): unknown {
@@ -230,7 +223,6 @@ export class Scheduler {
     this.unconfirmedSwitchRequests.clear();
     this.zoneBoundaries.clear();
     this.zoneOwnedMarkers.clear();
-    this.nextRegistrationSeq = 0;
     this.layout.reset();
   }
 
@@ -311,7 +303,7 @@ export class Scheduler {
     this.devices.set(deviceId, deviceRecord);
 
     if (capabilities.includes('core.controls_motion')) {
-      this.initTrainState(deviceId, reg);
+      this.trains.register(deviceId, reg.priority, reg.train_length_mm);
     }
 
     const ownership: SchedulerEffect[] = [];
@@ -339,28 +331,6 @@ export class Scheduler {
     if (reg.name !== undefined) deviceState.name = reg.name;
     if (reg.livery !== undefined) deviceState.livery = reg.livery;
     return [...ownership, effects.updateState('devices', deviceId, deviceState)];
-  }
-
-  /**
-   * Initialise (or re-initialise) train state when a device declares
-   * `core.controls_motion`. Captures optional physical length for
-   * tail-clearance deferral.
-   */
-  private initTrainState(deviceId: string, reg: DeviceRegistrationView): void {
-    if (!this.trains.has(deviceId)) {
-      /* Assign the registration-sequence number only on FIRST registration, so
-       * a reconnecting train keeps its place in the arrival order. The optional
-       * announced priority is resolved to a concrete number here (default 0). */
-      const priority = reg.priority ?? 0;
-      this.trains.set(deviceId, initialTrainState(deviceId, this.nextRegistrationSeq++, priority));
-    }
-    const trainLengthMm = reg.train_length_mm;
-    if (trainLengthMm !== undefined && trainLengthMm > 0) {
-      const train = this.trains.get(deviceId);
-      if (train) {
-        train.length_mm = trainLengthMm;
-      }
-    }
   }
 
   /**
@@ -482,7 +452,7 @@ export class Scheduler {
         }),
         effects.updateState('schedule', deviceId, { train_id: deviceId }),
       );
-      this.trains.delete(deviceId);
+      this.trains.remove(deviceId);
     }
 
     out.push(...this.retryBlockedClearances());
@@ -1426,7 +1396,7 @@ export class Scheduler {
     // only reaches the actuation branch once it has exclusive claim to the
     // junction's section, so it cannot flip the points out from under a peer
     // that already holds the junction.
-    if (this.edgeConflictsWithAnotherTrain(train.train_id, nextEdge)) return [];
+    if (this.trains.edgeConflictsWithAnotherTrain(train.train_id, nextEdge)) return [];
     if (this.edgeRequiresMismatchedSwitch(nextEdge)) return this.maybeActuateSwitch(nextEdge);
     if (this.anyCapabilityDeniesClearance(train, nextEdge)) return [];
     return this.grantClearance(train, nextEdge);
@@ -1500,28 +1470,6 @@ export class Scheduler {
     const required = layoutEdge?.requires_switch_state;
     if (!required) return false;
     return this.layout.getSwitchPosition(edge.from_marker_id) !== required;
-  }
-
-  /**
-   * Two sections conflict when they share either boundary marker. A train
-   * holding `A→B` therefore locks markers A and B; any edge whose `from` or
-   * `to` is A or B is denied to other trains. ADR-011.
-   */
-  private edgeConflictsWithAnotherTrain(trainId: string, edge: EdgeRef): boolean {
-    for (const [otherId, other] of this.trains) {
-      if (otherId === trainId) continue;
-      for (const held of other.cleared_edges) {
-        if (
-          held.from_marker_id === edge.from_marker_id ||
-          held.from_marker_id === edge.to_marker_id ||
-          held.to_marker_id === edge.from_marker_id ||
-          held.to_marker_id === edge.to_marker_id
-        ) {
-          return true;
-        }
-      }
-    }
-    return false;
   }
 
   private anyCapabilityDeniesClearance(train: TrainState, nextEdge: EdgeRef): boolean {
@@ -1793,7 +1741,7 @@ export class Scheduler {
      * highest-ranked reaches `tryGrantClearance` first and takes it; ADR-011's
      * conflict check then denies the rest. The grant mechanism is unchanged —
      * only the order of consideration is now a named policy. */
-    for (const train of this.orderedTrains()) {
+    for (const train of this.trains.ordered()) {
       if (skipTrainIds?.has(train.train_id)) continue;
       // Re-run the full horizon walk per train, not just the single next edge:
       // an unblocked train should fill its whole look-ahead in one retry pass,
@@ -1802,24 +1750,6 @@ export class Scheduler {
     }
     out.push(...this.resolveDeadlockOrEmitState(skipTrainIds));
     return out;
-  }
-
-  /**
-   * The explicit total order over trains (ADR-017 §1), applied uniformly in
-   * the grant path and to deadlock victim selection. A pure, total comparison:
-   *
-   *   1. announced priority, higher first;
-   *   2. registration-sequence number, lower first (the FIFO-by-arrival floor);
-   *   3. `train_id`, lexicographic (final stable tiebreak — total even for two
-   *      trains registered in the same event batch).
-   *
-   * No wall clock, no RNG, no VirtualClock read: a deterministic function of
-   * state the scheduler already holds, so the same event stream produces the
-   * same grants every run. This makes the previously-accidental Map-iteration
-   * tiebreak intentional.
-   */
-  private orderedTrains(): ReadonlyArray<TrainState> {
-    return [...this.trains.values()].sort(compareTrains);
   }
 
   /**
@@ -2065,7 +1995,7 @@ export class Scheduler {
       /* (a) the marker we'd back onto must be provably clear — no OTHER train
        * holds an edge touching it. (Backing over `headBlock` itself is safe by
        * exclusivity: the victim holds it, so no peer is inside it.) */
-      if (this.markerHeldByAnotherTrain(victim.train_id, nextMarker)) break;
+      if (this.trains.markerHeldByAnotherTrain(victim.train_id, nextMarker)) break;
 
       released.push(headBlock);
       visited.add(nextMarker);
@@ -2148,17 +2078,6 @@ export class Scheduler {
       boundary = tailEdge.from_marker_id;
     }
     return covered >= lengthMm;
-  }
-
-  /** True if any train OTHER than `trainId` holds an edge touching `marker`. */
-  private markerHeldByAnotherTrain(trainId: string, marker: string): boolean {
-    for (const [otherId, other] of this.trains) {
-      if (otherId === trainId) continue;
-      for (const held of other.cleared_edges) {
-        if (held.from_marker_id === marker || held.to_marker_id === marker) return true;
-      }
-    }
-    return false;
   }
 
   /**
@@ -2279,12 +2198,7 @@ export class Scheduler {
   ): Map<string, ReadonlyArray<string>> {
     const graph = new Map<string, ReadonlyArray<string>>();
     for (const [trainId, wanted] of waiting) {
-      const blockers: string[] = [];
-      for (const [otherId, other] of this.trains) {
-        if (otherId === trainId) continue;
-        if (anyEdgeSharesMarker(other.cleared_edges, wanted)) blockers.push(otherId);
-      }
-      graph.set(trainId, blockers);
+      graph.set(trainId, this.trains.trainsBlocking(trainId, wanted));
     }
     return graph;
   }
@@ -2649,8 +2563,8 @@ export class Scheduler {
     markerId: string,
     headingEdge: EdgeRef,
   ): TrainState | undefined {
-    for (const [otherId, other] of this.trains) {
-      if (otherId === train.train_id) continue;
+    for (const other of this.trains.values()) {
+      if (other.train_id === train.train_id) continue;
       for (const held of other.cleared_edges) {
         const sameSection =
           held.from_marker_id === headingEdge.from_marker_id &&
@@ -3038,38 +2952,6 @@ type MarkerKind =
 
 function isMarkerKind(value: unknown): value is MarkerKind {
   return typeof value === 'string' && VALID_MARKER_KINDS.has(value);
-}
-
-function anyEdgeSharesMarker(held: ReadonlyArray<EdgeRef>, wanted: EdgeRef): boolean {
-  for (const e of held) {
-    if (edgeSharesMarker(e, wanted)) return true;
-  }
-  return false;
-}
-
-/** Two sections conflict when they share either boundary marker (ADR-011). */
-function edgeSharesMarker(a: EdgeRef, b: EdgeRef): boolean {
-  return (
-    a.from_marker_id === b.from_marker_id ||
-    a.from_marker_id === b.to_marker_id ||
-    a.to_marker_id === b.from_marker_id ||
-    a.to_marker_id === b.to_marker_id
-  );
-}
-
-/**
- * The total order over trains for section contention and deadlock victim
- * selection (ADR-017 §1). Pure and total: announced priority desc, then
- * registration-sequence asc (FIFO floor), then `train_id` lexicographic.
- * Negative when `a` ranks ahead of (is preferred over) `b`. No clock, no RNG —
- * deterministic given the event stream.
- */
-function compareTrains(a: TrainState, b: TrainState): number {
-  if (a.priority !== b.priority) return b.priority - a.priority;
-  if (a.registration_seq !== b.registration_seq) {
-    return a.registration_seq - b.registration_seq;
-  }
-  return a.train_id < b.train_id ? -1 : a.train_id > b.train_id ? 1 : 0;
 }
 
 /**
