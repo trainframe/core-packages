@@ -32,3 +32,8 @@ export interface ClearanceRetry {
 export interface ScheduleAdvance {
   advanceScheduleAndReplan(train: TrainState): ReadonlyArray<SchedulerEffect>;
 }
+
+/** Plan the leg to a train's current scheduled stop and send it the route. */
+export interface TransitPlanning {
+  planAndExecuteCurrentTransit(train: TrainState): ReadonlyArray<SchedulerEffect>;
+}
