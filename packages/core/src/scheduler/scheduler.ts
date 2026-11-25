@@ -1,5 +1,5 @@
-import type { Capability } from '../capability.js';
 import type { CapabilityRegistry } from '../registry.js';
+import { DeviceTable, readRegistration } from './devices.js';
 import { type SchedulerEffect, effects, grantClearancePayload } from './effects.js';
 import type { LayoutState } from './layout-state.js';
 import { planTransit } from './planner.js';
@@ -91,50 +91,11 @@ export interface SchedulerOptions {
 }
 
 /**
- * Information about a connected device, tracked by the scheduler.
- */
-interface DeviceRecord {
-  device_id: string;
-  capabilities: ReadonlyArray<string>;
-  /** Per-capability state: capability_id -> opaque state value. */
-  capability_state: Map<string, unknown>;
-  /** Operator-authored presentation fields from registration (0.12.0). */
-  name?: string | undefined;
-  livery?: string | undefined;
-}
-
-/**
- * The `device_registered` fields the scheduler consumes. The server validates
- * the envelope against the protocol schema before dispatch, so reading them
- * through this one typed view at the registration boundary is sound — a SINGLE
- * coercion point (per the no-scattered-casts rule), replacing the ad-hoc
- * `payload as {...}` reads that used to dot the registration path.
- */
-interface DeviceRegistrationView {
-  readonly capabilities: string[];
-  readonly train_length_mm?: number;
-  readonly priority?: number;
-  /** The junction marker a `core.controls_switch` device actuates (0.12.0,
-   *  first-class — previously read via an untyped cast). */
-  readonly controls_marker_id?: string;
-  /** The selectable switch positions a `core.controls_switch` device declares
-   *  (0.13.0, ADR-035). Discovery materialises a junction with these legs. */
-  readonly valid_positions?: string[];
-  /** Operator-authored presentation fields (0.12.0); echoed into retained state. */
-  readonly name?: string;
-  readonly livery?: string;
-}
-
-function readRegistration(payload: unknown): DeviceRegistrationView {
-  return (payload ?? {}) as DeviceRegistrationView;
-}
-
-/**
  * The scheduler. Stateful, but the state is fully observable and all
  * mutations happen through `handleEvent`.
  */
 export class Scheduler {
-  private readonly devices = new Map<string, DeviceRecord>();
+  private readonly devices: DeviceTable;
   private readonly trains = new TrainRoster();
   private readonly tags = new TagRegistry();
   /**
@@ -178,11 +139,12 @@ export class Scheduler {
   private readonly now: () => number;
 
   constructor(
-    private readonly registry: CapabilityRegistry,
+    registry: CapabilityRegistry,
     private readonly layout: LayoutState,
     options: SchedulerOptions,
   ) {
     this.now = options.now;
+    this.devices = new DeviceTable(registry);
   }
 
   /** Read-only view of the tag registry, exposed for the visualiser/tests. */
@@ -201,7 +163,7 @@ export class Scheduler {
   }
 
   getDeviceCapabilityState(deviceId: string, capabilityId: string): unknown {
-    return this.devices.get(deviceId)?.capability_state.get(capabilityId);
+    return this.devices.capabilityState(deviceId, capabilityId);
   }
 
   getLayout(): LayoutState {
@@ -275,32 +237,8 @@ export class Scheduler {
     const reg = readRegistration(payload);
     const { capabilities } = reg;
 
-    const unknownCaps = this.registry.validateDeviceCapabilities(capabilities);
-    if (unknownCaps.length > 0) {
-      return [
-        effects.publishEvent('anomaly', {
-          severity: 'warning',
-          description: `Device ${deviceId} declared unknown capabilities: ${unknownCaps.join(', ')}`,
-        }),
-      ];
-    }
-
-    const capabilityState = new Map<string, unknown>();
-    for (const capId of capabilities) {
-      const cap = this.registry.get(capId);
-      if (cap) {
-        capabilityState.set(capId, cap.initialiseStateFor(deviceId));
-      }
-    }
-
-    const deviceRecord: DeviceRecord = {
-      device_id: deviceId,
-      capabilities,
-      capability_state: capabilityState,
-    };
-    if (reg.name !== undefined) deviceRecord.name = reg.name;
-    if (reg.livery !== undefined) deviceRecord.livery = reg.livery;
-    this.devices.set(deviceId, deviceRecord);
+    const rejected = this.devices.register(deviceId, reg);
+    if (rejected) return [rejected];
 
     if (capabilities.includes('core.controls_motion')) {
       this.trains.register(deviceId, reg.priority, reg.train_length_mm);
@@ -422,18 +360,9 @@ export class Scheduler {
     const device = this.devices.get(deviceId);
     if (!device) return [];
 
-    const out: SchedulerEffect[] = [];
-    for (const capId of device.capabilities) {
-      const cap = this.registry.get(capId);
-      if (!cap) continue;
-      const oldState = device.capability_state.get(capId);
-      const result = cap.invokeOnDeviceDisconnect(oldState);
-      device.capability_state.set(capId, result.newState);
-      out.push(...this.translateIntents(result.intents, deviceId));
-    }
-
+    const out = this.devices.runDisconnectHooks(device);
     out.push(...this.forgetDeviceTrackAuthority(deviceId));
-    this.devices.delete(deviceId);
+    this.devices.remove(deviceId);
     /*
      * Tombstone the retained device registration. Without this the broker keeps
      * replaying `railway/state/devices/<id>` to every new subscriber and the
@@ -670,7 +599,7 @@ export class Scheduler {
 
   /** True if the train declared `core.can_reverse` (ADR-027). */
   private trainCanReverse(trainId: string): boolean {
-    return this.devices.get(trainId)?.capabilities.includes('core.can_reverse') ?? false;
+    return this.devices.declares(trainId, 'core.can_reverse');
   }
 
   /** True if `markerId` is the terminus of the train's current transit. */
@@ -1473,22 +1402,12 @@ export class Scheduler {
   }
 
   private anyCapabilityDeniesClearance(train: TrainState, nextEdge: EdgeRef): boolean {
-    const request = {
+    return this.devices.anyCapabilityDenies({
       train_id: train.train_id,
       current_limit_marker_id: train.clearance_limit_marker_id ?? '',
       proposed_new_limit_marker_id: nextEdge.to_marker_id,
       proposed_edges_to_clear: [nextEdge],
-    };
-    for (const device of this.devices.values()) {
-      for (const capId of device.capabilities) {
-        const cap = this.registry.get(capId);
-        if (!cap) continue;
-        const state = device.capability_state.get(capId);
-        const vote = cap.invokeOnClearanceConsultation(state, request);
-        if (vote && vote.vote === 'deny') return true;
-      }
-    }
-    return false;
+    });
   }
 
   private grantClearance(train: TrainState, nextEdge: EdgeRef): ReadonlyArray<SchedulerEffect> {
@@ -2218,55 +2137,7 @@ export class Scheduler {
   }): ReadonlyArray<SchedulerEffect> {
     const device = this.devices.get(event.device_id);
     if (!device) return [];
-
-    const out: SchedulerEffect[] = [];
-    for (const capId of device.capabilities) {
-      const cap = this.registry.get(capId);
-      if (!cap) continue;
-
-      const oldState = device.capability_state.get(capId);
-      const result = cap.invokeOnEvent(oldState, {
-        device_id: event.device_id,
-        event_type: event.event_type,
-        payload: event.payload,
-        device_capabilities: device.capabilities,
-      });
-
-      device.capability_state.set(capId, result.newState);
-      out.push(...this.translateIntents(result.intents, event.device_id));
-    }
-
-    out.push(...this.retryBlockedClearances());
-    return out;
-  }
-
-  private translateIntents(
-    intents: ReadonlyArray<import('../capability.js').SchedulerIntent>,
-    sourceDeviceId: string,
-  ): SchedulerEffect[] {
-    const out: SchedulerEffect[] = [];
-    for (const intent of intents) {
-      switch (intent.kind) {
-        case 'send_command':
-          out.push(effects.sendCommand(intent.device_id, intent.command_type, intent.payload));
-          break;
-        case 'emit_anomaly':
-          out.push(
-            effects.publishEvent('anomaly', {
-              severity: intent.severity,
-              description: intent.description,
-              context: { source_device_id: sourceDeviceId },
-            }),
-          );
-          break;
-        // withhold/release intents are state-only; the scheduler reads the
-        // capability state directly during clearance consultation.
-        case 'withhold_clearance_at_marker':
-        case 'release_clearance_at_marker':
-          break;
-      }
-    }
-    return out;
+    return [...this.devices.dispatchEvent(device, event), ...this.retryBlockedClearances()];
   }
 
   // ---------- train introduction (ADR-036) ----------
@@ -2579,36 +2450,8 @@ export class Scheduler {
     return undefined;
   }
 
-  /**
-   * Build an `update_state_snapshot` effect for the retained device state of
-   * `deviceId`. This mirrors the payload built in `handleDeviceRegistered` but
-   * additionally carries `introduced: true` once a train's vector has resolved.
-   * Called from `resolveIntroduction` so the garage immediately sees the train
-   * as on-track. Name/livery are carried from the stored device record so the
-   * retained snapshot stays complete (late joiners see them as before).
-   */
   private deviceStateEffect(deviceId: string): SchedulerEffect {
-    const device = this.devices.get(deviceId);
-    const train = this.trains.get(deviceId);
-    const capabilities = (device?.capabilities ?? []) as string[];
-    const state: {
-      capabilities: string[];
-      train_length_mm?: number;
-      name?: string;
-      livery?: string;
-      introduced?: boolean;
-    } = { capabilities };
-
-    if (train?.length_mm !== undefined && train.length_mm > 0) {
-      state.train_length_mm = train.length_mm;
-    }
-    if (device?.name !== undefined) state.name = device.name;
-    if (device?.livery !== undefined) state.livery = device.livery;
-    if (train?.introduced) {
-      state.introduced = true;
-    }
-
-    return effects.updateState('devices', deviceId, state);
+    return this.devices.stateEffect(deviceId, this.trains.get(deviceId));
   }
 
   // ---------- schedule assignment (driven by external API, not events) ----------
@@ -2727,7 +2570,7 @@ export class Scheduler {
      * the vector resolves via resolveIntroduction(). */
     if (!train.introduced) return [];
     if (!train.schedule || train.last_marker_id === undefined) return [];
-    if (!this.devices.get(train.train_id)?.capabilities.includes('core.accepts_route')) {
+    if (!this.devices.declares(train.train_id, 'core.accepts_route')) {
       return [
         effects.publishEvent('anomaly', {
           severity: 'warning',
