@@ -71,11 +71,7 @@ describe('GarageIntroduction', () => {
   it('clicking Introduce publishes railway/operator/introduce_train with the correct train_id', async () => {
     const user = userEvent.setup();
     const { client } = renderComponent();
-    deliverDevice(client, 'T2', [
-      'core.controls_motion',
-      'core.reports_marker_traversal',
-      'core.accepts_route',
-    ]);
+    deliverDevice(client, 'T2', ['core.controls_motion', 'core.accepts_route']);
 
     await user.click(screen.getByTestId('introduce-btn-T2'));
 

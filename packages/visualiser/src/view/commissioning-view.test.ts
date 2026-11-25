@@ -77,7 +77,7 @@ describe('CommissioningView — pending queue (criterion 3)', () => {
 
   it('a registered, un-named device enters the queue suggested as a TRAIN when it drives motion', () => {
     announceDevice(h.client, 'T1', {
-      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
     const pending = h.view.getState().pending;
     expect(pending).toHaveLength(1);
@@ -151,7 +151,7 @@ describe('CommissioningView — commands + confirm emit correctness facts + prof
 
   it('confirming a TRAIN re-announces device_registered with name + measured length, and drops it from the queue', () => {
     announceDevice(h.client, 'T1', {
-      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
     });
     h.view.setName('T1', 'Rocket');
     h.view.setTrainLength('T1', 180);
@@ -163,7 +163,7 @@ describe('CommissioningView — commands + confirm emit correctness facts + prof
     expect(reg).toBeDefined();
     expect(reg?.protocol_version).toBe(PROTOCOL_VERSION);
     expect(reg?.payload).toMatchObject({
-      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
       name: 'Rocket',
       train_length_mm: 180,
     });

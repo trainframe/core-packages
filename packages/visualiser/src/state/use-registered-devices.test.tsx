@@ -32,11 +32,7 @@ describe('useRegisteredDevices', () => {
 
   it('keeps a train and a gate together — every device, not just trains', async () => {
     const { client, result } = setup();
-    deliverDevice(client, 'T1', [
-      'core.controls_motion',
-      'core.reports_marker_traversal',
-      'core.accepts_route',
-    ]);
+    deliverDevice(client, 'T1', ['core.controls_motion', 'core.accepts_route']);
     deliverDevice(client, 'GATE-M3', ['core.gates_clearance']);
     await waitFor(() => expect(result.current.size).toBe(2));
     expect(result.current.get('T1')?.capabilities).toEqual([

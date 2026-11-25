@@ -38,9 +38,7 @@ describe('CommissioningPanel — scan → commission (no naming) → device row'
     renderUi(client);
 
     // A train appears on the bus with capabilities only (no name).
-    deliverDevice(client, 'T1', {
-      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
-    });
+    deliverDevice(client, 'T1', { capabilities: ['core.controls_motion', 'core.accepts_route'] });
 
     // It shows up in the commission queue (suggested category = train).
     const row = screen.getByTestId('commission-item-T1');
@@ -77,7 +75,7 @@ describe('CommissioningPanel — scan → commission (no naming) → device row'
     // The server merges the length into the retained snapshot; the DEVICE ROW
     // then shows the length (the device id stands in for a name).
     deliverDevice(client, 'T1', {
-      capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
       train_length_mm: 180,
     });
 

@@ -32,11 +32,7 @@ describe('useRegisteredTrains', () => {
 
   it('adds trains as their device snapshots land', async () => {
     const { client, result } = setup();
-    deliverDevice(client, 'T1', [
-      'core.controls_motion',
-      'core.reports_marker_traversal',
-      'core.accepts_route',
-    ]);
+    deliverDevice(client, 'T1', ['core.controls_motion', 'core.accepts_route']);
     deliverDevice(client, 'T2', ['core.controls_motion']);
     await waitFor(() => expect(result.current).toEqual(['T1', 'T2']));
   });
