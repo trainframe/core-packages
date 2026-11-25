@@ -146,7 +146,7 @@ The toy table: a virtual Brio table the operator builds on. Runs the physics wor
 
 - Server learn mode sends `set_switch_position` directly instead of asking through the `core.controls_switch` hooks
 - `core.displays_aspect` is reserved: `set_aspect` and `aspect_changed` are schema-only and nothing uses them
-- A train waiting behind a peer with a queued schedule holds no block
+- A zero-length (point) train stopped at a marker with no onward grant holds no block, so another train can be granted up to it; length-aware trains and trains waiting after introduction (`standing_edge`) are protected. Fixing it changes ADR-011 semantics and is waiting on a ruling
 - Station dwell is a scheduler constant, not a capability
 - No fault, mishap or sensor-noise injection in the physics world
 - No broker authentication and no vendor custom-event dispatch
