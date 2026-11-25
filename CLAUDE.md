@@ -20,25 +20,37 @@ Before claiming a problem requires `any`, ask. The answer is almost always "no."
 
 ### Integration tests over mocking
 
-Tests follow the Kent C. Dodds philosophy. The default is to test through the real seams: real broker (in tests, in-process via aedes; in dev, Mosquitto), real scheduler, real registry, real virtual devices. The simulator was specifically designed to make this cheap.
+Tests follow the Kent C. Dodds philosophy. The default is to test through the real seams: real broker (in tests, in-process via aedes or the in-memory client; in dev, Mosquitto), real scheduler, real registry, real physics devices. `startPhysicsEnv` in `@trainframe/simulator` was specifically designed to make this cheap.
 
 A test that mocks the scheduler, the registry, or the capability hooks is testing implementation. Rewrite it to drive the system through events and observe outcomes.
 
 The only acceptable inspection of internal state in tests is when the same observation cannot be made externally — and even then, prefer adding a public observer method to the appropriate class over reaching into private fields.
 
-A typical good test looks like:
+A typical good test looks like (from `packages/integration/src/multi-gate-clearance.test.ts`):
 
 ```typescript
-const sim = new Simulation({ layout: SIMPLE_LOOP, seed: 1 });
-sim.spawnTrain('T1', { startEdge: ... });
-const gate = sim.spawnGate('GATE-M3');
-gate.withhold('M3');
-sim.assignRoute('T1', [...]);
-sim.advance(10_000);
-expect(sim.getEventsOfType('marker_traversed').map(...)).toEqual(['M2']);
+const env = startPhysicsEnv(
+  straightLoop(
+    [
+      { id: 'M1', kind: 'block_boundary' },
+      { id: 'M2', kind: 'block_boundary' },
+      { id: 'M3', kind: 'block_boundary' },
+      { id: 'M4', kind: 'block_boundary' },
+    ],
+    { spacingMm: 200, name: 'multi-gate-clearance' },
+  ),
+);
+const gate = env.spawnGate('GATE-A', { markers: ['M3'] });
+gate.hold('M3', 'closed');
+env.spawnTrain('T1', { atMarker: 'M1' });
+env.assignSchedule('T1', ['M1', 'M3']);
+env.advance(4000);
+expect(
+  env.commandsFor('T1').filter((c) => c.payload.limit_marker_id === 'M3'),
+).toHaveLength(0);
 ```
 
-Drive the system; observe the events; assert on outcomes. No hook stubbing, no scheduler internals.
+Drive the system; observe the events and commands; assert on outcomes. No hook stubbing, no scheduler internals.
 
 ### Coverage thresholds are floors, not goals
 
@@ -48,8 +60,9 @@ These numbers ratchet up over time. **Never lower a threshold to match a regress
 
 Current thresholds:
 - `protocol`: 90% lines, 85% branches
-- `core`: 75% lines, 75% branches (low because layout-state, scheduler edge cases need more tests — raise to 85% as soon as feasible)
+- `core`: 95% lines, statements and functions, 87% branches
 - `simulator`: 80% lines, 75% branches
+- `server`: 75% lines, 65% branches
 
 When you add code, add tests. When tests pass but coverage drops, you haven't covered your new code; fix it before opening the PR.
 
@@ -90,9 +103,9 @@ Side effects happen in the scheduler, which translates intents into effects, whi
 
 ### Determinism in the simulator
 
-The simulator is deterministic given a seed. Tests that depend on simulator output must use a fixed seed. If a test is flaky, either the simulator has a non-determinism bug (find it) or the test is making assumptions about output that aren't guaranteed (rewrite).
+The simulator is deterministic: the physics world steps at a fixed 60 Hz and every clock and id source is injected. `startPhysicsEnv` wires the server's `now`, the devices' `now` and `newId`, and the world step to one virtual clock, and tests advance it with `env.advance(ms)`. There is no seeded random source. If a test is flaky, either the simulator has a non-determinism bug (find it) or the test is making assumptions about output that aren't guaranteed (rewrite).
 
-Never use `Math.random()` or `Date.now()` directly inside the simulator or scheduler. Use the `SeededRandom` and `VirtualClock` classes.
+Never use `Math.random()` or `Date.now()` directly inside the simulator or scheduler. Take an injected `now` and `newId` instead (`Scheduler` takes `now`, `Server` takes both, devices and platforms take an `EnvelopeSource` from `packages/simulator/src/envelope-source.ts`). `deterministicEnvelopeSource` backs tests, and `packages/simulator/src/envelope.ts` validates every envelope through one adapter. The real clock and `randomUUID` appear only at the composition edge (`wallClockEnvelopeSource` in the toy table's entry point, and the `Server` defaults in `packages/server/src/server.ts`).
 
 ## File and package layout
 
@@ -104,13 +117,17 @@ Other repositories under the `trainframe` org follow these conventions:
 
 Inside this repo:
 
-- `packages/protocol/` — schemas, types, topic helpers. Pure data shapes. No I/O. No business logic.
-- `packages/core/` — capability registry, scheduler, layout state, clearance logic. Pure logic. No I/O.
-- `packages/server/` — composition: broker client + scheduler + HTTP API. The thin shell that turns logic into a running thing.
-- `packages/simulator/` — virtual devices, virtual clock, virtual bridge. Speaks the protocol identically to hardware.
-- `packages/visualiser/` — web UI subscribing to MQTT.
+- `packages/protocol/`: schemas, types, topic helpers, the TCF compact codec. Pure data shapes. No I/O. No business logic.
+- `packages/core/`: capability registry, scheduler, layout state, clearance logic. Pure logic. No I/O.
+- `packages/server/`: composition: broker client + scheduler + admin HTTP API + LearnMode, plus the `tf-server` CLI. The thin shell that turns logic into a running thing.
+- `packages/simulator/`: the ADR-030 physics world (`PhysicsWorld`, rail networks, track pieces) and the devices that run on it, speaking the protocol identically to hardware. Provides `startPhysicsEnv`, the test harness.
+- `packages/simulator-ui/`: the toy table: a browser virtual Brio table that runs the physics world and talks to a real server over MQTT.
+- `packages/visualiser/`: web UI subscribing to MQTT; the operator's system view.
+- `packages/ui-kit/`: shared UI primitives (Button, Panel, Drawer, themes). Depends on neither app.
+- `packages/integration/`: cross-package tests: in-process aedes broker, real server, real physics devices.
+- `packages/ui-tests/`: Playwright end-to-end tests against the toy table and visualiser.
 - `examples/` — sample satellite packages.
-- `docs/spec/` — protocol specifications, versioned.
+- `docs/spec/` — protocol and simulator specifications, versioned.
 - `docs/adr/` — architecture decision records.
 - `docs/contributing/` — guides for new device types and capabilities.
 
@@ -144,19 +161,21 @@ When fixing a bug:
 
 ## Open design questions
 
-These are unresolved; ask before assuming an answer.
+These are unresolved; ask before assuming an answer. Conflict resolution (ADR-017), multi-gate semantics (ADR-018), topology violations (ADR-019), the ESP-NOW wire format (ADR-021), coupling (narrowed to train length in ADR-023) and tag to marker resolution (ADR-007) are decided.
 
-- Conflict resolution policy for clearance contention between trains.
-- Multi-gate semantics when several `gates_clearance` devices gate the same marker.
-- Topology violations: train reports a marker the graph says shouldn't be reachable from where it was.
-- Coupling/decoupling of trains as multi-vehicle compositions.
-- Tag→marker resolution at runtime (currently the simulator uses marker IDs as tag IDs).
-- The MQTT bridge wire format for ESP-NOW devices (compact event-type IDs vs. full strings).
+- Station dwell is a scheduler constant (`STATION_DWELL_MS`), not a capability or a per-stop setting
+- Heartbeat versus duty cycle: a sleepy ESP-NOW loco cannot publish `train_status` every tick, so cyclic-schedule dwell resume (ADR-028) needs an explicit trigger (ADR-035)
+- Composite-parent association: a zone or depot gathering its children's device associations has no lifecycle yet (ADR-035)
+- Stopping at a marker: distant plus home pattern, or single marker with calibrated overshoot
+- Route plans with conditional branches; routes are linear edge sequences
+- Broker authentication and device pairing at the broker
+- Sensor noise and mishap injection (ADR-006) in the physics world
 
 ## Useful references
 
-- `docs/spec/protocol-v0.2.md` — current protocol spec
-- `docs/spec/simulator-v0.1.md` — simulator architecture
+- `docs/spec/protocol-v0.2.md` — current protocol spec (protocol version 0.15.0)
+- `docs/status.md` — what is built, partial or missing, per package
+- `docs/spec/simulator-v0.1.md` — simulator architecture (physics world, `startPhysicsEnv`)
 - `docs/contributing/new-device.md` — how to build a new device type
 - `docs/contributing/driving-the-ui-live.md` — playbook for live-driving the
   simulator-ui and visualiser through a controllable browser (Chrome DevTools
