@@ -30,7 +30,7 @@ Coverage floor: 95 lines, 95 statements, 95 functions, 87 branches.
 | `core.gates_clearance` | shipped | `builtins/gates-clearance.ts`; the reference capability with real hooks |
 | `core.gates_zone` (ADR-026) | shipped | `builtins/gates-zone.ts`; deny-when-full at the zone boundary marker |
 | Declaration capabilities | shipped as declarations | `declarationCapability(...)` in `builtins/index.ts`: empty hooks, and the scheduler enforces the behaviour only for devices that declare them. `core.assigns_tags` gates `tag_assignment`, `core.reports_length` gates `train_length_changed`, `core.can_reverse` gates zone admission, `core.provides_train_heading` gates `train_introduced`, `core.reports_marker_traversal` gates marker crossings from `tag_observed`, `core.identifies_vehicles` gates `vehicle_identified`, `core.accepts_route` gates route assignment and `core.controls_motion` marks a device as a train (ADR-023, ADR-027, ADR-036) |
-| `core.controls_switch` | partial | Stub hooks, the one real hooks gap. The scheduler records `controls_marker_id` and `valid_positions` from the registration and owns pairing and actuation itself. It re-sends a switch command left unconfirmed for `SWITCH_ACTUATION_TIMEOUT_MS` (3000) |
+| `core.controls_switch` | shipped | Real hooks (ADR-037, `builtins/controls-switch.ts`): binding via `onEvent` on `device_registered`, `onActuationRequest` and `isActuationOverdue` on the scheduler's clock, `bind_junction` and `report_switch_position` intents. The scheduler keeps the zone-ownership refusal and layout mutation, and re-asks an unconfirmed switch after `SWITCH_ACTUATION_TIMEOUT_MS` (3000) while a train waits. Server learn mode still sends `set_switch_position` directly |
 | `core.displays_aspect` | reserved | Schemas exist (`set_aspect`, `aspect_changed`) but nothing declares, sends or consumes them |
 | `LayoutState` | shipped | `scheduler/layout-state.ts`; edges, switches, runtime markers, edge inference and confirmation (ADR-009) |
 | `TagRegistry` (ADR-007) | shipped | `scheduler/tag-registry.ts`; populated only from `tag_assignment` |
@@ -139,12 +139,12 @@ The toy table: a virtual Brio table the operator builds on. Runs the physics wor
 | `core.gates_zone` | shipped, real hooks |
 | `core.assigns_tags`, `core.reports_length`, `core.can_reverse`, `core.provides_train_heading` | shipped, enforced by the scheduler |
 | `core.reports_marker_traversal`, `core.identifies_vehicles`, `core.accepts_route`, `core.controls_motion` | shipped, enforced by the scheduler |
-| `core.controls_switch` | partial |
+| `core.controls_switch` | shipped, real hooks (ADR-037) |
 | `core.displays_aspect` | reserved |
 
 ## Known gaps
 
-- `core.controls_switch` is the one real hooks gap: the scheduler owns switch pairing and actuation
+- Server learn mode sends `set_switch_position` directly instead of asking through the `core.controls_switch` hooks
 - `core.displays_aspect` is reserved: `set_aspect` and `aspect_changed` are schema-only and nothing uses them
 - A train waiting behind a peer with a queued schedule holds no block
 - Station dwell is a scheduler constant, not a capability
