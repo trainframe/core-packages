@@ -78,6 +78,8 @@ export class Server {
       trainLastMarker: (trainId) => this.scheduler.getTrainState(trainId)?.last_marker_id,
       sendCommand: (deviceId, commandType, payload) =>
         this.publishCommand(deviceId, commandType, payload),
+      requestSwitchPosition: (junction, position) =>
+        this.dispatchEffects(this.scheduler.requestSwitchPosition(junction, position)),
       publishState: (snapshot) => this.publishLearnModeState(snapshot),
     });
   }

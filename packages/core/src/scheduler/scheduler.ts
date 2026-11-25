@@ -710,6 +710,18 @@ export class Scheduler {
   }
 
   /**
+   * Ask the device bound to a junction to throw its points, through the same
+   * capability hooks routing uses (tracked, re-sent when overdue). For agents
+   * outside clearance, such as LearnMode.
+   */
+  requestSwitchPosition(
+    junctionMarkerId: string,
+    position: string,
+  ): ReadonlyArray<SchedulerEffect> {
+    return this.switches.request(junctionMarkerId, position);
+  }
+
+  /**
    * Revoke a train's clearance. The train is told to stop (the wire-level
    * `revoke_clearance` command), its cleared edges are released back to the
    * pool, and any peers waiting on those blocks are reconsidered in the same

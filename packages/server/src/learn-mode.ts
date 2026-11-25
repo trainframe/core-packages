@@ -48,6 +48,12 @@ export interface LearnModePorts {
   readonly trainLastMarker: (trainId: string) => string | undefined;
   /** Publish a command to a device on `railway/commands/<device_id>`. */
   readonly sendCommand: (deviceId: string, commandType: string, payload: unknown) => void;
+  /**
+   * Ask the scheduler to throw the junction's points. It goes through the
+   * switch device's actuation hooks, so the request is tracked and re-sent
+   * when unconfirmed.
+   */
+  readonly requestSwitchPosition: (junctionMarkerId: string, position: string) => void;
   /** Publish the retained state snapshot. */
   readonly publishState: (snapshot: LearnModeStateSnapshot) => void;
 }
@@ -66,8 +72,8 @@ interface ActiveSession {
   exploring: boolean;
   /**
    * Per-junction (marker id → switch position) the position LearnMode last
-   * commanded this session. Anti-thrash: an identical `set_switch_position` is
-   * suppressed, and since the chosen leg only advances when the current one is
+   * commanded this session. Anti-thrash: a request for the position already in
+   * flight is a no-op in the switch's hooks, and since the chosen leg only advances when the current one is
    * traversed, a junction is re-thrown at most once per leg.
    */
   readonly commandedSwitch: Map<string, string>;
@@ -152,6 +158,12 @@ export class LearnMode {
    */
   onEvent(eventType: string, deviceId: string, _payload: unknown): void {
     if (!this.session) return;
+    /* A train held waiting for a throw that never confirms sends no tags, only
+       status: asking again lets the switch's hooks re-send once it is overdue. */
+    if (eventType === 'train_status') {
+      if (deviceId === this.session.trainId) this.armJunctions();
+      return;
+    }
     if (eventType !== 'tag_observed') return;
     // While waiting for a train, latch onto whichever train just produced
     // its first tag_observed (only if no specific train was requested).
@@ -319,14 +331,11 @@ export class LearnMode {
     for (const junction of this.ports.layoutState.junctionMarkerIds()) {
       const position = this.firstUnsurveyedPosition(junction);
       if (position === undefined) continue; // every position's leg surveyed (or none declared)
-      if (this.session.commandedSwitch.get(junction) === position) continue; // already aimed
-      const device = this.ports.layoutState.switchDeviceForMarker(junction);
-      if (device === undefined) continue; // no controller registered yet
+      if (this.ports.layoutState.switchDeviceForMarker(junction) === undefined) continue;
       this.session.commandedSwitch.set(junction, position);
-      this.ports.sendCommand(device, 'set_switch_position', {
-        junction_marker_id: junction,
-        position,
-      });
+      /* The device's actuation hook stays quiet while this request is in
+         flight and re-sends it once overdue, so asking on every marker is safe. */
+      this.ports.requestSwitchPosition(junction, position);
     }
   }
 

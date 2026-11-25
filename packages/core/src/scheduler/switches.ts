@@ -136,6 +136,22 @@ export class SwitchControl {
     });
   }
 
+  /**
+   * Ask the device bound to `junctionMarkerId` to move the points to `position`,
+   * for an agent other than clearance (LearnMode). Same hooks as a routed throw,
+   * so the request is tracked and re-sent when overdue. Empty with no device bound.
+   */
+  request(junctionMarkerId: string, position: string): ReadonlyArray<SchedulerEffect> {
+    const deviceId = this.layout.switchDeviceForMarker(junctionMarkerId);
+    if (deviceId === undefined) return [];
+    return this.devices.requestActuation({
+      device_id: deviceId,
+      junction_marker_id: junctionMarkerId,
+      position,
+      now_ms: this.now(),
+    });
+  }
+
   /** True when some device's actuation has gone unconfirmed long enough to be re-sent. */
   anyRequestOverdue(): boolean {
     return this.devices.anyActuationOverdue(this.now());

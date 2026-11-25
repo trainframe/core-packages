@@ -63,7 +63,7 @@ Coverage floor: 75 lines, 65 branches, 65 functions.
 | Operator MQTT topics | shipped | `railway/operator/{assign_schedule,revoke_clearance,introduce_train}` |
 | Admin HTTP | shipped | `admin-http.ts`: `GET /api/health`, `/api/state` (deprecated), `/api/query/*`; `POST /api/tags`, `/api/trains/:id/route`, `/api/trains/:id/revoke_clearance`, `/api/gates/:id/hold`, `/api/gates/:id/release`, `/api/maintenance/{prune-markers,reset}`; `DELETE /api/trains/:id` (ADR-008, ADR-020) |
 | Discovery mode | shipped | `--discovery`; markers from `tag_assignment`, edges inferred from traversals, junctions from `valid_positions` (ADR-009, ADR-035) |
-| `LearnMode` (ADR-014, ADR-015) | shipped | `learn-mode.ts`; drives a registered train with `begin_exploration`, surveys junction legs by throwing switches |
+| `LearnMode` (ADR-014, ADR-015) | shipped | `learn-mode.ts`; drives a registered train with `begin_exploration`, surveys junction legs by throwing switches through the scheduler's `controls_switch` actuation hooks (`Scheduler.requestSwitchPosition`), so an unconfirmed throw is tracked and re-sent |
 | CLI `tf-server` | shipped | `--layout`, `--discovery`, `--discovery-name`, `--broker`, `--http-port` |
 | Docker image and compose | shipped | `packages/server/Dockerfile`, `tools/broker/docker-compose.yml` |
 
