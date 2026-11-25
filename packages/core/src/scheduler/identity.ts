@@ -16,7 +16,7 @@ export class IdentityAndTags {
   private readonly tags = new TagRegistry();
 
   constructor(
-    private readonly devices: Pick<DeviceTable, 'get'>,
+    private readonly devices: Pick<DeviceTable, 'get' | 'stateEffect'>,
     private readonly trains: Pick<TrainRoster, 'get'>,
     private readonly layout: Pick<LayoutState, 'name' | 'hasMarker' | 'upsertMarker' | 'toLayout'>,
     private readonly crossings: MarkerCrossings,
@@ -159,10 +159,9 @@ export class IdentityAndTags {
 
     train.length_mm = train_length_mm;
 
-    // Republish the TRAIN's retained device state with the new length, using
-    // the train device's own capabilities (the reporter may be another device).
-    const capabilities = this.devices.get(train_id)?.capabilities ?? [];
-    return [effects.updateState('devices', train_id, { capabilities, train_length_mm })];
+    // Republish the TRAIN's retained device state (the reporter may be another
+    // device). The snapshot replaces the previous one, so it is rebuilt whole.
+    return [this.devices.stateEffect(train_id, train)];
   }
 }
 
