@@ -242,6 +242,52 @@ export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): 
   const canvas = sim.getByTestId('toy-table-canvas');
   await canvas.waitFor({ state: 'visible' });
 
+  /* Scroll the tile into view BEFORE measuring the drop point: a tile in a lower
+   * tray section (e.g. the Experiments box) can sit off-screen, and scrolling
+   * moves the canvas too, so a drop point measured first lands offset by the
+   * scroll distance (the wagon then misses the crane's hook). */
+  await toyboxBtn.scrollIntoViewIfNeeded();
+  const tileBox = await toyboxBtn.boundingBox();
+  if (tileBox === null) {
+    throw new Error('placePieceOnToyTable: toybox tile has no bounding box');
+  }
+
+  /* The table may still be re-framing after earlier placements; on a slow runner
+   * a drop point measured mid-change lands somewhere else. Wait until the
+   * viewport and the canvas box hold still across two animation frames. */
+  await canvas.evaluate(
+    (el) =>
+      new Promise<void>((resolve) => {
+        const read = (): string => {
+          const r = el.getBoundingClientRect();
+          return [
+            el.getAttribute('data-viewport-zoom'),
+            el.getAttribute('data-viewport-x'),
+            el.getAttribute('data-viewport-y'),
+            r.left,
+            r.top,
+            r.width,
+            r.height,
+          ].join('|');
+        };
+        let last = read();
+        const tick = (): void => {
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() => {
+              const now = read();
+              if (now === last) {
+                resolve();
+                return;
+              }
+              last = now;
+              tick();
+            }),
+          );
+        };
+        tick();
+      }),
+  );
+
   const dropInfo = await canvas.evaluate(
     (el, { xMm, yMm }) => {
       const svg = el as SVGSVGElement;
@@ -262,28 +308,31 @@ export async function placePieceOnToyTable(sim: Page, opts: PlacePieceOptions): 
       const offsetX = fracX * rect.width;
       const offsetY = fracY * rect.height;
       return {
-        // Clamp to visible viewport (window.innerWidth/innerHeight).
-        clampedX: Math.min(rect.left + offsetX, window.innerWidth - 1),
-        clampedY: Math.min(rect.top + offsetY, window.innerHeight - 1),
+        x: rect.left + offsetX,
+        y: rect.top + offsetY,
+        onScreen:
+          rect.left + offsetX >= 0 &&
+          rect.top + offsetY >= 0 &&
+          rect.left + offsetX < window.innerWidth &&
+          rect.top + offsetY < window.innerHeight,
       };
     },
     { xMm, yMm },
   );
+  /* A drop point outside the window cannot be reached by a real pointer; fail
+   * loudly rather than silently dropping the piece somewhere else. */
+  if (!dropInfo.onScreen) {
+    throw new Error(
+      `placePieceOnToyTable: (${xMm}, ${yMm})mm is off-screen at (${dropInfo.x}, ${dropInfo.y})px`,
+    );
+  }
 
   // Feature-B drag: press the tile, drag onto the canvas at the drop point, and
   // release to commit. The gesture places a real piece on the first in-bounds
-  // move and follows the cursor until pointerup snaps + commits it. Scroll the
-  // tile into view first — a tile in a lower tray section (e.g. the Experiments
-  // box) can sit off-screen, and a raw mouse press at its bounding box would miss
-  // it (unlike `.click()`, which auto-scrolls).
-  await toyboxBtn.scrollIntoViewIfNeeded();
-  const tileBox = await toyboxBtn.boundingBox();
-  if (tileBox === null) {
-    throw new Error('placePieceOnToyTable: toybox tile has no bounding box');
-  }
+  // move and follows the cursor until pointerup snaps + commits it.
   await sim.mouse.move(tileBox.x + tileBox.width / 2, tileBox.y + tileBox.height / 2);
   await sim.mouse.down();
-  await sim.mouse.move(dropInfo.clampedX, dropInfo.clampedY, { steps: 8 });
+  await sim.mouse.move(dropInfo.x, dropInfo.y, { steps: 8 });
   await sim.mouse.up();
 
   // Wait for a new piece to appear.
