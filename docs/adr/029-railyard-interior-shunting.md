@@ -7,7 +7,7 @@
 
 ## Status
 
-Accepted — built. Makes the railyard **interior** real: the zone device drives a
+Accepted — built. Historical for the reverse-in ladder model: 49975c1 replaced it with one railyard model, discovered from the track under a gantry (`physics/gantry-yard.ts`), and deleted `RailyardZoneDevice` and the ladder, bezier and trapezoid yards. Makes the railyard **interior** real: the zone device drives a
 SELF-PROPELLED train along the yard's actual interior rails (spine → ladder leg →
 slot) — enter a free slot, the crane lifts its leading cut, pull back onto the lead
 and drive into the spares slot to couple, the crane reads it, then drive back out —
@@ -17,7 +17,7 @@ Replaces the instantaneous `swapLeadingPair` consist-array swap that
 geometry-free (phase + progress + slot choices); the toy-table maps each phase onto
 its centre-line path. Verified by `virtual-railyard.test.ts` (phase order, cut
 lift/hold, no-swap path) and a yard-framed screenshot + video pass
-(`scripts/railyard-yard-capture.mjs`, `scripts/railyard-single-video.mjs`).
+(`scripts/railyard-yard-capture.mjs`, `scripts/railyard-single-video.mjs`, both removed in e0d2aee).
 
 **Scope boundary (the load-bearing decision): this is entirely a simulator +
 toy-table concern. Core and the wire protocol do not change.** ADR-026/027 already

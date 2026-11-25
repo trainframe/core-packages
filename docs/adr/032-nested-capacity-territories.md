@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed (drafted 2026-06-11). Builds on [ADR-026](026-delegated-capacity-territory.md)
+Accepted — implemented (drafted 2026-06-11). `DepotController` (`packages/simulator/src/devices/depot-controller.ts`) nests a turntable zone inside a depot zone; covered by `depot-controller.test.ts` (the `?physics=depot` browser view was removed in e0d2aee). Builds on [ADR-026](026-delegated-capacity-territory.md)
 (delegated capacity territory), [ADR-027](027-zone-interior-handoff.md) (zone
 interior handoff), and [ADR-031](031-provider-boundary-platform-and-honest-actuators.md)
 (the provider boundary).

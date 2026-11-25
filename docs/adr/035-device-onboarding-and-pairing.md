@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed — 2026-06-26. Not implemented. Supersedes nothing; **completes** the
+Accepted — implemented (2026-06-26). Phases 1 to 3 are built: junction discovery (`valid_positions`, protocol 0.13.0), the pairing handshake (`device_discovered` and `device_association`, protocol 0.14.0, `EspNowLink`, `EspNowPlatform`, `PairingBridge`), and device migration through the seam. The firmware-side obligations in section 6 (marker and withheld-set persistence, composite association, heartbeat versus duty cycle) are recorded decisions, not built. Supersedes nothing; **completes** the
 device side of [ADR-007](007-tag-resolution-registry.md) (tag→entity
 resolution), fills the pairing handshake [ADR-021](021-esp-now-bridge-wire-format.md)
 §5 explicitly deferred ("out-of-band pairing path … out of scope here"), and

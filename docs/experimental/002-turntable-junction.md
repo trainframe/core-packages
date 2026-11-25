@@ -23,7 +23,7 @@ stubs sit on the 45° lattice (the spatial open question answered: the disc
 snaps like every other piece). `compileLayout` emits one junction marker with
 `valid_positions ['stub-a','stub-b','stub-c']` and three switched outbound
 edges — the N-way claim, compiled by the unchanged junction machinery. The
-deck is a separate rotating sub-shape drawn at the confirmed `VirtualSwitch`
+deck is a separate rotating sub-shape drawn at the confirmed `SwitchDevice`
 position (eased), and a "Spin deck" affordance models a hand on the knob: the
 device seats and confirms exactly as for `set_switch_position`.
 

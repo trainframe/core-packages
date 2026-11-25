@@ -21,7 +21,7 @@ and the operator's "Lift crate" / "Place crate" affordances move a crate
 between the stack and the wagon under the hook — the wagon departs visibly one
 box heavier or lighter, the stack grows or shrinks to match. Each transfer is
 bracketed by a clearance withhold/grant pulse on the crane's own marker
-(`CRANE-{piece.id}`, `core.gates_clearance`, a real `VirtualGate`) — the pin,
+(`CRANE-{piece.id}`, `core.gates_clearance`, a real `GateDevice`) — the pin,
 never a dwell timer — and **nothing cargo-specific crosses the wire**: no
 crate event, no manifest, no carriage id. The negative-space proof, run.
 

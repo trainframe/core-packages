@@ -3,7 +3,7 @@
 **Status:** viability test, now **partially built** — it has graduated to a core
 mechanism. The admission/capacity seam it proves is specified in
 [ADR-026](../adr/026-delegated-capacity-territory.md) and implemented
-(`core.gates_zone` + `zone_state_changed` + `VirtualRailyard`); the opaque-interior
+(`core.gates_zone` + `zone_state_changed` + `YardZoneDevice`); the opaque-interior
 maneuvering remains the hand-wave. Still not something a typical setup has.
 
 **Proves:** that a device can own a **capacity-limited territory** and gate
@@ -100,7 +100,7 @@ table: full yard → train waits; slot frees → train enters.
 ## What's built, and what proves it
 
 The whole lifecycle is implemented and tested end-to-end through a real broker +
-scheduler: **admission** — a `VirtualRailyard` (scalable to N slots) asserts
+scheduler: **admission** — a `YardZoneDevice` (scalable to N slots) asserts
 occupancy, and a routed train holds at the throat of a full yard and is admitted
 when a slot frees, via the `core.gates_zone` consultation veto and the existing
 retry machinery (`zone-admission.test.ts`); **the interior handoff**

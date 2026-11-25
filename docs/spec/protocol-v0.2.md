@@ -60,11 +60,17 @@ Defined capabilities for v0.2:
 
 `controls_switch`: the device accepts switch-position commands and publishes position-confirmation events.
 
-`displays_aspect`: the device accepts aspect commands and shows them. E-paper signal heads, station departure boards, status displays.
+`displays_aspect` *(reserved)*: the device accepts aspect commands and shows them. The schemas (`set_aspect`, `aspect_changed`) exist but nothing in core, the server or the simulator declares, sends or consumes them yet. E-paper signal heads, station departure boards, status displays.
 
 `gates_clearance`: the device may withhold or grant clearance for trains at a specified marker. The extensibility hook: any device can become a clearance gate by declaring this capability and publishing `gate_state_changed` events for the markers it gates. Stations, crane-gated stations, manual stop buttons, "wait for kid to press button" puzzles: all gates.
 
 `assigns_tags`: the device can assign meaning to previously-unknown tags. Garages and registration interfaces have this capability.
+
+`gates_zone` *(added 0.8.0; ADR-026)*: the device owns a capacity-limited territory behind one boundary marker and gates admission by its own asserted occupancy.
+
+`reports_length` *(added 0.9.0; ADR-023)*: the device may assert a train's physical length at runtime.
+
+`can_reverse` *(added 0.10.0; ADR-027)*: a train whose hardware can run backward. Required for admission to a zone.
 
 `provides_train_heading` *(added 0.15.0; [ADR-036](../adr/036-train-introduction-and-activation.md))*: the device (typically a railyard or turntable) can supply a train's heading at the moment it is introduced — before the train is released to open track. When a train is introduced from such a zone, the zone emits a `train_introduced` event carrying the resolved vector, and no blind forward roll is required. This is pure capability-based extension: the scheduler takes the zone's emitted vector when present and falls back to the two-marker roll otherwise.
 
@@ -101,7 +107,7 @@ railway/state/{entity_type}/{entity_id}       # retained state messages
 railway/discovery/register                    # device registration handshake
 ```
 
-Events use the `event_type` segment so consumers can subscribe selectively (the visualiser subscribes `railway/events/#`, the scheduler subscribes only to events it cares about). Retained state messages mean a fresh subscriber gets current train positions, switch states, and clearance grants without replaying history.
+The server validates every core event payload against its schema (`packages/server/src/inbound-validation.ts`) and takes the sender from the `{device_id}` topic segment, not from the envelope. `device_registered` may omit `device_kind_hint`, which the scheduler never reads. Events use the `event_type` segment so consumers can subscribe selectively (the visualiser subscribes `railway/events/#`, the scheduler subscribes only to events it cares about). Retained state messages mean a fresh subscriber gets current train positions, switch states, and clearance grants without replaying history.
 
 **Retained device state (0.4.0):** `railway/state/devices/{device_id}` carries the registered device snapshot:
 
@@ -175,6 +181,20 @@ The broker does not set `timestamp_server`; the scheduler does, on consumption. 
 `tag_assignment`: emitted by `assigns_tags` device. Payload: `tag_id`, `assigned_kind` (`marker` | `vehicle`), `target_id` (the marker_id or train_id this tag refers to), optional `marker_kind` (from the shared `MarkerKind` enum), optional `marker_name` (0.12.0 — the marker's operator label), metadata. Updates the tag→entity map. Honoured only if the emitting device declared `core.assigns_tags`.
 
 `anomaly`: emitted by anything; describes unexpected conditions: unknown tags, missed-marker timeouts, two trains in one block, switch position contradicting command. Free-form description, severity.
+
+`device_disconnected`: a device left (shutdown or removal). Handled by the scheduler, which runs each capability's disconnect hook, forgets the device and releases anything it held. It has no TypeBox schema in `packages/protocol`.
+
+`topology_violation` *(added 0.6.0; [ADR-019](../adr/019-topology-violation-handling.md))*: a train under a bounded route reported a marker unreachable from where it was. Emitted by the scheduler, not retained.
+
+`zone_state_changed` *(added 0.8.0; [ADR-026](../adr/026-delegated-capacity-territory.md))*: emitted by a `gates_zone` device. Payload: `zone_marker_id`, `capacity`, `occupancy`.
+
+`train_length_changed` *(added 0.9.0; [ADR-023](../adr/023-coupling-and-decoupling.md))*: emitted by a `reports_length` device. Payload: `train_id`, `train_length_mm`.
+
+`zone_train_released` *(added 0.10.0; [ADR-027](../adr/027-zone-interior-handoff.md))*: a zone device hands a held train back to core authority. The train departs only under ordinary clearance.
+
+`device_discovered` *(added 0.14.0; [ADR-035](../adr/035-device-onboarding-and-pairing.md))*: a bridge relays an unpaired device's announce so the garage can offer to scan it. Payload: `device_ref`, `device_kind_hint`.
+
+`device_association` *(added 0.14.0; ADR-035)*: binds a discovered `device_ref` to the marker `tag_id` the operator scanned.
 
 `train_introduced` *(added 0.15.0; [ADR-036](../adr/036-train-introduction-and-activation.md))*: the resolved position and heading of a newly-introduced train. Payload: `train_id`, `marker_id` (the marker at which the vector resolved), `heading_edge` (the directed edge the train is currently traversing — its canonical heading). Emitted by the core when the two-marker introduction roll completes, or by a `core.provides_train_heading` zone *before* it releases the train, so the vector is always known before the train reaches open track.
 
@@ -252,35 +272,29 @@ Switches are linked to junction markers when a `controls_switch` device register
 
 ## Simulator
 
-The simulator is a bridge fronting virtual devices, presenting the same MQTT protocol as physical hardware. Indistinguishable from real devices to the scheduler.
-
-Models:
-
-- Position, velocity, acceleration of trains, with configurable per-train physics
-- Stopping distance with realistic noise
-- Tag detection with configurable miss rate, double-read rate, detection delay
-- MQTT message jitter and drop rate
-- Battery drain (optional)
-
-Physical and virtual devices may coexist in one running system. The visualiser is a separate MQTT subscriber, also indistinguishable to it.
+The simulator is a physics world with device implementations that present the same MQTT protocol as physical hardware, indistinguishable from real devices to the scheduler. See [simulator-v0.1.md](simulator-v0.1.md). Physical and virtual devices may coexist in one running system, and the visualiser is a separate MQTT subscriber that cannot tell the difference.
 
 ---
 
-## Open questions for v0.3
+## Open questions
 
-The semantics of *stopping at a marker*: distant + home pattern, or single-marker with calibrated overshoot? Probably both should be supported; the API needs to express which a given request is.
+Status of the questions raised for v0.3:
 
-Conflict resolution policy when two trains request clearance into the same edge: first-come, route-priority, train-priority? Needs an explicit policy.
+- **Conflict resolution when two trains request the same edge**: resolved by [ADR-017](../adr/017-conflict-resolution-policy.md) (priority, then registration order, then train id)
+- **Coupling and decoupling**: resolved by narrowing in [ADR-023](../adr/023-coupling-and-decoupling.md); the system models a train's length, never its composition
+- **Multi-gate semantics**: resolved by [ADR-018](../adr/018-multi-gate-semantics.md) (conjunctive AND, any deny vetoes)
+- **Topology violations**: resolved by [ADR-019](../adr/019-topology-violation-handling.md) (expectation-gated hold plus `topology_violation` event)
+- **MQTT versus HTTP query API**: resolved by [ADR-020](../adr/020-http-query-api-split.md) (read-only `GET /api/query/*`; MQTT stays the application transport)
+- **Tag to marker resolution**: resolved by [ADR-007](../adr/007-tag-resolution-registry.md)
+- **ESP-NOW bridge wire format**: resolved by [ADR-021](../adr/021-esp-now-bridge-wire-format.md)
+- **Reverse running**: resolved by [ADR-022](../adr/022-reverse-authority.md) (a bounded, signed `grant_reverse`)
 
-Route plans with conditional branches: "if gate X is held more than Y seconds, divert via edge Z." v0.2 routes are still linear edge sequences.
+Still open:
 
-Coupling and decoupling: trains as multi-vehicle compositions. Currently a train is an atomic entity.
-
-Multi-gate semantics: when several `gates_clearance` devices all gate the same marker, do they AND or have priority?
-
-Topology violations: a train reports a marker that the graph says shouldn't be reachable from where it was. Repair behaviour vs. lockout?
-
-The split between MQTT pub/sub and HTTP query API is currently informal; some queries (current layout snapshot, route planning request) might want a request/reply pattern. MQTT 5 has request/response built in; whether to use it or a separate HTTP server is undecided.
+- The semantics of *stopping at a marker*: distant plus home pattern, or single-marker with calibrated overshoot. The API needs to express which a given request is
+- Route plans with conditional branches ("if gate X is held more than Y seconds, divert via edge Z"). Routes are still linear edge sequences
+- Request/reply for queries such as route planning (MQTT 5 request/response or HTTP). Layout and state queries are covered by ADR-020
+- Authentication and pairing at the broker (spec section "Authentication")
 
 ---
 
@@ -293,6 +307,14 @@ The split between MQTT pub/sub and HTTP query API is currently informal; some qu
 **Changes in 0.6.0:** new `topology_violation` event + optional `block_reason` on the retained clearance state (ADR-019).
 
 **Changes in 0.7.0:** new `grant_reverse` command (ADR-022) — a bounded, signed (backward) clearance the scheduler issues to break an otherwise-unresolvable closed nose-to-nose standoff by backing one train out of an occupied block into track it provably holds. TCF registry epoch 1 → 2.
+
+**Changes in 0.8.0:** new `core.gates_zone` capability, `zone_state_changed` event and `ZoneRetainedState` (ADR-026): a device owns a capacity-limited territory (a railyard) and gates admission by its own asserted occupancy. TCF registry epoch 2 → 3.
+
+**Changes in 0.9.0:** new `core.reports_length` capability and `train_length_changed` event (ADR-023): a device may assert a train's physical length at runtime. Honoured only from a `core.reports_length` device. TCF registry epoch 3 → 4.
+
+**Changes in 0.10.0:** new `core.can_reverse` capability and `zone_train_released` event (ADR-027): the zone interior handoff. A train is admitted to a zone only if it declared `core.can_reverse`. TCF registry epoch 4 → 5.
+
+**Changes in 0.11.0:** optional `owned_marker_ids` on `device_registered` (ADR-034): a `core.gates_zone` device declares the interior markers it owns.
 
 **Changes in 0.12.0:** garage device commissioning (design 2026-06-23). `device_registered` and the retained `railway/state/devices/{device_id}` payload gain operator-authored `name` + `livery` (presentation only; carried in the retained snapshot so a late-joining display sees them). `controls_marker_id` is promoted to a first-class field on `device_registered` (previously read by the scheduler via an out-of-schema cast, so a spec-conformant third-party `core.controls_switch` device had nowhere to declare which junction it throws). `tag_assignment` and `assign_tag` gain `marker_name` (naming a marker at bind time). `assign_tag`'s `marker_kind` is tightened from a free string to the shared `MarkerKind` enum, matching the `tag_assignment` event. `name`, `livery`, `marker_name`, and `marker_kind` are presentation annotations — the scheduler reasons on capabilities + topology only and never branches on them.
 

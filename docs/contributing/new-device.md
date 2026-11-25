@@ -1,6 +1,6 @@
 # Building a new device type
 
-This guide walks you through creating a new device for the Smart Railway from scratch. By the end, you'll have a working device that runs against the simulator-hosted server with no changes to the core codebase.
+This guide walks you through creating a new device for the Smart Railway from scratch. By the end, you'll have a working device, tested in the physics simulator against the real server, with no changes to the core codebase.
 
 The example device is a **panic button**: a physical button that, when pressed, withholds clearance everywhere on the layout until released. It's the simplest possible new device (one capability, one event) but the workflow is the same for arbitrarily complex ones.
 
@@ -14,7 +14,7 @@ You only need to engage with the core project if (a) you want a new core capabil
 
 ## What you do need
 
-- An MQTT broker accessible from your device (the dev server runs Mosquitto on `localhost:1883`)
+- An MQTT broker accessible from your device (`pnpm services` runs Mosquitto and `tf-server` on `localhost:1883`)
 - A way to send and receive MQTT messages (any MQTT client library, in any language)
 - A device manifest describing what your device does
 - Optionally: a visualiser plugin if you want custom rendering
@@ -29,10 +29,10 @@ Create a file `manifest.json` describing your device. This is the contract betwe
   "vendor": "com.yourname.panicbutton",
   "device_kind": "panic_button",
   "version": "0.1.0",
-  "protocol_version": "0.2.0",
+  "protocol_version": "0.15.0",
   "display_name": "Panic button",
   "description": "A big red button. Press to halt all clearance grants on the layout. Press again to release.",
-  "capabilities": ["gates_clearance"],
+  "capabilities": ["core.gates_clearance"],
   "configuration": [
     {
       "key": "gated_marker_ids",
@@ -83,7 +83,7 @@ function publish(eventType: string, payload: object) {
     device_id: DEVICE_ID,
     timestamp_device: new Date().toISOString(),
     event_type: eventType,
-    protocol_version: '0.2.0',
+    protocol_version: '0.15.0',
     payload,
   };
   client.publish(`railway/events/${eventType}/${DEVICE_ID}`, JSON.stringify(envelope), {
@@ -135,53 +135,78 @@ That's the entire device. ~50 lines, all behaviour explicit, no framework magic.
 
 ## Step 3: Test against the simulator
 
-Before connecting your physical button to anything, test against the simulator:
+The panic button is a clearance gate, and the simulator already ships one: `GateDevice` (`packages/simulator/src/devices/gate-device.ts`). It is the reference for how a device is structured. A device takes a `PlatformProvider` (its only link to core, [ADR-031](../adr/031-provider-boundary-platform-and-honest-actuators.md)) and registers with `registerDevice`, so the same class runs against an in-memory bus in tests and against MQTT in production.
+
+To try a device against a live stack, start the broker, server and visualiser, then run the toy table (it hosts simulated devices) or your own process:
 
 ```bash
-# In one terminal: start the broker, server, and simulator
-pnpm dev
-
-# In another: run your device with no GPIO, simulating button presses via stdin
-DEVICE_ID=test-panic-1 BROKER=mqtt://localhost:1883 \
-  pnpm tsx packages/devices/panicbutton/src/dev-harness.ts
+pnpm services          # Mosquitto plus tf-server (discovery mode)
+pnpm dev:stack         # or: the full dev stack including the toy table and visualiser
 ```
 
-The `dev-harness.ts` you write alongside the production device strips out the GPIO and reads `press`/`release` lines from stdin. Same MQTT logic, fake input. Exactly the pattern that makes the simulator-first approach work.
-
-In the visualiser (open `http://localhost:3000`), you should see your device appear in the device list with the icon and colour from your manifest. Spawn a virtual train, give it a route, press your button: the train should stop at its current clearance limit. Release the button: it should proceed.
-
-If the visualiser shows the device but the train doesn't respond to gate state, double-check: are the marker IDs in `GATED_MARKER_IDS` actually markers on the train's route? The gate only affects clearance at markers it's configured for.
+Run your device with `DEVICE_ID=test-panic-1 BROKER=mqtt://localhost:1883`. It should appear in the visualiser's devices panel. If a gate does not hold a train, check that the marker IDs it gates are actually on the train's route.
 
 ## Step 4: Write integration tests
 
-Your device's tests live in your repository, not the core. Use the same simulator the core project uses (it's published as `@smartrailway/simulator`):
+Your device's tests live in your repository. `startPhysicsEnv` (exported from `@trainframe/simulator/physics-env.js`) runs the real server, a real in-memory broker, a real physics world and real devices, with a virtual clock. Nothing is mocked, and `env.advance(ms)` replaces sleeping. This test is taken from `packages/integration/src/multi-gate-clearance.test.ts` and shows the panic-button pattern, a gate holding a train:
 
 ```typescript
-import { startTestEnvironment } from '@smartrailway/simulator/testing';
+import {
+  type PhysicsEnv,
+  startPhysicsEnv,
+  straightLoop,
+} from '@trainframe/simulator/physics-env.js';
+import { afterEach, beforeEach, expect, it } from 'vitest';
 
-describe('panic button', () => {
-  it('halts a moving train when pressed', async () => {
-    const env = await startTestEnvironment({ layout: 'fixtures/simple-loop.json' });
-    const train = await env.spawnTrain('T1');
-    const button = await env.attachDevice('./manifest.json', './src/index.ts', {
-      env: { GATED_MARKER_IDS: 'M1,M2,M3,M4' },
-    });
+let env: PhysicsEnv;
+beforeEach(() => {
+  env = startPhysicsEnv(
+    straightLoop(
+      [
+        { id: 'M1', kind: 'block_boundary' },
+        { id: 'M2', kind: 'block_boundary' },
+        { id: 'M3', kind: 'block_boundary' },
+        { id: 'M4', kind: 'block_boundary' },
+      ],
+      { spacingMm: 200, name: 'panic-button' },
+    ),
+  );
+});
+afterEach(() => {
+  env.shutdown();
+});
 
-    await env.assignRoute(train, env.layout.fullLoopRoute());
-    await env.expectTrainMoving(train);
+const grants = (limit: string) =>
+  env
+    .commandsFor('T1')
+    .filter((c) => c.command_type === 'grant_clearance' && c.payload.limit_marker_id === limit);
 
-    await button.press();
-    await env.expectTrainStopped(train, { withinMs: 2000 });
+it('a withholding gate holds the train until it releases', () => {
+  const button = env.spawnGate('PANIC-1', { markers: ['M3'] });
+  button.hold('M3', 'panic button pressed');
 
-    await button.release();
-    await env.expectTrainMoving(train, { withinMs: 1000 });
+  env.spawnTrain('T1', { atMarker: 'M1' });
+  env.assignSchedule('T1', ['M1', 'M3']);
+  env.advance(4000);
+  expect(grants('M3')).toHaveLength(0);
 
-    await env.shutdown();
-  });
+  button.release('M3');
+  env.advance(4000);
+  expect(grants('M3').length).toBeGreaterThanOrEqual(1);
 });
 ```
 
-The test environment runs a real broker (in-process), a real server, the real simulator, and your real device. No mocks. If this passes, your device works.
+To test your own device class instead of `GateDevice`, construct it the way `spawnGate` does, on the env's broker:
+
+```typescript
+import { mqttPlatform } from '@trainframe/simulator/broker/mqtt-platform.js';
+
+const device = new MyDevice('MY-1', { platform: mqttPlatform(env.client, 'MY-1') });
+device.start();
+env.advance(100);
+```
+
+See [the simulator spec](../spec/simulator-v0.1.md) for the full harness API.
 
 ## Step 5: Publish
 
@@ -241,6 +266,6 @@ If you're sure you need one, open an issue first describing the use case. We'll 
 
 **Not handling reconnection.** MQTT clients reconnect automatically, but you need to re-publish your `device_registered` event on reconnect; otherwise the server thinks you've disappeared. The MQTT `clean: true` flag plus republishing on the `connect` event handles this.
 
-**Sending events before registering.** If you publish a `gate_state_changed` before the server has seen your `device_registered`, the server doesn't know what to do with it. Always register first, wait for confirmation (the server publishes `railway/state/devices/{device_id}` as a retained message), then start emitting other events.
+**Sending events before registering.** If you publish a `gate_state_changed` before the server has seen your `device_registered`, the server doesn't know what to do with it. Always register first, wait for confirmation (the server publishes `railway/state/devices/{device_id}` as a retained message), then start emitting other events. `registerDevice` does this in the right order.
 
 **Tagging events with the wrong device_id.** A bridge publishing on behalf of a constrained device must use the *originating* device's ID, not its own. Otherwise the visualiser shows everything as coming from the bridge.

@@ -1,5 +1,7 @@
 # State Lifecycle Management Implementation Plan
 
+> **Status: shipped.** Delivered on main: `LayoutState.pruneOrphanMarkers`, `Scheduler.forgetDevice`, `DELETE /api/trains/:id`, `POST /api/maintenance/{prune-markers,reset}` and the visualiser `MaintenancePanel`. The checkboxes below were never ticked and are kept as the original task list. Note that the `SeededRandom` constraint below refers to the deleted virtual-device simulator.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give the operator a clean way to forget stale state — delete a train from memory, prune orphaned markers, and blank-slate the whole railway — across both the server's memory and the broker's retained messages, surfaced through a cleaner train-management UI.

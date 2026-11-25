@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted. **Not currently implemented**: the overshoot and sensor-miss knobs and the fault profiles lived in the virtual-device simulator deleted in 4759ee6, and the physics world (ADR-030) has no mishap injection. The decision stands as the design for reintroducing it; `SeededRandom` and `VirtualClock` named below no longer exist.
 
 ## Context
 

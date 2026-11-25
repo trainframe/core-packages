@@ -1,6 +1,6 @@
 # ADR-033: The railyard demo runs on the real scheduler (and the yard is in-line)
 
-Status: Accepted
+Status: Accepted. Historical: 49975c1 deleted the branching demo, its scene and `RailyardDemoController`; the interesting railway on `YardZoneDevice` is the one remaining railyard demo.
 
 ## Context
 
@@ -30,8 +30,8 @@ scheduler + broker run in a Node harness, and the devices run as MQTT clients
    - `YardZoneDevice` (`core.gates_zone`) — asserts occupancy so the scheduler
      deny-and-holds trains at the throat (they QUEUE), and runs the interior
      `YardController` on the resident via a `ParentPlatform` (ADR-032).
-   The browser scene (`?physics=branching`) and the headless integration gate run
-   the SAME assembly (`buildBranchingDemo`); only the transport differs.
+   The browser scene (`?physics=branching`, since removed in e0d2aee) and the headless
+   integration gate ran the SAME assembly (`buildBranchingDemo`); only the transport differed.
 
 2. **The yard is IN-LINE, not a branch.** A yard hung off the loop as a
    diverge/rejoin gridlocks a concurrent run: a re-merging yard train and a train
@@ -54,8 +54,9 @@ scheduler + broker run in a Node harness, and the devices run as MQTT clients
 
 - The demo now genuinely demonstrates the platform: emergent routing, clearance,
   junction control and zone queueing, with nothing scripted.
-- The bespoke `?physics=railyard-demo` scene remains (it is a useful pure-physics
-  view), but the headline demo is the scheduler-driven `?physics=branching`.
+- The bespoke railyard-demo scene remained a useful pure-physics view, but the
+  headline demo was the scheduler-driven branching scene (both `?physics=` views were
+  removed in e0d2aee; the assemblies live on in `packages/simulator/src/demo/`).
 - Adding deadlock AVOIDANCE to the scheduler (the open conflict-resolution
   question) would let denser/branch-hung layouts run concurrently without the
   by-construction discipline. Until then, demo layouts must keep a spare block.

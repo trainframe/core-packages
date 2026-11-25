@@ -15,8 +15,7 @@ a fixed rate, owns its own `raise` fraction, connects the link only when fully
 seated and breaks it the instant a raise begins; ADR-031 §2) and a portable
 `LiftBridgeController` (`devices/lift-bridge-controller.ts` — withholds the train
 out while the span is up, lowers it, awaits physical seating, then releases). A
-`?physics=lift-bridge` scenario + view (`components/LiftBridgeScenarioView.tsx`,
-`physics/lift-bridge.ts`) demonstrate a train held short of a raised gap (never
+lift-bridge scenario (`physics/lift-bridge.ts`; the `?physics=lift-bridge` browser view was removed in e0d2aee) demonstrates a train held short of a raised gap (never
 running off), the span lowering, and the train crossing — drawn from the actuator's
 real raise fraction, never animated. Unit-tested (`network.test.ts`, `world.test.ts`,
 `link-actuator.test.ts`, `lift-bridge-controller.test.ts`) and harnessed
@@ -29,7 +28,7 @@ swing: seen from above, the leaf **foreshortens toward its hinge** (plan-view
 length compresses as it tilts up), its dark underside end face comes into view
 at the free end, it floats on a longer cast shadow, and the gap opens beyond
 it. The proof runs: scanning registers `BRIDGE-{piece.id}` with
-`core.gates_clearance` (a real `VirtualGate`); the "Raise span" affordance
+`core.gates_clearance` (a real `GateDevice`); the "Raise span" affordance
 withholds clearance across the bridge's own marker the instant it is pressed,
 and "Lower span" grants it — the drawn deck state is read off the gate, so the
 picture can never disagree with the wire. Confirmed-clear-before-raising

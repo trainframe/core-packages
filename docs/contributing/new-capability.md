@@ -106,20 +106,24 @@ describe('myCapability', () => {
 
 These tests validate behaviour without any infrastructure.
 
-For end-to-end validation, write a simulator integration test:
+For end-to-end validation, register the capability on a real `Server` through `ServerOptions.extraCapabilities` and drive it over the broker, the way `packages/server/src/server.test.ts` does:
 
 ```typescript
-import { Simulation } from '@trainframe/simulator';
+import { Server, InMemoryBrokerClient } from '@trainframe/server';
 import { myCapability } from './my-capability.js';
 
-it('end to end: my capability changes train behaviour', () => {
-  const sim = new Simulation({
-    layout: testLayout,
-    extraCapabilities: [myCapability],
-  });
-  // ... drive the simulation, assert outcomes
+const client = new InMemoryBrokerClient();
+const server = new Server({
+  layout: SIMPLE_LOOP,
+  client,
+  extraCapabilities: [myCapability],
 });
+server.start();
+// publish device_registered declaring 'com.yourname.my_capability',
+// publish your custom events, assert on client.published
 ```
+
+`startPhysicsEnv` does not take extra capabilities. For a test that needs real moving trains alongside your capability, build the server with `extraCapabilities` and add physics devices as `startPhysicsEnv` does (see [the simulator spec](../spec/simulator-v0.1.md)).
 
 ## Step 4: Register at platform startup
 

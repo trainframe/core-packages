@@ -2,9 +2,10 @@
 
 ## Status
 
-Accepted. **Partially implemented** — the load-bearing seam (capacity/occupancy
-admission) is built; the opaque-interior maneuvering is modelled in the simulator
-device and specified here for a later core handoff. Additive minor bump
+Accepted — implemented. The capacity/occupancy admission seam is built here; the
+core handoff this ADR deferred landed in [ADR-027](027-zone-interior-handoff.md),
+and the interior maneuvering lives in the simulator devices (ADR-029, ADR-030).
+Additive minor bump
 (0.7.0 → 0.8.0): one new capability, one new event, one new retained-state shape.
 
 Builds on:

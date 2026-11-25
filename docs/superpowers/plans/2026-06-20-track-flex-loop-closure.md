@@ -1,5 +1,7 @@
 # Track Flex & Loop Closure Implementation Plan
 
+> **Status: shipped, then revised.** The flex model and solver exist in `packages/simulator/src/track/` (`flex.ts`, `flex-solver.ts`) and the toy table uses them. The live-bend design in this plan was later reworked into bake-on-release and an authoritative geometric connection (see the specs in `docs/superpowers/specs/` dated 2026-06-21 and 2026-06-22). The checkboxes below were never ticked and are kept as the original task list.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make closing a track loop in the toybox viable by giving joints a small, bounded, persistent flex — with live bending on drag, a closure flash, and a one-shot wave when a local loop closes — plus fix the 30 mm-straight snapping bug.

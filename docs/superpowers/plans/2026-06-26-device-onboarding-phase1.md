@@ -1,5 +1,7 @@
 # Device Onboarding — Phase 1 (+ placement fix + registration abstraction) Implementation Plan
 
+> **Status: shipped.** Phase 1 landed with protocol 0.13.0 (`valid_positions` on `device_registered`) and the shared `registerDevice` seam; Phases 2 and 3 followed (ADR-035). The checkboxes below were never ticked and are kept as the original task list.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development or executing-plans. Steps use `- [ ]` checkboxes.
 
 **Goal:** Make the operator's real layout learnable live — junctions materialise in discovery so `LearnMode.armJunctions` surveys both legs and learning completes — plus the independent toy-table device-placement fix and the shared device-registration abstraction that Phase 2 will hang the pairing lifecycle on. Full contract: `.goal.md`.
