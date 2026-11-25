@@ -22,6 +22,7 @@ import { Aedes } from 'aedes';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { BeaconDevice } from '../devices/beacon-device.js';
 import { InProcessBus, inProcessPlatform } from '../devices/platform-provider.js';
+import { deterministicEnvelopeSource } from '../envelope-source.js';
 import { MqttBrokerClient } from './mqtt-client.js';
 import { mqttPlatform } from './mqtt-platform.js';
 
@@ -88,7 +89,7 @@ describe('mqttPlatform — over a real aedes broker', () => {
   });
 
   it('publishes a device event onto the real broker topic', async () => {
-    const platform = mqttPlatform(client, DEVICE);
+    const platform = mqttPlatform(client, DEVICE, deterministicEnvelopeSource());
     const seen: string[] = [];
     /* A second client subscribes to the device's event topic, as the server would. */
     const sub = new MqttBrokerClient();
@@ -107,7 +108,7 @@ describe('mqttPlatform — over a real aedes broker', () => {
   });
 
   it('decodes a real command off the broker and hands it to onCommand', async () => {
-    const platform = mqttPlatform(client, DEVICE);
+    const platform = mqttPlatform(client, DEVICE, deterministicEnvelopeSource());
     const beacon = new BeaconDevice(DEVICE, platform);
     beacon.start();
     await delay(80);
@@ -158,7 +159,10 @@ describe('mqttPlatform — over a real aedes broker', () => {
     });
 
     /* --- MQTT edge backing, SAME device shape, SAME script --- */
-    const mqttBeacon = new BeaconDevice(DEVICE, mqttPlatform(client, DEVICE));
+    const mqttBeacon = new BeaconDevice(
+      DEVICE,
+      mqttPlatform(client, DEVICE, deterministicEnvelopeSource()),
+    );
     const mqttEvents: string[] = [];
     const sub = new MqttBrokerClient();
     sub.connect(url);

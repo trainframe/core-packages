@@ -1,9 +1,10 @@
-import { type CoreCommand, type CoreEvent, PROTOCOL_VERSION } from '@trainframe/protocol';
+import type { CoreCommand, CoreEvent } from '@trainframe/protocol';
 import type {
   CommandHandler,
   CommissionSpec,
   PlatformProvider,
 } from '../devices/platform-provider.js';
+import { buildCoreCommand } from '../envelope.js';
 import type { EspNowLink, PeerId } from './espnow-link.js';
 
 /**
@@ -91,7 +92,7 @@ export function espNowPlatform(
       options.onPersist?.(msg.tagId);
       registerWith(msg.tagId);
     } else if (msg.kind === 'command' && commandHandler !== undefined) {
-      commandHandler(reconstructCommand(msg.commandType, msg.payload, deviceId));
+      deliverCommand(commandHandler, msg.commandType, msg.payload, deviceId);
     }
   };
 
@@ -133,20 +134,31 @@ export function espNowPlatform(
   };
 }
 
-/** Rebuild a minimal `CoreCommand` envelope from a relayed command frame, so the
- *  device's existing `handle(command)` reads `command_type` + `payload` exactly
- *  as it would off the bus. */
+/** Hand a relayed command frame to the device, unless it fails validation. */
+function deliverCommand(
+  handler: CommandHandler,
+  commandType: string,
+  payload: unknown,
+  deviceId: string | undefined,
+): void {
+  const command = reconstructCommand(commandType, payload, deviceId);
+  if (command !== undefined) handler(command);
+}
+
+/** Rebuild a `CoreCommand` envelope from a relayed command frame, so the device's
+ *  existing `handle(command)` reads `command_type` + `payload` exactly as it would
+ *  off the bus. A frame naming an unknown command type or carrying a payload that
+ *  fails the protocol schema is dropped. */
 function reconstructCommand(
   commandType: string,
   payload: unknown,
   deviceId: string | undefined,
-): CoreCommand {
-  return {
+): CoreCommand | undefined {
+  return buildCoreCommand({
     command_id: 'espnow',
     device_id: deviceId ?? 'unknown',
     timestamp_server: new Date(0).toISOString(),
     command_type: commandType,
-    protocol_version: PROTOCOL_VERSION,
     payload,
-  } as unknown as CoreCommand;
+  });
 }

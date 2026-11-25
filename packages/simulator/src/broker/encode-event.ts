@@ -14,10 +14,10 @@ export interface EncodedDeviceEvent {
 }
 
 export interface EncodeDeviceEventOptions {
-  /** Generates a fresh envelope ID. Defaults to `crypto.randomUUID`. */
-  readonly newId?: () => string;
-  /** Returns the current ISO-8601 timestamp. Defaults to `new Date().toISOString()`. */
-  readonly now?: () => string;
+  /** Generates a fresh envelope ID. */
+  readonly newId: () => string;
+  /** Returns the current ISO-8601 timestamp. */
+  readonly now: () => string;
 }
 
 /**
@@ -29,10 +29,9 @@ export function encodeDeviceEvent(
   event_type: string,
   device_id: string,
   payload: unknown,
-  options: EncodeDeviceEventOptions = {},
+  options: EncodeDeviceEventOptions,
 ): EncodedDeviceEvent {
-  const newId = options.newId ?? defaultNewId;
-  const now = options.now ?? defaultNow;
+  const { newId, now } = options;
   const envelope = {
     event_id: newId(),
     device_id,
@@ -45,16 +44,4 @@ export function encodeDeviceEvent(
     topic: topics.event(event_type, device_id),
     payload: new TextEncoder().encode(JSON.stringify(envelope)),
   };
-}
-
-function defaultNewId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  // Fallback for very old runtimes — the UI never hits this path in practice.
-  return `id-${Math.floor(Math.random() * 1e12).toString(36)}`;
-}
-
-function defaultNow(): string {
-  return new Date().toISOString();
 }

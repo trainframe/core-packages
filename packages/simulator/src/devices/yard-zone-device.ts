@@ -426,9 +426,7 @@ export class YardZoneDevice {
         heading_edge: { from_marker_id: this.d.scene.throatMarker, to_marker_id: exit },
       },
     };
-    /* `TrainIntroduced` is a member of `CoreEvent`; the plain object literal satisfies
-     *  it, so the cast is sound. Confined here, named, not sprinkled. */
-    return event as unknown as CoreEvent;
+    return event;
   }
 
   private releasedEvent(trainId: string): CoreEvent {

@@ -188,6 +188,8 @@ export interface ToyHardwareOptions {
   readonly client: BrokerClient;
   /** Override UUID generator. Browser default is `crypto.randomUUID`. */
   readonly newId?: () => string;
+  /** Envelope timestamp source; the server re-stamps, so the epoch default is inert. */
+  readonly now?: () => string;
   /** Cap on real elapsed ms forwarded to the world per tick (default 200). */
   readonly maxTickMs?: number;
 }
@@ -210,6 +212,7 @@ interface LiveYard {
 export class ToyHardware {
   private readonly client: BrokerClient;
   private readonly newId: () => string;
+  private readonly now: () => string;
   private readonly maxTickMs: number;
 
   private world: PhysicsWorld;
@@ -255,6 +258,7 @@ export class ToyHardware {
   constructor(options: ToyHardwareOptions) {
     this.client = options.client;
     this.newId = options.newId ?? defaultNewId;
+    this.now = options.now ?? (() => new Date(0).toISOString());
     this.maxTickMs = options.maxTickMs ?? 200;
     this.layout = { name: 'toy-table', markers: [], edges: [], junctions: [] };
     this.compiled = compileNetwork([]);
@@ -670,6 +674,7 @@ export class ToyHardware {
       lengthMm,
       canReverse: true,
       newId: this.newId,
+      now: this.now,
     });
     device.start();
     /* Resume a preserved train mid-run: route, clearance, and motion are
@@ -728,6 +733,7 @@ export class ToyHardware {
       platform: this.platformFor(deviceId),
       markers: [markerId],
       newId: this.newId,
+      now: this.now,
     });
     device.start();
     this.gates.set(deviceId, device);
@@ -755,6 +761,7 @@ export class ToyHardware {
       junctionMarkerId,
       positions,
       newId: this.newId,
+      now: this.now,
     });
     device.start();
     this.switches.set(deviceId, device);
@@ -974,7 +981,7 @@ export class ToyHardware {
   /** Each device gets its OWN platform over the shared broker — there is no single
    *  bridge any more; every device publishes / subscribes for itself, as on hardware. */
   private platformFor(deviceId: string): PlatformProvider {
-    return mqttPlatform(this.client, deviceId, { newId: this.newId });
+    return mqttPlatform(this.client, deviceId, { newId: this.newId, now: this.now });
   }
 
   /** The marker points the marker sensors read — every logical marker at its world

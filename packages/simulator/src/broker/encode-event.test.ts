@@ -1,5 +1,6 @@
 import { PROTOCOL_VERSION } from '@trainframe/protocol';
 import { describe, expect, it } from 'vitest';
+import { deterministicEnvelopeSource } from '../envelope-source.js';
 import { encodeDeviceEvent } from './encode-event.js';
 
 describe('encodeDeviceEvent', () => {
@@ -22,11 +23,11 @@ describe('encodeDeviceEvent', () => {
     });
   });
 
-  it('falls back to default newId / now when options are omitted', () => {
-    const { payload } = encodeDeviceEvent('tag_observed', 'T-2', { tag_id: 'M1' });
+  it('stamps ids and timestamps from the injected source', () => {
+    const source = deterministicEnvelopeSource();
+    const { payload } = encodeDeviceEvent('tag_observed', 'T-2', { tag_id: 'M1' }, source);
     const envelope = JSON.parse(new TextDecoder().decode(payload)) as Record<string, unknown>;
-    expect(typeof envelope.event_id).toBe('string');
-    expect((envelope.event_id as string).length).toBeGreaterThan(0);
-    expect(typeof envelope.timestamp_device).toBe('string');
+    expect(envelope.event_id).toBe('id-1');
+    expect(envelope.timestamp_device).toBe('1970-01-01T00:00:00.000Z');
   });
 });

@@ -23,6 +23,7 @@ import {
   MqttBrokerClient,
   buildInterestingRailwayDemo,
   buildMainLoopScene,
+  deterministicEnvelopeSource,
   interestingToLayout,
   mqttPlatform,
 } from '@trainframe/simulator';
@@ -56,13 +57,14 @@ async function startRig(layout: Layout): Promise<Rig> {
   await harness.testClient.seedIdentityTags(layout.markers.map((m) => m.id));
 
   const deviceClients: MqttBrokerClient[] = [];
+  const envelope = deterministicEnvelopeSource();
   const platformFactory = (deviceId: string) => {
     const client = new MqttBrokerClient();
     deviceClients.push(client);
     client.connect(harness.brokerUrl);
-    return mqttPlatform(client, deviceId);
+    return mqttPlatform(client, deviceId, envelope);
   };
-  const demo = buildInterestingRailwayDemo(platformFactory);
+  const demo = buildInterestingRailwayDemo(platformFactory, envelope);
   await delay(400);
   demo.start();
 

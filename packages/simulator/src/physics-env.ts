@@ -30,6 +30,7 @@ import { mqttPlatform } from './broker/mqtt-platform.js';
 import { GateDevice } from './devices/gate-device.js';
 import { ScheduledTrainDevice } from './devices/scheduled-train-device.js';
 import { SwitchDevice } from './devices/switch-device.js';
+import { buildCoreEvent } from './envelope.js';
 import { type RailNetwork, buildNetwork } from './physics/network.js';
 import type { Rail } from './physics/rail.js';
 import { PhysicsWorld } from './physics/world.js';
@@ -505,18 +506,40 @@ function seedIdentityTags(
     description: 'Mints identity tag assignments for the test layout.',
     capabilities: ['core.assigns_tags'],
   });
-  garage.publish(tagEvent('device_registered', { capabilities: ['core.assigns_tags'] }));
+  garage.publish(
+    tagEvent(
+      'device_registered',
+      { capabilities: ['core.assigns_tags'], device_kind_hint: 'tag-garage' },
+      newId,
+      now,
+    ),
+  );
   for (const id of markerIds) {
     garage.publish(
-      tagEvent('tag_assignment', { tag_id: id, assigned_kind: 'marker', target_id: id }),
+      tagEvent(
+        'tag_assignment',
+        { tag_id: id, assigned_kind: 'marker', target_id: id },
+        newId,
+        now,
+      ),
     );
   }
 }
 
-/** A bare GARAGE event for the platform to publish. The open envelope is sound on
- *  the wire (the broker re-encodes JSON); coerced to `CoreEvent` once, here. */
-function tagEvent(eventType: CoreEvent['event_type'], payload: Record<string, unknown>): CoreEvent {
-  return { event_type: eventType, payload } as unknown as CoreEvent;
+/** A GARAGE event for the platform to publish; the platform re-stamps the transport envelope. */
+function tagEvent(
+  eventType: CoreEvent['event_type'],
+  payload: Record<string, unknown>,
+  newId: () => string,
+  now: () => string,
+): CoreEvent {
+  return buildCoreEvent({
+    event_id: newId(),
+    device_id: 'GARAGE',
+    timestamp_device: now(),
+    event_type: eventType,
+    payload,
+  });
 }
 
 interface WireEnvelope {

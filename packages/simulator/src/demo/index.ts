@@ -24,3 +24,5 @@ export { PhysicsWorld } from '../physics/world.js';
 export { mqttPlatform } from '../broker/mqtt-platform.js';
 export { MqttBrokerClient } from '../broker/mqtt-client.js';
 export type { BrokerClient } from '../broker/client.js';
+export { deterministicEnvelopeSource } from '../envelope-source.js';
+export type { EnvelopeSource } from '../envelope-source.js';

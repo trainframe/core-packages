@@ -20,6 +20,7 @@ import {
   PROTOCOL_VERSION,
   type SetSwitchPosition,
 } from '@trainframe/protocol';
+import { buildCoreEvent } from '../envelope.js';
 import type { PlatformProvider } from './platform-provider.js';
 import { registerDevice } from './registerable-device.js';
 import type { SwitchActuator } from './switch-actuator.js';
@@ -37,11 +38,11 @@ export interface SwitchDeviceDeps {
   readonly junctionMarkerId?: string;
   /** The valid positions for this junction (e.g. `['thru','branch']`). */
   readonly positions: readonly string[];
-  /** Fresh envelope id source. Defaults to `crypto.randomUUID`. The mqtt edge
-   *  re-stamps the envelope anyway; injectable for deterministic tests. */
-  readonly newId?: () => string;
-  /** Current ISO-8601 timestamp source. Defaults to `new Date().toISOString()`. */
-  readonly now?: () => string;
+  /** Fresh envelope id source. The mqtt edge re-stamps
+   *  the envelope anyway. */
+  readonly newId: () => string;
+  /** Current ISO-8601 timestamp source. */
+  readonly now: () => string;
 }
 
 export class SwitchDevice {
@@ -57,8 +58,8 @@ export class SwitchDevice {
   constructor(deviceId: string, deps: SwitchDeviceDeps) {
     this.id = deviceId;
     this.d = deps;
-    this.newId = deps.newId ?? defaultNewId;
-    this.now = deps.now ?? defaultNow;
+    this.newId = deps.newId;
+    this.now = deps.now;
     this.resolvedMarker = deps.junctionMarkerId;
   }
 
@@ -139,39 +140,17 @@ export class SwitchDevice {
     });
   }
 
-  /**
-   * Build a `CoreEvent` envelope. THE single sound coercion point in this file:
-   * the `device_registered` payload carries an extra `controls_marker_id` field
-   * the protocol schema models loosely (the scheduler reads it off the payload;
-   * the TypeBox object is open, so it survives validation on the wire). We type
-   * `payload` as the open record it really is and coerce the assembled envelope
-   * to the `CoreEvent` union once, here, rather than sprinkling casts. The
-   * `event_type` is constrained to the union's literals, so the discriminant is
-   * always valid.
-   */
+  /** Assemble a schema-validated `CoreEvent` envelope for this device. */
   private envelope(
     eventType: CoreEvent['event_type'],
     payload: Readonly<Record<string, unknown>>,
   ): CoreEvent {
-    const env = {
+    return buildCoreEvent({
       event_id: this.newId(),
       device_id: this.id,
       timestamp_device: this.now(),
       event_type: eventType,
-      protocol_version: PROTOCOL_VERSION,
       payload,
-    };
-    return env as unknown as CoreEvent;
+    });
   }
-}
-
-function defaultNewId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return `id-${Date.now().toString(36)}`;
-}
-
-function defaultNow(): string {
-  return new Date().toISOString();
 }

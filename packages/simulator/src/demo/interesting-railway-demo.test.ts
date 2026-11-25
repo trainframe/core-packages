@@ -12,13 +12,15 @@
 import { PROTOCOL_VERSION } from '@trainframe/protocol';
 import { describe, expect, it } from 'vitest';
 import { InProcessBus, inProcessPlatform } from '../devices/platform-provider.js';
+import { deterministicEnvelopeSource } from '../envelope-source.js';
 import { buildInterestingRailwayDemo } from './interesting-railway-demo.js';
 
 const DT = 1 / 60;
 
 function setup() {
   const bus = new InProcessBus();
-  const demo = buildInterestingRailwayDemo((id) => inProcessPlatform(bus, id));
+  const envelope = deterministicEnvelopeSource();
+  const demo = buildInterestingRailwayDemo((id) => inProcessPlatform(bus, id), envelope);
   return { bus, demo };
 }
 

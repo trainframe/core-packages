@@ -32,6 +32,7 @@ import {
   PROTOCOL_VERSION,
   type SetTargetSpeed,
 } from '@trainframe/protocol';
+import { buildCoreEvent } from '../envelope.js';
 import type { Motion } from '../physics/observation.js';
 import type { MarkerSensor } from './marker-sensor.js';
 import type { MotorActuator } from './motor-actuator.js';
@@ -74,10 +75,10 @@ export interface ScheduledTrainDeps {
   /** Nominal forward speed (mm/s) the device assumes for dead reckoning. A real
    *  loco knows only its motor state, not its speed; this is its best guess. */
   readonly nominalSpeedMmS?: number;
-  /** Fresh envelope id source. Defaults to `crypto.randomUUID`. */
-  readonly newId?: () => string;
-  /** Current ISO-8601 timestamp source. Defaults to `new Date().toISOString()`. */
-  readonly now?: () => string;
+  /** Fresh envelope id source. */
+  readonly newId: () => string;
+  /** Current ISO-8601 timestamp source. */
+  readonly now: () => string;
 }
 
 /** Default dead-reckoning speed (mm/s) — the device's assumed running pace. */
@@ -138,8 +139,8 @@ export class ScheduledTrainDevice {
   constructor(deviceId: string, deps: ScheduledTrainDeps) {
     this.id = deviceId;
     this.d = deps;
-    this.newId = deps.newId ?? defaultNewId;
-    this.now = deps.now ?? defaultNow;
+    this.newId = deps.newId;
+    this.now = deps.now;
     this.nominalSpeed = deps.nominalSpeedMmS ?? DEFAULT_NOMINAL_SPEED;
   }
 
@@ -494,29 +495,18 @@ export class ScheduledTrainDevice {
     return this.envelope('train_status', payload);
   }
 
-  /**
-   * Build a `CoreEvent` envelope. THE single sound coercion point in this file:
-   * `device_registered` carries an extra `train_length_mm`/capability shape and
-   * `train_status` carries an optional `current_edge`, all modelled by open
-   * TypeBox objects (the scheduler reads the fields it needs; extras survive
-   * validation on the wire). We type `payload` as the open record it really is
-   * and coerce the assembled envelope to the `CoreEvent` union once, here, rather
-   * than sprinkling casts. `event_type` is constrained to the union's literals so
-   * the discriminant is always valid.
-   */
+  /** Assemble a schema-validated `CoreEvent` envelope for this device. */
   private envelope(
     eventType: CoreEvent['event_type'],
     payload: Readonly<Record<string, unknown>>,
   ): CoreEvent {
-    const env = {
+    return buildCoreEvent({
       event_id: this.newId(),
       device_id: this.id,
       timestamp_device: this.now(),
       event_type: eventType,
-      protocol_version: PROTOCOL_VERSION,
       payload,
-    };
-    return env as unknown as CoreEvent;
+    });
   }
 }
 
@@ -536,15 +526,4 @@ function narrow<T extends CoreCommand>(
   type: T['command_type'],
 ): T | undefined {
   return command.command_type === type ? (command as T) : undefined;
-}
-
-function defaultNewId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return `id-${Date.now().toString(36)}`;
-}
-
-function defaultNow(): string {
-  return new Date().toISOString();
 }

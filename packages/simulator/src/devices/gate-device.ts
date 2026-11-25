@@ -27,6 +27,7 @@ import {
   PROTOCOL_VERSION,
   type ReleaseGate,
 } from '@trainframe/protocol';
+import { buildCoreEvent } from '../envelope.js';
 import type { PlatformProvider } from './platform-provider.js';
 import { registerDevice } from './registerable-device.js';
 
@@ -39,11 +40,11 @@ export interface GateDeviceDeps {
   /** Markers withheld from the moment it registers (a gate that starts CLOSED).
    *  Each emits an initial `gate_state_changed{withholding}` on `start()`. */
   readonly initialWithheld?: readonly string[];
-  /** Fresh envelope id source. Defaults to `crypto.randomUUID`. The mqtt edge
-   *  re-stamps the envelope anyway; injectable for deterministic tests. */
-  readonly newId?: () => string;
-  /** Current ISO-8601 timestamp source. Defaults to `new Date().toISOString()`. */
-  readonly now?: () => string;
+  /** Fresh envelope id source. The mqtt edge re-stamps
+   *  the envelope anyway. */
+  readonly newId: () => string;
+  /** Current ISO-8601 timestamp source. */
+  readonly now: () => string;
 }
 
 export class GateDevice {
@@ -57,8 +58,8 @@ export class GateDevice {
   constructor(deviceId: string, deps: GateDeviceDeps) {
     this.id = deviceId;
     this.d = deps;
-    this.newId = deps.newId ?? defaultNewId;
-    this.now = deps.now ?? defaultNow;
+    this.newId = deps.newId;
+    this.now = deps.now;
   }
 
   get deviceId(): string {
@@ -146,36 +147,17 @@ export class GateDevice {
     });
   }
 
-  /**
-   * Build a `CoreEvent` envelope. The single sound coercion point in this file:
-   * the protocol's `CoreEvent` union models payloads per `event_type`; we assemble
-   * the open record the wire actually carries and coerce once, here, rather than
-   * sprinkling casts. The `event_type` is constrained to the union's literals, so
-   * the discriminant is always valid.
-   */
+  /** Assemble a schema-validated `CoreEvent` envelope for this device. */
   private envelope(
     eventType: CoreEvent['event_type'],
     payload: Readonly<Record<string, unknown>>,
   ): CoreEvent {
-    const env = {
+    return buildCoreEvent({
       event_id: this.newId(),
       device_id: this.id,
       timestamp_device: this.now(),
       event_type: eventType,
-      protocol_version: PROTOCOL_VERSION,
       payload,
-    };
-    return env as unknown as CoreEvent;
+    });
   }
-}
-
-function defaultNewId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-  return `id-${Date.now().toString(36)}`;
-}
-
-function defaultNow(): string {
-  return new Date().toISOString();
 }

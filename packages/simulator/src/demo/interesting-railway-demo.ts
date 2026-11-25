@@ -27,6 +27,7 @@ import type { PlatformProvider } from '../devices/platform-provider.js';
 import { ScheduledTrainDevice } from '../devices/scheduled-train-device.js';
 import { SwitchDevice } from '../devices/switch-device.js';
 import { YardZoneDevice } from '../devices/yard-zone-device.js';
+import type { EnvelopeSource } from '../envelope-source.js';
 import { discoverGantryYard } from '../physics/gantry-yard.js';
 import { type MainLoopScene, buildMainLoopScene } from '../physics/interesting-layout.js';
 import {
@@ -193,6 +194,7 @@ function nearestStoppedLoco(world: PhysicsWorld, x: number, y: number, r: number
  *  to its transport (the same assembly runs over MQTT in a harness or the browser). */
 export function buildInterestingRailwayDemo(
   platformFactory: PlatformFactory,
+  envelope: EnvelopeSource,
 ): InterestingRailwayDemo {
   const scene = buildMainLoopScene();
   const ml = buildInterestingMarkers(scene);
@@ -215,6 +217,7 @@ export function buildInterestingRailwayDemo(
       layout,
       lengthMm: 60 + t.cars * 68,
       canReverse: true,
+      ...envelope,
     });
   });
 
@@ -228,6 +231,7 @@ export function buildInterestingRailwayDemo(
         actuator: physicsSwitchActuator(world, j.switchId),
         junctionMarkerId: j.markerId,
         positions: j.positions,
+        ...envelope,
       }),
   );
 

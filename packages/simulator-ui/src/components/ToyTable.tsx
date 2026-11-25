@@ -87,6 +87,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } fro
 import { useBroker } from '../broker/broker-context.js';
 import type { ToyHardware } from '../sim/toy-hardware.js';
 import { useToyHardware } from '../sim/use-toy-hardware.js';
+import { wallClockEnvelopeSource } from '../sim/wall-clock-envelope.js';
 import { ClosureWave } from './ClosureWave.js';
 import { ConnectionStatus } from './ConnectionStatus.js';
 import { ScanBox } from './ScanBox.js';
@@ -1579,7 +1580,12 @@ export function ToyTable({ initialUrl }: ToyTableProps) {
         if (piece === undefined) continue;
         if (!isWireDevice(piece.type)) continue;
         const device_id = deviceIdForDevicePiece(piece);
-        const { topic, payload } = encodeDeviceEvent('device_disconnected', device_id, {});
+        const { topic, payload } = encodeDeviceEvent(
+          'device_disconnected',
+          device_id,
+          {},
+          wallClockEnvelopeSource,
+        );
         client.publish(topic, payload);
       }
     }
@@ -4308,21 +4314,31 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
     // own length); a point train would deadlock a diverging junction such as
     // the bridge demo's J1. Mirrors the length spawned into the sim by
     // ToyHardware so the wire payload and physics agree.
-    const reg = encodeDeviceEvent('device_registered', device_id, {
-      // `core.can_reverse` so the train may be admitted into a railyard zone
-      // (ADR-027 — the interior is worked by shunting). Toy locos can be pushed,
-      // so every toy-table train declares it.
-      capabilities: ['core.controls_motion', 'core.accepts_route', 'core.can_reverse'],
-      train_length_mm: TRAIN_LENGTH_MM,
-    });
+    const reg = encodeDeviceEvent(
+      'device_registered',
+      device_id,
+      {
+        // `core.can_reverse` so the train may be admitted into a railyard zone
+        // (ADR-027 — the interior is worked by shunting). Toy locos can be pushed,
+        // so every toy-table train declares it.
+        capabilities: ['core.controls_motion', 'core.accepts_route', 'core.can_reverse'],
+        train_length_mm: TRAIN_LENGTH_MM,
+      },
+      wallClockEnvelopeSource,
+    );
     client.publish(reg.topic, reg.payload);
     return false;
   }
   if (piece.type === 'gate') {
     const device_id = deviceIdForDevicePiece(piece);
-    const reg = encodeDeviceEvent('device_registered', device_id, {
-      capabilities: ['core.gates_clearance'],
-    });
+    const reg = encodeDeviceEvent(
+      'device_registered',
+      device_id,
+      {
+        capabilities: ['core.gates_clearance'],
+      },
+      wallClockEnvelopeSource,
+    );
     client.publish(reg.topic, reg.payload);
     return false;
   }
@@ -4335,27 +4351,42 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
     // zone_state_changed from the sim device. Note: NO early return — fall
     // through so the GARAGE binds its `M-{id}` marker too.
     const device_id = deviceIdForDevicePiece(piece);
-    const reg = encodeDeviceEvent('device_registered', device_id, {
-      capabilities: ['core.gates_zone', 'core.reports_length'],
-    });
+    const reg = encodeDeviceEvent(
+      'device_registered',
+      device_id,
+      {
+        capabilities: ['core.gates_zone', 'core.reports_length'],
+      },
+      wallClockEnvelopeSource,
+    );
     client.publish(reg.topic, reg.payload);
   }
   // Track piece — announce GARAGE if needed, then bind the tag.
   let announced = false;
   if (!garageRegistered) {
-    const reg = encodeDeviceEvent('device_registered', GARAGE_DEVICE_ID, {
-      capabilities: ['core.assigns_tags'],
-    });
+    const reg = encodeDeviceEvent(
+      'device_registered',
+      GARAGE_DEVICE_ID,
+      {
+        capabilities: ['core.assigns_tags'],
+      },
+      wallClockEnvelopeSource,
+    );
     client.publish(reg.topic, reg.payload);
     announced = true;
   }
   const markerId = `M-${piece.id}`;
-  const assignment = encodeDeviceEvent('tag_assignment', GARAGE_DEVICE_ID, {
-    tag_id: markerId,
-    assigned_kind: 'marker',
-    target_id: markerId,
-    marker_kind: pieceMarkerKind(piece.type),
-  });
+  const assignment = encodeDeviceEvent(
+    'tag_assignment',
+    GARAGE_DEVICE_ID,
+    {
+      tag_id: markerId,
+      assigned_kind: 'marker',
+      target_id: markerId,
+      marker_kind: pieceMarkerKind(piece.type),
+    },
+    wallClockEnvelopeSource,
+  );
   client.publish(assignment.topic, assignment.payload);
 
   // Some track pieces carry a companion device that registers alongside the
@@ -4363,10 +4394,15 @@ function scanPiece(client: BrokerClient, piece: TrackPiece, garageRegistered: bo
   // or an experimental piece's trackside identity.
   const companion = TRACK_COMPANION_DEVICES[piece.type];
   if (companion !== undefined) {
-    const reg = encodeDeviceEvent('device_registered', `${companion.prefix}${piece.id}`, {
-      capabilities: [...companion.capabilities],
-      ...(companion.controlsMarker === true ? { controls_marker_id: markerId } : {}),
-    });
+    const reg = encodeDeviceEvent(
+      'device_registered',
+      `${companion.prefix}${piece.id}`,
+      {
+        capabilities: [...companion.capabilities],
+        ...(companion.controlsMarker === true ? { controls_marker_id: markerId } : {}),
+      },
+      wallClockEnvelopeSource,
+    );
     client.publish(reg.topic, reg.payload);
   }
 
