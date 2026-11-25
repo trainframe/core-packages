@@ -1,4 +1,5 @@
 import type { SchedulerEffect } from './effects.js';
+import type { TrainState } from './train-state.js';
 
 /**
  * Single ownership of a piece of track (ADR-034). A marker under a
@@ -16,4 +17,18 @@ export interface MarkerOwnership {
 /** Where a train's resolved marker read goes once identity has authorised it. */
 export interface MarkerCrossings {
   handleTrainCrossing(trainId: string, markerId: string): ReadonlyArray<SchedulerEffect>;
+}
+
+/**
+ * Re-run the clearance horizon for every train, in the total order, after a
+ * change that may have freed track. `skipTrainIds` keeps a train that was just
+ * made to give ground from re-taking it in the same pass.
+ */
+export interface ClearanceRetry {
+  retryBlockedClearances(skipTrainIds?: ReadonlySet<string>): ReadonlyArray<SchedulerEffect>;
+}
+
+/** Move a train's schedule on to its next stop and plan the leg there. */
+export interface ScheduleAdvance {
+  advanceScheduleAndReplan(train: TrainState): ReadonlyArray<SchedulerEffect>;
 }

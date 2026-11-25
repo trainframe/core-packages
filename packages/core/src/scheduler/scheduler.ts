@@ -1,14 +1,21 @@
 import type { CapabilityRegistry } from '../registry.js';
 import { DeviceTable, readRegistration } from './devices.js';
-import { type SchedulerEffect, effects, grantClearancePayload } from './effects.js';
+import {
+  type SchedulerEffect,
+  clearanceStateEffect,
+  effects,
+  grantClearancePayload,
+} from './effects.js';
 import { IdentityAndTags } from './identity.js';
 import type { LayoutState } from './layout-state.js';
 import { planTransit } from './planner.js';
+import type { MarkerOwnership } from './seams.js';
 import { SwitchControl } from './switches.js';
 import type { TagRegistry } from './tag-registry.js';
 import { TrainRoster, compareTrains } from './train-roster.js';
 import type { TrainState } from './train-state.js';
 import { type EdgeRef, anyEdgeSharesMarker, edgeSharesMarker, edgesEqual } from './types.js';
+import { ZoneAuthority } from './zones.js';
 
 /**
  * Deterministic dwell at a scheduled stop, in milliseconds. When a train
@@ -95,6 +102,7 @@ export class Scheduler {
   private readonly switches: SwitchControl;
   private readonly trains = new TrainRoster();
   private readonly identity: IdentityAndTags;
+  private readonly zones: ZoneAuthority;
   /**
    * The set of trains currently part of a detected waits-for cycle (sorted,
    * for stable equality checks). Kept on the scheduler so we only publish a
@@ -102,22 +110,6 @@ export class Scheduler {
    * actually changes — not on every event.
    */
   private currentDeadlock: ReadonlyArray<string> = [];
-  /**
-   * Zone boundary marker id → owning `core.gates_zone` device id (ADR-027).
-   * Populated from `zone_state_changed`. Lets the scheduler recognise a zone
-   * boundary so it can suspend a train that pulls in (entry) and gate admission
-   * on `core.can_reverse` — the new coupling ADR-026 implied but did not build.
-   */
-  private readonly zoneBoundaries = new Map<string, string>();
-  /**
-   * Interior marker id → owning `core.gates_zone` device id (ADR-034). Populated
-   * from `owned_marker_ids` on `device_registered` — the track "under the frame".
-   * Core only RECORDS the declared list; it never computes which markers fall
-   * under a frame (the device derives that from its own footprint, ADR-031). The
-   * scheduler uses it to enforce single ownership: nothing else may control a
-   * marker a frame owns.
-   */
-  private readonly zoneOwnedMarkers = new Map<string, string>();
   private readonly now: () => number;
 
   constructor(
@@ -127,10 +119,17 @@ export class Scheduler {
   ) {
     this.now = options.now;
     this.devices = new DeviceTable(registry);
-    this.switches = new SwitchControl(
-      layout,
-      { zoneOwnerOf: (markerId) => this.zoneOwnedMarkers.get(markerId) },
-      this.now,
+    const ownership: MarkerOwnership = {
+      zoneOwnerOf: (markerId) => this.zones.ownerOf(markerId),
+      switchOwnerOf: (markerId) => layout.switchDeviceForMarker(markerId),
+    };
+    this.switches = new SwitchControl(layout, ownership, this.now);
+    this.zones = new ZoneAuthority(
+      this.devices,
+      this.trains,
+      ownership,
+      { retryBlockedClearances: (skip) => this.retryBlockedClearances(skip) },
+      { advanceScheduleAndReplan: (train) => this.advanceScheduleAndReplan(train) },
     );
     this.identity = new IdentityAndTags(this.devices, this.trains, layout, {
       handleTrainCrossing: (trainId, markerId) => this.handleTrainCrossing(trainId, markerId),
@@ -172,8 +171,7 @@ export class Scheduler {
     this.identity.reset();
     this.currentDeadlock = [];
     this.switches.reset();
-    this.zoneBoundaries.clear();
-    this.zoneOwnedMarkers.clear();
+    this.zones.reset();
     this.layout.reset();
   }
 
@@ -209,7 +207,7 @@ export class Scheduler {
       case 'zone_state_changed':
         return this.handleZoneStateChanged(event);
       case 'zone_train_released':
-        return this.handleZoneTrainReleased(event.device_id, event.payload);
+        return this.zones.handleTrainReleased(event.device_id, event.payload);
       case 'train_introduced':
         return this.handleTrainIntroducedEvent(event.device_id, event.payload);
       default:
@@ -235,7 +233,7 @@ export class Scheduler {
 
     const ownership: SchedulerEffect[] = [];
     if (capabilities.includes('core.gates_zone')) {
-      ownership.push(...this.recordZoneOwnership(deviceId, payload));
+      ownership.push(...this.zones.recordOwnership(deviceId, reg.owned_marker_ids));
     }
     if (capabilities.includes('core.controls_switch')) {
       ownership.push(
@@ -260,44 +258,10 @@ export class Scheduler {
     return [...ownership, effects.updateState('devices', deviceId, deviceState)];
   }
 
-  /**
-   * Record the interior markers a `core.gates_zone` device declares it owns
-   * (ADR-034) — the track "under the frame". Core only records the declared list;
-   * it never computes which markers these are. Single ownership is enforced: a
-   * marker already owned by another device (a second frame, or a switch device
-   * already controlling it) is refused with an anomaly and left with its first
-   * owner — two things cannot own the same piece of track.
-   */
-  private recordZoneOwnership(deviceId: string, payload: unknown): ReadonlyArray<SchedulerEffect> {
-    const owned = (payload as { owned_marker_ids?: unknown }).owned_marker_ids;
-    if (!Array.isArray(owned)) return [];
-    const anomalies: SchedulerEffect[] = [];
-    for (const markerId of owned) {
-      if (typeof markerId !== 'string') continue;
-      const zoneOwner = this.zoneOwnedMarkers.get(markerId);
-      const switchOwner = this.layout.switchDeviceForMarker(markerId);
-      const conflict =
-        (zoneOwner !== undefined && zoneOwner !== deviceId) ||
-        (switchOwner !== undefined && switchOwner !== deviceId);
-      if (conflict) {
-        const other = zoneOwner ?? switchOwner;
-        anomalies.push(
-          effects.publishEvent('anomaly', {
-            severity: 'warning',
-            description: `Device ${deviceId} cannot own marker ${markerId}: already owned by ${other}`,
-          }),
-        );
-        continue;
-      }
-      this.zoneOwnedMarkers.set(markerId, deviceId);
-    }
-    return anomalies;
-  }
-
   /** The `core.gates_zone` device that owns `markerId` as interior (under its
    *  frame, ADR-034), or undefined if no frame has declared it. */
   ownerOfZoneMarker(markerId: string): string | undefined {
-    return this.zoneOwnedMarkers.get(markerId);
+    return this.zones.ownerOf(markerId);
   }
 
   // ---------- device disconnect ----------
@@ -318,7 +282,8 @@ export class Scheduler {
     if (!device) return [];
 
     const out = this.devices.runDisconnectHooks(device);
-    out.push(...this.forgetDeviceTrackAuthority(deviceId));
+    out.push(...this.zones.forgetDevice(deviceId));
+    this.switches.forgetDevice(deviceId);
     this.devices.remove(deviceId);
     /*
      * Tombstone the retained device registration. Without this the broker keeps
@@ -345,53 +310,6 @@ export class Scheduler {
     return out;
   }
 
-  /**
-   * Drop what a departing device controlled on the track: the interior markers
-   * a zone owned (ADR-034), the zone boundaries it gated (ADR-027) and the
-   * junctions a switch device actuated, along with any switch position we had
-   * asked it for, so a replacement device is asked afresh and nothing is sent to
-   * the dead one. A train suspended inside a vanished zone has no known position
-   * any more (the zone held it in its opaque interior), so it goes back off the
-   * map (ADR-036) and must be introduced again before it is routed.
-   */
-  private forgetDeviceTrackAuthority(deviceId: string): ReadonlyArray<SchedulerEffect> {
-    for (const [markerId, owner] of [...this.zoneOwnedMarkers]) {
-      if (owner === deviceId) this.zoneOwnedMarkers.delete(markerId);
-    }
-    this.switches.forgetDevice(deviceId);
-    const out: SchedulerEffect[] = [];
-    for (const [boundaryMarkerId, owner] of [...this.zoneBoundaries]) {
-      if (owner !== deviceId) continue;
-      this.zoneBoundaries.delete(boundaryMarkerId);
-      for (const train of this.trains.values()) {
-        if (train.in_zone === boundaryMarkerId) {
-          out.push(...this.takeOffMapAfterZoneLoss(train, deviceId));
-        }
-      }
-    }
-    return out;
-  }
-
-  private takeOffMapAfterZoneLoss(
-    train: TrainState,
-    zoneDeviceId: string,
-  ): ReadonlyArray<SchedulerEffect> {
-    train.in_zone = undefined;
-    train.introduced = undefined;
-    train.last_marker_id = undefined;
-    train.current_edge = undefined;
-    train.zone_entry_edge = undefined;
-    train.transit = undefined;
-    train.dwell_until = undefined;
-    return [
-      effects.publishEvent('anomaly', {
-        severity: 'warning',
-        description: `Zone device ${zoneDeviceId} disconnected with train ${train.train_id} inside; its position is unknown and it must be introduced again`,
-      }),
-      this.deviceStateEffect(train.train_id),
-    ];
-  }
-
   // ---------- zone interior handoff (ADR-027) ----------
 
   /**
@@ -404,35 +322,8 @@ export class Scheduler {
     device_id: string;
     payload: unknown;
   }): ReadonlyArray<SchedulerEffect> {
-    const { zone_marker_id } = event.payload as { zone_marker_id?: string };
-    if (typeof zone_marker_id === 'string') {
-      this.zoneBoundaries.set(zone_marker_id, event.device_id);
-    }
+    this.zones.recordBoundary(event.device_id, event.payload);
     return this.dispatchToCapabilities(event);
-  }
-
-  /** True if the train declared `core.can_reverse` (ADR-027). */
-  private trainCanReverse(trainId: string): boolean {
-    return this.devices.declares(trainId, 'core.can_reverse');
-  }
-
-  /** True if `markerId` is the terminus of the train's current transit. */
-  private transitTerminatesAt(train: TrainState, markerId: string): boolean {
-    if (!train.transit) return false;
-    const idx = train.transit.progress_index;
-    return (
-      train.transit.edges[idx]?.to_marker_id === markerId && idx + 1 >= train.transit.edges.length
-    );
-  }
-
-  /**
-   * True if an admitted train arriving at `markerId` is pulling into a zone:
-   * the marker is a zone boundary and the train's route terminates there (a
-   * pass-through train, whose terminus lies past the boundary, is not entering).
-   * ADR-027 §2.
-   */
-  private isZoneEntry(train: TrainState, markerId: string): boolean {
-    return this.zoneBoundaries.has(markerId) && this.transitTerminatesAt(train, markerId);
   }
 
   /**
@@ -456,78 +347,6 @@ export class Scheduler {
         ? [effects.updateState('layout', this.layout.name, this.layout.toLayout())]
         : [];
     return { effects: out, inDiscoveryMode };
-  }
-
-  /**
-   * An admitted train has reached a zone boundary as its route terminus — it is
-   * pulling into the device's opaque interior. Suspend it: it holds no core
-   * block (the throat frees for the next admission), core routes it no further,
-   * and it stays put until the owning device emits `zone_train_released`. Zone
-   * fullness is the device's asserted count (ADR-026), not block exclusivity.
-   */
-  private handleZoneEntry(train: TrainState, markerId: string): ReadonlyArray<SchedulerEffect> {
-    train.in_zone = markerId;
-    train.transit = undefined;
-    // Preserve the arrival heading before dropping the edge, so the zone resume
-    // sends the train onward (out the far side) instead of reversing back in.
-    train.zone_entry_edge = train.current_edge;
-    train.current_edge = undefined;
-    train.clearance_limit_marker_id = markerId;
-    const hadEdges = train.cleared_edges.length > 0;
-    train.cleared_edges = [];
-
-    const out: SchedulerEffect[] = [];
-    if (hadEdges) out.push(this.clearanceStateEffect(train));
-    // The throat (and approach) just freed — let a waiting train be admitted.
-    out.push(...this.retryBlockedClearances());
-    return out;
-  }
-
-  /**
-   * The owning device releases a held train back to core authority. Reclaim it
-   * at the throat: clear `in_zone` and resume normal scheduling. The train
-   * departs onward only under ordinary clearance (main-line block exclusivity
-   * holds — the device never drives a train across the throat). Honoured only
-   * from the device that owns the zone boundary.
-   */
-  private handleZoneTrainReleased(
-    deviceId: string,
-    payload: unknown,
-  ): ReadonlyArray<SchedulerEffect> {
-    const { zone_marker_id, train_id } = payload as {
-      zone_marker_id: string;
-      train_id: string;
-    };
-
-    if (this.zoneBoundaries.get(zone_marker_id) !== deviceId) {
-      return [
-        effects.publishEvent('anomaly', {
-          severity: 'warning',
-          description: `Device ${deviceId} released a train from zone ${zone_marker_id} it does not own`,
-        }),
-      ];
-    }
-
-    const train = this.trains.get(train_id);
-    if (!train || train.in_zone !== zone_marker_id) return [];
-
-    train.in_zone = undefined;
-
-    /* Cyclic resume (ADR-028): if the train is running a schedule whose CURRENT
-     * stop is this yard, the yard was just a stop on its loop — advance the
-     * schedule and plan the onward leg itself, exactly as a station dwell does
-     * on expiry. The train drives out under ordinary clearance (block
-     * exclusivity still holds — the device only released it, it did not move
-     * it). Otherwise this was a one-off route into the yard: leave the train
-     * parked at the throat, reclaimed, awaiting a fresh route. Either branch
-     * retries peers that may have been waiting on the freed throat. */
-    if (
-      train.schedule &&
-      train.schedule.stops[train.schedule.current_stop_index] === zone_marker_id
-    ) {
-      return this.advanceScheduleAndReplan(train);
-    }
-    return [...this.retryBlockedClearances()];
   }
 
   /**
@@ -628,8 +447,8 @@ export class Scheduler {
      * before the normal release/horizon logic — it parks at the throat and is
      * handed to the device until released. A pass-through train (boundary is
      * not its terminus) is untouched and continues normally. */
-    if (this.isZoneEntry(train, markerId)) {
-      return this.handleZoneEntry(train, markerId);
+    if (this.zones.isEntry(train, markerId)) {
+      return this.zones.enter(train, markerId);
     }
 
     /* `block_reason` is NOT cleared here. A topology hold is lifted ONLY by an
@@ -677,7 +496,7 @@ export class Scheduler {
     // the edge we just crossed is still inferred after this traversal.
     const out: SchedulerEffect[] = [];
     if (edgesReleased) {
-      out.push(this.clearanceStateEffect(train));
+      out.push(clearanceStateEffect(train));
     }
     const { effects: discoveryEffects, inDiscoveryMode } = this.recordTraversalAndDiscovery(
       previousMarker,
@@ -839,7 +658,7 @@ export class Scheduler {
         suspected_cause: this.suspectedCause(lastKnownMarkerId, reportedMarkerId),
         detected_at_ms: this.now(),
       }),
-      this.clearanceStateEffect(train),
+      clearanceStateEffect(train),
     ];
   }
 
@@ -1164,31 +983,8 @@ export class Scheduler {
         'grant_clearance',
         grantClearancePayload(nextEdge.to_marker_id, [nextEdge]),
       ),
-      this.clearanceStateEffect(train),
+      clearanceStateEffect(train),
     ];
-  }
-
-  /**
-   * Emit a retained-state snapshot of which edges this train currently holds.
-   * Published every time `cleared_edges` is mutated (grant, release, revoke,
-   * disconnect). An empty array clears the visual — the visualiser drops the
-   * train's overlay entries when it sees [].
-   */
-  private clearanceStateEffect(train: TrainState): SchedulerEffect {
-    /* ADR-019: when the scheduler is holding this train for a reason it owns
-     * (currently only `'unknown_topology'`), surface it here — on the retained
-     * clearance state the scheduler already publishes, NOT on the train-emitted
-     * `train_status`. The field is omitted entirely when the train is not so
-     * held (exactOptionalPropertyTypes: an absent field, never `undefined`). */
-    const base = {
-      train_id: train.train_id,
-      cleared_edges: train.cleared_edges,
-    };
-    return effects.updateState(
-      'clearance',
-      train.train_id,
-      train.block_reason === undefined ? base : { ...base, block_reason: train.block_reason },
-    );
   }
 
   // ---------- switch state ----------
@@ -1281,7 +1077,7 @@ export class Scheduler {
     train.cleared_edges = train.cleared_edges.filter(
       (e) => !edgesToRelease.some((r) => edgesEqual(r, e)),
     );
-    return [this.clearanceStateEffect(train), ...this.retryBlockedClearances()];
+    return [clearanceStateEffect(train), ...this.retryBlockedClearances()];
   }
 
   /**
@@ -1510,7 +1306,7 @@ export class Scheduler {
         reason: 'deadlock_yield',
         immediate: true,
       }),
-      this.clearanceStateEffect(victim),
+      clearanceStateEffect(victim),
     ];
     /* Re-run the grant loop with the victim skipped so it cannot re-grab the
      * block it just yielded, letting the higher-ranked peers proceed. This
@@ -1747,7 +1543,7 @@ export class Scheduler {
         edges: plan.releasedEdges,
         reason: 'deadlock_reverse',
       }),
-      this.clearanceStateEffect(victim),
+      clearanceStateEffect(victim),
     ];
     out.push(...this.retryBlockedClearances(new Set([victim.train_id])));
     return out;
@@ -2086,7 +1882,7 @@ export class Scheduler {
       if (!train.cleared_edges.some((e) => edgesEqual(e, headingEdge))) {
         train.cleared_edges = [...train.cleared_edges, headingEdge];
       }
-      out.push(this.clearanceStateEffect(train));
+      out.push(clearanceStateEffect(train));
     }
     out.push(...this.retryBlockedClearances());
     return out;
@@ -2125,7 +1921,7 @@ export class Scheduler {
         block_edge: headingEdge,
         reason: 'resolved vector co-occupies a block held by another train',
       }),
-      this.clearanceStateEffect(train),
+      clearanceStateEffect(train),
     );
     return out;
   }
@@ -2333,19 +2129,8 @@ export class Scheduler {
       return [];
     }
 
-    /* Reverse-admission gate (ADR-027): a zone interior is worked by shunting,
-     * which needs reversing. A train routed INTO a zone (its terminus is a zone
-     * boundary) must declare `core.can_reverse`, or it would pull in and get
-     * stuck. Refuse the route. A pass-through train (terminus past the boundary)
-     * is unaffected — its terminus is not a zone boundary. */
-    if (this.zoneBoundaries.has(targetStop) && !this.trainCanReverse(train.train_id)) {
-      return [
-        effects.publishEvent('anomaly', {
-          severity: 'warning',
-          description: `Train ${train.train_id} routed into zone ${targetStop} without core.can_reverse; refusing admission`,
-        }),
-      ];
-    }
+    const refusal = this.zones.admissionRefusal(train, targetStop);
+    if (refusal) return [refusal];
 
     train.transit = { edges: transitEdges, progress_index: 0 };
     const firstEdge = transitEdges[0];
@@ -2418,7 +2203,7 @@ export class Scheduler {
         reason: 'admin',
         immediate: true,
       }),
-      this.clearanceStateEffect(train),
+      clearanceStateEffect(train),
       ...this.retryBlockedClearances(new Set([trainId])),
     ];
   }
@@ -2445,7 +2230,7 @@ export class Scheduler {
     train.clearance_limit_marker_id = confirmedMarkerId;
     train.transit = undefined;
 
-    return [this.clearanceStateEffect(train), ...this.resumeAfterRecovery(train)];
+    return [clearanceStateEffect(train), ...this.resumeAfterRecovery(train)];
   }
 
   /**
@@ -2478,7 +2263,7 @@ export class Scheduler {
 
     return [
       effects.updateState('layout', this.layout.name, this.layout.toLayout()),
-      this.clearanceStateEffect(train),
+      clearanceStateEffect(train),
       ...this.resumeAfterRecovery(train),
     ];
   }

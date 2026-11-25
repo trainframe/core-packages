@@ -1,3 +1,4 @@
+import type { TrainState } from './train-state.js';
 import type { EdgeRef } from './types.js';
 
 /**
@@ -58,3 +59,25 @@ export const grantClearancePayload = (
   reason: 'route extension',
   edges_newly_cleared: edgesNewlyCleared,
 });
+
+/**
+ * The retained-state snapshot of which edges a train currently holds, published
+ * every time its `cleared_edges` changes (grant, release, revoke, disconnect).
+ * An empty array clears the visual: the visualiser drops the train's overlay
+ * entries when it sees [].
+ *
+ * A hold the scheduler owns (ADR-019, currently only `'unknown_topology'`) is
+ * surfaced here as `block_reason`, not on the train-emitted `train_status`. The
+ * field is absent, never `undefined`, when the train is not so held.
+ */
+export function clearanceStateEffect(train: TrainState): SchedulerEffect {
+  const base = {
+    train_id: train.train_id,
+    cleared_edges: train.cleared_edges,
+  };
+  return effects.updateState(
+    'clearance',
+    train.train_id,
+    train.block_reason === undefined ? base : { ...base, block_reason: train.block_reason },
+  );
+}
