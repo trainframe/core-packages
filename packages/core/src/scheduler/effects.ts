@@ -1,4 +1,4 @@
-import type { TrainState } from './train-state.js';
+import { type TrainState, occupiedEdges } from './train-state.js';
 import type { EdgeRef } from './types.js';
 
 /**
@@ -63,6 +63,7 @@ export const grantClearancePayload = (
 /**
  * The retained-state snapshot of which edges a train currently holds, published
  * every time its `cleared_edges` changes (grant, release, revoke, disconnect).
+ * A standing block is held too, so it is listed with them.
  * An empty array clears the visual: the visualiser drops the train's overlay
  * entries when it sees [].
  *
@@ -73,7 +74,7 @@ export const grantClearancePayload = (
 export function clearanceStateEffect(train: TrainState): SchedulerEffect {
   const base = {
     train_id: train.train_id,
-    cleared_edges: train.cleared_edges,
+    cleared_edges: occupiedEdges(train),
   };
   return effects.updateState(
     'clearance',

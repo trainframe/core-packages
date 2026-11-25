@@ -2,7 +2,7 @@ import type { DeviceTable } from './devices.js';
 import { type SchedulerEffect, clearanceStateEffect, effects } from './effects.js';
 import type { ClearanceRetry, TransitPlanning } from './seams.js';
 import type { TrainRoster } from './train-roster.js';
-import type { TrainState } from './train-state.js';
+import { type TrainState, occupiedEdges } from './train-state.js';
 import { type EdgeRef, edgesEqual } from './types.js';
 
 /**
@@ -172,6 +172,7 @@ export class TrainIntroduction {
     train.last_marker_id = markerId;
     train.introduced = true;
     train.cleared_edges = [];
+    train.standing_edge = undefined;
 
     const out: SchedulerEffect[] = [];
 
@@ -206,32 +207,29 @@ export class TrainIntroduction {
     /* Update the retained device state to carry `introduced: true`. */
     out.push(this.devices.stateEffect(train.train_id, train));
 
-    /* No co-occupation. What protects the resolved block from a peer differs by
-     * whether a schedule is waiting and whether the train is STOPPED or MOVING:
+    /* What protects the resolved block from a peer depends on whether a schedule
+     * is waiting and whether the train is stopped or moving.
      *
-     *  - PENDING SCHEDULE → start it now. `planAndExecuteCurrentTransit` plans
-     *    the leg and grants the first horizon, which establishes occupancy from
-     *    the PLANNED edges and is released normally as the train drives. We must
-     *    NOT seed `headingEdge` here: it is the block BEHIND the head (the train
-     *    already crossed `headingEdge.to_marker_id` to resolve), so the point-train
-     *    release rule — which drops a held edge only when the train re-crosses
-     *    that edge's END marker — would never release it. Since this path does not
-     *    wipe `cleared_edges` (unlike `assignSchedule`), a seeded `headingEdge`
-     *    would orphan and permanently lock the introduction section. The planned
-     *    grant alone is the correct, self-releasing occupancy.
+     *  - PENDING SCHEDULE: the block is the train's standing block, occupancy
+     *    that is not clearance, and the schedule starts. Planning grants the
+     *    first horizon from the planned edges, and a grant takes the train out
+     *    of its standing block. Until then, a train held behind a peer still
+     *    keeps every other train out of the block it sits in. The block is not
+     *    put in `cleared_edges`: `headingEdge` is either behind the head, where
+     *    the point-train release rule would never drop it, or the first planned
+     *    edge, which the horizon would then count as held and never send.
      *
-     *  - NO SCHEDULE, train STOPPED at the resolved point ('roll'/'zone'/'operator')
-     *    → seed `headingEdge` as occupancy so a peer approaching is excluded under
-     *    block exclusivity (ADR-011, Scenario 6). The train holds this block
-     *    without onward motion clearance; it cannot orphan because `assignSchedule`
-     *    wipes `cleared_edges` when a schedule eventually arrives.
+     *  - NO SCHEDULE, train STOPPED at the resolved point ('roll'/'zone'/'operator'):
+     *    `headingEdge` is seeded as held clearance so a peer approaching is
+     *    excluded (ADR-011, Scenario 6). It cannot orphan because
+     *    `assignSchedule` wipes `cleared_edges` when a schedule arrives.
      *
-     *  - NO SCHEDULE, train MOVING ('discovered') → do NOT seed. The train is
-     *    rolling on (exploring); its block protection comes from its clearance
-     *    GRANTS, not a seed, and a seeded behind-the-head edge would orphan.
-     *    It simply continues; a later schedule routes it normally. */
+     *  - NO SCHEDULE, train MOVING ('discovered'): nothing is seeded. The train
+     *    is exploring; its protection comes from its clearance grants. */
     if (train.schedule) {
+      train.standing_edge = headingEdge;
       out.push(...this.schedules.planAndExecuteCurrentTransit(train));
+      if (train.standing_edge !== undefined) out.push(clearanceStateEffect(train));
     } else if (source !== 'discovered') {
       train.clearance_limit_marker_id = headingEdge.to_marker_id;
       if (!train.cleared_edges.some((e) => edgesEqual(e, headingEdge))) {
@@ -294,8 +292,9 @@ export class TrainIntroduction {
    * block, is the resolvable trailing case (ADR §5 Scenario 4): one train simply
    * follows the other and ordinary block exclusivity holds the one behind.
    *
-   * Every peer counts, introduced or not: a train whose own introduction was
-   * refused still holds its resolved block as occupancy.
+   * Every peer counts, introduced or not, and so does a peer's standing block: a
+   * train whose own introduction was refused still holds its resolved block, and
+   * a train waiting for its first grant stands in its own.
    *
    * Returns the first conflicting peer, or `undefined` if none.
    */
@@ -306,7 +305,7 @@ export class TrainIntroduction {
   ): TrainState | undefined {
     for (const other of this.trains.values()) {
       if (other.train_id === train.train_id) continue;
-      for (const held of other.cleared_edges) {
+      for (const held of occupiedEdges(other)) {
         const sameSection =
           held.from_marker_id === headingEdge.from_marker_id &&
           held.to_marker_id === headingEdge.to_marker_id;

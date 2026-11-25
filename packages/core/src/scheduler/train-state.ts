@@ -1,4 +1,4 @@
-import type { EdgeRef } from './types.js';
+import { type EdgeRef, edgesEqual } from './types.js';
 
 /**
  * Per-train state held by the scheduler. The train itself also holds state
@@ -66,6 +66,14 @@ export interface TrainState {
 
   /** Edges the train is currently cleared for, in order. */
   cleared_edges: ReadonlyArray<EdgeRef>;
+
+  /**
+   * The block a train stands in while it waits for its first grant after
+   * introduction. It is occupancy, not clearance: block exclusivity denies it to
+   * every peer, but the train is never told it may move through it. Given up
+   * when the train is granted onward or moves on (see `leaveStandingBlock`).
+   */
+  standing_edge?: EdgeRef | undefined;
 
   /**
    * Why the scheduler is holding this train, when it is held for a reason it
@@ -176,3 +184,28 @@ export const initialTrainState = (
   priority,
   cleared_edges: [],
 });
+
+/** Every edge a train keeps peers out of: its standing block and its clearance. */
+export function occupiedEdges(train: TrainState): ReadonlyArray<EdgeRef> {
+  return train.standing_edge === undefined
+    ? train.cleared_edges
+    : [train.standing_edge, ...train.cleared_edges];
+}
+
+/**
+ * The train is leaving the block it stood in, onto `nextEdge` when the move is a
+ * grant. A point train occupies only the marker its head is at, so the block
+ * goes. A length-aware train's tail is still in it, so it joins the held edges
+ * behind the head, where tail release frees it once the tail has left. When the
+ * standing block IS the edge being granted, the grant takes it over. Returns
+ * whether the train had a standing block to leave.
+ */
+export function leaveStandingBlock(train: TrainState, nextEdge?: EdgeRef): boolean {
+  const standing = train.standing_edge;
+  if (standing === undefined) return false;
+  train.standing_edge = undefined;
+  const tailStillInside =
+    Boolean(train.length_mm) && !(nextEdge !== undefined && edgesEqual(standing, nextEdge));
+  if (tailStillInside) train.cleared_edges = [standing, ...train.cleared_edges];
+  return true;
+}

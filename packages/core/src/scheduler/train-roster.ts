@@ -1,4 +1,4 @@
-import { type TrainState, initialTrainState } from './train-state.js';
+import { type TrainState, initialTrainState, occupiedEdges } from './train-state.js';
 import { type EdgeRef, anyEdgeSharesMarker, edgeSharesMarker } from './types.js';
 
 /**
@@ -6,7 +6,7 @@ import { type EdgeRef, anyEdgeSharesMarker, edgeSharesMarker } from './types.js'
  * queries that read one train's held clearance against its peers. Block
  * exclusivity (ADR-011), deadlock detection and the introduction conflict check
  * all ask "does another train hold track here?"; this is the one place that
- * walks the peers' `cleared_edges` to answer.
+ * walks the peers' occupied edges to answer.
  */
 export class TrainRoster {
   private readonly trains = new Map<string, TrainState>();
@@ -73,7 +73,7 @@ export class TrainRoster {
   edgeConflictsWithAnotherTrain(trainId: string, edge: EdgeRef): boolean {
     for (const [otherId, other] of this.trains) {
       if (otherId === trainId) continue;
-      for (const held of other.cleared_edges) {
+      for (const held of occupiedEdges(other)) {
         if (edgeSharesMarker(held, edge)) return true;
       }
     }
@@ -84,7 +84,7 @@ export class TrainRoster {
   markerHeldByAnotherTrain(trainId: string, marker: string): boolean {
     for (const [otherId, other] of this.trains) {
       if (otherId === trainId) continue;
-      for (const held of other.cleared_edges) {
+      for (const held of occupiedEdges(other)) {
         if (held.from_marker_id === marker || held.to_marker_id === marker) return true;
       }
     }
@@ -96,7 +96,7 @@ export class TrainRoster {
     const blockers: string[] = [];
     for (const [otherId, other] of this.trains) {
       if (otherId === trainId) continue;
-      if (anyEdgeSharesMarker(other.cleared_edges, wanted)) blockers.push(otherId);
+      if (anyEdgeSharesMarker(occupiedEdges(other), wanted)) blockers.push(otherId);
     }
     return blockers;
   }

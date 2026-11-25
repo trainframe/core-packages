@@ -12,7 +12,7 @@ import { SwitchControl } from './switches.js';
 import type { TagRegistry } from './tag-registry.js';
 import { TopologyGuard } from './topology.js';
 import { TrainRoster } from './train-roster.js';
-import type { TrainState } from './train-state.js';
+import { type TrainState, leaveStandingBlock } from './train-state.js';
 import { type EdgeRef, edgesEqual } from './types.js';
 import { ZoneAuthority } from './zones.js';
 
@@ -371,6 +371,10 @@ export class Scheduler {
 
     const previousMarker = train.last_marker_id;
 
+    /* A train that moves on without a grant (an exploring train whose schedule
+     * is still waiting) has left the block it stood in. */
+    const leftStandingBlock = previousMarker !== markerId && leaveStandingBlock(train);
+
     /* ADR-019 position validation, BEFORE we advance `last_marker_id`, release
      * any block, or call `recordTraversal` (all of which trust the report).
      * P = previousMarker (last certain position), M = markerId.
@@ -433,19 +437,14 @@ export class Scheduler {
     // unprotected, into which a peer can be granted, leading to switch
     // oscillation and deadlock. Switched-junction serialization therefore
     // currently requires length-aware trains; see the keystone test.
-    let edgesReleased = false;
-    if (!train.length_mm || train.length_mm === 0) {
-      const before = train.cleared_edges.length;
-      train.cleared_edges = train.cleared_edges.filter((e) => e.to_marker_id !== markerId);
-      edgesReleased = train.cleared_edges.length !== before;
-    }
+    const edgesReleased = releasePointTrainArrival(train, markerId);
 
     // Discovery: when a train moves from one marker to another, either
     // confirm an existing edge (inferred or not) or learn a new one.
     // The `in_discovery_mode` flag on marker_traversed reflects whether
     // the edge we just crossed is still inferred after this traversal.
     const out: SchedulerEffect[] = [];
-    if (edgesReleased) {
+    if (edgesReleased || leftStandingBlock) {
       out.push(clearanceStateEffect(train));
     }
     const { effects: discoveryEffects, inDiscoveryMode } = this.recordTraversalAndDiscovery(
@@ -736,4 +735,16 @@ export class Scheduler {
   confirmNewTrack(trainId: string): ReadonlyArray<SchedulerEffect> {
     return this.topology.confirmNewTrack(trainId);
   }
+}
+
+/**
+ * A point train releases every held edge ending at the marker its head has just
+ * reached. Returns whether anything was released. A length-aware train releases
+ * nothing here: its tail still occupies those edges (see `handleTrainStatus`).
+ */
+function releasePointTrainArrival(train: TrainState, markerId: string): boolean {
+  if (train.length_mm) return false;
+  const before = train.cleared_edges.length;
+  train.cleared_edges = train.cleared_edges.filter((e) => e.to_marker_id !== markerId);
+  return train.cleared_edges.length !== before;
 }

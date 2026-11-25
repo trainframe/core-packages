@@ -22,6 +22,7 @@ import { CapabilityRegistry } from '../registry.js';
 import type { SchedulerEffect } from './effects.js';
 import { LayoutState } from './layout-state.js';
 import { Scheduler } from './scheduler.js';
+import type { EdgeRef } from './types.js';
 
 /* ---------- layouts ---------- */
 
@@ -784,11 +785,9 @@ describe('ADR-036 §5 — resolution clear of peers (no escalation)', () => {
     expect(scheduler.getTrainState('T1')?.introduced).toBe(true);
 
     /* T1's pending schedule started (transit established). It is waiting on its
-     * first leg M2→M3, which T2 holds — so block exclusivity denies the grant and
-     * T1 holds NO block yet. (With a pending schedule the resolved block is NOT
-     * seeded as a standalone hold — the planned grant is the occupancy, and here
-     * it is withheld until the peer clears. That avoids the orphan-lock a seeded
-     * behind-the-head block would otherwise cause on the auto-start path.) */
+     * first leg M2→M3, which T2 holds, so block exclusivity denies the grant and
+     * T1 holds no clearance yet. Its resolved block is a standing block, not
+     * clearance, so it cannot orphan-lock the introduction section. */
     const t1 = scheduler.getTrainState('T1');
     expect(t1?.transit).toBeDefined();
     const t1HoldsM2M3 = t1?.cleared_edges.some(
@@ -1069,5 +1068,240 @@ describe('ADR-036 §3c — operator-provided vector introduction (introduceTrain
     expect(t1?.introduced).toBeFalsy();
     expect(t1?.transit).toBeUndefined();
     expect(t1?.cleared_edges).toEqual([{ from_marker_id: 'M1', to_marker_id: 'M2' }]);
+  });
+});
+
+/**
+ * An eight-marker loop, long enough for three trains to stand apart:
+ *   M1 -> M2 -> M3 -> M4 -> M5 -> M6 -> M7 -> M8 -> M1
+ */
+const EIGHT_LOOP: Layout = {
+  name: 'eight-loop',
+  markers: ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'M8'].map((id) => ({
+    id,
+    kind: 'block_boundary' as const,
+  })),
+  edges: [
+    ['M1', 'M2'],
+    ['M2', 'M3'],
+    ['M3', 'M4'],
+    ['M4', 'M5'],
+    ['M5', 'M6'],
+    ['M6', 'M7'],
+    ['M7', 'M8'],
+    ['M8', 'M1'],
+  ].map(([from, to]) => ({
+    from_marker_id: from as string,
+    to_marker_id: to as string,
+    estimated_length_mm: 200,
+  })),
+  junctions: [],
+};
+
+const heldEdges = (scheduler: Scheduler, trainId: string): ReadonlyArray<string> =>
+  (scheduler.getTrainState(trainId)?.cleared_edges ?? []).map(
+    (e) => `${e.from_marker_id}->${e.to_marker_id}`,
+  );
+
+const grantedEdges = (effs: ReadonlyArray<SchedulerEffect>, trainId: string): string[] =>
+  effs.flatMap((e) =>
+    e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === trainId
+      ? (e.payload as { edges_newly_cleared: ReadonlyArray<EdgeRef> }).edges_newly_cleared.map(
+          (edge) => `${edge.from_marker_id}->${edge.to_marker_id}`,
+        )
+      : [],
+  );
+
+/**
+ * T2 runs ahead holding M3->M4..M5->M6. Returns the scheduler with T2 placed,
+ * ready for T1 to be introduced behind it with a pending schedule.
+ */
+const leaderAheadOnEightLoop = (): Scheduler => {
+  const scheduler = makeScheduler(EIGHT_LOOP);
+  registerTrain(scheduler, 'T2');
+  rollIntroduce(scheduler, 'T2', 'M2', 'M3');
+  scheduler.assignSchedule('T2', 'route-t2', ['M3', 'M6']);
+  expect(heldEdges(scheduler, 'T2')).toEqual(['M3->M4', 'M4->M5', 'M5->M6']);
+  return scheduler;
+};
+
+/** A third train approaching from behind T1, introduced and routed towards M3. */
+const approachFromBehind = (scheduler: Scheduler): ReadonlyArray<SchedulerEffect> => {
+  registerTrain(scheduler, 'T3');
+  rollIntroduce(scheduler, 'T3', 'M6', 'M7');
+  return scheduler.assignSchedule('T3', 'route-t3', ['M7', 'M3']);
+};
+
+describe('a waiting introduced train is protected by the block it stands in', () => {
+  it('a third train is not granted into the block a roll-introduced train waits in', () => {
+    const scheduler = leaderAheadOnEightLoop();
+
+    /* T1 rolls onto M1->M2 and stands at M2 waiting for M2->M3, which shares M3
+     * with T2's clearance. */
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-t1', ['M2', 'M5']);
+    const resolution = rollIntroduce(scheduler, 'T1', 'M1', 'M2');
+    expect(scheduler.getTrainState('T1')?.introduced).toBe(true);
+    expect(heldEdges(scheduler, 'T1')).toEqual([]);
+    expect(findStateUpdate(resolution, 'clearance', 'T1')?.state).toEqual({
+      train_id: 'T1',
+      cleared_edges: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
+    });
+
+    const t3Effects = approachFromBehind(scheduler);
+
+    expect(grantedEdges(t3Effects, 'T3')).toEqual(['M7->M8']);
+    expect(heldEdges(scheduler, 'T3')).toEqual(['M7->M8']);
+  });
+
+  it('a third train is not granted into the block an operator-introduced train waits in', () => {
+    const scheduler = leaderAheadOnEightLoop();
+
+    /* Placed at M2 facing M3: the block it stands in is its own first leg
+     * M2->M3, withheld because it shares M3 with T2's clearance. */
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-t1', ['M1', 'M5']);
+    scheduler.introduceTrainWithVector('T1', { from_marker_id: 'M2', to_marker_id: 'M3' });
+    expect(heldEdges(scheduler, 'T1')).toEqual([]);
+
+    registerTrain(scheduler, 'T3');
+    rollIntroduce(scheduler, 'T3', 'M7', 'M8');
+    const t3Effects = scheduler.assignSchedule('T3', 'route-t3', ['M8', 'M3']);
+
+    expect(grantedEdges(t3Effects, 'T3')).not.toContain('M1->M2');
+    expect(grantedEdges(t3Effects, 'T3')).not.toContain('M2->M3');
+    expect(heldEdges(scheduler, 'T3')).toEqual(['M8->M1']);
+  });
+
+  it('a fourth train cannot be introduced into the block a waiting train stands in', () => {
+    const scheduler = leaderAheadOnEightLoop();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-t1', ['M2', 'M5']);
+    rollIntroduce(scheduler, 'T1', 'M1', 'M2');
+
+    registerTrain(scheduler, 'T4');
+    const effs = scheduler.introduceTrainWithVector('T4', {
+      from_marker_id: 'M1',
+      to_marker_id: 'M2',
+    });
+
+    const conflict = findEvent(effs, 'train_introduction_conflict');
+    expect((conflict?.payload as { conflicting_train_id: string }).conflicting_train_id).toBe('T1');
+  });
+
+  it('the waiting train is sent its first grant on the wire once the leader clears', () => {
+    const scheduler = leaderAheadOnEightLoop();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-t1', ['M2', 'M5']);
+    scheduler.introduceTrainWithVector('T1', { from_marker_id: 'M2', to_marker_id: 'M3' });
+
+    const afterLeaderMoves = tagObserved(scheduler, 'T2', 'M4');
+
+    expect(grantedEdges(afterLeaderMoves, 'T1')).toEqual(['M2->M3']);
+  });
+
+  it('a point train gives up the block it stood in once granted onward, so the train behind follows', () => {
+    const scheduler = leaderAheadOnEightLoop();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-t1', ['M2', 'M5']);
+    rollIntroduce(scheduler, 'T1', 'M1', 'M2');
+    approachFromBehind(scheduler);
+
+    tagObserved(scheduler, 'T2', 'M4');
+    expect(heldEdges(scheduler, 'T1')).toEqual(['M2->M3']);
+    expect(heldEdges(scheduler, 'T3')).toEqual(['M7->M8', 'M8->M1']);
+
+    tagObserved(scheduler, 'T1', 'M3');
+    expect(heldEdges(scheduler, 'T3')).toEqual(['M7->M8', 'M8->M1', 'M1->M2']);
+  });
+
+  it('a length-aware train keeps the block it stood in until its tail has left it', () => {
+    const scheduler = leaderAheadOnEightLoop();
+    scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'T1',
+      payload: {
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+        ],
+        train_length_mm: 150,
+      },
+    });
+    scheduler.assignSchedule('T1', 'route-t1', ['M2', 'M5']);
+    rollIntroduce(scheduler, 'T1', 'M1', 'M2');
+
+    tagObserved(scheduler, 'T2', 'M4');
+    expect(heldEdges(scheduler, 'T1')).toEqual(['M1->M2', 'M2->M3']);
+
+    const status = (distanceMm: number) =>
+      scheduler.handleEvent({
+        event_type: 'train_status',
+        device_id: 'T1',
+        payload: {
+          train_id: 'T1',
+          current_edge: { from_marker_id: 'M2', to_marker_id: 'M3' },
+          estimated_distance_from_edge_start_mm: distanceMm,
+        },
+      });
+    status(100);
+    expect(heldEdges(scheduler, 'T1')).toContain('M1->M2');
+    status(150);
+    expect(heldEdges(scheduler, 'T1')).not.toContain('M1->M2');
+  });
+
+  it('a length-aware train granted the very block it stands in holds it once', () => {
+    const scheduler = leaderAheadOnEightLoop();
+    scheduler.handleEvent({
+      event_type: 'device_registered',
+      device_id: 'T1',
+      payload: {
+        capabilities: [
+          'core.controls_motion',
+          'core.reports_marker_traversal',
+          'core.accepts_route',
+        ],
+        train_length_mm: 150,
+      },
+    });
+    scheduler.assignSchedule('T1', 'route-t1', ['M1', 'M5']);
+    scheduler.introduceTrainWithVector('T1', { from_marker_id: 'M2', to_marker_id: 'M3' });
+
+    tagObserved(scheduler, 'T2', 'M4');
+
+    expect(heldEdges(scheduler, 'T1')).toEqual(['M2->M3']);
+  });
+
+  it('a new schedule for the waiting train keeps it protected', () => {
+    const scheduler = leaderAheadOnEightLoop();
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-t1', ['M2', 'M5']);
+    rollIntroduce(scheduler, 'T1', 'M1', 'M2');
+    scheduler.assignSchedule('T1', 'route-t1b', ['M2', 'M4']);
+
+    const t3Effects = approachFromBehind(scheduler);
+
+    expect(grantedEdges(t3Effects, 'T3')).toEqual(['M7->M8']);
+  });
+
+  it('a train that moves on without a grant leaves the block it stood in', () => {
+    const scheduler = leaderAheadOnEightLoop();
+
+    /* Exploring, not introduced: two crossings introduce it, its schedule waits
+     * behind T2, and it rolls on to M3 under its own exploration. */
+    registerTrain(scheduler, 'T1');
+    scheduler.assignSchedule('T1', 'route-t1', ['M2', 'M5']);
+    tagObserved(scheduler, 'T1', 'M1');
+    tagObserved(scheduler, 'T1', 'M2');
+    expect(scheduler.getTrainState('T1')?.introduced).toBe(true);
+    const rolledOn = tagObserved(scheduler, 'T1', 'M3');
+
+    expect(findStateUpdate(rolledOn, 'clearance', 'T1')?.state).toEqual({
+      train_id: 'T1',
+      cleared_edges: [],
+    });
+    const t3Effects = approachFromBehind(scheduler);
+    expect(grantedEdges(t3Effects, 'T3')).toEqual(['M7->M8', 'M8->M1', 'M1->M2']);
   });
 });

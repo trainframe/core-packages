@@ -8,7 +8,7 @@ import {
 import type { LayoutState } from './layout-state.js';
 import type { SwitchControl } from './switches.js';
 import type { TrainRoster } from './train-roster.js';
-import type { TrainState } from './train-state.js';
+import { type TrainState, leaveStandingBlock } from './train-state.js';
 import { type EdgeRef, edgesEqual } from './types.js';
 
 /**
@@ -322,6 +322,7 @@ export class ClearanceControl {
   }
 
   private grantClearance(train: TrainState, nextEdge: EdgeRef): ReadonlyArray<SchedulerEffect> {
+    leaveStandingBlock(train, nextEdge);
     train.clearance_limit_marker_id = nextEdge.to_marker_id;
     train.cleared_edges = [...train.cleared_edges, nextEdge];
     return [
