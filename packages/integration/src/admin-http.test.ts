@@ -55,6 +55,7 @@ describe('Admin HTTP API', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
     /* ADR-036 §3c: introduce at M1→M2 before routing. */
@@ -117,10 +118,12 @@ describe('Admin HTTP API', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.publishEvent('device_registered', 'T2', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
     await harness.testClient.waitForState('railway/state/devices/T2');
@@ -168,6 +171,7 @@ describe('Admin HTTP API', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
 
@@ -233,6 +237,7 @@ describe('Query HTTP API (ADR-020)', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
 
@@ -276,6 +281,7 @@ describe('Query HTTP API (ADR-020)', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
     /* ADR-036 §3c: introduce at M1→M2 before routing. */
@@ -297,6 +303,7 @@ describe('Query HTTP API (ADR-020)', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
 
@@ -315,6 +322,7 @@ describe('Query HTTP API (ADR-020)', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
     /* ADR-036 §3c: introduce at M1→M2 before routing. */

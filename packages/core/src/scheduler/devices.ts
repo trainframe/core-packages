@@ -211,9 +211,7 @@ export class DeviceTable {
       introduced?: boolean;
     } = { capabilities };
 
-    if (train?.length_mm !== undefined && train.length_mm > 0) {
-      state.train_length_mm = train.length_mm;
-    }
+    if (train !== undefined) state.train_length_mm = train.length_mm;
     if (device?.name !== undefined) state.name = device.name;
     if (device?.livery !== undefined) state.livery = device.livery;
     if (train?.introduced) {

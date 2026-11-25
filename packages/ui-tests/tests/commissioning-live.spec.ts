@@ -65,6 +65,7 @@ test.describe
             'core.reports_marker_traversal',
             'core.accepts_route',
           ],
+          train_length_mm: 150,
           device_kind_hint: 'train',
         }),
       );

@@ -71,6 +71,9 @@ interface Appearance {
   /** A device whose retained snapshot already carries an operator name is
    *  commissioned — it drops out of the queue. */
   readonly named: boolean;
+  /** The length the server already holds for a train: every registered train
+   *  has one, so a re-announce carries it unless the operator measured another. */
+  readonly trainLengthMm?: number;
 }
 
 interface Draft {
@@ -161,6 +164,12 @@ export class CommissioningView {
     if (item.category === 'track') {
       this.bindTrack(item);
     } else {
+      /* A train is never announced without a length: the server rejects it. */
+      if (
+        item.category === 'train' &&
+        !(item.trainLengthMm !== undefined && item.trainLengthMm > 0)
+      )
+        return;
       this.announceDevice(item);
     }
     this.resolved.add(id);
@@ -193,6 +202,7 @@ export class CommissioningView {
         source: 'device',
         capabilities: decoded.capabilities,
         named: decoded.named,
+        ...(decoded.trainLengthMm !== undefined ? { trainLengthMm: decoded.trainLengthMm } : {}),
       });
     }
     this.recompute();
@@ -221,6 +231,7 @@ export class CommissioningView {
     if (appearance === undefined) return null;
     const draft = this.drafts.get(id) ?? {};
     const suggested = suggestCategory(appearance.source, appearance.capabilities);
+    const trainLengthMm = draft.trainLengthMm ?? appearance.trainLengthMm;
     const item: CommissionItem = {
       id,
       source: appearance.source,
@@ -228,7 +239,7 @@ export class CommissioningView {
       suggestedCategory: suggested,
       category: draft.category ?? suggested,
       name: draft.name ?? '',
-      ...(draft.trainLengthMm !== undefined ? { trainLengthMm: draft.trainLengthMm } : {}),
+      ...(trainLengthMm !== undefined ? { trainLengthMm } : {}),
       ...(draft.markerId !== undefined ? { markerId: draft.markerId } : {}),
     };
     return item;
@@ -305,6 +316,7 @@ export class CommissioningView {
 interface DecodedDevice {
   readonly capabilities: ReadonlyArray<string>;
   readonly named: boolean;
+  readonly trainLengthMm?: number;
 }
 
 function decodeDevice(payload: Uint8Array): DecodedDevice | null {
@@ -312,7 +324,14 @@ function decodeDevice(payload: Uint8Array): DecodedDevice | null {
   if (obj === null) return null;
   const caps = obj.capabilities;
   if (!Array.isArray(caps) || !caps.every((c): c is string => typeof c === 'string')) return null;
-  return { capabilities: caps, named: typeof obj.name === 'string' && obj.name.length > 0 };
+  const length = obj.train_length_mm;
+  return {
+    capabilities: caps,
+    named: typeof obj.name === 'string' && obj.name.length > 0,
+    ...(typeof length === 'number' && Number.isFinite(length) && length > 0
+      ? { trainLengthMm: length }
+      : {}),
+  };
 }
 
 function decodeTagId(payload: Uint8Array): string | null {

@@ -373,7 +373,7 @@ export class ClearanceControl {
     currentEdge: { from_marker_id: string; to_marker_id: string },
     distanceMm: number,
   ): ReadonlyArray<EdgeRef> {
-    const lengthMm = train.length_mm ?? 0;
+    const lengthMm = train.length_mm;
     const result: EdgeRef[] = [];
     const forwardEdgeKeys = this.buildForwardEdgeKeys(train, currentEdge);
 

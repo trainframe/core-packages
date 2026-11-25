@@ -9,6 +9,10 @@ description of block exclusivity ("an edge already cleared to another
 train always denies") is the *old* rule. This ADR replaces it with a
 strictly stronger rule.
 
+**Note, 2026-11-25:** every train has a positive length (ADR-012 amendment,
+protocol 0.16.0), so the rule never treats a train as a point. A stopped train
+keeps holding the block it stands in until its tail has left it.
+
 ## Context
 
 Before this ADR, the scheduler's block-exclusivity check was edge identity:

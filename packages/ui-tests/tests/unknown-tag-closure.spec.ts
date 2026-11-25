@@ -88,6 +88,7 @@ test.describe
           'core.reports_marker_traversal',
           'core.accepts_route',
         ],
+        train_length_mm: 150,
       });
       harness.server.injectEvent('tag_observed', 'T1', { tag_id: 'TAG-MYSTERY' });
 

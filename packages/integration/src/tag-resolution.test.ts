@@ -83,6 +83,7 @@ describe('ADR-007: runtime tag→marker resolution over the wire', () => {
     await publishWire('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
 
@@ -118,6 +119,7 @@ describe('ADR-007: runtime tag→marker resolution over the wire', () => {
     await publishWire('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
 

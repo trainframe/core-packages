@@ -51,6 +51,7 @@ describe('Switch-state edge filtering through a real broker', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.publishEvent('device_registered', 'SW-M2', {
       device_kind_hint: 'mainline-switch',
@@ -82,6 +83,7 @@ describe('Switch-state edge filtering through a real broker', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.publishEvent('device_registered', 'SW-M2', {
       device_kind_hint: 'mainline-switch',
@@ -118,6 +120,7 @@ describe('Switch-state edge filtering through a real broker', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.publishEvent('device_registered', 'SW-M2', {
       device_kind_hint: 'mainline-switch',

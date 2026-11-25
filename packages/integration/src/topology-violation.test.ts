@@ -61,6 +61,7 @@ describe('Topology violation handling through a real broker (ADR-019)', () => {
     await tc.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await tc.waitForState('railway/state/devices/T1');
     /* ADR-036 §3c: introduce at M1→M2 before routing. */
@@ -108,6 +109,7 @@ describe('Topology violation handling through a real broker (ADR-019)', () => {
     await tc.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await tc.waitForState('railway/state/devices/T1');
     /* ADR-036 §3c: introduce at M1→M2 before routing. */

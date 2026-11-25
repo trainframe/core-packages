@@ -25,13 +25,16 @@ const DeviceRegisteredPayload = Type.Object({
   ),
   metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   /**
-   * Physical length of the train in millimetres. When present and > 0, the
-   * scheduler defers clearing the section behind the head until
+   * Physical length of the train in millimetres, always positive. The scheduler
+   * defers clearing the section behind the head until
    * `train_status.estimated_distance_from_edge_start_mm >= train_length_mm`,
-   * ensuring the tail has fully vacated before releasing the block. Only
-   * meaningful for devices declaring `core.controls_motion`.
+   * ensuring the tail has fully vacated before releasing the block. REQUIRED for
+   * a device declaring `core.controls_motion` (0.16.0); meaningless for any other
+   * device. The requirement depends on `capabilities`, which a TypeBox object
+   * schema cannot express, so the server and the scheduler enforce it at their
+   * seams and refuse a train without a length.
    */
-  train_length_mm: Type.Optional(Type.Number({ minimum: 0 })),
+  train_length_mm: Type.Optional(Type.Number({ minimum: 0, exclusiveMinimum: 0 })),
   /**
    * Announced scheduling priority for section contention (ADR-017). Higher
    * wins when two trains contend for the same free section. OPTIONAL and

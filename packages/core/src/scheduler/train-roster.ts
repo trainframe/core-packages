@@ -38,21 +38,18 @@ export class TrainRoster {
 
   /**
    * Add a train the first time it registers, resolving its announced priority
-   * (default 0), and record a positive announced length. A reconnecting train
-   * keeps its state and its place in the arrival order.
+   * (default 0), and record its announced length. A reconnecting train keeps
+   * its state and its place in the arrival order, and takes the new length.
    */
-  register(trainId: string, priority: number | undefined, lengthMm: number | undefined): void {
-    if (!this.trains.has(trainId)) {
+  register(trainId: string, priority: number | undefined, lengthMm: number): void {
+    const existing = this.trains.get(trainId);
+    if (existing === undefined) {
       this.trains.set(
         trainId,
-        initialTrainState(trainId, this.nextRegistrationSeq++, priority ?? 0),
+        initialTrainState(trainId, this.nextRegistrationSeq++, priority ?? 0, lengthMm),
       );
-    }
-    if (lengthMm !== undefined && lengthMm > 0) {
-      const train = this.trains.get(trainId);
-      if (train) {
-        train.length_mm = lengthMm;
-      }
+    } else {
+      existing.length_mm = lengthMm;
     }
   }
 

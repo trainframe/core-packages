@@ -290,8 +290,7 @@ export class DeadlockResolver {
       if (!anyEdgeSharesMarker(remaining, peerWanted)) {
         /* (c) LENGTH SAFETY (ADR-022 + ADR-012/016). Backing the HEAD from its old
          * position to X shifts the whole body back by the same distance: the TAIL
-         * sweeps into the track BEHIND X. For a point train (length 0) the body is
-         * at X and nothing sweeps. For a length-aware train the body extends
+         * sweeps into the track BEHIND X. The body extends
          * `length_mm` behind X and that swept region must be track the victim still
          * provably HOLDS (so block exclusivity keeps it locked and no peer is
          * granted into a block the reverser physically sits on). The scheduler only
@@ -326,7 +325,6 @@ export class DeadlockResolver {
    * reaches `length_mm`. If at any step there is no retained held edge behind the
    * current boundary, or its length is unknown, the body would extend into track
    * the scheduler does not track as held / cannot measure → return false (refuse).
-   * A point train (`length_mm` 0/undefined) is trivially covered: nothing sweeps.
    *
    * Pure graph + occupancy query; no clock, no RNG. The visited-marker guard plus
    * the retained-edge-count bound guarantee termination on cyclic topologies.
@@ -336,8 +334,7 @@ export class DeadlockResolver {
     targetMarkerId: string,
     retainedEdges: ReadonlyArray<EdgeRef>,
   ): boolean {
-    const lengthMm = victim.length_mm ?? 0;
-    if (lengthMm <= 0) return true; // point train: body is at X, nothing sweeps behind.
+    const lengthMm = victim.length_mm;
 
     let boundary = targetMarkerId;
     let covered = 0;

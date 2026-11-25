@@ -71,6 +71,7 @@ describe('Discovery mode: operator + train collaborate to learn a graph', () => 
     await publishWire('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await publishWire('tag_assignment', 'GARAGE', {
       tag_id: 'M1',

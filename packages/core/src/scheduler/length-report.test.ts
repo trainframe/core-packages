@@ -32,7 +32,12 @@ const makeScheduler = (): Scheduler => {
   scheduler.handleEvent({
     event_type: 'device_registered',
     device_id: 'T1',
-    payload: { capabilities: TRAIN_CAPABILITIES, name: 'Puffer', livery: 'green' },
+    payload: {
+      capabilities: TRAIN_CAPABILITIES,
+      train_length_mm: 150,
+      name: 'Puffer',
+      livery: 'green',
+    },
   });
   scheduler.handleEvent({
     event_type: 'device_registered',

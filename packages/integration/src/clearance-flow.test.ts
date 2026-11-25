@@ -35,6 +35,7 @@ describe('Clearance flow through a real broker', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
     /* ADR-036 §3c: introduce with known heading before routing. */
@@ -51,6 +52,7 @@ describe('Clearance flow through a real broker', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.publishEvent('device_registered', 'GATE-M3', {
       device_kind_hint: 'clearance-gate',
@@ -91,6 +93,7 @@ describe('Clearance flow through a real broker', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.publishEvent('device_registered', 'GATE-M3', {
       device_kind_hint: 'clearance-gate',
@@ -142,6 +145,7 @@ describe('Clearance flow through a real broker', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.publishEvent('device_registered', 'GATE-M3', {
       device_kind_hint: 'clearance-gate',

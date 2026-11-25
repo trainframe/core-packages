@@ -149,6 +149,7 @@ test.describe('Discovery mode: visualiser grows as the operator scans pieces', (
     harness.server.injectEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     harness.server.injectEvent('tag_observed', 'T1', { tag_id: 'M-A' });
     harness.server.injectEvent('tag_observed', 'T1', { tag_id: 'M-B' });

@@ -81,6 +81,7 @@ describe('AdminHttpServer — DELETE /api/trains/:id', () => {
     publishWireEvent(client, 'device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion'],
+      train_length_mm: 150,
     });
 
     const res = await fetch(`${baseUrl}/api/trains/T1`, { method: 'DELETE' });
@@ -102,6 +103,7 @@ describe('AdminHttpServer — DELETE /api/trains/:id', () => {
     publishWireEvent(client, 'device_registered', 'T 1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion'],
+      train_length_mm: 150,
     });
 
     const res = await fetch(`${baseUrl}/api/trains/${encodeURIComponent('T 1')}`, {
@@ -169,6 +171,7 @@ describe('AdminHttpServer — POST /api/maintenance/reset', () => {
     publishWireEvent(client, 'device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion'],
+      train_length_mm: 150,
     });
     expect(server.getScheduler().getTrainIds()).toContain('T1');
 

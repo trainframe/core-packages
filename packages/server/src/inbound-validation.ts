@@ -37,6 +37,25 @@ export function coreEventPayloadProblem(eventType: string, payload: unknown): st
   const payloadSchema = PAYLOAD_SCHEMAS.get(eventType);
   if (payloadSchema === undefined) return undefined;
   const first = Value.Errors(payloadSchema, payload).First();
-  if (first === undefined) return undefined;
-  return `${first.path || '(payload)'}: ${first.message}`;
+  if (first !== undefined) return `${first.path || '(payload)'}: ${first.message}`;
+  return eventType === 'device_registered' ? trainRegistrationProblem(payload) : undefined;
+}
+
+/*
+ * A train (a device declaring `core.controls_motion`) must register with a
+ * positive length (protocol 0.16.0). The rule depends on `capabilities`, which
+ * a TypeBox object schema cannot express, so it is checked here once the
+ * payload has passed its schema.
+ */
+function trainRegistrationProblem(payload: unknown): string | undefined {
+  if (typeof payload !== 'object' || payload === null) return undefined;
+  const { capabilities, train_length_mm } = payload as {
+    capabilities?: unknown;
+    train_length_mm?: unknown;
+  };
+  const isTrain = Array.isArray(capabilities) && capabilities.includes('core.controls_motion');
+  if (isTrain && train_length_mm === undefined) {
+    return '/train_length_mm: a device declaring core.controls_motion must register a train length';
+  }
+  return undefined;
 }

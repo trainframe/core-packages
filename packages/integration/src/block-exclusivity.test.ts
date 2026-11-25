@@ -44,6 +44,14 @@ afterEach(async () => {
 const grantsFor = (trainId: string) =>
   harness.testClient.commandsFor(trainId).filter((c) => c.command_type === 'grant_clearance');
 
+const reportTailClear = (trainId: string) =>
+  harness.testClient.publishEvent('train_status', trainId, {
+    train_id: trainId,
+    current_edge: { from_marker_id: 'M3', to_marker_id: 'M4' },
+    estimated_distance_from_edge_start_mm: 10_000,
+    speed_normalised: 0.5,
+  });
+
 describe('Block exclusivity: three trains queue through a single block', () => {
   it('T2 and T3 receive no clearance until T1 clears the entire M1→M2→M3 block chain', async () => {
     // Register all three trains in sequence. Each emits device_registered and
@@ -59,6 +67,7 @@ describe('Block exclusivity: three trains queue through a single block', () => {
           'core.reports_marker_traversal',
           'core.accepts_route',
         ],
+        train_length_mm: 150,
       });
       await harness.testClient.waitForState(`railway/state/devices/${id}`);
       harness.server.introduceTrainWithVector(id, { from_marker_id: 'M1', to_marker_id: 'M2' });
@@ -92,8 +101,10 @@ describe('Block exclusivity: three trains queue through a single block', () => {
     await new Promise((r) => setTimeout(r, 200));
     expect(grantsFor('T2')).toHaveLength(0);
 
-    // T1 crosses M3: M2→M3 is released. The section-pair check passes for T2.
+    // T1 crosses M3 and reports its head well along M3→M4, so its tail has left
+    // M2→M3 and the block is released. The section-pair check passes for T2.
     await harness.testClient.publishEvent('tag_observed', 'T1', { tag_id: 'M3' });
+    await reportTailClear('T1');
 
     // After T1 releases M2→M3 at M3, T2 — the next queued train — gets clearance.
     await harness.testClient.waitForCommand('T2', 'grant_clearance', 2000);
@@ -108,6 +119,7 @@ describe('Block exclusivity: three trains queue through a single block', () => {
     await harness.testClient.publishEvent('tag_observed', 'T2', { tag_id: 'M1' });
     await harness.testClient.publishEvent('tag_observed', 'T2', { tag_id: 'M2' });
     await harness.testClient.publishEvent('tag_observed', 'T2', { tag_id: 'M3' });
+    await reportTailClear('T2');
 
     // T3 now receives its clearance.
     await harness.testClient.waitForCommand('T3', 'grant_clearance', 2000);

@@ -8,7 +8,7 @@ describe('encodeDeviceEvent', () => {
     const { topic, payload } = encodeDeviceEvent(
       'device_registered',
       'T-1',
-      { capabilities: ['core.controls_motion'] },
+      { capabilities: ['core.controls_motion'], train_length_mm: 150 },
       { newId: () => 'evt-id', now: () => '2026-01-01T00:00:00.000Z' },
     );
     expect(topic).toBe('railway/events/device_registered/T-1');
@@ -19,7 +19,7 @@ describe('encodeDeviceEvent', () => {
       timestamp_device: '2026-01-01T00:00:00.000Z',
       event_type: 'device_registered',
       protocol_version: PROTOCOL_VERSION,
-      payload: { capabilities: ['core.controls_motion'] },
+      payload: { capabilities: ['core.controls_motion'], train_length_mm: 150 },
     });
   });
 

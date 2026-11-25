@@ -83,6 +83,9 @@ function CommissionRow({
         type="button"
         variant="primary"
         data-testid={`commission-confirm-${item.id}`}
+        disabled={
+          item.category === 'train' && !(item.trainLengthMm !== undefined && item.trainLengthMm > 0)
+        }
         onClick={() => c.confirm(item.id)}
       >
         Confirm

@@ -51,6 +51,7 @@ const registerTrain = (scheduler: Scheduler, trainId: string): void => {
     device_id: trainId,
     payload: {
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     },
   });
 };
@@ -384,6 +385,7 @@ describe('a forgotten device drops its zone and switch bookkeeping', () => {
           'core.accepts_route',
           'core.can_reverse',
         ],
+        train_length_mm: 150,
       },
     });
     rollIntroduce(scheduler, 'T1', 'M4', 'M1');

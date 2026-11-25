@@ -150,6 +150,7 @@ const turntableAtJunction = () => {
     device_id: 'T1',
     payload: {
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     },
   });
   scheduler.introduceTrain('T1');

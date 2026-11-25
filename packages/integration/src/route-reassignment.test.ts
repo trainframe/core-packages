@@ -54,6 +54,7 @@ describe('Mid-journey schedule reassignment replaces the prior plan', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
     /* ADR-036 §3c: introduce with the arrival heading M3→M1 (the train came
@@ -121,6 +122,7 @@ describe('Mid-journey schedule reassignment replaces the prior plan', () => {
     await harness.testClient.publishEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     await harness.testClient.waitForState('railway/state/devices/T1');
     /* ADR-036 §3c: same arrival heading as the sibling test (M3→M1). */

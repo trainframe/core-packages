@@ -77,6 +77,7 @@ const registerTrain = (scheduler: Scheduler, trainId: string) =>
     device_id: trainId,
     payload: {
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     },
   });
 
@@ -108,6 +109,23 @@ const emitTrainIntroduced = (
     event_type: 'train_introduced',
     device_id: emitterDeviceId,
     payload: { train_id: trainId, marker_id: markerId, heading_edge: headingEdge },
+  });
+
+/* The train reports its head far along `currentEdge`, so its tail has left every
+ * block behind it and tail release frees them. */
+const tailClear = (
+  scheduler: Scheduler,
+  trainId: string,
+  currentEdge: { from_marker_id: string; to_marker_id: string },
+) =>
+  scheduler.handleEvent({
+    event_type: 'train_status',
+    device_id: trainId,
+    payload: {
+      train_id: trainId,
+      current_edge: currentEdge,
+      estimated_distance_from_edge_start_mm: 10_000,
+    },
   });
 
 /* Simulate a complete two-marker introduction roll. Returns the effects from
@@ -323,7 +341,7 @@ describe('ADR-036 — two-marker roll introduction (§3a)', () => {
     expect(state?.introduced).toBe(true);
   });
 
-  it('Scenario 2 (no orphan lock): a point train with a pending schedule auto-starts, drives clear, and does NOT permanently lock the introduction section', () => {
+  it('Scenario 2 (no orphan lock): a train with a pending schedule auto-starts, drives clear, and does NOT permanently lock the introduction section', () => {
     /* Regression for the orphan-occupancy bug: on the auto-start path the resolved
      * block (behind the head) must NOT be seeded into cleared_edges — it would
      * never be released (the train never re-crosses its end marker going forward)
@@ -339,28 +357,25 @@ describe('ADR-036 — two-marker roll introduction (§3a)', () => {
      * NOT seeded as a standalone hold. */
     rollIntroduce(scheduler, 'T1', 'M1', 'M2');
     const afterStart = scheduler.getTrainState('T1');
-    /* M1→M2 (behind the head) must NOT be held — that is the orphan the fix
-     * prevents. */
-    const holdsBehindHead = afterStart?.cleared_edges.some(
-      (e) => e.from_marker_id === 'M1' && e.to_marker_id === 'M2',
-    );
-    expect(holdsBehindHead).toBeFalsy();
+    expect(afterStart?.standing_edge).toBeUndefined();
 
-    /* T1 drives its route: cross M3 then M4 (point train releases each block as
-     * its head leaves it). After M4, T1 has driven entirely clear of the M1→M2
-     * introduction section. */
+    /* T1 drives its route: cross M3 then M4, reporting its head far along the
+     * last edge so its tail has left every block behind it. After M4, T1 has
+     * driven entirely clear of the M1→M2 introduction section. */
     tagObserved(scheduler, 'T1', 'M3');
     tagObserved(scheduler, 'T1', 'M4');
+    tailClear(scheduler, 'T1', { from_marker_id: 'M3', to_marker_id: 'M4' });
+    const holdsIntroSection = scheduler
+      .getTrainState('T1')
+      ?.cleared_edges.some((e) => e.from_marker_id === 'M1' && e.to_marker_id === 'M2');
+    expect(holdsIntroSection).toBeFalsy();
 
-    /* A later peer T2 needs an edge through the introduction section. M4→M1 and
-     * M1→M2 both touch M1; if M1→M2 were orphan-locked by T1, T2 would be denied
-     * forever. It must be GRANTED. */
+    /* A later peer T2 is introduced into the introduction section itself. If
+     * M1→M2 were orphan-locked by T1 it would be refused as a conflict; it must
+     * be accepted and hold the section. */
     registerTrain(scheduler, 'T2');
-    rollIntroduce(scheduler, 'T2', 'M2', 'M3'); /* T2 introduced elsewhere, idle hold on M2→M3 */
-    /* Route T2 M3→M4→M1→M2 (the schedule replaces its idle hold). Its horizon
-     * reaches through the introduction section. */
-    scheduler.assignSchedule('T2', 'route-t2', ['M3', 'M2']);
-    /* The introduction section is FREE — T2 is granted clearance through it. */
+    const t2Resolution = rollIntroduce(scheduler, 'T2', 'M1', 'M2');
+    expect(findEvent(t2Resolution, 'train_introduction_conflict')).toBeUndefined();
     const t2HoldsIntroSection = scheduler
       .getTrainState('T2')
       ?.cleared_edges.some((e) => e.from_marker_id === 'M1' && e.to_marker_id === 'M2');
@@ -766,7 +781,7 @@ describe('ADR-036 §5 — resolution clear of peers (no escalation)', () => {
      * block M2→M3 (shares only M2). This is ordinary trailing contention — NOT a
      * conflict. Only the trailing train waits; T2 is unaffected. Once T2 clears
      * M2→M3, T1 gets its onward grant via normal block exclusivity. */
-    const scheduler = makeScheduler();
+    const scheduler = makeScheduler(EIGHT_LOOP);
 
     /* T2: introduce at M1→M2 (parked at M2), assign M2→M4. T2 is granted M2→M3
      * (the block immediately ahead of T1's resolved block). */
@@ -774,7 +789,7 @@ describe('ADR-036 §5 — resolution clear of peers (no escalation)', () => {
     scheduler.introduceTrain('T2');
     tagObserved(scheduler, 'T2', 'M1');
     tagObserved(scheduler, 'T2', 'M2');
-    scheduler.assignSchedule('T2', 'route-t2', ['M2', 'M4']);
+    scheduler.assignSchedule('T2', 'route-t2', ['M2', 'M6']);
     const t2HoldsM2M3 = scheduler
       .getTrainState('T2')
       ?.cleared_edges.some((e) => e.from_marker_id === 'M2' && e.to_marker_id === 'M3');
@@ -783,7 +798,7 @@ describe('ADR-036 §5 — resolution clear of peers (no escalation)', () => {
     /* T1: register with a pending schedule M2→M4, then roll-introduce ONTO M1→M2
      * (first crossing M1, second M2 → heading M1→M2, parked at M2). */
     registerTrain(scheduler, 'T1');
-    scheduler.assignSchedule('T1', 'route-t1', ['M2', 'M4']);
+    scheduler.assignSchedule('T1', 'route-t1', ['M2', 'M6']);
     const resolutionEffects = rollIntroduce(scheduler, 'T1', 'M1', 'M2');
 
     /* NO escalation — adjacency (shared M2 only) is the resolvable trailing case. */
@@ -808,7 +823,8 @@ describe('ADR-036 §5 — resolution clear of peers (no escalation)', () => {
     /* Now T2 advances past M3 (crosses M3 then M4), releasing M2→M3. The retry in
      * that crossing then grants T1 the onward block it was waiting for. */
     tagObserved(scheduler, 'T2', 'M3');
-    const afterClear = tagObserved(scheduler, 'T2', 'M4');
+    tagObserved(scheduler, 'T2', 'M4');
+    const afterClear = tailClear(scheduler, 'T2', { from_marker_id: 'M4', to_marker_id: 'M5' });
     const grantToT1 = afterClear.some(
       (e) =>
         e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T1',
@@ -884,7 +900,10 @@ describe('ADR-036 §5 — resolution clear of peers (no escalation)', () => {
     expect(findCommand(schedEffects, 'grant_clearance', 'T1')).toBeDefined();
 
     /* Crossing a marker tops up the clearance horizon (normal transit logic). */
-    const crossEffects = tagObserved(scheduler, 'T1', 'M3');
+    const crossEffects = [
+      ...tagObserved(scheduler, 'T1', 'M3'),
+      ...tailClear(scheduler, 'T1', { from_marker_id: 'M3', to_marker_id: 'M4' }),
+    ];
     /* Some clearance effects should flow (either new grant or clearance state). */
     const hasEffect = crossEffects.some(
       (e) =>
@@ -1037,7 +1056,10 @@ describe('ADR-036 §3c — operator-provided vector introduction (introduceTrain
     expect(findCommand(schedEffects, 'grant_clearance', 'T1')).toBeDefined();
 
     /* Crossing a marker tops up the horizon (normal transit logic). */
-    const crossEffects = tagObserved(scheduler, 'T1', 'M2');
+    const crossEffects = [
+      ...tagObserved(scheduler, 'T1', 'M2'),
+      ...tailClear(scheduler, 'T1', { from_marker_id: 'M2', to_marker_id: 'M3' }),
+    ];
     const hasEffect = crossEffects.some(
       (e) =>
         (e.kind === 'send_command' && e.command_type === 'grant_clearance') ||
@@ -1204,12 +1226,16 @@ describe('a waiting introduced train is protected by the block it stands in', ()
     scheduler.assignSchedule('T1', 'route-t1', ['M2', 'M5']);
     scheduler.introduceTrainWithVector('T1', { from_marker_id: 'M2', to_marker_id: 'M3' });
 
-    const afterLeaderMoves = tagObserved(scheduler, 'T2', 'M4');
+    tagObserved(scheduler, 'T2', 'M4');
+    const afterLeaderMoves = tailClear(scheduler, 'T2', {
+      from_marker_id: 'M4',
+      to_marker_id: 'M5',
+    });
 
     expect(grantedEdges(afterLeaderMoves, 'T1')).toEqual(['M2->M3']);
   });
 
-  it('a point train gives up the block it stood in once granted onward, so the train behind follows', () => {
+  it('a train gives up the block it stood in once granted onward and its tail has left, so the train behind follows', () => {
     const scheduler = leaderAheadOnEightLoop();
     registerTrain(scheduler, 'T1');
     scheduler.assignSchedule('T1', 'route-t1', ['M2', 'M5']);
@@ -1217,10 +1243,12 @@ describe('a waiting introduced train is protected by the block it stands in', ()
     approachFromBehind(scheduler);
 
     tagObserved(scheduler, 'T2', 'M4');
-    expect(heldEdges(scheduler, 'T1')).toEqual(['M2->M3']);
-    expect(heldEdges(scheduler, 'T3')).toEqual(['M7->M8', 'M8->M1']);
+    tailClear(scheduler, 'T2', { from_marker_id: 'M4', to_marker_id: 'M5' });
+    expect(heldEdges(scheduler, 'T1')).toEqual(['M1->M2', 'M2->M3']);
+    expect(heldEdges(scheduler, 'T3')).toEqual(['M7->M8']);
 
     tagObserved(scheduler, 'T1', 'M3');
+    tailClear(scheduler, 'T1', { from_marker_id: 'M3', to_marker_id: 'M4' });
     expect(heldEdges(scheduler, 'T3')).toEqual(['M7->M8', 'M8->M1', 'M1->M2']);
   });
 
@@ -1242,6 +1270,7 @@ describe('a waiting introduced train is protected by the block it stands in', ()
     rollIntroduce(scheduler, 'T1', 'M1', 'M2');
 
     tagObserved(scheduler, 'T2', 'M4');
+    tailClear(scheduler, 'T2', { from_marker_id: 'M4', to_marker_id: 'M5' });
     expect(heldEdges(scheduler, 'T1')).toEqual(['M1->M2', 'M2->M3']);
 
     const status = (distanceMm: number) =>
@@ -1278,6 +1307,7 @@ describe('a waiting introduced train is protected by the block it stands in', ()
     scheduler.introduceTrainWithVector('T1', { from_marker_id: 'M2', to_marker_id: 'M3' });
 
     tagObserved(scheduler, 'T2', 'M4');
+    tailClear(scheduler, 'T2', { from_marker_id: 'M4', to_marker_id: 'M5' });
 
     expect(heldEdges(scheduler, 'T1')).toEqual(['M2->M3']);
   });
@@ -1294,7 +1324,7 @@ describe('a waiting introduced train is protected by the block it stands in', ()
     expect(grantedEdges(t3Effects, 'T3')).toEqual(['M7->M8']);
   });
 
-  it('a train that moves on without a grant leaves the block it stood in', () => {
+  it('a train that moves on without a grant keeps the block its tail is still in', () => {
     const scheduler = leaderAheadOnEightLoop();
 
     /* Exploring, not introduced: two crossings introduce it, its schedule waits
@@ -1308,10 +1338,10 @@ describe('a waiting introduced train is protected by the block it stands in', ()
 
     expect(findStateUpdate(rolledOn, 'clearance', 'T1')?.state).toEqual({
       train_id: 'T1',
-      cleared_edges: [],
+      cleared_edges: [{ from_marker_id: 'M1', to_marker_id: 'M2' }],
     });
     const t3Effects = approachFromBehind(scheduler);
-    expect(grantedEdges(t3Effects, 'T3')).toEqual(['M7->M8', 'M8->M1', 'M1->M2']);
+    expect(grantedEdges(t3Effects, 'T3')).toEqual(['M7->M8']);
   });
 });
 

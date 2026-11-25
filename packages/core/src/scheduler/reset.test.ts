@@ -73,6 +73,7 @@ const populate = (scheduler: Scheduler, trainId: string): ReadonlyArray<Schedule
     device_id: trainId,
     payload: {
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     },
   });
   scheduler.introduceTrainWithVector(trainId, { from_marker_id: 'A', to_marker_id: 'J' });

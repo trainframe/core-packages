@@ -111,13 +111,14 @@ export interface TrainState {
   zone_entry_edge?: EdgeRef | undefined;
 
   /**
-   * Physical length of the train in millimetres. When undefined or 0 the
-   * scheduler uses point-train semantics (release on marker_traversed).
-   * When > 0 the scheduler waits for `train_status` to report
+   * Physical length of the train in millimetres, always positive. The scheduler
+   * waits for `train_status` to report
    * `estimated_distance_from_edge_start_mm >= length_mm` before releasing
-   * the block behind the head. Populated from `device_registered.train_length_mm`.
+   * the block behind the head. Populated from `device_registered.train_length_mm`
+   * and updated by `train_length_changed`. A train with no known length is not
+   * representable: registration without one is refused (ADR-012).
    */
-  length_mm?: number | undefined;
+  length_mm: number;
 
   /**
    * Injected-clock timestamp in ms before which the train must remain held at
@@ -177,11 +178,13 @@ export interface TrainState {
 export const initialTrainState = (
   trainId: string,
   registrationSeq: number,
-  priority = 0,
+  priority: number,
+  lengthMm: number,
 ): TrainState => ({
   train_id: trainId,
   registration_seq: registrationSeq,
   priority,
+  length_mm: lengthMm,
   cleared_edges: [],
 });
 
@@ -194,8 +197,7 @@ export function occupiedEdges(train: TrainState): ReadonlyArray<EdgeRef> {
 
 /**
  * The train is leaving the block it stood in, onto `nextEdge` when the move is a
- * grant. A point train occupies only the marker its head is at, so the block
- * goes. A length-aware train's tail is still in it, so it joins the held edges
+ * grant. The train's tail is still in the block, so it joins the held edges
  * behind the head, where tail release frees it once the tail has left. When the
  * standing block IS the edge being granted, the grant takes it over. Returns
  * whether the train had a standing block to leave.
@@ -204,8 +206,7 @@ export function leaveStandingBlock(train: TrainState, nextEdge?: EdgeRef): boole
   const standing = train.standing_edge;
   if (standing === undefined) return false;
   train.standing_edge = undefined;
-  const tailStillInside =
-    Boolean(train.length_mm) && !(nextEdge !== undefined && edgesEqual(standing, nextEdge));
+  const tailStillInside = !(nextEdge !== undefined && edgesEqual(standing, nextEdge));
   if (tailStillInside) train.cleared_edges = [standing, ...train.cleared_edges];
   return true;
 }

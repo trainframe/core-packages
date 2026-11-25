@@ -87,5 +87,13 @@
  * `core.provides_train_heading` (a zone/device that supplies a train's heading
  * on emergence). New event/command types append so this bumps BOTH the
  * protocol version AND the TCF registry epoch (6 → 7, per ADR-021 §3).
+ *
+ * 0.16.0 — a train's length is mandatory (ADR-012). A `device_registered` that
+ * declares `core.controls_motion` must carry a positive `train_length_mm`; the
+ * server rejects one without it and the scheduler refuses it, so a train with no
+ * known length (a zero-length "point" train) can no longer exist. The field's
+ * schema also tightens from `minimum: 0` to strictly positive. A device that
+ * registered a train without a length must now send one; no new event types, so
+ * the TCF registry epoch is unchanged.
  */
-export const PROTOCOL_VERSION = '0.15.0' as const;
+export const PROTOCOL_VERSION = '0.16.0' as const;

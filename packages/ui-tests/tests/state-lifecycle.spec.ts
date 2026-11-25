@@ -63,10 +63,12 @@ test.describe('state lifecycle: delete, prune, blank slate', () => {
     harness.server.injectEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     harness.server.injectEvent('device_registered', 'T2', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
 
     const trainsGroup = vis.getByTestId('devices-trains-group');

@@ -47,6 +47,7 @@ const registerTrain = (scheduler: Scheduler, trainId: string) =>
     device_id: trainId,
     payload: {
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     },
   });
 
@@ -56,6 +57,7 @@ const registerTrainWithPriority = (scheduler: Scheduler, trainId: string, priori
     device_id: trainId,
     payload: {
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
       priority,
     },
   });
@@ -81,6 +83,7 @@ const registerReversibleTrain = (scheduler: Scheduler, trainId: string) =>
         'core.accepts_route',
         'core.can_reverse',
       ],
+      train_length_mm: 150,
     },
   });
 
@@ -1245,11 +1248,14 @@ describe('Scheduler — block exclusivity', () => {
 
     // T1 reaches M3 → progress advances again, T1 now holds M3→M4 (lock {M3,
     // M4}). M2 has dropped out of T1's lock set, so M1→M2 is free for T2.
-    const effectsM3 = scheduler.handleEvent({
-      event_type: 'tag_observed',
-      device_id: 'T1',
-      payload: { tag_id: 'M3' },
-    });
+    const effectsM3 = [
+      ...scheduler.handleEvent({
+        event_type: 'tag_observed',
+        device_id: 'T1',
+        payload: { tag_id: 'M3' },
+      }),
+      ...sendTrainStatus(scheduler, 'T1', { from_marker_id: 'M3', to_marker_id: 'M4' }, 10_000),
+    ];
     const t2GrantAtM3 = effectsM3.find(
       (e) =>
         e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
@@ -1291,11 +1297,14 @@ describe('Scheduler — block exclusivity', () => {
 
     // T1 crosses M3: it releases M2→M3, so M2 finally frees. The scheduler must
     // retry T2's previously-denied clearance in the SAME call and grant it.
-    const effectsM3 = scheduler.handleEvent({
-      event_type: 'tag_observed',
-      device_id: 'T1',
-      payload: { tag_id: 'M3' },
-    });
+    const effectsM3 = [
+      ...scheduler.handleEvent({
+        event_type: 'tag_observed',
+        device_id: 'T1',
+        payload: { tag_id: 'M3' },
+      }),
+      ...sendTrainStatus(scheduler, 'T1', { from_marker_id: 'M3', to_marker_id: 'M4' }, 10_000),
+    ];
     const t2Grant = effectsM3.find(
       (e) =>
         e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
@@ -1851,7 +1860,10 @@ describe('Scheduler — tag resolution', () => {
     scheduler.handleEvent({
       event_type: 'device_registered',
       device_id: 'T-DEAF',
-      payload: { capabilities: ['core.controls_motion', 'core.reports_marker_traversal'] },
+      payload: {
+        capabilities: ['core.controls_motion', 'core.reports_marker_traversal'],
+        train_length_mm: 150,
+      },
     });
     introduceByRoll(scheduler, 'T-DEAF', 'M3', 'M4');
 
@@ -1870,7 +1882,10 @@ describe('Scheduler — tag resolution', () => {
     scheduler.handleEvent({
       event_type: 'device_registered',
       device_id: 'T-MUTE',
-      payload: { capabilities: ['core.controls_motion', 'core.accepts_route'] },
+      payload: {
+        capabilities: ['core.controls_motion', 'core.accepts_route'],
+        train_length_mm: 150,
+      },
     });
     scheduler.introduceTrain('T-MUTE');
 
@@ -2206,11 +2221,13 @@ describe('Scheduler — train-length-aware tail clearance', () => {
     ).toBeUndefined();
   });
 
-  it('point train (length=0) still releases on marker_traversed (regression)', () => {
-    // A train registered with train_length_mm=0 must behave identically to a
-    // train with no length_mm — release on head arrival, not deferred.
+  it.each([
+    ['no length', {}],
+    ['a zero length', { train_length_mm: 0 }],
+    ['a negative length', { train_length_mm: -5 }],
+  ])('refuses a train registered with %s and keeps it out of the roster', (_label, extra) => {
     const { scheduler } = setup();
-    scheduler.handleEvent({
+    const effects = scheduler.handleEvent({
       event_type: 'device_registered',
       device_id: 'T1',
       payload: {
@@ -2219,44 +2236,36 @@ describe('Scheduler — train-length-aware tail clearance', () => {
           'core.reports_marker_traversal',
           'core.accepts_route',
         ],
-        train_length_mm: 0,
+        ...extra,
       },
     });
-    registerTrain(scheduler, 'T2');
 
-    scheduler.assignSchedule('T1', 'r1', ['M1', 'M3']);
-    scheduler.assignSchedule('T2', 'r2', ['M1', 'M2']);
-
-    // T1 crosses M1 then M2.
-    scheduler.handleEvent({
-      event_type: 'tag_observed',
-      device_id: 'T1',
-      payload: { tag_id: 'M1' },
-    });
-    // After M2: T1 point train, so M1→M2 is released immediately. T2 should
-    // still be denied because under ADR-011, T1 holds M2→M3 (lock {M2,M3})
-    // which shares M2 with T2's M1→M2 request.
-    const atM2 = scheduler.handleEvent({
-      event_type: 'tag_observed',
-      device_id: 'T1',
-      payload: { tag_id: 'M2' },
-    });
-
-    // The key regression check: T1's M1→M2 was released on marker_traversed
-    // (not deferred). T2 is still blocked by ADR-011 (M2 in T1's lock set).
-    // Verify state directly.
-    const t1State = scheduler.getTrainState('T1');
-    // cleared_edges should NOT contain M1→M2 (it was released on arrival at M2).
-    expect(
-      t1State?.cleared_edges.some((e) => e.from_marker_id === 'M1' && e.to_marker_id === 'M2'),
-    ).toBe(false);
-
-    // T2 is still denied because T1 holds M2→M3.
-    const t2Grant = atM2.find(
-      (e) =>
-        e.kind === 'send_command' && e.command_type === 'grant_clearance' && e.device_id === 'T2',
+    const anomaly = effects.find(
+      (e): e is Extract<SchedulerEffect, { kind: 'publish_event' }> =>
+        e.kind === 'publish_event' && e.event_type === 'anomaly',
     );
-    expect(t2Grant).toBeUndefined();
+    expect((anomaly?.payload as { description: string }).description).toMatch(/train_length_mm/);
+    expect(effects.some((e) => e.kind === 'update_state_snapshot')).toBe(false);
+    expect(scheduler.getTrainState('T1')).toBeUndefined();
+  });
+
+  it('a stopped train with no onward grant keeps holding its block', () => {
+    const { scheduler } = setup();
+    registerTrain(scheduler, 'T1');
+    registerTrain(scheduler, 'T2');
+    introduceByRoll(scheduler, 'T1', 'M4', 'M1');
+    introduceByRoll(scheduler, 'T2', 'M2', 'M3');
+
+    /* T1 stands at M1 in M4→M1 with no onward grant. T2 wants the block it stands in. */
+    const effects = scheduler.assignSchedule('T2', 'route-2', ['M3', 'M1']);
+
+    const grant = effects.find(
+      (e) => e.kind === 'send_command' && e.command_type === 'grant_clearance',
+    );
+    expect(grant).toBeUndefined();
+    expect(scheduler.getTrainState('T2')?.cleared_edges.some((e) => e.to_marker_id === 'M1')).toBe(
+      false,
+    );
   });
 });
 
@@ -2711,41 +2720,6 @@ describe('Scheduler — retained device state', () => {
     expect(deviceUpdate).toBeDefined();
     expect((deviceUpdate?.state as { train_length_mm?: number }).train_length_mm).toBe(200);
   });
-
-  it('device_registered without train_length_mm omits it from the updateState effect', () => {
-    const { scheduler } = setup();
-    const effects = registerTrain(scheduler, 'T1');
-
-    const deviceUpdate = effects.find(
-      (e): e is Extract<SchedulerEffect, { kind: 'update_state_snapshot' }> =>
-        e.kind === 'update_state_snapshot' && e.entity_type === 'devices' && e.entity_id === 'T1',
-    );
-    expect(deviceUpdate).toBeDefined();
-    expect(deviceUpdate?.state).not.toHaveProperty('train_length_mm');
-  });
-
-  it('device_registered with train_length_mm=0 omits it from the updateState effect', () => {
-    const { scheduler } = setup();
-    const effects = scheduler.handleEvent({
-      event_type: 'device_registered',
-      device_id: 'T1',
-      payload: {
-        capabilities: [
-          'core.controls_motion',
-          'core.reports_marker_traversal',
-          'core.accepts_route',
-        ],
-        train_length_mm: 0,
-      },
-    });
-
-    const deviceUpdate = effects.find(
-      (e): e is Extract<SchedulerEffect, { kind: 'update_state_snapshot' }> =>
-        e.kind === 'update_state_snapshot' && e.entity_type === 'devices' && e.entity_id === 'T1',
-    );
-    expect(deviceUpdate).toBeDefined();
-    expect(deviceUpdate?.state).not.toHaveProperty('train_length_mm');
-  });
 });
 
 describe('Scheduler — referential validation', () => {
@@ -2914,7 +2888,11 @@ describe('Scheduler — switch device pairing', () => {
     scheduler.handleEvent({
       event_type: 'device_registered',
       device_id: 'SOME-DEVICE',
-      payload: { capabilities: ['core.controls_motion'], controls_marker_id: 'M1' },
+      payload: {
+        capabilities: ['core.controls_motion'],
+        train_length_mm: 150,
+        controls_marker_id: 'M1',
+      },
     });
     // No switch capability → pairing must not be recorded.
     expect(scheduler.getLayout().switchDeviceForMarker('M1')).toBeUndefined();
@@ -2942,6 +2920,7 @@ describe('Scheduler — presentation fields never change scheduling (commissioni
           'core.reports_marker_traversal',
           'core.accepts_route',
         ],
+        train_length_mm: 150,
         ...extra,
       },
     });
@@ -2966,6 +2945,7 @@ describe('Scheduler — presentation fields never change scheduling (commissioni
           'core.reports_marker_traversal',
           'core.accepts_route',
         ],
+        train_length_mm: 150,
         name: 'Rocket',
         livery: 'crimson',
       },
@@ -3016,7 +2996,11 @@ describe('Scheduler — zone owned-marker declaration (ADR-034)', () => {
     scheduler.handleEvent({
       event_type: 'device_registered',
       device_id: 'NOT-A-ZONE',
-      payload: { capabilities: ['core.controls_motion'], owned_marker_ids: ['M-lad0'] },
+      payload: {
+        capabilities: ['core.controls_motion'],
+        train_length_mm: 150,
+        owned_marker_ids: ['M-lad0'],
+      },
     });
     expect(scheduler.ownerOfZoneMarker('M-lad0')).toBeUndefined();
   });

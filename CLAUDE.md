@@ -173,7 +173,7 @@ These are unresolved; ask before assuming an answer. Conflict resolution (ADR-01
 
 ## Useful references
 
-- `docs/spec/protocol-v0.2.md` — current protocol spec (protocol version 0.15.0)
+- `docs/spec/protocol-v0.2.md` — current protocol spec (protocol version 0.16.0)
 - `docs/status.md` — what is built, partial or missing, per package
 - `docs/spec/simulator-v0.1.md` — simulator architecture (physics world, `startPhysicsEnv`)
 - `docs/contributing/new-device.md` — how to build a new device type

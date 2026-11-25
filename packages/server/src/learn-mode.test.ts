@@ -182,6 +182,7 @@ describe('LearnMode — drives a registered train', () => {
     publishWireEvent(client, 'device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
       device_kind_hint: 'tag-garage',
@@ -237,6 +238,7 @@ describe('LearnMode — bootstraps discovery from an empty graph', () => {
     publishWireEvent(client, 'device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
       device_kind_hint: 'tag-garage',
@@ -261,6 +263,7 @@ describe('LearnMode — explores without re-issuing commands per marker', () => 
     publishWireEvent(client, 'device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
       device_kind_hint: 'tag-garage',
@@ -293,6 +296,7 @@ describe('LearnMode — completes after a full loop', () => {
     publishWireEvent(client, 'device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
       device_kind_hint: 'tag-garage',
@@ -321,6 +325,7 @@ describe('LearnMode — hits a terminus and pauses', () => {
     publishWireEvent(client, 'device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
       device_kind_hint: 'tag-garage',
@@ -358,6 +363,7 @@ describe('LearnMode — learn_track_stop returns to idle', () => {
     publishWireEvent(client, 'device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     publishOperatorCommand(client, 'learn_track_start', {});
     publishOperatorCommand(client, 'learn_track_stop', {});
@@ -369,6 +375,7 @@ describe('LearnMode — learn_track_stop returns to idle', () => {
     publishWireEvent(client, 'device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
       device_kind_hint: 'tag-garage',
@@ -410,6 +417,7 @@ describe('LearnMode — junctions under exploration', () => {
     publishWireEvent(client, 'device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
       device_kind_hint: 'tag-garage',
@@ -451,6 +459,7 @@ describe('LearnMode — junctions under exploration', () => {
     publishWireEvent(client, 'device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     publishWireEvent(client, 'device_registered', 'GARAGE', {
       device_kind_hint: 'tag-garage',
@@ -501,10 +510,12 @@ describe('LearnMode — start named train', () => {
     publishWireEvent(client, 'device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     publishWireEvent(client, 'device_registered', 'T2', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     publishOperatorCommand(client, 'learn_track_start', { train_id: 'T2' });
     expect(latestLearnState(client)?.train_id).toBe('T2');
@@ -517,6 +528,7 @@ describe('LearnMode — observability hook', () => {
     publishWireEvent(client, 'device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
     expect(server.getLearnMode().isActive()).toBe(false);
     publishOperatorCommand(client, 'learn_track_start', {});

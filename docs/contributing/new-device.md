@@ -29,7 +29,7 @@ Create a file `manifest.json` describing your device. This is the contract betwe
   "vendor": "com.yourname.panicbutton",
   "device_kind": "panic_button",
   "version": "0.1.0",
-  "protocol_version": "0.15.0",
+  "protocol_version": "0.16.0",
   "display_name": "Panic button",
   "description": "A big red button. Press to halt all clearance grants on the layout. Press again to release.",
   "capabilities": ["core.gates_clearance"],
@@ -83,7 +83,7 @@ function publish(eventType: string, payload: object) {
     device_id: DEVICE_ID,
     timestamp_device: new Date().toISOString(),
     event_type: eventType,
-    protocol_version: '0.15.0',
+    protocol_version: '0.16.0',
     payload,
   };
   client.publish(`railway/events/${eventType}/${DEVICE_ID}`, JSON.stringify(envelope), {

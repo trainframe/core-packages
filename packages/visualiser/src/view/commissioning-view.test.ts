@@ -169,6 +169,29 @@ describe('CommissioningView — commands + confirm emit correctness facts + prof
     });
   });
 
+  it('confirming a TRAIN re-announces the length the server already holds when none is measured', () => {
+    announceDevice(h.client, 'T1', {
+      capabilities: ['core.controls_motion', 'core.accepts_route'],
+      train_length_mm: 150,
+    });
+    h.view.setName('T1', 'Rocket');
+    h.view.confirm('T1');
+
+    const reg = h.published().find((p) => p.topic === 'railway/events/device_registered/T1');
+    expect(reg?.payload).toMatchObject({ name: 'Rocket', train_length_mm: 150 });
+  });
+
+  it('confirming a TRAIN with no known length announces nothing and leaves it pending', () => {
+    announceDevice(h.client, 'T1', { capabilities: ['core.controls_motion'] });
+    h.view.setName('T1', 'Rocket');
+    h.view.confirm('T1');
+
+    expect(h.published().some((p) => p.topic === 'railway/events/device_registered/T1')).toBe(
+      false,
+    );
+    expect(h.view.getState().pending).toHaveLength(1);
+  });
+
   it('confirming a non-train DEVICE re-announces name but NOT a train length', () => {
     announceDevice(h.client, 'GATE-1', { capabilities: ['core.gates_clearance'] });
     h.view.setName('GATE-1', 'East Signal');

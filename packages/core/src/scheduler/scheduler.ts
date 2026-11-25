@@ -175,11 +175,24 @@ export class Scheduler {
     const reg = readRegistration(payload);
     const { capabilities } = reg;
 
+    /* A train with no known length is not a valid state (ADR-012): refuse it
+     * before anything is recorded, so it never reaches the roster. */
+    const trainLengthMm = reg.train_length_mm;
+    const isTrain = capabilities.includes('core.controls_motion');
+    if (isTrain && !isPositiveLength(trainLengthMm)) {
+      return [
+        effects.publishEvent('anomaly', {
+          severity: 'warning',
+          description: `Device ${deviceId} declared core.controls_motion without a positive train_length_mm`,
+        }),
+      ];
+    }
+
     const rejected = this.devices.register(deviceId, reg);
     if (rejected) return [rejected];
 
-    if (capabilities.includes('core.controls_motion')) {
-      this.trains.register(deviceId, reg.priority, reg.train_length_mm);
+    if (isTrain && isPositiveLength(trainLengthMm)) {
+      this.trains.register(deviceId, reg.priority, trainLengthMm);
     }
 
     const ownership: SchedulerEffect[] = [];
@@ -205,8 +218,8 @@ export class Scheduler {
       name?: string;
       livery?: string;
     } = { capabilities };
-    if (typeof reg.train_length_mm === 'number' && reg.train_length_mm > 0) {
-      deviceState.train_length_mm = reg.train_length_mm;
+    if (isTrain && isPositiveLength(trainLengthMm)) {
+      deviceState.train_length_mm = trainLengthMm;
     }
     if (reg.name !== undefined) deviceState.name = reg.name;
     if (reg.livery !== undefined) deviceState.livery = reg.livery;
@@ -417,34 +430,24 @@ export class Scheduler {
     // gates concurrent occupation, not lifetime ownership — without pruning,
     // cleared_edges grows monotonically and every following train is denied.
     //
-    // For trains with a known physical length (length_mm > 0), skip immediate
-    // release on head arrival. The tail still occupies the section behind the
-    // head. Release is deferred until handleTrainStatus reports progress far
-    // enough that the tail has vacated each held edge. Multi-edge spanning is
-    // supported: handleTrainStatus walks back through cleared_edges and releases
-    // every edge whose cumulative distance from the head exceeds length_mm (ADR-012
-    // refinement, ADR-016 step 5).
+    // Release is deferred past head arrival: the tail still occupies the
+    // section behind the head. handleTrainStatus releases each held edge once
+    // the reported progress shows the tail has vacated it (ADR-012 refinement,
+    // ADR-016 step 5).
     //
     // SWITCHED-JUNCTION SAFETY: continuous junction protection across a switch
     // handover relies on this tail-occupancy deferral. When a train must cross
     // a junction it doesn't yet have the right points for, `SwitchControl.actuate`
-    // only *requests* the switch and withholds clearance — the train does not
-    // yet hold the onward edge. For a length-aware train the approach edge stays
-    // held (its tail still occupies it), so the junction marker remains locked
-    // under block exclusivity and no peer can grab a conflicting branch. A POINT
-    // train (length_mm 0/undefined) releases its approach edge the instant its
-    // head reaches the junction — opening a window where the junction is
-    // unprotected, into which a peer can be granted, leading to switch
-    // oscillation and deadlock. Switched-junction serialization therefore
-    // currently requires length-aware trains; see the keystone test.
-    const edgesReleased = releasePointTrainArrival(train, markerId);
+    // only *requests* the switch and withholds clearance, so the approach edge
+    // stays held (the tail still occupies it), the junction marker remains
+    // locked under block exclusivity and no peer can grab a conflicting branch.
 
     // Discovery: when a train moves from one marker to another, either
     // confirm an existing edge (inferred or not) or learn a new one.
     // The `in_discovery_mode` flag on marker_traversed reflects whether
     // the edge we just crossed is still inferred after this traversal.
     const out: SchedulerEffect[] = [];
-    if (edgesReleased || leftStandingBlock) {
+    if (leftStandingBlock) {
       out.push(clearanceStateEffect(train));
     }
     const { effects: discoveryEffects, inDiscoveryMode } = this.recordTraversalAndDiscovery(
@@ -515,8 +518,7 @@ export class Scheduler {
   }
 
   /**
-   * Handle a `train_status` event from a length-aware train. For trains with
-   * `length_mm > 0`, the head crossing a boundary marker is not sufficient to
+   * Handle a `train_status` event. The head crossing a boundary marker is not sufficient to
    * release the section behind it — the tail must also have cleared. This
    * method walks backward through `cleared_edges` to find every held edge
    * whose cumulative distance from the head exceeds `length_mm`, and releases
@@ -532,9 +534,6 @@ export class Scheduler {
    * undefined, the walk stops there and deeper edges remain held. This is
    * deliberate — the scheduler must never guess a length to release clearance
    * (safety asymmetry: holding too long is safe, releasing too early is not).
-   *
-   * Point trains (length_mm undefined or 0) release on `marker_traversed`
-   * (handleTrainAtMarker) and are unaffected by this method.
    *
    * Ignored unless the sending device is the train it describes.
    */
@@ -568,16 +567,12 @@ export class Scheduler {
       train.current_edge = current_edge;
     }
 
-    /* Deterministic station dwell. Checked before the length gate because the
-     * dwell applies to point trains too. When the dwell has elapsed, clear it
+    /* Deterministic station dwell. When the dwell has elapsed, clear it
      * and replan onward (advance the schedule pointer, plan the next leg, emit
      * the route + grant). The parked train keeps emitting `train_status`, so a
      * later status reliably observes the expiry. */
     const afterDwell = this.schedules.resumeIfDwellElapsed(train);
     if (afterDwell) return afterDwell;
-
-    // Only apply tail-deferral logic to trains with a registered length.
-    if (!train.length_mm || train.length_mm === 0) return [];
 
     // We need both the current edge and a distance reading.
     if (!current_edge || estimated_distance_from_edge_start_mm === undefined) return [];
@@ -737,14 +732,6 @@ export class Scheduler {
   }
 }
 
-/**
- * A point train releases every held edge ending at the marker its head has just
- * reached. Returns whether anything was released. A length-aware train releases
- * nothing here: its tail still occupies those edges (see `handleTrainStatus`).
- */
-function releasePointTrainArrival(train: TrainState, markerId: string): boolean {
-  if (train.length_mm) return false;
-  const before = train.cleared_edges.length;
-  train.cleared_edges = train.cleared_edges.filter((e) => e.to_marker_id !== markerId);
-  return train.cleared_edges.length !== before;
+function isPositiveLength(lengthMm: number | undefined): lengthMm is number {
+  return typeof lengthMm === 'number' && Number.isFinite(lengthMm) && lengthMm > 0;
 }

@@ -370,8 +370,8 @@ describe('DeviceRetainedState', () => {
 });
 
 describe('protocol version', () => {
-  it('PROTOCOL_VERSION is 0.15.0 (train introduction lifecycle landed, ADR-036)', () => {
-    expect(PROTOCOL_VERSION).toBe('0.15.0');
+  it('PROTOCOL_VERSION is 0.16.0 (train length mandatory, ADR-012)', () => {
+    expect(PROTOCOL_VERSION).toBe('0.16.0');
   });
 });
 

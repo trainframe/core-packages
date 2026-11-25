@@ -47,6 +47,7 @@ test.describe('visualiser surfaces train battery + error_state', () => {
     harness.server.injectEvent('device_registered', 'T1', {
       device_kind_hint: 'scheduled-loco',
       capabilities: ['core.controls_motion', 'core.reports_marker_traversal', 'core.accepts_route'],
+      train_length_mm: 150,
     });
 
     const client = mqtt.connect(harness.brokerWsUrl, { protocolVersion: 4 });

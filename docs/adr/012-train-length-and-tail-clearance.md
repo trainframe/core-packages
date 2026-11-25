@@ -4,6 +4,18 @@
 
 Accepted
 
+**Amendment, 2026-11-25: length is mandatory.** Every train reports a length. A
+`device_registered` declaring `core.controls_motion` must carry a positive
+`train_length_mm` (protocol 0.16.0); the server rejects one without it and the
+scheduler refuses it with an anomaly. The point-train semantics described below
+(absent or 0 length, release on head arrival) no longer exist: the scheduler has
+no zero-length path, and `TrainState.length_mm` is always a positive number. A
+point train could not be told apart from a train whose length was merely unknown,
+and it left a stopped train holding no block, so a peer could be granted up to it.
+No default length is invented: a train that does not know its length cannot
+register, and `train_length_changed` (ADR-023) still corrects it later. The
+decisions below describe the original design and are kept for the record.
+
 Extends [ADR-011](011-section-as-edge-plus-boundary-markers.md). The section-pair
 locking rule treats every train as a point. This ADR generalises the release
 side of that model to honour the train's physical length.
