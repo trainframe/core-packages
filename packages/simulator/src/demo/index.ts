@@ -4,23 +4,10 @@
  * without reaching into a deep source path. Pure data + geometry — no React, no
  * DOM — so it is safe to import from a Node test runner.
  */
-export { buildRailyardDemo } from './railyard-demo.js';
-export type { DemoCarriage, DemoTrain, RailyardDemo } from './railyard-demo.js';
-
-/* The branching demo (FROZEN SPEC) — driven by the REAL scheduler. The headless
- * integration gate and the render script build the SAME assembly through this
- * composition root, varying only the device transport. */
-export {
-  buildBranchingDemo,
-  DEMO_ROUTES,
-  YARD_DEVICE_ID,
-  SPUR_SWITCH_ID,
-} from './branching-demo.js';
-export type { BranchingDemo, DemoRoute, PlatformFactory } from './branching-demo.js';
-
 /* The interesting-railway demo — FOUR trains on the winding loop + drive-through yard,
- * driven by the REAL scheduler (the 4-train stress test). Same composition-root shape
- * as the branching demo. */
+ * driven by the REAL scheduler (the 4-train stress test). Its devices talk to core
+ * through a `PlatformProvider` the caller supplies per device id. */
+export type { PlatformFactory } from './interesting-railway-demo.js';
 export {
   buildInterestingRailwayDemo,
   INTERESTING_YARD_DEVICE_ID,
@@ -32,9 +19,7 @@ export {
   buildInterestingMarkers,
   INTERESTING_MARKERS,
 } from '../physics/interesting-markers.js';
-export { buildBranchingScene } from '../physics/branching-scene.js';
-export type { BranchingScene, SceneMarker } from '../physics/branching-scene.js';
-export { sceneToLayout, markerAt, edgeRequiresSwitch } from '../physics/scene-markers.js';
+export type { SceneMarker } from '../physics/markers.js';
 export { PhysicsWorld } from '../physics/world.js';
 export { mqttPlatform } from '../broker/mqtt-platform.js';
 export { MqttBrokerClient } from '../broker/mqtt-client.js';

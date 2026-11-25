@@ -1,11 +1,9 @@
 /**
  * Adapts an ARBITRARY fan of DISCOVERED slot segments — the operator's real stabling
  * roads, found beneath a gantry footprint by `discoverYardSlots` — to the `YardLayout`
- * seam the reused `YardController` drives. It is the general sibling of
- * `parallelogram-yard-layout.ts`: where that projects a yard the BUILDER laid (so the
- * slot/lead/switch ids are known up front), this RE-DISCOVERS that structure from a
- * network it was handed nothing about but the slot segments — the leads, the throat and
- * the ladder switches are all inferred from the SAME `compileNetwork` net's adjacency.
+ * seam the reused `YardController` drives. The structure is
+ * RE-DISCOVERED from a network handed nothing but the slot segments — the leads, the
+ * throat and the ladder switches are all inferred from the net's adjacency.
  *
  * The whole point of the toybox keystone: the gantry drives the operator's ACTUAL
  * segments in the ONE unified network (a running loop + the slots, both already in
@@ -24,15 +22,15 @@
  *    the compiled net) is selected by throwing switch `M-X` — `divert` for the branch
  *    leg, `main` for the through. A road fronting plain track (a trailing road reached
  *    by a curve) carries no switch on that side. The per-slot, per-side throws are
- *    returned as a `ladder` the COMPOSITION binds two `SwitchActuator`s to (exactly as
- *    the parallelogram yard binds `ladderSwitchActuator`); the controller, which thinks
+ *    returned as a `ladder` the COMPOSITION binds two `SwitchActuator`s to (see
+ *    `discoveredYardActuator`); the controller, which thinks
  *    in a single multi-position diverge/converge switch, is none the wiser.
  *
  * Pure geometry/topology: endpoints come straight from the net's `geom`. No DOM, no
  * clock, no randomness.
  */
 import type { RailNetwork } from './network.js';
-import type { SegEndpoints } from './piece-network.js';
+import type { LegGate, SegEndpoints } from './piece-network.js';
 import type { YardLayout, YardSegGeom } from './yard.js';
 
 /** Nominal switch labels the controller addresses (the bound actuators are ladder
@@ -52,12 +50,25 @@ export interface DiscoveredYardOptions {
    *  `S-{pieceId}` / `S-{pieceId}-b`; this is how the adapter learns which segment id
    *  belongs to which switch.) */
   readonly junctionSwitchIds: readonly string[];
+  /** Turnout legs of a hand-built net (a `PieceNetworkBuilder` scene), whose switches
+   *  carry their own ids and positions rather than the compiled `M-x` naming. A leg
+   *  listed here is gated by the throw it maps to; others fall back to the compiled
+   *  naming. */
+  readonly legGates?: ReadonlyMap<string, LegGate>;
+  /** Where a visitor arrives (the throat). Each road's end nearer this point is its
+   *  entry, so the entry and exit sides are decided by geometry rather than by which
+   *  running-line segment each end happens to front. A ladder of per-slot turnouts has
+   *  a different adjacent segment at every slot, so it needs this hint. */
+  readonly entryPoint?: { x: number; y: number };
 }
 
-/** A single junction throw: set `switchId` to `position` to route through that leg. */
+/** A single junction throw: set `switchId` to `position` to route through that leg.
+ *  `rest` is the position that sends the same switch along its other leg (the through
+ *  line), `main` when omitted. */
 export interface LadderThrow {
   readonly switchId: string;
   readonly position: string;
+  readonly rest?: string;
 }
 
 /** Per-slot ladder throws — what to set on each side to route a lead into THAT slot.
@@ -211,13 +222,28 @@ function roadFromSegs(segs: string[], geom: ReadonlyMap<string, SegEndpoints>): 
 /** The junction throw a compiled segment represents, or null when it isn't a junction
  *  leg. `S-{id}-b` → branch (`divert`); `S-{id}` whose `M-{id}` is a junction → through
  *  (`main`). */
-function switchForSegment(seg: string, junctionSwitchIds: ReadonlySet<string>): LadderThrow | null {
+function compiledLegThrow(seg: string, junctionSwitchIds: ReadonlySet<string>): LadderThrow | null {
   if (!seg.startsWith('S-')) return null;
   const isBranch = seg.endsWith('-b');
   const pieceId = isBranch ? seg.slice(2, -2) : seg.slice(2);
   const switchId = `M-${pieceId}`;
   if (!junctionSwitchIds.has(switchId)) return null;
   return { switchId, position: isBranch ? 'divert' : 'main' };
+}
+
+/** Resolves a segment to the junction throw that selects it, or null for plain track. */
+type LegResolver = (seg: string) => LadderThrow | null;
+
+/** The resolver for `opts`: a hand-built leg's own gate wins, else the compiled naming. */
+function legResolver(opts: DiscoveredYardOptions): LegResolver {
+  const switchSet = new Set(opts.junctionSwitchIds);
+  return (seg) => {
+    const gate = opts.legGates?.get(seg);
+    if (gate !== undefined) {
+      return { switchId: gate.switchId, position: gate.position, rest: gate.restPosition };
+    }
+    return compiledLegThrow(seg, switchSet);
+  };
 }
 
 /** A full-length running straight (mm) — what a yard LEAD is, as opposed to the short
@@ -268,7 +294,7 @@ function stepWalk(
   ctx: {
     net: RailNetwork;
     geom: ReadonlyMap<string, SegEndpoints>;
-    junctionSwitchIds: ReadonlySet<string>;
+    legThrowOf: LegResolver;
     seen: Set<string>;
   },
   next: WalkNode[],
@@ -279,7 +305,7 @@ function stepWalk(
     if (g === undefined || !segTouches(g, node.at)) continue;
     ctx.seen.add(seg);
     const far = farEndOf(g, node.at);
-    const legThrow = switchForSegment(seg, ctx.junctionSwitchIds);
+    const legThrow = ctx.legThrowOf(seg);
     if (legThrow === null && lengthOf(g) >= LEAD_MIN_LENGTH_MM) {
       return { lead: seg, outer: far, throw: node.throw };
     }
@@ -299,9 +325,9 @@ function walkToLead(
   slotSegs: ReadonlySet<string>,
   net: RailNetwork,
   geom: ReadonlyMap<string, SegEndpoints>,
-  junctionSwitchIds: ReadonlySet<string>,
+  legThrowOf: LegResolver,
 ): SideResolution | null {
-  const ctx = { net, geom, junctionSwitchIds, seen: new Set<string>(slotSegs) };
+  const ctx = { net, geom, legThrowOf, seen: new Set<string>(slotSegs) };
   let frontier: WalkNode[] = [{ at: p, throw: null }];
   for (let depth = 0; depth < 12 && frontier.length > 0; depth++) {
     const next: WalkNode[] = [];
@@ -330,14 +356,14 @@ function resolveRoad(
   road: Road,
   net: RailNetwork,
   geom: ReadonlyMap<string, SegEndpoints>,
-  junctionSwitchIds: ReadonlySet<string>,
+  legThrowOf: LegResolver,
 ): ResolvedRoad {
   const roadSet = new Set(road.segs);
   return {
     slot: road.segs[0] ?? '',
     geom: { ax: road.a.x, ay: road.a.y, bx: road.b.x, by: road.b.y },
-    endA: walkToLead(road.a, roadSet, net, geom, junctionSwitchIds),
-    endB: walkToLead(road.b, roadSet, net, geom, junctionSwitchIds),
+    endA: walkToLead(road.a, roadSet, net, geom, legThrowOf),
+    endB: walkToLead(road.b, roadSet, net, geom, legThrowOf),
     a: road.a,
     b: road.b,
   };
@@ -356,22 +382,26 @@ export function discoveredYardLayout(
   slotSegIds: readonly string[],
   opts: DiscoveredYardOptions,
 ): DiscoveredYard | null {
-  const switchSet = new Set(opts.junctionSwitchIds);
+  const legThrowOf = legResolver(opts);
   /* A junction LEG (`S-X` / `S-X-b`) that fell under the footprint is a CONNECTOR feeding
    *  a slot, never a stabling road itself — drop it before coalescing so a slot is only
    *  ever real running track, not a turnout's through/branch rail. */
-  const slotSegsOnly = slotSegIds.filter((s) => switchForSegment(s, switchSet) === null);
+  const slotSegsOnly = slotSegIds.filter((s) => legThrowOf(s) === null);
   const roads = coalesceRoads(slotSegsOnly, geom);
   if (roads.length < 2) return null;
 
-  const resolved = roads.map((r) => resolveRoad(r, net, geom, switchSet));
-  const leads = pickLeads(resolved);
+  const resolved = roads.map((r) => resolveRoad(r, net, geom, legThrowOf));
+  const entry = opts.entryPoint;
+  const leads = entry === undefined ? pickLeads(resolved) : leadsFrom(resolved, entry);
   if (leads === null) return null;
 
   const layoutGeom = new Map<string, YardSegGeom>();
   const ladder: SlotLadder[] = [];
   const slots: string[] = [];
-  for (const r of resolved) buildSlot(r, leads.west, leads.east, layoutGeom, ladder, slots);
+  for (const r of resolved) {
+    const entrySide = entry === undefined ? sideFronting(r, leads.west) : nearerEnd(r, entry);
+    buildSlot(r, entrySide, layoutGeom, ladder, slots);
+  }
   setLeadGeom(layoutGeom, geom, leads.west);
   setLeadGeom(layoutGeom, geom, leads.east);
 
@@ -409,20 +439,43 @@ function pickLeads(
   return { west: west[0], east: east[0], throat: west[1].outer };
 }
 
+/** The end of a road nearer `p` — its entry when `p` is where visitors arrive. */
+function nearerEnd(r: ResolvedRoad, p: { x: number; y: number }): 'a' | 'b' {
+  return Math.hypot(r.a.x - p.x, r.a.y - p.y) <= Math.hypot(r.b.x - p.x, r.b.y - p.y) ? 'a' : 'b';
+}
+
+/** The two leads of a fan whose entry side is known from `p`: the entry lead is the one
+ *  fronting an entry end nearest `p`, the exit lead the one fronting an exit end farthest
+ *  from it (the end of the chain the visitor drives out along). */
+function leadsFrom(
+  resolved: readonly ResolvedRoad[],
+  p: { x: number; y: number },
+): { west: string; east: string; throat: { x: number; y: number } } | null {
+  let west: SideResolution | null = null;
+  let east: SideResolution | null = null;
+  const dist = (s: SideResolution): number => Math.hypot(s.outer.x - p.x, s.outer.y - p.y);
+  for (const r of resolved) {
+    const entrySide = nearerEnd(r, p) === 'a' ? r.endA : r.endB;
+    const exitSide = nearerEnd(r, p) === 'a' ? r.endB : r.endA;
+    if (entrySide !== null && (west === null || dist(entrySide) < dist(west))) west = entrySide;
+    if (exitSide !== null && (east === null || dist(exitSide) > dist(east))) east = exitSide;
+  }
+  if (west === null || east === null || west.lead === east.lead) return null;
+  return { west: west.lead, east: east.lead, throat: west.outer };
+}
+
 /** Build one slot's geom + ladder entry. The controller enters at the slot MOUTH (geom
  *  `a`) and rests at the far FOOT (geom `b`), reasoning FOOT→MOUTH; the visitor arrives
  *  along leadWest, so the ENTRY (leadWest) end is the MOUTH `a` and the EXIT (leadEast)
  *  end — where it pulls clear and reverses onto the spares — is the FOOT `b`. */
 function buildSlot(
   r: ResolvedRoad,
-  leadWestSeg: string,
-  leadEastSeg: string,
+  entrySide: 'a' | 'b',
   layoutGeom: Map<string, YardSegGeom>,
   ladder: SlotLadder[],
   slots: string[],
 ): void {
-  const entrySide = sideFronting(r, leadWestSeg);
-  const exitSide = sideFronting(r, leadEastSeg);
+  const exitSide = entrySide === 'a' ? 'b' : 'a';
   const entryEnd = entrySide === 'a' ? r.a : r.b;
   const exitEnd = exitSide === 'a' ? r.a : r.b;
   layoutGeom.set(r.slot, { ax: entryEnd.x, ay: entryEnd.y, bx: exitEnd.x, by: exitEnd.y });

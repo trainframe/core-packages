@@ -73,6 +73,7 @@ export interface MainLoopScene {
   readonly net: RailNetwork;
   readonly pieces: ReturnType<PieceNetworkBuilder['build']>['pieces'];
   readonly geom: ReturnType<PieceNetworkBuilder['build']>['geom'];
+  readonly legGates: ReturnType<PieceNetworkBuilder['build']>['legGates'];
   readonly branches: MainLoopBranches;
   /** The parallelogram yard hanging off the bottom-left tap. */
   readonly yard: ParallelogramYardSegments;
@@ -115,7 +116,7 @@ export function buildMainLoopScene(): MainLoopScene {
   b.link('top-c', 'semi-r');
 
   /* BOTTOM run (heading west): WINDS via a varied mix of humps, then near the LEFT a
-   *  YARD tap drops the trapezoid yard below the loop (bottom-left), then a filler
+   *  YARD tap drops the drive-through yard below the loop (bottom-left), then a filler
    *  closes back to the start x. Humps (not straights) absorb the satellites' length
    *  so the bottom stays curvy. */
   const afterBotA = b.run('bot-a', afterSemiR, [STRAIGHT, ...HUMP_AWAY, STRAIGHT]);
@@ -167,6 +168,7 @@ export function buildMainLoopScene(): MainLoopScene {
     net: built.net,
     pieces: built.pieces,
     geom: built.geom,
+    legGates: built.legGates,
     branches: { yard: detour.segments, satA: satA.segments, satB: satB.segments },
     yard: detour.segments.yard,
     startSegment,

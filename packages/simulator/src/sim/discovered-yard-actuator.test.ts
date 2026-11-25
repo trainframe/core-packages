@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { discoverGantryYard } from '../physics/gantry-yard.js';
 import { buildMainLoopScene } from '../physics/interesting-layout.js';
-import { parallelogramYardLayout } from '../physics/parallelogram-yard-layout.js';
 import { PhysicsWorld } from '../physics/world.js';
-import { ladderSwitchActuator } from './ladder-switch-actuator.js';
+import { discoveredYardActuator } from './discovered-yard-actuator.js';
 
 /** Drive the body forward for up to `maxS` sim-seconds, stopping early once it is on one
  *  of `targetSegs`; returns the segment it ended on. */
@@ -33,15 +33,17 @@ function seedVisitor(world: PhysicsWorld, topLeadIn: string): void {
   });
 }
 
-describe('ladder-switch-actuator — the YardController seam over a parallelogram yard', () => {
+describe('discovered-yard-actuator — the YardController seam over a discovered ladder yard', () => {
   it('routes a visitor INTO a chosen slot (west ladder) then OUT the far lead (east ladder)', () => {
     const scene = buildMainLoopScene();
     const seg = scene.yard; // the parallelogram ParallelogramYardSegments
-    const layout = parallelogramYardLayout(scene.net, scene.geom, seg);
-    expect(layout.slots).toEqual(seg.slots);
+    const entry = scene.geom.get(seg.topLeadIn)?.start;
+    if (entry === undefined) throw new Error('expected the top lead');
+    const discovered = discoverGantryYard(scene, seg.slots, entry);
+    expect(discovered.layout.slots).toEqual(seg.slots);
     const world = new PhysicsWorld(scene.net);
-    const west = ladderSwitchActuator(world, seg, 'top');
-    const east = ladderSwitchActuator(world, seg, 'bottom');
+    const west = discoveredYardActuator(world, discovered.ladder, 'west');
+    const east = discoveredYardActuator(world, discovered.ladder, 'east');
 
     /* Pick an INNER slot (the controller never rests in an outer corner). */
     const entrySlot = seg.slots[2];
@@ -67,15 +69,18 @@ describe('ladder-switch-actuator — the YardController seam over a parallelogra
   it('selects DIFFERENT slots independently (slot 1 vs slot 3 land on distinct roads)', () => {
     const scene = buildMainLoopScene();
     const seg = scene.yard;
+    const entry = scene.geom.get(seg.topLeadIn)?.start;
+    if (entry === undefined) throw new Error('expected the top lead');
+    const discovered = discoverGantryYard(scene, seg.slots, entry);
     for (const k of [1, 3]) {
       const world = new PhysicsWorld(scene.net);
-      const west = ladderSwitchActuator(world, seg, 'top');
+      const west = discoveredYardActuator(world, discovered.ladder, 'west');
       const slot = seg.slots[k];
       if (slot === undefined) throw new Error(`expected slot ${k}`);
       /* Route BOTH leads to slot k so reaching the foot drives through (no run-off);
        *  driveUntil returns the instant it enters the slot, proving the west routing. */
       west.set(slot);
-      ladderSwitchActuator(world, seg, 'bottom').set(slot);
+      discoveredYardActuator(world, discovered.ladder, 'east').set(slot);
       seedVisitor(world, seg.topLeadIn);
       expect(driveUntil(world, 'V', [slot], 14), `routes to slot ${k}`).toBe(slot);
     }

@@ -12,13 +12,14 @@ import {
   ScheduledTrainDevice,
   MqttBrokerClient as SimBrokerClient,
   SwitchDevice,
-  buildBranchingScene,
+  buildInterestingMarkers,
+  buildMainLoopScene,
   deriveHeadingEdge,
+  interestingToLayout,
   mqttPlatform,
   physicsMarkerSensor,
   physicsMotorActuator,
   physicsSwitchActuator,
-  sceneToLayout,
   straightLoop,
 } from '@trainframe/simulator';
 import { Aedes } from 'aedes';
@@ -65,23 +66,24 @@ function loopUiScene(markers: readonly LoopMarker[]): UiScene {
 }
 
 /**
- * The branching scene (main ring + scenic BRANCH off the `Jspur` diverge) as a
- * harness scene. Used by the operator-built-route journey: the operator picks a
- * branch stop and the planner must route through `M-spur` (Jspur='branch') onto
- * the branch — a path a trivial first-edge walk never takes.
+ * The interesting railway (winding main loop with satellite loops and a yard detour) as
+ * a harness scene. Used by the operator-built-route journey: the operator picks a
+ * satellite station and the planner must route through the satellite's diverge
+ * junction onto the loop, a path a trivial first-edge walk never takes.
  */
-export function buildBranchingUiScene(): UiScene {
-  const scene = buildBranchingScene();
-  const layout = sceneToLayout(scene, 'branching');
-  const points: MarkerPoint[] = scene.markers.map((m) => {
+export function buildInterestingUiScene(): UiScene {
+  const scene = buildMainLoopScene();
+  const markers = buildInterestingMarkers(scene);
+  const layout = interestingToLayout(scene);
+  const points: MarkerPoint[] = markers.markers.map((m) => {
     const rail = scene.net.railOf(m.segment);
     const d = m.distAlongMm ?? (m.end === 'start' ? 0 : rail.length);
     const p = rail.at(d);
     return { id: m.id, x: p.x, y: p.y };
   });
   const placeAt = (markerId: string): { segment: string; railPos: number } => {
-    const m = scene.markers.find((mk) => mk.id === markerId);
-    if (m === undefined) throw new Error(`buildBranchingUiScene: no marker ${markerId}`);
+    const m = markers.markers.find((mk) => mk.id === markerId);
+    if (m === undefined) throw new Error(`buildInterestingUiScene: no marker ${markerId}`);
     const rail = scene.net.railOf(m.segment);
     const railPos = m.distAlongMm ?? (m.end === 'start' ? 0 : rail.length);
     return { segment: m.segment, railPos: Math.max(20, Math.min(rail.length - 20, railPos)) };
@@ -91,14 +93,12 @@ export function buildBranchingUiScene(): UiScene {
     layout,
     points,
     placeAt,
-    switches: [
-      {
-        deviceId: 'SPUR',
-        switchLabel: 'Jspur',
-        junctionMarkerId: 'M-spur',
-        positions: ['thru', 'branch'],
-      },
-    ],
+    switches: markers.junctions.map((j) => ({
+      deviceId: `SWITCH-${j.markerId}`,
+      switchLabel: j.switchId,
+      junctionMarkerId: j.markerId,
+      positions: j.positions,
+    })),
   };
 }
 
@@ -148,7 +148,7 @@ export interface UiHarnessOptions {
    *  single-rail loop scene to drive trains on. Mutually exclusive with `scene`
    *  and `discovery`. */
   readonly layout?: Layout;
-  /** A pre-built scene (e.g. `buildBranchingUiScene()`) for non-loop topologies. */
+  /** A pre-built scene (e.g. `buildInterestingUiScene()`) for non-loop topologies. */
   readonly scene?: UiScene;
   /** Boot the server in discovery mode: empty layout, no device layer (events are
    *  injected by the test or produced by the browser sim). */

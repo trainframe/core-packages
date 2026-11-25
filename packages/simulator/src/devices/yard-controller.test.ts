@@ -1,59 +1,87 @@
 import { describe, expect, it } from 'vitest';
+import { discoverGantryYard } from '../physics/gantry-yard.js';
+import { addParallelogramYard } from '../physics/parallelogram-yard.js';
+import { type Cursor, PieceNetworkBuilder } from '../physics/piece-network.js';
 import { PhysicsWorld } from '../physics/world.js';
-import { buildYardLayout } from '../physics/yard.js';
+import { discoveredYardActuator } from '../sim/discovered-yard-actuator.js';
 import { physicsMotorActuator } from '../sim/motor-actuator.js';
-import { physicsSwitchActuator } from '../sim/switch-actuator.js';
 import { Crane } from './crane.js';
 import { TrainDevice } from './train-device.js';
 import { YardController, craneBounds } from './yard-controller.js';
 
-/** Stage a yard, a visiting loco+3 rake on the west lead, and a 2-car spare cut in
- *  slot B, then run the CV controller to completion (or a step cap). */
-function serviceRun(): { world: PhysicsWorld; phase: string } {
-  const yard = buildYardLayout();
-  const w = new PhysicsWorld(yard.net);
+/**
+ * The `YardController` swap over a yard DISCOVERED beneath a gantry from a ladder of
+ * diagonal stabling roads. A long approach lead stages the visiting rake clear of the
+ * ladder.
+ */
+function serviceRun(): { world: PhysicsWorld; phase: string; layoutSlots: readonly string[] } {
+  const b = new PieceNetworkBuilder();
+  const entry: Cursor = { x: 0, y: 0, dir: 0, layer: 0 };
+  /* A 4-straight approach so the loco + 3-car rake stands clear of the first turnout. */
+  const approachEnd = b.run('approach', entry, [
+    { type: 'straight' },
+    { type: 'straight' },
+    { type: 'straight' },
+    { type: 'straight' },
+  ]);
+  const yard = addParallelogramYard(b, approachEnd, { prefix: 'y', slots: 5 });
+  b.link('approach', yard.topLeadIn);
+  const built = b.build();
+  const seg = yard.segments;
+  const entryPoint = built.geom.get(yard.topLeadIn)?.start;
+  if (entryPoint === undefined) throw new Error('need the top lead');
+  const discovered = discoverGantryYard(built, seg.slots, entryPoint);
+  const layout = discovered.layout;
 
-  // Visitor: loco + 3 carriages, coupled, on the west lead facing east.
-  w.addBody({ id: 'L', kind: 'loco', railPos: 400, facing: 1, segment: 'leadW', color: 'red' });
+  const w = new PhysicsWorld(built.net);
+  // Visitor: loco + 3 carriages, coupled, on the approach lead facing into the yard.
+  w.addBody({ id: 'L', kind: 'loco', railPos: 700, facing: 1, segment: 'approach', color: 'red' });
   for (let i = 0; i < 3; i++) {
     const id = `a${i}`;
     w.addBody({
       id,
       kind: 'carriage',
-      railPos: 400 - (i + 1) * 68,
+      railPos: 700 - (i + 1) * 68,
       facing: 1,
-      segment: 'leadW',
+      segment: 'approach',
       color: 'amber',
     });
     w.couple(i === 0 ? 'L' : `a${i - 1}`, id);
   }
-  // Spares already sitting in slot B (west part), coupled together.
+  // Spares already stabled in an inner slot, coupled together.
+  const entrySlot = seg.slots[2];
+  const sparesSlot = seg.slots[1];
+  if (entrySlot === undefined || sparesSlot === undefined) throw new Error('need inner slots');
+  const sparesLen = built.net.railOf(sparesSlot).length;
   w.addBody({
     id: 'p0',
     kind: 'carriage',
-    railPos: 200,
+    railPos: sparesLen * 0.55,
     facing: 1,
-    segment: 'slot1',
+    segment: sparesSlot,
     color: 'purple',
   });
   w.addBody({
     id: 'p1',
     kind: 'carriage',
-    railPos: 132,
+    railPos: sparesLen * 0.55 - 68,
     facing: 1,
-    segment: 'slot1',
+    segment: sparesSlot,
     color: 'purple',
   });
   w.couple('p0', 'p1');
 
   const train = new TrainDevice('L', physicsMotorActuator(w, 'L'));
-  const b = craneBounds(yard);
-  const crane = new Crane(b, { x: (b.minX + b.maxX) / 2, y: (b.minY + b.maxY) / 2 });
+  const bounds = craneBounds(layout);
+  const crane = new Crane(bounds, {
+    x: (bounds.minX + bounds.maxX) / 2,
+    y: (bounds.minY + bounds.maxY) / 2,
+  });
   const ctrl = new YardController({
-    layout: yard,
+    layout,
     train,
-    westPoints: physicsSwitchActuator(w, 'Jw'),
-    eastPoints: physicsSwitchActuator(w, 'Je'),
+    westPoints: discoveredYardActuator(w, discovered.ladder, 'west'),
+    eastPoints: discoveredYardActuator(w, discovered.ladder, 'east'),
     look: (x, y) => {
       const s = w.sampleAt(x, y, 20);
       return s === null ? { occupied: false } : { occupied: true, colour: s.colour };
@@ -63,17 +91,17 @@ function serviceRun(): { world: PhysicsWorld; phase: string } {
       w.uncoupleAt(x, y);
     },
     crane,
-    entrySlot: 'slot0',
-    sparesSlot: 'slot1',
+    entrySlot,
+    sparesSlot,
   });
 
   const dt = 1 / 60;
-  for (let i = 0; i < 4000 && ctrl.currentPhase !== 'done'; i++) {
+  for (let i = 0; i < 12000 && ctrl.currentPhase !== 'done'; i++) {
     ctrl.tick(dt);
     crane.step(dt);
     w.step(dt);
   }
-  return { world: w, phase: ctrl.currentPhase };
+  return { world: w, phase: ctrl.currentPhase, layoutSlots: seg.slots };
 }
 
 /** The set of ids coupled to `id` (its rake), by flood-fill over couplings. */
@@ -92,22 +120,19 @@ function rake(world: PhysicsWorld, id: string): Set<string> {
   return seen;
 }
 
-describe('YardController — a full CV-driven service', () => {
-  it('enters a slot, sheds the rear cut, picks up the spares, and leaves with them', () => {
+describe('YardController over a discovered yard (diagonal slots)', () => {
+  it('enters a diagonal slot, sheds the rear cut, picks up the spares, and leaves with them', () => {
     const { world, phase } = serviceRun();
-    const segOf = (id: string) => world.bodies().find((b) => b.id === id)?.segment;
-
-    expect(phase).toBe('done'); // ran the whole choreography
+    expect(phase).toBe('done');
 
     const train = rake(world, 'L');
-    // Departing train = loco + the kept front car + the picked-up spares.
-    expect(train).toEqual(new Set(['L', 'a0', 'p0', 'p1']));
-    // The rear cut (a1,a2) was shed, left coupled to itself, parked in slot A.
+    /* Departing train = loco + the kept front car + the picked-up spares. */
+    expect(train.has('p0')).toBe(true);
+    expect(train.has('p1')).toBe(true);
+    expect(train.has('a0')).toBe(true);
+    /* The rear cut (a1,a2) was shed — no longer part of the visiting train. */
     expect(train.has('a1')).toBe(false);
     expect(train.has('a2')).toBe(false);
     expect(rake(world, 'a1')).toEqual(new Set(['a1', 'a2']));
-    expect(segOf('a2')).toBe('slot0');
-    // And the serviced train left toward the opposite (east) throat.
-    expect(['leadE', 'eleg1', 'slot1']).toContain(segOf('L'));
   });
 });

@@ -3,9 +3,8 @@
  * junction marker paired to a physics switch. Core's view of a layout is the set
  * of these (`SceneMarker[]` + `SceneJunction[]`); physics knows only segments.
  *
- * One source of truth for both scene families — the bezier `BranchingScene`
- * (`branching-scene.ts`) and the real-piece railyard (`railyard-markers.ts`) —
- * so the two compilers cannot drift in what a marker anchor means.
+ * The piece-built scene compilers (`railyard-markers.ts`) share it, so they
+ * cannot drift in what a marker anchor means.
  *
  * Pure data shapes: no I/O, no clock, no randomness.
  */

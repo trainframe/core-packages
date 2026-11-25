@@ -96,16 +96,25 @@ function isSwapped(demo: InterestingRailwayDemo, originalCut: string[], spares: 
   return spares.every((s) => t1.has(s)) && originalCut.every((c) => !t1.has(c));
 }
 
-/** Pump `RUN_SECONDS` of sim time; track each train's distinct markers and whether T1's
- *  swap ever completed. */
+/** What the world looked like the first time T1 wore the spares and shed its own cut. */
+interface SwapSnapshot {
+  readonly t1Rake: string[];
+  readonly shedCutCoupled: boolean;
+  readonly shedSegment: string | undefined;
+}
+
+/** Pump `RUN_SECONDS` of sim time; track each train's distinct markers and capture the
+ *  world the first time T1's swap completes. The schedule is cyclic, so T1 revisits the
+ *  yard and starts a second swap; the end-of-run state would depend on where in that
+ *  second service the clock lands, which moves with message timing on a real broker. */
 async function pump(
   rig: Rig,
   originalCut: string[],
   spares: string[],
-): Promise<{ swapped: boolean; markerSets: Map<string, Set<string>> }> {
+): Promise<{ swap: SwapSnapshot | null; markerSets: Map<string, Set<string>> }> {
   const markerSets = new Map(rig.demo.trainIds.map((id) => [id, new Set<string>()]));
   const batches = Math.ceil(RUN_SECONDS / DT / 12);
-  let swapped = false;
+  let swap: SwapSnapshot | null = null;
   for (let i = 0; i < batches; i++) {
     for (let t = 0; t < 12; t++) {
       rig.demo.step(DT);
@@ -116,9 +125,15 @@ async function pump(
       if (e.event_type !== 'tag_observed') continue;
       markerSets.get(e.device_id)?.add((e.payload as { tag_id: string }).tag_id);
     }
-    if (isSwapped(rig.demo, originalCut, spares)) swapped = true;
+    if (swap === null && isSwapped(rig.demo, originalCut, spares)) {
+      swap = {
+        t1Rake: [...rake(rig.demo, 'T1')].sort(),
+        shedCutCoupled: rake(rig.demo, 'T1-c0').has('T1-c1'),
+        shedSegment: segmentOf(rig.demo, 'T1-c0'),
+      };
+    }
   }
-  return { swapped, markerSets };
+  return { swap, markerSets };
 }
 
 describe('Interesting-railway scheduled YARD VISIT swaps a train’s carriages on-rail', () => {
@@ -146,19 +161,19 @@ describe('Interesting-railway scheduled YARD VISIT swaps a train’s carriages o
     const originalCut = ['T1-c0', 'T1-c1'];
     const spares = ['spare0', 'spare1'];
 
-    const { swapped, markerSets } = await pump(rig, originalCut, spares);
+    const { swap, markerSets } = await pump(rig, originalCut, spares);
 
-    /* THE SWAP: T1 now hauls the spares, not its own cut. */
-    const t1Rake = rake(rig.demo, 'T1');
-    expect(swapped, 'T1 picked up the spares at some point').toBe(true);
-    expect([...t1Rake].sort(), 'T1 departs with loco + spares').toEqual(
+    /* THE SWAP: T1 hauls the spares, not its own cut. */
+    expect(swap, 'T1 picked up the spares at some point').not.toBeNull();
+    expect(swap?.t1Rake, 'T1 departs with loco + spares').toEqual(
       ['T1', 'spare0', 'spare1'].sort(),
     );
-    for (const c of originalCut) expect(t1Rake.has(c), `${c} shed`).toBe(false);
     /* The shed cut stays coupled to itself, abandoned in the yard interior. */
-    expect(rake(rig.demo, 'T1-c0').has('T1-c1'), 'shed cut stays coupled').toBe(true);
-    const shedSeg = segmentOf(rig.demo, 'T1-c0');
-    expect(shedSeg?.startsWith('yard-'), `shed cut parked in the yard (was ${shedSeg})`).toBe(true);
+    expect(swap?.shedCutCoupled, 'shed cut stays coupled').toBe(true);
+    expect(
+      swap?.shedSegment?.startsWith('yard-'),
+      `shed cut parked in the yard (was ${swap?.shedSegment})`,
+    ).toBe(true);
 
     /* LIVENESS: the other three kept circulating throughout the service. */
     for (const id of ['T2', 'T3', 'T4']) {

@@ -15,9 +15,8 @@
  * logic — it wires the devices and exposes `step(dtS)`; route assignment is the
  * operator's job (`server.assignSchedule`).
  *
- * Unlike the branching demo (THREE trains — its only path threaded an IN-LINE yard, so
- * a fourth circular-waited), this layout's yard is a DRIVE-THROUGH detour with a
- * bypass: trains circulate the main loop freely and only divert into the yard on a
+ * The yard is a DRIVE-THROUGH detour with a bypass, discovered from the track under a
+ * gantry footprint: trains circulate the main loop freely and only divert into the yard on a
  * rota, so four trains never gridlock the running line.
  *
  * Pure wiring: no Date.now / Math.random. DOM-free — safe from a Node test runner.
@@ -28,6 +27,7 @@ import type { PlatformProvider } from '../devices/platform-provider.js';
 import { ScheduledTrainDevice } from '../devices/scheduled-train-device.js';
 import { SwitchDevice } from '../devices/switch-device.js';
 import { YardZoneDevice } from '../devices/yard-zone-device.js';
+import { discoverGantryYard } from '../physics/gantry-yard.js';
 import { type MainLoopScene, buildMainLoopScene } from '../physics/interesting-layout.js';
 import {
   INTERESTING_MARKERS as M,
@@ -35,9 +35,8 @@ import {
   interestingToLayout,
 } from '../physics/interesting-markers.js';
 import type { SceneMarker } from '../physics/markers.js';
-import { parallelogramYardLayout } from '../physics/parallelogram-yard-layout.js';
 import { PhysicsWorld } from '../physics/world.js';
-import { ladderSwitchActuator } from '../sim/ladder-switch-actuator.js';
+import { discoveredYardActuator } from '../sim/discovered-yard-actuator.js';
 import { physicsMarkerSensor } from '../sim/marker-sensor.js';
 import { physicsMotorActuator } from '../sim/motor-actuator.js';
 import { physicsSwitchActuator } from '../sim/switch-actuator.js';
@@ -107,6 +106,13 @@ function markerPoints(scene: MainLoopScene, markers: readonly SceneMarker[]): Ma
     const p = rail.at(d);
     return { id: m.id, x: p.x, y: p.y };
   });
+}
+
+/** The world point of the marker `id`. */
+function markerPoint(points: readonly MarkerPoint[], id: string): { x: number; y: number } {
+  const p = points.find((m) => m.id === id);
+  if (p === undefined) throw new Error(`interesting-demo: no marker ${id}`);
+  return { x: p.x, y: p.y };
 }
 
 /** Where a marker sits along its segment — a body seeds here, a touch inside the
@@ -225,15 +231,15 @@ export function buildInterestingRailwayDemo(
       }),
   );
 
-  /* The YARD as a `core.gates_zone` device — the SAME zone device + `YardController`
-   *  swap the branching demo uses, over the parallelogram drive-through yard. The
+  /* The YARD as a `core.gates_zone` device — the zone device + `YardController`
+   *  swap over the yard discovered beneath the gantry. The
    *  visitor stops at the yard throat (a scheduled stop); the zone diverts it off the
    *  running line, swaps its rear cut for the stabled spares (crane decouples only —
    *  on-rail throughout), and releases it back onto the line past the merge. */
-  const yardSeg = scene.yard;
-  const sparesSlot = yardSeg.slots[SPARES_SLOT_INDEX];
-  if (sparesSlot === undefined) {
-    throw new Error('interesting-demo: yard needs at least 2 slots');
+  const discovered = discoverGantryYard(scene, scene.yard.slots, markerPoint(points, M.yard));
+  const sparesSlot = scene.yard.slots[SPARES_SLOT_INDEX];
+  if (sparesSlot === undefined || !discovered.layout.slots.includes(sparesSlot)) {
+    throw new Error('interesting-demo: yard needs a discovered spares slot');
   }
   seedSpares(world, scene, sparesSlot);
   const YARD_CAM_R = 20;
@@ -243,13 +249,14 @@ export function buildInterestingRailwayDemo(
   const yard = new YardZoneDevice(INTERESTING_YARD_DEVICE_ID, {
     platform: platformFactory(INTERESTING_YARD_DEVICE_ID),
     scene: {
-      yard: parallelogramYardLayout(scene.net, scene.geom, yardSeg),
+      yard: discovered.layout,
       throatMarker: M.yard,
       sparesSlot,
+      throatPoint: markerPoint(points, M.yard),
     },
     capacity: YARD_CAPACITY,
-    westPoints: ladderSwitchActuator(world, yardSeg, 'top'),
-    eastPoints: ladderSwitchActuator(world, yardSeg, 'bottom'),
+    westPoints: discoveredYardActuator(world, discovered.ladder, 'west'),
+    eastPoints: discoveredYardActuator(world, discovered.ladder, 'east'),
     look: (x, y) => {
       const s = world.sampleAt(x, y, YARD_CAM_R);
       return s === null ? { occupied: false } : { occupied: true, colour: s.colour };

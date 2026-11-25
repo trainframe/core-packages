@@ -19,6 +19,7 @@ import { YardController, craneBounds } from '../devices/yard-controller.js';
 import type { TrackPiece } from '../track/pieces.js';
 import { discoverYardSlots } from './discover-yard.js';
 import { discoveredYardLayout } from './discovered-yard-layout.js';
+import { buildMainLoopScene } from './interesting-layout.js';
 import { compileNetwork } from './network-from-pieces.js';
 import { addPassingLoop } from './passing-loop.js';
 import { type Cursor, PieceNetworkBuilder } from './piece-network.js';
@@ -197,5 +198,53 @@ describe('discoveredYardLayout — a YardLayout from an arbitrary discovered slo
     expect(controller.currentPhase).toBe('route-in');
     controller.tick(0.1);
     expect(['route-in', 'rest']).toContain(controller.currentPhase);
+  });
+});
+
+describe('discoveredYardLayout — a hand-built ladder yard (leg gates + entry point)', () => {
+  const scene = buildMainLoopScene();
+  const xs = scene.yard.slots.flatMap((id) => {
+    const g = scene.geom.get(id);
+    return g === undefined ? [] : [g.start.x, g.end.x];
+  });
+  const ys = scene.yard.slots.flatMap((id) => {
+    const g = scene.geom.get(id);
+    return g === undefined ? [] : [g.start.y, g.end.y];
+  });
+  const footprint = {
+    minX: Math.min(...xs),
+    maxX: Math.max(...xs),
+    minY: Math.min(...ys),
+    maxY: Math.max(...ys),
+  };
+  const entry = scene.geom.get(scene.yard.topLeadIn)?.start ?? { x: 0, y: 0 };
+
+  it('discovers every slot, and the entry side follows the hinted throat', () => {
+    const slots = discoverYardSlots(scene.net.segments(), scene.geom, footprint);
+    expect(slots).toEqual(scene.yard.slots);
+    const yard = discoveredYardLayout(scene.net, scene.geom, slots, {
+      junctionSwitchIds: [],
+      legGates: scene.legGates,
+      entryPoint: entry,
+    });
+    expect(yard?.layout.slots).toEqual(scene.yard.slots);
+    expect(yard?.layout.leadWest).toBe(scene.yard.topLeadIn);
+    expect(yard?.layout.leadEast).toBe(scene.yard.bottomLeadOutSeg);
+  });
+
+  it('selects each inner slot through its own top and bottom turnout, and a corner slot through none', () => {
+    const slots = discoverYardSlots(scene.net.segments(), scene.geom, footprint);
+    const yard = discoveredYardLayout(scene.net, scene.geom, slots, {
+      junctionSwitchIds: [],
+      legGates: scene.legGates,
+      entryPoint: entry,
+    });
+    const byslot = new Map(yard?.ladder.map((l) => [l.slot, l]));
+    const first = byslot.get('yard-slot0');
+    const last = byslot.get('yard-slot4');
+    expect(first?.west).toEqual({ switchId: 'yard-sw0', position: 'slot', rest: 'thru' });
+    expect(first?.east).toBeNull();
+    expect(last?.west).toBeNull();
+    expect(last?.east).toEqual({ switchId: 'yard-bsw4', position: 'slot', rest: 'thru' });
   });
 });

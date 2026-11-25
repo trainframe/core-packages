@@ -6,15 +6,15 @@
  * every slot a dead-end; this translates that into the underlying junction throws the
  * `discoveredYardLayout` adapter inferred (`SlotLadder[]`).
  *
- * The crux (and what `sim/ladder-switch-actuator.ts` gets right and a naive per-slot loop
- * gets wrong): several slots may share ONE junction — a passing-loop's facing turnout
- * routes the LOOP on `divert` and the MAIN on `main`. So we set the TARGET slot's switch
- * to its throw and EVERY OTHER ladder switch to `main`; we never let a later slot's `main`
- * clobber the target's `divert` on the SAME junction. Sim-wiring only (touches the world);
+ * The crux (a naive per-slot loop gets this wrong): several slots may share ONE junction,
+ * a passing-loop's facing turnout routes the LOOP on `divert` and the MAIN on `main`. So we
+ * set the TARGET slot's switch to its throw and EVERY OTHER ladder switch to its rest
+ * position; we never let a later slot's rest throw clobber the target's on the SAME
+ * junction. Sim-wiring only (touches the world);
  * the device sees a plain `SwitchActuator` and never knows a ladder exists.
  */
 import type { SwitchActuator } from '../devices/switch-actuator.js';
-import type { SlotLadder } from '../physics/discovered-yard-layout.js';
+import type { LadderThrow, SlotLadder } from '../physics/discovered-yard-layout.js';
 import type { PhysicsWorld } from '../physics/world.js';
 
 /** Build a ladder actuator over one side's discovered junctions. `set(slotId)` routes
@@ -25,20 +25,19 @@ export function discoveredYardActuator(
   ladder: readonly SlotLadder[],
   side: 'west' | 'east',
 ): SwitchActuator {
-  const throwFor = (l: SlotLadder): { switchId: string; position: string } | null =>
-    side === 'west' ? l.west : l.east;
-  const allSwitches = new Set<string>();
+  const throwFor = (l: SlotLadder): LadderThrow | null => (side === 'west' ? l.west : l.east);
+  const allSwitches = new Map<string, string>();
   for (const l of ladder) {
     const t = throwFor(l);
-    if (t !== null) allSwitches.add(t.switchId);
+    if (t !== null) allSwitches.set(t.switchId, t.rest ?? 'main');
   }
   return {
     set(position: string): void {
       const target = ladder.find((l) => l.slot === position);
       const targetThrow = target === undefined ? null : throwFor(target);
-      for (const switchId of allSwitches) {
+      for (const [switchId, rest] of allSwitches) {
         const pos =
-          targetThrow !== null && targetThrow.switchId === switchId ? targetThrow.position : 'main';
+          targetThrow !== null && targetThrow.switchId === switchId ? targetThrow.position : rest;
         world.setSwitch(switchId, pos);
       }
     },

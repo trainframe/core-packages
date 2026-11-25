@@ -39,7 +39,7 @@
  * Tick-driven over a virtual clock; pure (no DOM, no Date.now, no Math.random).
  */
 import { type CoreEvent, PROTOCOL_VERSION } from '@trainframe/protocol';
-import type { DeviceManifest } from '@trainframe/protocol';
+import type { DeviceManifest, TrainIntroduced } from '@trainframe/protocol';
 import type { YardLayout } from '../physics/yard.js';
 import { Crane } from './crane.js';
 import type { MotorActuator } from './motor-actuator.js';
@@ -69,9 +69,8 @@ const INTERIOR_LOCO_ID = '0a0d0001-0000-4000-8000-000000000001';
 
 /** The opaque-yard layout the zone device needs — the throat marker it gates, the
  *  drive-through `YardLayout` (slot geometry + leads), and which slots the visitor
- *  enters and the spares occupy. PURE layout data — NOT the track. Any yard shape
- *  (the bezier `BranchingScene`, the parallelogram drive-through) satisfies it, so
- *  ONE zone device + ONE `YardController` swap serve every yard. */
+ *  enters and the spares occupy. PURE layout data — NOT the track. Any discovered yard
+ *  satisfies it, so ONE zone device + ONE `YardController` swap serve every yard. */
 export interface YardZoneScene {
   readonly yard: YardLayout;
   readonly throatMarker: string;
@@ -86,6 +85,15 @@ export interface YardZoneScene {
    *  yard the throat sits on the running line, across the divert + lead-in from the
    *  lead, so the composition supplies it explicitly. */
   readonly throatPoint?: { x: number; y: number };
+  /** The next marker on the running line after the throat: the `to_marker_id` of the
+   *  edge a released train traverses leaving the zone. When set the zone declares
+   *  `core.provides_train_heading` and hands core the vector (`train_introduced`)
+   *  before releasing the train, so core has a heading the instant it reaches open
+   *  track. */
+  readonly exitMarker?: string;
+  /** The interior markers the frame owns; declared on registration so core refuses
+   *  anything else controlling a marker under the frame. */
+  readonly ownedMarkerIds?: readonly string[];
 }
 
 export interface YardZoneDeps {
@@ -244,6 +252,18 @@ export class YardZoneDevice {
     return this.crane.pos;
   }
 
+  /** The capabilities the zone declares: heading is offered only when the scene names
+   *  the marker a released train heads for. */
+  private capabilities(): (
+    | 'core.gates_zone'
+    | 'core.reports_length'
+    | 'core.provides_train_heading'
+  )[] {
+    return this.d.scene.exitMarker === undefined
+      ? ['core.gates_zone', 'core.reports_length']
+      : ['core.gates_zone', 'core.reports_length', 'core.provides_train_heading'];
+  }
+
   private manifest(): DeviceManifest {
     return {
       manifest_version: '1.0',
@@ -253,7 +273,7 @@ export class YardZoneDevice {
       protocol_version: PROTOCOL_VERSION,
       display_name: 'Railyard',
       description: 'A capacity-limited opaque shunting yard gating its throat.',
-      capabilities: ['core.gates_zone', 'core.reports_length'],
+      capabilities: this.capabilities(),
     };
   }
 
@@ -268,8 +288,11 @@ export class YardZoneDevice {
       event_type: 'device_registered',
       protocol_version: PROTOCOL_VERSION,
       payload: {
-        capabilities: ['core.gates_zone', 'core.reports_length'],
+        capabilities: this.capabilities(),
         device_kind_hint: 'railyard',
+        ...(this.d.scene.ownedMarkerIds !== undefined
+          ? { owned_marker_ids: [...this.d.scene.ownedMarkerIds] }
+          : {}),
       },
     };
   }
@@ -366,6 +389,8 @@ export class YardZoneDevice {
    *  next queued train is admitted. The device never drives it across the throat. */
   private release(resident: Resident): void {
     resident.released = true;
+    const intro = this.trainIntroducedEvent(resident.trainId);
+    if (intro !== null) this.d.platform.publish(intro);
     this.d.platform.publish(this.releasedEvent(resident.trainId));
     this.d.platform.publish(this.lengthChanged(resident.trainId));
     const idx = this.residents.indexOf(resident);
@@ -381,6 +406,29 @@ export class YardZoneDevice {
     this.westPoints.set('thru');
     this.eastPoints.set('thru');
     this.announce();
+  }
+
+  /** The heading hand-over published before release: the train always leaves by the
+   *  throat to exit edge, so the zone knows its vector. Null when the zone offers no
+   *  heading. */
+  private trainIntroducedEvent(trainId: string): CoreEvent | null {
+    const exit = this.d.scene.exitMarker;
+    if (exit === undefined) return null;
+    const event: TrainIntroduced = {
+      event_id: this.nextId(),
+      device_id: this.deviceId,
+      timestamp_device: EVENT_TIMESTAMP,
+      event_type: 'train_introduced',
+      protocol_version: PROTOCOL_VERSION,
+      payload: {
+        train_id: trainId,
+        marker_id: this.d.scene.throatMarker,
+        heading_edge: { from_marker_id: this.d.scene.throatMarker, to_marker_id: exit },
+      },
+    };
+    /* `TrainIntroduced` is a member of `CoreEvent`; the plain object literal satisfies
+     *  it, so the cast is sound. Confined here, named, not sprinkled. */
+    return event as unknown as CoreEvent;
   }
 
   private releasedEvent(trainId: string): CoreEvent {

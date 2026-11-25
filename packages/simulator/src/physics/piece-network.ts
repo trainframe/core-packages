@@ -120,10 +120,21 @@ function placePiece(
   };
 }
 
+/** The switch position that routes a train through a gated turnout leg. */
+export interface LegGate {
+  readonly switchId: string;
+  readonly position: string;
+  /** The position that routes the same switch along its other leg. */
+  readonly restPosition: string;
+}
+
 export interface PieceNetwork {
   readonly net: RailNetwork;
   readonly pieces: readonly TrackPiece[];
   readonly geom: ReadonlyMap<string, SegEndpoints>;
+  /** Each turnout leg segment mapped to the switch throw that selects it: a facing
+   *  turnout keys its two exit legs, a trailing one its two entry legs. */
+  readonly legGates: ReadonlyMap<string, LegGate>;
 }
 
 /** A turtle that lays runs of real pieces and assembles them into a RailNetwork. */
@@ -283,6 +294,29 @@ export class PieceNetworkBuilder {
     };
   }
 
+  /** Derive each turnout leg's gate from the gated links: where one segment fans out to
+   *  gated links the exits are the legs (facing), otherwise the gated links' own origins
+   *  are the legs converging on one segment (trailing). */
+  private legGates(): Map<string, LegGate> {
+    const gated = this.links.filter((l) => l.when !== undefined);
+    const gates = new Map<string, LegGate>();
+    for (const l of gated) {
+      if (l.when === undefined) continue;
+      const { switchId, position } = l.when;
+      const sibling = gated.find(
+        (o) => o !== l && o.when?.switchId === switchId && (o.from === l.from || o.to === l.to),
+      );
+      if (sibling?.when === undefined) continue;
+      const facing = sibling.from === l.from;
+      gates.set(facing ? l.to : l.from, {
+        switchId,
+        position,
+        restPosition: sibling.when.position,
+      });
+    }
+    return gates;
+  }
+
   build(): PieceNetwork {
     /* A layout that folds back over itself is a build-time error: two pieces on
      * the same height layer whose footprints overlap without sharing a joint. A
@@ -310,6 +344,7 @@ export class PieceNetworkBuilder {
       net: buildNetwork(this.segments, this.links),
       pieces: this.placed,
       geom: this.geom,
+      legGates: this.legGates(),
     };
   }
 }
